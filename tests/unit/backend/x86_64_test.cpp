@@ -170,4 +170,37 @@ TEST(X8664BackendTest, EmitsPointerSizedIntegerSemanticsAndAbi) {
     EXPECT_NE(assembly.find("seta %al"), std::string::npos);
 }
 
+TEST(X8664BackendTest, EmitsFloatingPointSemanticsAndSystemVAbi) {
+    FrontendHarness harness{
+        "module test.float_codegen;\n"
+        "fn calculate(a: f32, b: f64, c: f32, d: f64,\n"
+        "             e: f32, f: f64, g: f32, h: f64) -> f64 {\n"
+        "    let single: f32 = (a + c) * e / g;\n"
+        "    let double: f64 = (b - d) + f / h;\n"
+        "    if (single <= 10.0 && double != 0.0) { return -double; }\n"
+        "    return double;\n"
+        "}\n"
+        "fn main() -> i32 {\n"
+        "    if (calculate(1.0, 2.0, 3.0, 4.0,\n"
+        "                  5.0, 6.0, 7.0, 8.0) < 0.0) { return 42; }\n"
+        "    return 1;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.EmitAssembly()) << harness.Diagnostics();
+    const std::string assembly = harness.Assembly();
+    EXPECT_NE(assembly.find("ldmxcsr"), std::string::npos);
+    EXPECT_NE(assembly.find("movss %xmm0"), std::string::npos);
+    EXPECT_NE(assembly.find("movsd %xmm1"), std::string::npos);
+    EXPECT_NE(assembly.find("%xmm7"), std::string::npos);
+    EXPECT_NE(assembly.find("addss"), std::string::npos);
+    EXPECT_NE(assembly.find("mulss"), std::string::npos);
+    EXPECT_NE(assembly.find("divss"), std::string::npos);
+    EXPECT_NE(assembly.find("subsd"), std::string::npos);
+    EXPECT_NE(assembly.find("divsd"), std::string::npos);
+    EXPECT_NE(assembly.find("ucomiss"), std::string::npos);
+    EXPECT_NE(assembly.find("ucomisd"), std::string::npos);
+    EXPECT_NE(assembly.find("setp %cl"), std::string::npos);
+    EXPECT_NE(assembly.find("movabsq $0x8000000000000000"), std::string::npos);
+}
+
 }

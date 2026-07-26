@@ -16,6 +16,8 @@ static const LunaTargetInfo luna_x86_64_unknown_linux_gnu = {
             .integer16 = {.size_bits = 16U, .abi_alignment_bits = 16U},
             .integer32 = {.size_bits = 32U, .abi_alignment_bits = 32U},
             .integer64 = {.size_bits = 64U, .abi_alignment_bits = 64U},
+            .float32 = {.size_bits = 32U, .abi_alignment_bits = 32U},
+            .float64 = {.size_bits = 64U, .abi_alignment_bits = 64U},
             .pointer = {.size_bits = 64U, .abi_alignment_bits = 64U},
         },
 };
@@ -63,7 +65,9 @@ bool luna_data_layout_is_valid(const LunaDataLayout *layout) {
         !luna_scalar_layout_is_valid(&layout->integer8, 8U) ||
         !luna_scalar_layout_is_valid(&layout->integer16, 16U) ||
         !luna_scalar_layout_is_valid(&layout->integer32, 32U) ||
-        !luna_scalar_layout_is_valid(&layout->integer64, 64U)) {
+        !luna_scalar_layout_is_valid(&layout->integer64, 64U) ||
+        !luna_scalar_layout_is_valid(&layout->float32, 32U) ||
+        !luna_scalar_layout_is_valid(&layout->float64, 64U)) {
         return false;
     }
 
@@ -97,6 +101,12 @@ bool luna_data_layout_equal(const LunaDataLayout *left,
            left->integer64.size_bits == right->integer64.size_bits &&
            left->integer64.abi_alignment_bits ==
                right->integer64.abi_alignment_bits &&
+           left->float32.size_bits == right->float32.size_bits &&
+           left->float32.abi_alignment_bits ==
+               right->float32.abi_alignment_bits &&
+           left->float64.size_bits == right->float64.size_bits &&
+           left->float64.abi_alignment_bits ==
+               right->float64.abi_alignment_bits &&
            left->pointer.size_bits == right->pointer.size_bits &&
            left->pointer.abi_alignment_bits ==
                right->pointer.abi_alignment_bits;
@@ -117,6 +127,22 @@ const LunaScalarLayout *luna_data_layout_integer(const LunaDataLayout *layout,
         return &layout->integer32;
     case 64U:
         return &layout->integer64;
+    default:
+        return NULL;
+    }
+}
+
+const LunaScalarLayout *luna_data_layout_float(const LunaDataLayout *layout,
+                                               uint32_t bit_width) {
+    if (layout == NULL) {
+        return NULL;
+    }
+
+    switch (bit_width) {
+    case 32U:
+        return &layout->float32;
+    case 64U:
+        return &layout->float64;
     default:
         return NULL;
     }

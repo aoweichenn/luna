@@ -9,13 +9,15 @@ The project is deliberately narrow at this stage:
 
 - target: x86-64 Linux, System V ABI, ELF64;
 - frontend: explicit `bool`, `i8`, `i16`, `i32`, `i64`, `isize`, `u8`,
-  `u16`, `u32`, `u64` and `usize` types, checked integer conversions,
-  functions, expressions, local variables and structured control flow;
+  `u16`, `u32`, `u64`, `usize`, `f32` and `f64` types, checked integer
+  conversions, functions, expressions, local variables and structured control
+  flow;
 - middle end: typed, non-SSA control-flow IR;
 - target model: explicit `x86_64-unknown-linux-gnu` data layout, with
   target-sized `isize` and `usize`;
-- backend: direct, unoptimized x86-64 instruction selection;
-- bootstrap host: conforming C23;
+- backend: direct, unoptimized x86-64 instruction selection, including
+  IEEE-754 scalar SSE floating-point operations;
+- bootstrap host: conforming C23 with IEC 60559 binary32 and binary64;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests, IR
   snapshots, differential random programs, libFuzzer and executable
   cross-target tests.

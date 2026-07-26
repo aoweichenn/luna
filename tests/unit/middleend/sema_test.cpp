@@ -530,4 +530,128 @@ TEST(SemaTest, RejectsNonIntegerExplicitConversions) {
               std::string::npos);
 }
 
+TEST(SemaTest, ContextuallyTypesFloatingLiteralsAndOperators) {
+    FrontendHarness harness{"module test.float_context;\n"
+                            "fn single(value: f32) -> f32 {\n"
+                            "    return -(value + 1.5) * 2.0 / 4.0;\n"
+                            "}\n"
+                            "fn ordered(left: f64, right: f64) -> bool {\n"
+                            "    return left >= right;\n"
+                            "}\n"
+                            "fn main() -> i32 { return 0; }\n"};
+
+    ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaIrFunction *single = luna_ir_module_function(harness.Module(), 0U);
+    LunaIrFunction *ordered = luna_ir_module_function(harness.Module(), 1U);
+    ASSERT_NE(single, nullptr);
+    ASSERT_NE(ordered, nullptr);
+    EXPECT_EQ(single->return_type, LUNA_IR_TYPE_F32);
+    EXPECT_EQ(ordered->return_type, LUNA_IR_TYPE_BOOL);
+
+    LunaIrInstruction *constant = FindInstruction(single, LUNA_IR_CONST_FLOAT);
+    LunaIrInstruction *addition = FindInstruction(single, LUNA_IR_ADD_FLOAT);
+    LunaIrInstruction *negation = FindInstruction(single, LUNA_IR_NEG_FLOAT);
+    LunaIrInstruction *multiplication =
+        FindInstruction(single, LUNA_IR_MUL_FLOAT);
+    LunaIrInstruction *division = FindInstruction(single, LUNA_IR_DIV_FLOAT);
+    LunaIrInstruction *comparison =
+        FindInstruction(ordered, LUNA_IR_COMPARE_GREATER_EQUAL_FLOAT);
+    ASSERT_NE(constant, nullptr);
+    ASSERT_NE(addition, nullptr);
+    ASSERT_NE(negation, nullptr);
+    ASSERT_NE(multiplication, nullptr);
+    ASSERT_NE(division, nullptr);
+    ASSERT_NE(comparison, nullptr);
+    EXPECT_EQ(constant->type, LUNA_IR_TYPE_F32);
+    EXPECT_EQ(constant->immediate, UINT64_C(0x3fc00000));
+    EXPECT_EQ(addition->type, LUNA_IR_TYPE_F32);
+    EXPECT_EQ(negation->type, LUNA_IR_TYPE_F32);
+    EXPECT_EQ(multiplication->type, LUNA_IR_TYPE_F32);
+    EXPECT_EQ(division->type, LUNA_IR_TYPE_F32);
+    EXPECT_EQ(comparison->type, LUNA_IR_TYPE_BOOL);
+}
+
+TEST(SemaTest, RoundsFloatingLiteralsDirectlyToTheirContextType) {
+    FrontendHarness harness{
+        "module test.float_rounding;\n"
+        "fn single() -> f32 {\n"
+        "    return 1.0000000596046447753906251;\n"
+        "}\n"
+        "fn double() -> f64 { return 9007199254740993.0; }\n"
+        "fn default_width() -> bool { return 1.0 == 1.0; }\n"
+        "fn main() -> i32 { return 0; }\n"};
+
+    ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    LunaIrInstruction *single = FindInstruction(
+        luna_ir_module_function(harness.Module(), 0U), LUNA_IR_CONST_FLOAT);
+    LunaIrInstruction *double_value = FindInstruction(
+        luna_ir_module_function(harness.Module(), 1U), LUNA_IR_CONST_FLOAT);
+    LunaIrInstruction *default_value = FindInstruction(
+        luna_ir_module_function(harness.Module(), 2U), LUNA_IR_CONST_FLOAT);
+    ASSERT_NE(single, nullptr);
+    ASSERT_NE(double_value, nullptr);
+    ASSERT_NE(default_value, nullptr);
+    EXPECT_EQ(single->type, LUNA_IR_TYPE_F32);
+    EXPECT_EQ(single->immediate, UINT64_C(0x3f800001));
+    EXPECT_EQ(double_value->type, LUNA_IR_TYPE_F64);
+    EXPECT_EQ(double_value->immediate, UINT64_C(0x4340000000000000));
+    EXPECT_EQ(default_value->type, LUNA_IR_TYPE_F64);
+}
+
+TEST(SemaTest, RejectsImplicitFloatingPointTypeMixing) {
+    FrontendHarness widths{
+        "module test.float_width_mix;\n"
+        "fn combine(left: f32, right: f64) -> f32 { return left + right; }\n"
+        "fn main() -> i32 { return 0; }\n"};
+    EXPECT_FALSE(widths.ParseAndLower());
+    EXPECT_NE(widths.Diagnostics().find("expected f32, found f64"),
+              std::string::npos);
+
+    FrontendHarness categories{
+        "module test.float_integer_mix;\n"
+        "fn combine(left: f64, right: i32) -> f64 { return left + right; }\n"
+        "fn main() -> i32 { return 0; }\n"};
+    EXPECT_FALSE(categories.ParseAndLower());
+    EXPECT_NE(categories.Diagnostics().find("expected f64, found i32"),
+              std::string::npos);
+}
+
+TEST(SemaTest, EnforcesIndependentScalarArgumentRegisterLimits) {
+    FrontendHarness valid{
+        "module test.mixed_registers;\n"
+        "fn mixed(a: i32, b: f32, c: i64, d: f64, e: u32, f: f32,\n"
+        "         g: u64, h: f64, i: isize, j: f32, k: usize, l: f64,\n"
+        "         m: f32, n: f64) -> bool {\n"
+        "    return true;\n"
+        "}\n"
+        "fn main() -> i32 { return 0; }\n"};
+    EXPECT_TRUE(valid.Verify()) << valid.Diagnostics();
+
+    FrontendHarness invalid{
+        "module test.too_many_float_registers;\n"
+        "fn too_many(a: f64, b: f64, c: f64, d: f64, e: f64,\n"
+        "            f: f64, g: f64, h: f64, i: f64) -> f64 {\n"
+        "    return a;\n"
+        "}\n"
+        "fn main() -> i32 { return 0; }\n"};
+    EXPECT_FALSE(invalid.ParseAndLower());
+    EXPECT_NE(invalid.Diagnostics().find("eight floating-point arguments"),
+              std::string::npos);
+
+    FrontendHarness too_many_integers{
+        "module test.too_many_integer_registers;\n"
+        "fn too_many(a: i8, b: i16, c: i32, d: i64, e: u32, f: usize,\n"
+        "            g: isize) -> i32 {\n"
+        "    return 0;\n"
+        "}\n"
+        "fn main() -> i32 { return 0; }\n"};
+    EXPECT_FALSE(too_many_integers.ParseAndLower());
+    EXPECT_NE(too_many_integers.Diagnostics().find(
+                  "six integer-class and eight floating-point arguments"),
+              std::string::npos);
+}
+
 }

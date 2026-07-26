@@ -70,6 +70,7 @@ with virtual values and explicit local slots:
 - `load` and `store`
 - type-directed integer arithmetic shared by fixed-width and target-sized
   integer types
+- binary32 and binary64 constants, arithmetic and ordered comparisons
 - explicit integer conversions whose extension or truncation follows source
   and target type metadata
 - comparisons
@@ -102,12 +103,18 @@ The first backend is correctness-first:
 
 - System V's first six integer argument-register assignments and integer result
   register for every fixed-width and target-sized integer type;
+- System V's first eight SSE argument-register assignments and SSE result
+  register for `f32` and `f64`, classified independently from integer
+  registers so mixed signatures can use both banks;
 - explicit stack frames;
 - virtual values assigned stack homes;
 - canonical zero-extended raw bits in the low 32 bits for 8-bit and 16-bit
   arguments, results and stack homes, with explicit sign extension at signed
   comparisons, division, right shifts and widening conversions;
 - deterministic labels and symbol mangling;
+- scalar `movss`/`movsd` arithmetic and ordered `ucomiss`/`ucomisd`
+  comparisons, with an explicitly initialized IEEE floating-point
+  environment;
 - a Linux `_start` shim that exits through syscall 60;
 - no dependency on a target C runtime.
 

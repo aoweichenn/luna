@@ -3,10 +3,30 @@
 #include "luna/frontend/support/buffer.h"
 #include "luna/frontend/support/string_view.h"
 
+#include <float.h>
 #include <limits.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#if !defined(__STDC_IEC_60559_BFP__)
+#error "floating literals require IEC 60559 floating-point arithmetic"
+#endif
+
+_Static_assert(FLT_RADIX == 2, "floating literals require a binary host");
+_Static_assert(FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128,
+               "floating literals require IEEE-754 binary32");
+_Static_assert(DBL_MANT_DIG == 53 && DBL_MAX_EXP == 1024,
+               "floating literals require IEEE-754 binary64");
+_Static_assert(FLT_HAS_SUBNORM == 1 && DBL_HAS_SUBNORM == 1,
+               "floating literals require subnormal support");
+_Static_assert(sizeof(float) == sizeof(uint32_t),
+               "floating literals require 32-bit float");
+_Static_assert(sizeof(double) == sizeof(uint64_t),
+               "floating literals require 64-bit double");
 
 typedef struct LunaSemaFunction {
     const LunaFunction *syntax;
@@ -73,6 +93,10 @@ static LunaIrType luna_sema_ir_type(LunaTypeKind type) {
         return LUNA_IR_TYPE_U64;
     case LUNA_TYPE_USIZE:
         return LUNA_IR_TYPE_USIZE;
+    case LUNA_TYPE_F32:
+        return LUNA_IR_TYPE_F32;
+    case LUNA_TYPE_F64:
+        return LUNA_IR_TYPE_F64;
     case LUNA_TYPE_INVALID:
         break;
     }
@@ -315,12 +339,12 @@ static bool luna_sema_is_integer_type(LunaTypeKind type) {
     return luna_type_kind_is_integer(type);
 }
 
-static LunaIrOpcode
-luna_sema_unary_integer_opcode(LunaTokenKind operator_kind) {
-    if (operator_kind == LUNA_TOKEN_MINUS) {
-        return LUNA_IR_NEG_INTEGER;
-    }
-    return LUNA_IR_BIT_NOT_INTEGER;
+static bool luna_sema_is_float_type(LunaTypeKind type) {
+    return luna_type_kind_is_float(type);
+}
+
+static bool luna_sema_is_numeric_type(LunaTypeKind type) {
+    return luna_sema_is_integer_type(type) || luna_sema_is_float_type(type);
 }
 
 static LunaIrOpcode
@@ -369,6 +393,46 @@ luna_sema_binary_integer_opcode(LunaTokenKind operator_kind) {
     }
 }
 
+static bool luna_sema_binary_float_opcode(LunaTokenKind operator_kind,
+                                          LunaIrOpcode *opcode) {
+    switch (operator_kind) {
+    case LUNA_TOKEN_PLUS:
+    case LUNA_TOKEN_PLUS_EQUAL:
+        *opcode = LUNA_IR_ADD_FLOAT;
+        return true;
+    case LUNA_TOKEN_MINUS:
+    case LUNA_TOKEN_MINUS_EQUAL:
+        *opcode = LUNA_IR_SUB_FLOAT;
+        return true;
+    case LUNA_TOKEN_STAR:
+    case LUNA_TOKEN_STAR_EQUAL:
+        *opcode = LUNA_IR_MUL_FLOAT;
+        return true;
+    case LUNA_TOKEN_SLASH:
+    case LUNA_TOKEN_SLASH_EQUAL:
+        *opcode = LUNA_IR_DIV_FLOAT;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static LunaIrOpcode
+luna_sema_float_comparison_opcode(LunaTokenKind operator_kind) {
+    switch (operator_kind) {
+    case LUNA_TOKEN_LESS:
+        return LUNA_IR_COMPARE_LESS_FLOAT;
+    case LUNA_TOKEN_LESS_EQUAL:
+        return LUNA_IR_COMPARE_LESS_EQUAL_FLOAT;
+    case LUNA_TOKEN_GREATER:
+        return LUNA_IR_COMPARE_GREATER_FLOAT;
+    case LUNA_TOKEN_GREATER_EQUAL:
+        return LUNA_IR_COMPARE_GREATER_EQUAL_FLOAT;
+    default:
+        return LUNA_IR_COMPARE_LESS_FLOAT;
+    }
+}
+
 static uint64_t luna_sema_integer_maximum(const LunaSemaContext *context,
                                           LunaTypeKind type) {
     const uint32_t width =
@@ -394,6 +458,62 @@ luna_sema_signed_minimum_magnitude(const LunaSemaContext *context,
     return width == 0U || width > 64U ? 0U : UINT64_C(1) << (width - 1U);
 }
 
+static bool luna_sema_float_literal_bits(LunaSemaContext *context,
+                                         const LunaExpression *expression,
+                                         LunaTypeKind type, uint64_t *bits) {
+    const LunaStringView text = expression->as.floating;
+    if (text.length == SIZE_MAX) {
+        luna_sema_report_allocation_failure(context);
+        return false;
+    }
+
+    char *normalized = malloc(text.length + 1U);
+    if (normalized == NULL) {
+        luna_sema_report_allocation_failure(context);
+        return false;
+    }
+
+    size_t normalized_length = 0U;
+    for (size_t index = 0U; index < text.length; index += 1U) {
+        if (text.data[index] != '_') {
+            normalized[normalized_length] = text.data[index];
+            normalized_length += 1U;
+        }
+    }
+    normalized[normalized_length] = '\0';
+
+    char *end = NULL;
+    bool valid = false;
+    bool finite = false;
+    if (type == LUNA_TYPE_F32) {
+        const float value = strtof(normalized, &end);
+        uint32_t value_bits = 0U;
+        memcpy(&value_bits, &value, sizeof(value_bits));
+        *bits = value_bits;
+        finite = isfinite(value);
+        valid = end == normalized + normalized_length;
+    } else if (type == LUNA_TYPE_F64) {
+        const double value = strtod(normalized, &end);
+        memcpy(bits, &value, sizeof(*bits));
+        finite = isfinite(value);
+        valid = end == normalized + normalized_length;
+    }
+    free(normalized);
+
+    if (!valid) {
+        luna_diagnostic_error(context->diagnostics, expression->span,
+                              "invalid floating-point literal");
+        return false;
+    }
+    if (!finite) {
+        luna_diagnostic_error(context->diagnostics, expression->span,
+                              "floating-point literal does not fit in %s",
+                              luna_type_kind_name(type));
+        return false;
+    }
+    return true;
+}
+
 static LunaCheckedValue
 luna_sema_lower_expression(LunaSemaContext *context,
                            const LunaExpression *expression) {
@@ -410,6 +530,7 @@ luna_sema_known_expression_type(LunaSemaContext *context,
 
     switch (expression->kind) {
     case LUNA_EXPRESSION_INTEGER:
+    case LUNA_EXPRESSION_FLOAT:
         return LUNA_TYPE_INVALID;
     case LUNA_EXPRESSION_BOOLEAN:
         return LUNA_TYPE_BOOL;
@@ -454,6 +575,46 @@ luna_sema_known_expression_type(LunaSemaContext *context,
                                                    expression->as.binary.right);
         }
         return type;
+    }
+
+    return LUNA_TYPE_INVALID;
+}
+
+static LunaTypeKind
+luna_sema_default_literal_type(const LunaExpression *expression) {
+    if (expression == NULL) {
+        return LUNA_TYPE_INVALID;
+    }
+
+    switch (expression->kind) {
+    case LUNA_EXPRESSION_INTEGER:
+        return LUNA_TYPE_I32;
+    case LUNA_EXPRESSION_FLOAT:
+        return LUNA_TYPE_F64;
+    case LUNA_EXPRESSION_UNARY:
+        if (expression->as.unary.operator_kind == LUNA_TOKEN_PLUS ||
+            expression->as.unary.operator_kind == LUNA_TOKEN_MINUS) {
+            return luna_sema_default_literal_type(expression->as.unary.operand);
+        }
+        return LUNA_TYPE_INVALID;
+    case LUNA_EXPRESSION_BINARY: {
+        const LunaTypeKind left =
+            luna_sema_default_literal_type(expression->as.binary.left);
+        const LunaTypeKind right =
+            luna_sema_default_literal_type(expression->as.binary.right);
+        if (left == LUNA_TYPE_F64 || right == LUNA_TYPE_F64) {
+            return LUNA_TYPE_F64;
+        }
+        if (left == LUNA_TYPE_I32 || right == LUNA_TYPE_I32) {
+            return LUNA_TYPE_I32;
+        }
+        return LUNA_TYPE_INVALID;
+    }
+    case LUNA_EXPRESSION_BOOLEAN:
+    case LUNA_EXPRESSION_NAME:
+    case LUNA_EXPRESSION_CALL:
+    case LUNA_EXPRESSION_CAST:
+        return LUNA_TYPE_INVALID;
     }
 
     return LUNA_TYPE_INVALID;
@@ -661,6 +822,27 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
         };
     }
 
+    case LUNA_EXPRESSION_FLOAT: {
+        const LunaTypeKind literal_type = luna_sema_is_float_type(expected_type)
+                                              ? expected_type
+                                              : LUNA_TYPE_F64;
+        uint64_t bits = 0U;
+        if (!luna_sema_float_literal_bits(context, expression, literal_type,
+                                          &bits)) {
+            return luna_sema_invalid_value();
+        }
+
+        LunaIrInstruction instruction =
+            luna_sema_instruction(LUNA_IR_CONST_FLOAT, expression->span);
+        instruction.immediate = bits;
+        const LunaIrValueId result = luna_sema_emit_value_instruction(
+            context, &instruction, literal_type);
+        return (LunaCheckedValue){
+            .id = result,
+            .type = literal_type,
+        };
+    }
+
     case LUNA_EXPRESSION_BOOLEAN: {
         LunaIrInstruction instruction =
             luna_sema_instruction(LUNA_IR_CONST_BOOL, expression->span);
@@ -733,11 +915,15 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
 
     case LUNA_EXPRESSION_UNARY: {
         LunaTypeKind operand_type = expected_type;
-        if (!luna_sema_is_integer_type(operand_type)) {
+        if (!luna_sema_is_numeric_type(operand_type)) {
             operand_type = luna_sema_known_expression_type(
                 context, expression->as.unary.operand);
         }
-        if (!luna_sema_is_integer_type(operand_type)) {
+        if (!luna_sema_is_numeric_type(operand_type)) {
+            operand_type =
+                luna_sema_default_literal_type(expression->as.unary.operand);
+        }
+        if (!luna_sema_is_numeric_type(operand_type)) {
             operand_type = LUNA_TYPE_I32;
         }
 
@@ -766,9 +952,9 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
 
         switch (expression->as.unary.operator_kind) {
         case LUNA_TOKEN_PLUS:
-            if (!luna_sema_is_integer_type(operand.type)) {
+            if (!luna_sema_is_numeric_type(operand.type)) {
                 luna_diagnostic_error(context->diagnostics, expression->span,
-                                      "unary '+' requires an integer operand");
+                                      "unary '+' requires a numeric operand");
                 return luna_sema_invalid_value();
             }
             if (!luna_sema_require_type(context, operand, required_type,
@@ -778,11 +964,21 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
             return operand;
 
         case LUNA_TOKEN_MINUS:
+            if (!luna_sema_is_numeric_type(operand.type)) {
+                luna_diagnostic_error(context->diagnostics, expression->span,
+                                      "unary '-' requires a numeric operand");
+                return luna_sema_invalid_value();
+            }
+            if (!luna_sema_require_type(context, operand, required_type,
+                                        expression->as.unary.operand->span)) {
+                return luna_sema_invalid_value();
+            }
+            break;
+
         case LUNA_TOKEN_TILDE:
             if (!luna_sema_is_integer_type(operand.type)) {
-                luna_diagnostic_error(
-                    context->diagnostics, expression->span,
-                    "integer unary operator requires an integer operand");
+                luna_diagnostic_error(context->diagnostics, expression->span,
+                                      "unary '~' requires an integer operand");
                 return luna_sema_invalid_value();
             }
             if (!luna_sema_require_type(context, operand, required_type,
@@ -806,11 +1002,14 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
             expression->as.unary.operator_kind == LUNA_TOKEN_BANG
                 ? LUNA_TYPE_BOOL
                 : operand.type;
-        const LunaIrOpcode opcode =
-            expression->as.unary.operator_kind == LUNA_TOKEN_BANG
-                ? LUNA_IR_BOOL_NOT
-                : luna_sema_unary_integer_opcode(
-                      expression->as.unary.operator_kind);
+        LunaIrOpcode opcode = LUNA_IR_BOOL_NOT;
+        if (expression->as.unary.operator_kind == LUNA_TOKEN_MINUS) {
+            opcode = luna_sema_is_float_type(operand.type)
+                         ? LUNA_IR_NEG_FLOAT
+                         : LUNA_IR_NEG_INTEGER;
+        } else if (expression->as.unary.operator_kind == LUNA_TOKEN_TILDE) {
+            opcode = LUNA_IR_BIT_NOT_INTEGER;
+        }
 
         LunaIrInstruction instruction =
             luna_sema_instruction(opcode, expression->span);
@@ -842,7 +1041,7 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
 
     LunaTypeKind operand_type = LUNA_TYPE_INVALID;
     if (!is_equality && !is_relational &&
-        luna_sema_is_integer_type(expected_type)) {
+        luna_sema_is_numeric_type(expected_type)) {
         operand_type = expected_type;
     }
     if (operand_type == LUNA_TYPE_INVALID) {
@@ -852,6 +1051,14 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
     if (operand_type == LUNA_TYPE_INVALID) {
         operand_type = luna_sema_known_expression_type(
             context, expression->as.binary.right);
+    }
+    if (operand_type == LUNA_TYPE_INVALID) {
+        operand_type =
+            luna_sema_default_literal_type(expression->as.binary.left);
+        if (operand_type == LUNA_TYPE_INVALID) {
+            operand_type =
+                luna_sema_default_literal_type(expression->as.binary.right);
+        }
     }
     if (operand_type == LUNA_TYPE_INVALID) {
         operand_type = LUNA_TYPE_I32;
@@ -869,21 +1076,21 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
     }
 
     if (is_equality && operand_type != LUNA_TYPE_BOOL &&
-        !luna_sema_is_integer_type(operand_type)) {
+        !luna_sema_is_numeric_type(operand_type)) {
         luna_diagnostic_error(context->diagnostics, expression->span,
-                              "equality requires bool or integer operands");
+                              "equality requires bool or numeric operands");
         return luna_sema_invalid_value();
     }
-    if (is_relational && !luna_sema_is_integer_type(operand_type)) {
+    if (is_relational && !luna_sema_is_numeric_type(operand_type)) {
         luna_diagnostic_error(context->diagnostics, expression->span,
-                              "ordering requires integer operands");
+                              "ordering requires numeric operands");
         return luna_sema_invalid_value();
     }
     if (!is_equality && !is_relational &&
-        !luna_sema_is_integer_type(operand_type)) {
+        !luna_sema_is_numeric_type(operand_type)) {
         luna_diagnostic_error(context->diagnostics, expression->span,
                               "arithmetic and bitwise operators require "
-                              "integer operands");
+                              "numeric operands");
         return luna_sema_invalid_value();
     }
 
@@ -892,6 +1099,18 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
         opcode = operator_kind == LUNA_TOKEN_EQUAL_EQUAL
                      ? LUNA_IR_COMPARE_EQUAL
                      : LUNA_IR_COMPARE_NOT_EQUAL;
+    } else if (is_relational) {
+        opcode = luna_sema_is_float_type(operand_type)
+                     ? luna_sema_float_comparison_opcode(operator_kind)
+                     : luna_sema_binary_integer_opcode(operator_kind);
+    } else if (luna_sema_is_float_type(operand_type)) {
+        if (!luna_sema_binary_float_opcode(operator_kind, &opcode)) {
+            luna_diagnostic_error(
+                context->diagnostics, expression->span,
+                "operator %s is not defined for floating-point operands",
+                luna_token_kind_name(operator_kind));
+            return luna_sema_invalid_value();
+        }
     } else {
         opcode = luna_sema_binary_integer_opcode(operator_kind);
     }
@@ -1123,10 +1342,10 @@ static bool luna_sema_lower_statement(LunaSemaContext *context,
         }
 
         if (statement->as.assignment.operator_kind != LUNA_TOKEN_EQUAL) {
-            if (!luna_sema_is_integer_type(local->type)) {
+            if (!luna_sema_is_numeric_type(local->type)) {
                 luna_diagnostic_error(
                     context->diagnostics, statement->span,
-                    "compound assignment requires an integer type");
+                    "compound assignment requires a numeric type");
                 return false;
             }
 
@@ -1136,10 +1355,24 @@ static bool luna_sema_lower_statement(LunaSemaContext *context,
             const LunaIrValueId current =
                 luna_sema_emit_value_instruction(context, &load, local->type);
 
-            LunaIrInstruction operation = luna_sema_instruction(
-                luna_sema_binary_integer_opcode(
-                    statement->as.assignment.operator_kind),
-                statement->span);
+            LunaIrOpcode opcode = LUNA_IR_ADD_INTEGER;
+            if (luna_sema_is_float_type(local->type) &&
+                !luna_sema_binary_float_opcode(
+                    statement->as.assignment.operator_kind, &opcode)) {
+                luna_diagnostic_error(
+                    context->diagnostics, statement->span,
+                    "operator %s is not defined for floating-point operands",
+                    luna_token_kind_name(
+                        statement->as.assignment.operator_kind));
+                return false;
+            }
+            if (luna_sema_is_integer_type(local->type)) {
+                opcode = luna_sema_binary_integer_opcode(
+                    statement->as.assignment.operator_kind);
+            }
+
+            LunaIrInstruction operation =
+                luna_sema_instruction(opcode, statement->span);
             operation.left = current;
             operation.right = value.id;
             value.id = luna_sema_emit_value_instruction(context, &operation,
@@ -1235,10 +1468,22 @@ static bool luna_sema_collect_functions(LunaSemaContext *context) {
             continue;
         }
 
-        if (syntax->parameter_count > 6U) {
+        uint32_t integer_parameter_count = 0U;
+        uint32_t float_parameter_count = 0U;
+        for (const LunaParameter *parameter = syntax->first_parameter;
+             parameter != NULL; parameter = parameter->next) {
+            if (luna_sema_is_float_type(parameter->type.kind)) {
+                float_parameter_count += 1U;
+            } else if (parameter->type.kind != LUNA_TYPE_VOID &&
+                       parameter->type.kind != LUNA_TYPE_INVALID) {
+                integer_parameter_count += 1U;
+            }
+        }
+        if (integer_parameter_count > 6U || float_parameter_count > 8U) {
             luna_diagnostic_error(
                 context->diagnostics, syntax->span,
-                "the bootstrap ABI supports at most six integer arguments");
+                "the bootstrap ABI supports at most six integer-class and "
+                "eight floating-point arguments");
             continue;
         }
 

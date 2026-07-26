@@ -29,15 +29,19 @@ typedef enum LunaIrType {
     LUNA_IR_TYPE_U16,
     LUNA_IR_TYPE_U32,
     LUNA_IR_TYPE_U64,
-    LUNA_IR_TYPE_USIZE
+    LUNA_IR_TYPE_USIZE,
+    LUNA_IR_TYPE_F32,
+    LUNA_IR_TYPE_F64
 } LunaIrType;
 
 typedef enum LunaIrOpcode {
     LUNA_IR_CONST_INTEGER,
+    LUNA_IR_CONST_FLOAT,
     LUNA_IR_CONST_BOOL,
     LUNA_IR_LOAD,
     LUNA_IR_STORE,
     LUNA_IR_NEG_INTEGER,
+    LUNA_IR_NEG_FLOAT,
     LUNA_IR_BIT_NOT_INTEGER,
     LUNA_IR_BOOL_NOT,
     LUNA_IR_CONVERT_INTEGER,
@@ -51,12 +55,20 @@ typedef enum LunaIrOpcode {
     LUNA_IR_BIT_XOR_INTEGER,
     LUNA_IR_SHIFT_LEFT_INTEGER,
     LUNA_IR_SHIFT_RIGHT_INTEGER,
+    LUNA_IR_ADD_FLOAT,
+    LUNA_IR_SUB_FLOAT,
+    LUNA_IR_MUL_FLOAT,
+    LUNA_IR_DIV_FLOAT,
     LUNA_IR_COMPARE_EQUAL,
     LUNA_IR_COMPARE_NOT_EQUAL,
     LUNA_IR_COMPARE_LESS_INTEGER,
     LUNA_IR_COMPARE_LESS_EQUAL_INTEGER,
     LUNA_IR_COMPARE_GREATER_INTEGER,
     LUNA_IR_COMPARE_GREATER_EQUAL_INTEGER,
+    LUNA_IR_COMPARE_LESS_FLOAT,
+    LUNA_IR_COMPARE_LESS_EQUAL_FLOAT,
+    LUNA_IR_COMPARE_GREATER_FLOAT,
+    LUNA_IR_COMPARE_GREATER_EQUAL_FLOAT,
     LUNA_IR_CALL,
     LUNA_IR_JUMP,
     LUNA_IR_BRANCH,
@@ -128,6 +140,7 @@ bool luna_ir_print(const LunaIrModule *module, LunaStringBuilder *output);
 const char *luna_ir_type_name(LunaIrType type);
 bool luna_ir_type_is_integer(LunaIrType type);
 bool luna_ir_type_is_signed_integer(LunaIrType type);
+bool luna_ir_type_is_float(LunaIrType type);
 uint32_t luna_ir_type_bit_width(LunaIrType type,
                                 const LunaDataLayout *data_layout);
 

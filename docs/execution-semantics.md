@@ -1,8 +1,9 @@
 # Bootstrap execution semantics
 
 This document freezes the behavior needed to test the current `i8`, `i16`,
-`i32`, `i64`, `isize`, `u8`, `u16`, `u32`, `u64`, `usize` and `bool`
-subset. It is an explicit execution contract, not an optimization policy.
+`i32`, `i64`, `isize`, `u8`, `u16`, `u32`, `u64`, `usize`, `f32`, `f64`
+and `bool` subset. It is an explicit execution contract, not an optimization
+policy.
 
 The selected target and its data layout are explicit compiler inputs. The
 bootstrap target is `x86_64-unknown-linux-gnu`, with little-endian byte order,
@@ -23,6 +24,12 @@ declaration, return, argument or integer expression. Without an integer
 context it defaults to `i32`. Contextual literal typing is not an implicit
 conversion: values and variables of different integer types never mix without
 an explicit `as` conversion.
+
+A decimal floating-point literal similarly takes the exact `f32` or `f64`
+type required by its context and defaults to `f64`. Decimal-to-binary
+conversion rounds directly to the destination format. A finite literal that
+overflows its destination format is rejected; underflow and subnormal results
+are accepted.
 
 ## Signed integers
 
@@ -83,6 +90,28 @@ Values do not mix implicitly.
 
 Conversions involving `bool` or `void` are rejected. A conversion to the same
 integer type is permitted and has no effect.
+
+## Floating-point numbers
+
+`f32` and `f64` use IEEE-754 binary32 and binary64 representations. Each
+arithmetic operation rounds to its declared type using round-to-nearest,
+ties-to-even. Subnormal operands and results are preserved; signed zero,
+infinities and NaNs follow IEEE-754 scalar arithmetic. Floating-point division
+by zero does not trap. The bootstrap entry point masks floating-point
+exceptions and explicitly establishes this environment before calling Luna
+code.
+
+Unary negation flips the sign bit, including for zero, infinities and NaNs.
+The arithmetic operators are `+`, `-`, `*` and `/`. `%`, bitwise operators and
+shifts are rejected for floating-point operands.
+
+Equality and ordering use ordered IEEE-754 comparisons. If either operand is
+NaN, `==`, `<`, `<=`, `>` and `>=` are false, while `!=` is true. Positive and
+negative zero compare equal.
+
+`f32` and `f64` are exact, independent types. They do not mix with each other
+or with integer types implicitly. Explicit floating-point conversions are not
+part of the current stage.
 
 ## Optimization boundary
 

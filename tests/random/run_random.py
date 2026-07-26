@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import math
 import pathlib
 import platform
 import random
 import shutil
+import struct
 import subprocess
 import sys
 
@@ -21,6 +23,12 @@ I64_MIN = -(2**63)
 class Expression:
     text: str
     value: int
+
+
+@dataclasses.dataclass(frozen=True)
+class FloatExpression:
+    text: str
+    value: float
 
 
 def wrap_i32(value: int) -> int:
@@ -461,6 +469,116 @@ def generate_unsigned_case(
     return source, expected_code
 
 
+def round_f32(value: float) -> float:
+    return struct.unpack("<f", struct.pack("<f", value))[0]
+
+
+def round_float(value: float, type_name: str) -> float:
+    return round_f32(value) if type_name == "f32" else value
+
+
+def format_float_literal(value: float, type_name: str) -> str:
+    if not math.isfinite(value):
+        raise AssertionError(
+            "random floating-point generator produced infinity or NaN"
+        )
+    precision = 9 if type_name == "f32" else 17
+    text = format(value, f".{precision}g")
+    if "." not in text and "e" not in text:
+        text += ".0"
+    return text
+
+
+def generate_float_expression(
+    engine: random.Random,
+    variables: dict[str, float],
+    depth: int,
+    type_name: str,
+) -> FloatExpression:
+    if depth == 0 or engine.randrange(5) == 0:
+        if engine.randrange(2) == 0:
+            name = engine.choice(tuple(variables))
+            return FloatExpression(name, variables[name])
+        value = round_float(engine.randrange(-1024, 1025) / 8.0, type_name)
+        return FloatExpression(
+            format_float_literal(value, type_name),
+            value,
+        )
+
+    if engine.randrange(8) == 0:
+        operand = generate_float_expression(
+            engine, variables, depth - 1, type_name
+        )
+        return FloatExpression(f"(-{operand.text})", -operand.value)
+
+    left = generate_float_expression(engine, variables, depth - 1, type_name)
+    operation = engine.choice(("+", "-", "*", "/"))
+    if operation == "/":
+        right_value = engine.choice(
+            (-8.0, -4.0, -2.0, -0.5, 0.5, 2.0, 4.0, 8.0)
+        )
+        right = FloatExpression(
+            format_float_literal(right_value, type_name),
+            right_value,
+        )
+    else:
+        right = generate_float_expression(
+            engine, variables, depth - 1, type_name
+        )
+
+    if operation == "+":
+        value = left.value + right.value
+    elif operation == "-":
+        value = left.value - right.value
+    elif operation == "*":
+        value = left.value * right.value
+    else:
+        value = left.value / right.value
+    value = round_float(value, type_name)
+    return FloatExpression(f"({left.text} {operation} {right.text})", value)
+
+
+def generate_float_case(
+    engine: random.Random,
+    case_index: int,
+    type_name: str,
+) -> tuple[str, int]:
+    arguments = {
+        "first": round_float(engine.randrange(-1024, 1025) / 8.0, type_name),
+        "second": round_float(engine.randrange(-1024, 1025) / 8.0, type_name),
+        "third": round_float(engine.randrange(-1024, 1025) / 8.0, type_name),
+    }
+    expression = generate_float_expression(engine, arguments, 4, type_name)
+    adjustment = round_float(engine.randrange(-64, 65) / 8.0, type_name)
+    expected_value = round_float(expression.value + adjustment, type_name)
+    expected_value = round_float(expected_value - adjustment, type_name)
+    expected_literal = format_float_literal(expected_value, type_name)
+    source = (
+        f"module random.float_case{case_index};\n"
+        "\n"
+        f"fn calculate(first: {type_name}, second: {type_name}, "
+        f"third: {type_name}) -> {type_name} {{\n"
+        f"    var result: {type_name} = {expression.text};\n"
+        f"    result += {format_float_literal(adjustment, type_name)};\n"
+        f"    result -= {format_float_literal(adjustment, type_name)};\n"
+        "    return -(-result);\n"
+        "}\n"
+        "\n"
+        "fn main() -> i32 {\n"
+        f"    let result: {type_name} = calculate("
+        f"{format_float_literal(arguments['first'], type_name)}, "
+        f"{format_float_literal(arguments['second'], type_name)}, "
+        f"{format_float_literal(arguments['third'], type_name)});\n"
+        f"    if (result == {expected_literal} && "
+        f"result <= {expected_literal} && result >= {expected_literal}) {{\n"
+        "        return 42;\n"
+        "    }\n"
+        "    return 1;\n"
+        "}\n"
+    )
+    return source, 42
+
+
 def compile_and_run(
     compiler: pathlib.Path,
     llvm_mc: str,
@@ -539,7 +657,7 @@ def main() -> int:
 
     engine = random.Random(arguments.seed)
     for case_index in range(arguments.cases):
-        case_kind = case_index % 10
+        case_kind = case_index % 12
         if case_kind == 0:
             source, expected_code = generate_case(engine, case_index)
         elif case_kind == 1:
@@ -572,9 +690,17 @@ def main() -> int:
             source, expected_code = generate_i64_case(
                 engine, case_index, "isize"
             )
-        else:
+        elif case_kind == 9:
             source, expected_code = generate_unsigned_case(
                 engine, case_index, 64, "usize"
+            )
+        elif case_kind == 10:
+            source, expected_code = generate_float_case(
+                engine, case_index, "f32"
+            )
+        else:
+            source, expected_code = generate_float_case(
+                engine, case_index, "f64"
             )
         compile_and_run(
             arguments.compiler,

@@ -30,6 +30,10 @@ const char *luna_type_kind_name(LunaTypeKind kind) {
         return "u64";
     case LUNA_TYPE_USIZE:
         return "usize";
+    case LUNA_TYPE_F32:
+        return "f32";
+    case LUNA_TYPE_F64:
+        return "f64";
     }
 
     return "<unknown>";
@@ -52,6 +56,10 @@ bool luna_type_kind_is_unsigned_integer(LunaTypeKind kind) {
            kind == LUNA_TYPE_USIZE;
 }
 
+bool luna_type_kind_is_float(LunaTypeKind kind) {
+    return kind == LUNA_TYPE_F32 || kind == LUNA_TYPE_F64;
+}
+
 uint32_t luna_type_kind_bit_width(LunaTypeKind kind,
                                   const LunaDataLayout *data_layout) {
     switch (kind) {
@@ -72,6 +80,10 @@ uint32_t luna_type_kind_bit_width(LunaTypeKind kind,
     case LUNA_TYPE_ISIZE:
     case LUNA_TYPE_USIZE:
         return data_layout == NULL ? 0U : data_layout->pointer.size_bits;
+    case LUNA_TYPE_F32:
+        return 32U;
+    case LUNA_TYPE_F64:
+        return 64U;
     case LUNA_TYPE_INVALID:
     case LUNA_TYPE_VOID:
         return 0U;

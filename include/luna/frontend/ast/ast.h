@@ -16,6 +16,7 @@ typedef struct LunaTypeRef {
 
 typedef enum LunaExpressionKind {
     LUNA_EXPRESSION_INTEGER,
+    LUNA_EXPRESSION_FLOAT,
     LUNA_EXPRESSION_BOOLEAN,
     LUNA_EXPRESSION_NAME,
     LUNA_EXPRESSION_UNARY,
@@ -34,6 +35,7 @@ struct LunaExpression {
 
     union {
         uint64_t integer;
+        LunaStringView floating;
         bool boolean;
         LunaStringView name;
 

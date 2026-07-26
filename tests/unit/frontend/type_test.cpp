@@ -53,7 +53,16 @@ TEST(TypeTest, ReportsCanonicalProperties) {
     EXPECT_TRUE(luna_type_kind_is_unsigned_integer(LUNA_TYPE_USIZE));
     EXPECT_FALSE(luna_type_kind_is_signed_integer(LUNA_TYPE_USIZE));
     EXPECT_EQ(luna_type_kind_bit_width(LUNA_TYPE_USIZE, &layout), 64U);
+    EXPECT_STREQ(luna_type_kind_name(LUNA_TYPE_F32), "f32");
+    EXPECT_TRUE(luna_type_kind_is_float(LUNA_TYPE_F32));
+    EXPECT_FALSE(luna_type_kind_is_integer(LUNA_TYPE_F32));
+    EXPECT_EQ(luna_type_kind_bit_width(LUNA_TYPE_F32, &layout), 32U);
+    EXPECT_STREQ(luna_type_kind_name(LUNA_TYPE_F64), "f64");
+    EXPECT_TRUE(luna_type_kind_is_float(LUNA_TYPE_F64));
+    EXPECT_FALSE(luna_type_kind_is_integer(LUNA_TYPE_F64));
+    EXPECT_EQ(luna_type_kind_bit_width(LUNA_TYPE_F64, &layout), 64U);
     EXPECT_FALSE(luna_type_kind_is_integer(LUNA_TYPE_BOOL));
+    EXPECT_FALSE(luna_type_kind_is_float(LUNA_TYPE_BOOL));
     EXPECT_FALSE(luna_type_kind_is_signed_integer(LUNA_TYPE_BOOL));
     EXPECT_FALSE(luna_type_kind_is_unsigned_integer(LUNA_TYPE_BOOL));
     EXPECT_EQ(luna_type_kind_bit_width(LUNA_TYPE_BOOL, &layout), 1U);

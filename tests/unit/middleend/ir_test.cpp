@@ -54,6 +54,15 @@ TEST(IrTypeTest, ReportsAllIntegerMetadata) {
     EXPECT_TRUE(luna_ir_type_is_integer(LUNA_IR_TYPE_USIZE));
     EXPECT_FALSE(luna_ir_type_is_signed_integer(LUNA_IR_TYPE_USIZE));
     EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_USIZE, &layout), 64U);
+    EXPECT_STREQ(luna_ir_type_name(LUNA_IR_TYPE_F32), "f32");
+    EXPECT_TRUE(luna_ir_type_is_float(LUNA_IR_TYPE_F32));
+    EXPECT_FALSE(luna_ir_type_is_integer(LUNA_IR_TYPE_F32));
+    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_F32, &layout), 32U);
+    EXPECT_STREQ(luna_ir_type_name(LUNA_IR_TYPE_F64), "f64");
+    EXPECT_TRUE(luna_ir_type_is_float(LUNA_IR_TYPE_F64));
+    EXPECT_FALSE(luna_ir_type_is_integer(LUNA_IR_TYPE_F64));
+    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_F64, &layout), 64U);
+    EXPECT_FALSE(luna_ir_type_is_float(LUNA_IR_TYPE_BOOL));
     EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_ISIZE, nullptr), 0U);
 }
 
@@ -78,6 +87,19 @@ TEST(IrVerifierTest, AcceptsGenericUnsignedIntegerInstructions) {
         "    if (calculate(18446744073709551615) > 1) { return 42; }\n"
         "    return 1;\n"
         "}\n"};
+
+    EXPECT_TRUE(harness.Verify()) << harness.Diagnostics();
+}
+
+TEST(IrVerifierTest, AcceptsWellTypedFloatingPointInstructions) {
+    FrontendHarness harness{"module test.valid_float_ir;\n"
+                            "fn calculate(left: f32, right: f32) -> f32 {\n"
+                            "    return -((left + right) * 2.0 / 4.0);\n"
+                            "}\n"
+                            "fn ordered(left: f64, right: f64) -> bool {\n"
+                            "    return left <= right;\n"
+                            "}\n"
+                            "fn main() -> i32 { return 0; }\n"};
 
     EXPECT_TRUE(harness.Verify()) << harness.Diagnostics();
 }
@@ -338,6 +360,52 @@ TEST(IrVerifierTest, RejectsNarrowConstantsThatExceedTheirStorageWidth) {
     word_constant->immediate = std::uint64_t{1} << 16U;
     EXPECT_FALSE(harness.Verify());
     EXPECT_NE(harness.Diagnostics().find("exceeds its type storage width"),
+              std::string::npos);
+}
+
+TEST(IrVerifierTest, RejectsF32ConstantsThatExceedTheirStorageWidth) {
+    FrontendHarness harness{"module test.f32_immediate_range;\n"
+                            "fn value() -> f32 { return 1.0; }\n"
+                            "fn main() -> i32 { return 0; }\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaIrInstruction *constant = FindInstruction(
+        luna_ir_module_function(harness.Module(), 0U), LUNA_IR_CONST_FLOAT);
+    ASSERT_NE(constant, nullptr);
+    constant->immediate = std::uint64_t{1} << 32U;
+
+    EXPECT_FALSE(harness.Verify());
+    EXPECT_NE(harness.Diagnostics().find("f32 constant exceeds"),
+              std::string::npos);
+}
+
+TEST(IrVerifierTest, KeepsIntegerAndFloatingOpcodesDisjoint) {
+    FrontendHarness floating{
+        "module test.float_opcode_type;\n"
+        "fn value(left: f64, right: f64) -> f64 { return left + right; }\n"
+        "fn main() -> i32 { return 0; }\n"};
+    ASSERT_TRUE(floating.Verify()) << floating.Diagnostics();
+    LunaIrInstruction *float_add = FindInstruction(
+        luna_ir_module_function(floating.Module(), 0U), LUNA_IR_ADD_FLOAT);
+    ASSERT_NE(float_add, nullptr);
+    float_add->opcode = LUNA_IR_ADD_INTEGER;
+    EXPECT_FALSE(floating.Verify());
+    EXPECT_NE(floating.Diagnostics().find(
+                  "integer binary operation has invalid type"),
+              std::string::npos);
+
+    FrontendHarness integer{
+        "module test.integer_opcode_type;\n"
+        "fn value(left: i32, right: i32) -> i32 { return left + right; }\n"
+        "fn main() -> i32 { return 0; }\n"};
+    ASSERT_TRUE(integer.Verify()) << integer.Diagnostics();
+    LunaIrInstruction *integer_add = FindInstruction(
+        luna_ir_module_function(integer.Module(), 0U), LUNA_IR_ADD_INTEGER);
+    ASSERT_NE(integer_add, nullptr);
+    integer_add->opcode = LUNA_IR_ADD_FLOAT;
+    EXPECT_FALSE(integer.Verify());
+    EXPECT_NE(integer.Diagnostics().find(
+                  "floating binary operation has invalid type"),
               std::string::npos);
 }
 

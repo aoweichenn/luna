@@ -85,29 +85,6 @@ static bool luna_parser_expect(LunaParser *parser, LunaTokenKind kind,
     return false;
 }
 
-static bool luna_parser_is_type_token(LunaTokenKind kind) {
-    switch (kind) {
-    case LUNA_TOKEN_BOOL:
-    case LUNA_TOKEN_I8:
-    case LUNA_TOKEN_I16:
-    case LUNA_TOKEN_I32:
-    case LUNA_TOKEN_I64:
-    case LUNA_TOKEN_U8:
-    case LUNA_TOKEN_U16:
-    case LUNA_TOKEN_U32:
-    case LUNA_TOKEN_U64:
-    case LUNA_TOKEN_ISIZE:
-    case LUNA_TOKEN_USIZE:
-    case LUNA_TOKEN_F32:
-    case LUNA_TOKEN_F64:
-    case LUNA_TOKEN_VOID:
-        return true;
-
-    default:
-        return false;
-    }
-}
-
 static LunaTypeRef luna_parser_parse_type(LunaParser *parser) {
     const LunaToken token = parser->current;
     LunaTypeKind kind = LUNA_TYPE_INVALID;
@@ -146,24 +123,17 @@ static LunaTypeRef luna_parser_parse_type(LunaParser *parser) {
     case LUNA_TOKEN_USIZE:
         kind = LUNA_TYPE_USIZE;
         break;
+    case LUNA_TOKEN_F32:
+        kind = LUNA_TYPE_F32;
+        break;
+    case LUNA_TOKEN_F64:
+        kind = LUNA_TYPE_F64;
+        break;
     case LUNA_TOKEN_VOID:
         kind = LUNA_TYPE_VOID;
         break;
 
     default:
-        if (luna_parser_is_type_token(token.kind)) {
-            luna_diagnostic_error(
-                parser->diagnostics, token.span,
-                "type %s is accepted by the language design but is not "
-                "implemented in the current bootstrap milestone",
-                luna_token_kind_name(token.kind));
-            luna_parser_advance(parser);
-            return (LunaTypeRef){
-                .kind = LUNA_TYPE_INVALID,
-                .span = token.span,
-            };
-        }
-
         luna_diagnostic_error(parser->diagnostics, token.span,
                               "expected a type, found %s",
                               luna_token_kind_name(token.kind));
@@ -266,6 +236,66 @@ static bool luna_parser_parse_integer(LunaParser *parser, LunaToken token,
     return true;
 }
 
+static bool luna_parser_scan_float_digits(LunaStringView text, size_t *index) {
+    bool saw_digit = false;
+    bool previous_was_separator = false;
+
+    while (*index < text.length) {
+        const char character = text.data[*index];
+        if (character >= '0' && character <= '9') {
+            saw_digit = true;
+            previous_was_separator = false;
+            *index += 1U;
+            continue;
+        }
+        if (character == '_') {
+            if (!saw_digit || previous_was_separator ||
+                *index + 1U >= text.length || text.data[*index + 1U] < '0' ||
+                text.data[*index + 1U] > '9') {
+                return false;
+            }
+            previous_was_separator = true;
+            *index += 1U;
+            continue;
+        }
+        break;
+    }
+
+    return saw_digit && !previous_was_separator;
+}
+
+static bool luna_parser_validate_float(LunaParser *parser, LunaToken token) {
+    const LunaStringView text = luna_parser_token_text(token);
+    size_t index = 0U;
+    bool has_fraction = false;
+    bool has_exponent = false;
+
+    bool valid = luna_parser_scan_float_digits(text, &index);
+    if (valid && index < text.length && text.data[index] == '.') {
+        has_fraction = true;
+        index += 1U;
+        valid = luna_parser_scan_float_digits(text, &index);
+    }
+
+    if (valid && index < text.length &&
+        (text.data[index] == 'e' || text.data[index] == 'E')) {
+        has_exponent = true;
+        index += 1U;
+        if (index < text.length &&
+            (text.data[index] == '+' || text.data[index] == '-')) {
+            index += 1U;
+        }
+        valid = luna_parser_scan_float_digits(text, &index);
+    }
+
+    valid = valid && (has_fraction || has_exponent) && index == text.length;
+    if (!valid) {
+        luna_diagnostic_error(parser->diagnostics, token.span,
+                              "invalid floating-point literal");
+    }
+    return valid;
+}
+
 static LunaExpression *luna_parser_parse_expression(LunaParser *parser);
 
 static LunaExpression *luna_parser_new_expression(LunaParser *parser,
@@ -332,6 +362,16 @@ static LunaExpression *luna_parser_parse_primary(LunaParser *parser) {
             uint64_t value = 0U;
             (void)luna_parser_parse_integer(parser, token, &value);
             expression->as.integer = value;
+        }
+        return expression;
+    }
+
+    if (luna_parser_match(parser, LUNA_TOKEN_FLOAT)) {
+        LunaExpression *expression = luna_parser_new_expression(
+            parser, LUNA_EXPRESSION_FLOAT, token.span);
+        if (expression != NULL) {
+            (void)luna_parser_validate_float(parser, token);
+            expression->as.floating = luna_parser_token_text(token);
         }
         return expression;
     }

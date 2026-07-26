@@ -175,6 +175,21 @@ declaration, return, argument or enclosing integer expression. It defaults to
 `i32` when no integer context exists. This rule applies only to literals and
 does not convert an already typed value.
 
+A decimal floating-point literal has either a decimal point with digits on
+both sides or an exponent:
+
+```luna
+let single: f32 = 1.25;
+let double: f64 = 6.022_140_76e23;
+let default_comparison: bool = 1e-9 == 1e-9;
+```
+
+Underscores may separate digits within the integer, fractional and exponent
+parts. A floating-point literal takes the `f32` or `f64` type required by its
+declaration, return, argument or enclosing floating-point expression. It
+defaults to `f64` when no floating-point context exists. An `f32` literal is
+rounded directly to binary32 rather than first being rounded to binary64.
+
 Binary operators, from tighter to looser groups, are:
 
 ```text
@@ -204,6 +219,13 @@ keeps the bit pattern. Integer conversions never trap. A conversion does not
 happen implicitly merely because the destination type could represent the
 source value. These rules include `isize` and `usize`; their source or
 destination width comes from the selected target data layout.
+
+The implemented floating-point operators are unary `+` and `-`, arithmetic
+`+`, `-`, `*` and `/`, and all equality and ordering comparisons. Normal and
+compound assignment preserve the exact declared type. There are no implicit
+integer/floating-point conversions and no implicit conversion between `f32`
+and `f64`. Explicit conversions involving floating-point types are reserved
+for the next scalar-language stage.
 
 Assignment and compound assignment are statements, not expressions. There are
 no increment, decrement or comma operators.

@@ -189,4 +189,47 @@ TEST(ParserTest, BuildsChainedExplicitConversionNodes) {
     EXPECT_EQ(inner->as.cast.target_type.kind, LUNA_TYPE_I64);
 }
 
+TEST(ParserTest, ParsesFloatingTypesAndPreservesLiteralSpelling) {
+    FrontendHarness harness{"module test.floating_syntax;\n"
+                            "fn blend(left: f32, right: f64) -> f64 {\n"
+                            "    let value: f64 = 1_2.5_0e-1;\n"
+                            "    return value;\n"
+                            "}\n"
+                            "fn main() -> i32 { return 0; }\n"};
+
+    ASSERT_TRUE(harness.Parse()) << harness.Diagnostics();
+    const LunaFunction *function = harness.Program()->first_function;
+    ASSERT_NE(function, nullptr);
+    ASSERT_NE(function->first_parameter, nullptr);
+    ASSERT_NE(function->first_parameter->next, nullptr);
+    EXPECT_EQ(function->first_parameter->type.kind, LUNA_TYPE_F32);
+    EXPECT_EQ(function->first_parameter->next->type.kind, LUNA_TYPE_F64);
+    EXPECT_EQ(function->return_type.kind, LUNA_TYPE_F64);
+    ASSERT_NE(function->body, nullptr);
+    ASSERT_NE(function->body->first, nullptr);
+    ASSERT_EQ(function->body->first->kind, LUNA_STATEMENT_DECLARATION);
+    const LunaExpression *initializer =
+        function->body->first->as.declaration.initializer;
+    ASSERT_NE(initializer, nullptr);
+    EXPECT_EQ(initializer->kind, LUNA_EXPRESSION_FLOAT);
+    EXPECT_EQ(std::string(initializer->as.floating.data,
+                          initializer->as.floating.length),
+              "1_2.5_0e-1");
+}
+
+TEST(ParserTest, RejectsMalformedFloatingPointLiterals) {
+    for (const std::string literal : {"1e", "1e+", "1_.0", "1.0_", "1.0e_2"}) {
+        FrontendHarness harness{"module test.bad_float;\n"
+                                "fn value() -> f64 { return " +
+                                literal +
+                                "; }\n"
+                                "fn main() -> i32 { return 0; }\n"};
+        EXPECT_FALSE(harness.Parse()) << literal;
+        EXPECT_NE(harness.Diagnostics().find("invalid floating-point literal"),
+                  std::string::npos)
+            << literal << '\n'
+            << harness.Diagnostics();
+    }
+}
+
 }

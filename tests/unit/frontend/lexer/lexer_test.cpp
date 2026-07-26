@@ -103,4 +103,21 @@ TEST(LexerTest, NeverTreatsEmbeddedNullAsEndOfFile) {
     EXPECT_EQ(harness.ErrorCount(), 1U);
 }
 
+TEST(LexerTest, RecognizesDecimalFloatingPointLiteralsAndTypes) {
+    constexpr std::string_view LUNA_TEST_SOURCE = "0.5 1e3 1_0.2_5e-2 f32 f64";
+    constexpr std::array LUNA_TEST_EXPECTED = {
+        LUNA_TOKEN_FLOAT, LUNA_TOKEN_FLOAT, LUNA_TOKEN_FLOAT,
+        LUNA_TOKEN_F32,   LUNA_TOKEN_F64,   LUNA_TOKEN_END,
+    };
+
+    FrontendHarness harness{LUNA_TEST_SOURCE};
+    ASSERT_TRUE(harness.IsReady());
+    LunaLexer lexer{};
+    luna_lexer_init(&lexer, harness.Source(), harness.DiagnosticEngine());
+    for (const LunaTokenKind expected : LUNA_TEST_EXPECTED) {
+        EXPECT_EQ(luna_lexer_next(&lexer).kind, expected);
+    }
+    EXPECT_EQ(harness.ErrorCount(), 0U);
+}
+
 }

@@ -286,6 +286,8 @@ def main() -> int:
         "isize_division_overflow.luna": -8,
         "isize_remainder_overflow.luna": -8,
         "usize_division_by_zero.luna": -8,
+        "floating_operations.luna": 42,
+        "floating_literals.luna": 42,
     }
 
     for case_name, expected_code in executable_cases.items():
@@ -349,6 +351,24 @@ def main() -> int:
             "integer literal does not fit in isize"
         ),
         "pointer_sized_mixed_types.luna": "expected isize, found i64",
+        "f32_literal_overflow.luna": (
+            "floating-point literal does not fit in f32"
+        ),
+        "f64_literal_overflow.luna": (
+            "floating-point literal does not fit in f64"
+        ),
+        "float_mixed_types.luna": "expected f32, found f64",
+        "float_integer_mixed.luna": "expected f64, found i32",
+        "invalid_float_operator.luna": (
+            "is not defined for floating-point operands"
+        ),
+        "invalid_float_conversion.luna": (
+            "explicit conversion requires integer source and target types"
+        ),
+        "malformed_float_literal.luna": "invalid floating-point literal",
+        "too_many_float_arguments.luna": (
+            "at most six integer-class and eight floating-point arguments"
+        ),
     }
 
     for case_name, expected_diagnostic in negative_cases.items():
@@ -375,6 +395,7 @@ def main() -> int:
         "unsigned_conversions",
         "narrow_ir",
         "pointer_sized_integer_ir",
+        "floating_ir",
     ):
         ir_output = arguments.work_dir / f"{snapshot_name}.lir"
         run(
@@ -408,6 +429,7 @@ def main() -> int:
         "unsigned_operations",
         "narrow_integer_operations",
         "pointer_sized_integer_operations",
+        "floating_operations",
     ):
         deterministic_first = (
             arguments.work_dir / f"{deterministic_name}_first.s"

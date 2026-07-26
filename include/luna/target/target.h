@@ -24,6 +24,8 @@ typedef struct LunaDataLayout {
     LunaScalarLayout integer16;
     LunaScalarLayout integer32;
     LunaScalarLayout integer64;
+    LunaScalarLayout float32;
+    LunaScalarLayout float64;
     LunaScalarLayout pointer;
 } LunaDataLayout;
 
@@ -63,6 +65,8 @@ bool luna_data_layout_equal(const LunaDataLayout *left,
                             const LunaDataLayout *right);
 const LunaScalarLayout *luna_data_layout_integer(const LunaDataLayout *layout,
                                                  uint32_t bit_width);
+const LunaScalarLayout *luna_data_layout_float(const LunaDataLayout *layout,
+                                               uint32_t bit_width);
 
 #ifdef __cplusplus
 }

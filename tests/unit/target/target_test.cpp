@@ -25,6 +25,10 @@ TEST(TargetTest, DescribesTheX8664SystemVDataLayout) {
     EXPECT_EQ(layout.byte_order, LUNA_BYTE_ORDER_LITTLE_ENDIAN);
     EXPECT_EQ(layout.boolean.size_bits, 8U);
     EXPECT_EQ(layout.boolean.abi_alignment_bits, 8U);
+    EXPECT_EQ(layout.float32.size_bits, 32U);
+    EXPECT_EQ(layout.float32.abi_alignment_bits, 32U);
+    EXPECT_EQ(layout.float64.size_bits, 64U);
+    EXPECT_EQ(layout.float64.abi_alignment_bits, 64U);
     EXPECT_EQ(layout.pointer.size_bits, 64U);
     EXPECT_EQ(layout.pointer.abi_alignment_bits, 64U);
 
@@ -43,6 +47,10 @@ TEST(TargetTest, DescribesTheX8664SystemVDataLayout) {
     }
     EXPECT_EQ(luna_data_layout_integer(&layout, 24U), nullptr);
     EXPECT_EQ(luna_data_layout_integer(nullptr, 32U), nullptr);
+    EXPECT_EQ(luna_data_layout_float(&layout, 32U), &layout.float32);
+    EXPECT_EQ(luna_data_layout_float(&layout, 64U), &layout.float64);
+    EXPECT_EQ(luna_data_layout_float(&layout, 16U), nullptr);
+    EXPECT_EQ(luna_data_layout_float(nullptr, 32U), nullptr);
 }
 
 TEST(TargetTest, RejectsMalformedLayoutsAndUnsupportedTargets) {
@@ -54,6 +62,12 @@ TEST(TargetTest, RejectsMalformedLayoutsAndUnsupportedTargets) {
 
     target = *canonical;
     target.data_layout.integer32.abi_alignment_bits = 24U;
+    EXPECT_FALSE(luna_data_layout_is_valid(&target.data_layout));
+    EXPECT_FALSE(
+        luna_data_layout_equal(&target.data_layout, &canonical->data_layout));
+
+    target = *canonical;
+    target.data_layout.float64.size_bits = 32U;
     EXPECT_FALSE(luna_data_layout_is_valid(&target.data_layout));
     EXPECT_FALSE(
         luna_data_layout_equal(&target.data_layout, &canonical->data_layout));
