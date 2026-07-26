@@ -1,0 +1,62 @@
+# Implementation roadmap
+
+Accepted language design and compiler implementation status are intentionally
+separate. A checked box means the feature has executable tests.
+
+## M0: direct-codegen vertical slice
+
+- [x] C23 project skeleton with strict warning policy
+- [x] source manager and diagnostics
+- [x] lexer for the accepted punctuation, literals and keywords
+- [x] parser for module units, functions and the M0 statement subset
+- [x] exact checking for `i32`, `bool` and no-result functions
+- [x] typed CFG IR and verifier
+- [x] direct internal calls with up to six integer arguments
+- [x] x86-64 System V stack-homed backend
+- [x] standalone Linux `_start`
+- [x] unit, negative, IR snapshot and executable QEMU tests
+
+M0 supports enough language to compile arithmetic functions, local variables,
+`if`, `while`, calls and integer-returning `main`.
+
+## M1: accepted scalar language
+
+- [ ] all fixed-width integer types
+- [ ] `isize`, `usize`, `f32`, `f64`
+- [ ] explicit `as` conversions
+- [ ] complete operators and `do`/`for`/`switch`
+- [ ] raw pointers, fixed arrays and string literals
+- [ ] external C declarations
+- [ ] target data-layout tests
+
+## M2: aggregate and module completion
+
+- [ ] structures, unions and scoped enums
+- [ ] aggregate initialization
+- [ ] module interface and implementation matching
+- [ ] import visibility and dependency validation
+- [ ] separate compiled module metadata
+
+## M3: production x86-64 backend
+
+- [ ] target machine IR
+- [ ] liveness analysis
+- [ ] linear-scan register allocation
+- [ ] stack arguments and aggregate ABI classification
+- [ ] instruction-level differential tests
+- [ ] native ELF64 relocatable-object writer
+- [ ] debug information design
+
+## M4: self-hosting
+
+- [ ] runtime and standard-library minimum
+- [ ] Luna implementation of lexer and parser
+- [ ] Luna implementation of type checking and IR
+- [ ] Luna implementation of x86-64 backend
+- [ ] stage 1, stage 2 and stage 3 reproducibility comparison
+
+## Explicitly deferred
+
+Optimization beyond local x86-64 improvements, general metaprogramming,
+parallel compilation, incremental compilation, package management, language
+server work and non-x86-64 backends are outside the bootstrap path.
