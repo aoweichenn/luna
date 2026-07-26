@@ -29,7 +29,8 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] all fixed-width integer types
 - [x] target-sized `isize` and `usize`
 - [x] `f32` and `f64`
-- [ ] explicit conversions for the remaining scalar and pointer types
+- [x] explicit conversions among every numeric scalar type
+- [ ] explicit raw-pointer conversions
 - [ ] complete operators and `do`/`for`/`switch`
 - [ ] raw pointers, fixed arrays and string literals
 - [ ] external C declarations

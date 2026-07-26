@@ -203,4 +203,30 @@ TEST(X8664BackendTest, EmitsFloatingPointSemanticsAndSystemVAbi) {
     EXPECT_NE(assembly.find("movabsq $0x8000000000000000"), std::string::npos);
 }
 
+TEST(X8664BackendTest, EmitsCheckedScalarConversions) {
+    FrontendHarness harness{
+        "module test.scalar_conversion_codegen;\n"
+        "fn widen(value: f32) -> f64 { return value as f64; }\n"
+        "fn narrow(value: f64) -> f32 { return value as f32; }\n"
+        "fn signed_to_float(value: i64) -> f64 { return value as f64; }\n"
+        "fn unsigned_to_float(value: u64) -> f32 { return value as f32; }\n"
+        "fn float_to_signed(value: f64) -> i64 { return value as i64; }\n"
+        "fn float_to_unsigned(value: f32) -> u64 { return value as u64; }\n"
+        "fn main() -> i32 { return 0; }\n"};
+
+    ASSERT_TRUE(harness.EmitAssembly()) << harness.Diagnostics();
+    const std::string assembly = harness.Assembly();
+    EXPECT_NE(assembly.find("cvtss2sd"), std::string::npos);
+    EXPECT_NE(assembly.find("cvtsd2ss"), std::string::npos);
+    EXPECT_NE(assembly.find("cvtsi2sdq"), std::string::npos);
+    EXPECT_NE(assembly.find("cvtsi2ssq"), std::string::npos);
+    EXPECT_NE(assembly.find("cvttsd2siq"), std::string::npos);
+    EXPECT_NE(assembly.find("cvttss2siq"), std::string::npos);
+    EXPECT_NE(assembly.find("ucomisd"), std::string::npos);
+    EXPECT_NE(assembly.find("ucomiss"), std::string::npos);
+    EXPECT_NE(assembly.find("_uitofp"), std::string::npos);
+    EXPECT_NE(assembly.find("_fptoi"), std::string::npos);
+    EXPECT_NE(assembly.find("ud2"), std::string::npos);
+}
+
 }

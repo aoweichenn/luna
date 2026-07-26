@@ -110,8 +110,29 @@ NaN, `==`, `<`, `<=`, `>` and `>=` are false, while `!=` is true. Positive and
 negative zero compare equal.
 
 `f32` and `f64` are exact, independent types. They do not mix with each other
-or with integer types implicitly. Explicit floating-point conversions are not
-part of the current stage.
+or with integer types implicitly.
+
+## Explicit floating-point conversions
+
+Converting `f32` to `f64` is exact. Converting `f64` to `f32` rounds once to
+binary32 using round-to-nearest, ties-to-even. A finite value too large for
+binary32 becomes an infinity with the source sign. Zeros, infinities and NaNs
+otherwise follow IEEE-754 format-conversion behavior.
+
+Converting any signed or unsigned integer to `f32` or `f64` rounds directly to
+the destination format using round-to-nearest, ties-to-even. The result is
+always finite because every implemented integer range fits within both
+floating-point formats' finite exponent range. Signed sources use their
+mathematical signed value; unsigned `u64` and `usize` values above `INT64_MAX`
+do not pass through a signed interpretation.
+
+Converting `f32` or `f64` to an integer requires the source to be finite and
+inside the closed mathematical range of the target type before its fractional
+part is discarded toward zero. Therefore `127.0 as i8` is valid, while
+`127.5 as i8` traps even though truncating first would produce `127`. NaN,
+either infinity and every out-of-range source trap. Positive and negative zero
+both convert to integer zero. These rules apply independently to all
+fixed-width and target-sized integer types.
 
 ## Optimization boundary
 

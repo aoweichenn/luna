@@ -428,6 +428,138 @@ TEST(IrVerifierTest, RejectsRedundantIntegerConversion) {
               std::string::npos);
 }
 
+TEST(IrVerifierTest, RejectsRedundantFloatingConversion) {
+    FrontendHarness harness{"module test.float_conversion_ir;\n"
+                            "fn widen(value: f32) -> f64 {\n"
+                            "    return value as f64;\n"
+                            "}\n"
+                            "fn main() -> i32 { return 0; }\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaIrInstruction *conversion = FindInstruction(
+        luna_ir_module_function(harness.Module(), 0U), LUNA_IR_CONVERT_FLOAT);
+    ASSERT_NE(conversion, nullptr);
+    conversion->type = LUNA_IR_TYPE_F32;
+
+    EXPECT_FALSE(harness.Verify());
+    EXPECT_NE(harness.Diagnostics().find("floating conversion is redundant"),
+              std::string::npos);
+}
+
+TEST(IrVerifierTest, RejectsInvalidFloatingWidthConversionTypes) {
+    FrontendHarness invalid_source{"module test.float_conversion_source_ir;\n"
+                                   "fn widen(value: f32) -> f64 {\n"
+                                   "    let marker: bool = true;\n"
+                                   "    return value as f64;\n"
+                                   "}\n"
+                                   "fn main() -> i32 { return 0; }\n"};
+    ASSERT_TRUE(invalid_source.Verify()) << invalid_source.Diagnostics();
+    LunaIrFunction *source_function =
+        luna_ir_module_function(invalid_source.Module(), 0U);
+    LunaIrInstruction *boolean =
+        FindInstruction(source_function, LUNA_IR_CONST_BOOL);
+    LunaIrInstruction *source_conversion =
+        FindInstruction(source_function, LUNA_IR_CONVERT_FLOAT);
+    ASSERT_NE(boolean, nullptr);
+    ASSERT_NE(source_conversion, nullptr);
+    source_conversion->left = boolean->result;
+    EXPECT_FALSE(invalid_source.Verify());
+    EXPECT_NE(invalid_source.Diagnostics().find(
+                  "floating conversion has invalid source type"),
+              std::string::npos);
+
+    FrontendHarness invalid_result{
+        "module test.float_conversion_result_ir;\n"
+        "fn widen(value: f32) -> f64 { return value as f64; }\n"
+        "fn main() -> i32 { return 0; }\n"};
+    ASSERT_TRUE(invalid_result.Verify()) << invalid_result.Diagnostics();
+    LunaIrInstruction *result_conversion =
+        FindInstruction(luna_ir_module_function(invalid_result.Module(), 0U),
+                        LUNA_IR_CONVERT_FLOAT);
+    ASSERT_NE(result_conversion, nullptr);
+    result_conversion->type = LUNA_IR_TYPE_I64;
+    EXPECT_FALSE(invalid_result.Verify());
+    EXPECT_NE(invalid_result.Diagnostics().find(
+                  "floating conversion has invalid result type"),
+              std::string::npos);
+}
+
+TEST(IrVerifierTest, RejectsInvalidCrossCategoryConversions) {
+    FrontendHarness integer_to_float{
+        "module test.integer_to_float_ir;\n"
+        "fn convert(value: i32) -> f32 { return value as f32; }\n"
+        "fn main() -> i32 { return 0; }\n"};
+    ASSERT_TRUE(integer_to_float.Verify()) << integer_to_float.Diagnostics();
+    LunaIrInstruction *to_float =
+        FindInstruction(luna_ir_module_function(integer_to_float.Module(), 0U),
+                        LUNA_IR_CONVERT_INTEGER_TO_FLOAT);
+    ASSERT_NE(to_float, nullptr);
+    to_float->type = LUNA_IR_TYPE_I32;
+    EXPECT_FALSE(integer_to_float.Verify());
+    EXPECT_NE(integer_to_float.Diagnostics().find(
+                  "integer-to-floating conversion has invalid result type"),
+              std::string::npos);
+
+    FrontendHarness invalid_integer_source{
+        "module test.integer_to_float_source_ir;\n"
+        "fn convert(value: i32) -> f32 {\n"
+        "    let marker: bool = true;\n"
+        "    return value as f32;\n"
+        "}\n"
+        "fn main() -> i32 { return 0; }\n"};
+    ASSERT_TRUE(invalid_integer_source.Verify())
+        << invalid_integer_source.Diagnostics();
+    LunaIrFunction *integer_source_function =
+        luna_ir_module_function(invalid_integer_source.Module(), 0U);
+    LunaIrInstruction *integer_source_boolean =
+        FindInstruction(integer_source_function, LUNA_IR_CONST_BOOL);
+    LunaIrInstruction *invalid_to_float = FindInstruction(
+        integer_source_function, LUNA_IR_CONVERT_INTEGER_TO_FLOAT);
+    ASSERT_NE(integer_source_boolean, nullptr);
+    ASSERT_NE(invalid_to_float, nullptr);
+    invalid_to_float->left = integer_source_boolean->result;
+    EXPECT_FALSE(invalid_integer_source.Verify());
+    EXPECT_NE(invalid_integer_source.Diagnostics().find(
+                  "integer-to-floating conversion has invalid source type"),
+              std::string::npos);
+
+    FrontendHarness float_to_integer{"module test.float_to_integer_ir;\n"
+                                     "fn convert(value: f64) -> i64 {\n"
+                                     "    let marker: bool = true;\n"
+                                     "    return value as i64;\n"
+                                     "}\n"
+                                     "fn main() -> i32 { return 0; }\n"};
+    ASSERT_TRUE(float_to_integer.Verify()) << float_to_integer.Diagnostics();
+    LunaIrFunction *function =
+        luna_ir_module_function(float_to_integer.Module(), 0U);
+    LunaIrInstruction *boolean = FindInstruction(function, LUNA_IR_CONST_BOOL);
+    LunaIrInstruction *to_integer =
+        FindInstruction(function, LUNA_IR_CONVERT_FLOAT_TO_INTEGER);
+    ASSERT_NE(boolean, nullptr);
+    ASSERT_NE(to_integer, nullptr);
+    to_integer->left = boolean->result;
+    EXPECT_FALSE(float_to_integer.Verify());
+    EXPECT_NE(float_to_integer.Diagnostics().find(
+                  "floating-to-integer conversion has invalid source type"),
+              std::string::npos);
+
+    FrontendHarness invalid_integer_result{
+        "module test.float_to_integer_result_ir;\n"
+        "fn convert(value: f64) -> i64 { return value as i64; }\n"
+        "fn main() -> i32 { return 0; }\n"};
+    ASSERT_TRUE(invalid_integer_result.Verify())
+        << invalid_integer_result.Diagnostics();
+    LunaIrInstruction *invalid_to_integer = FindInstruction(
+        luna_ir_module_function(invalid_integer_result.Module(), 0U),
+        LUNA_IR_CONVERT_FLOAT_TO_INTEGER);
+    ASSERT_NE(invalid_to_integer, nullptr);
+    invalid_to_integer->type = LUNA_IR_TYPE_F64;
+    EXPECT_FALSE(invalid_integer_result.Verify());
+    EXPECT_NE(invalid_integer_result.Diagnostics().find(
+                  "floating-to-integer conversion has invalid result type"),
+              std::string::npos);
+}
+
 TEST(IrVerifierTest, RejectsOrderingComparisonOnBooleanOperands) {
     FrontendHarness harness{"module test.bool_ordering_ir;\n"
                             "fn main() -> i32 {\n"

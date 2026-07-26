@@ -73,6 +73,9 @@ with virtual values and explicit local slots:
 - binary32 and binary64 constants, arithmetic and ordered comparisons
 - explicit integer conversions whose extension or truncation follows source
   and target type metadata
+- exact floating widening, rounded floating narrowing and type-directed
+  signed/unsigned integer-to-floating and checked floating-to-integer
+  conversions
 - comparisons
 - direct calls
 - unconditional and conditional branches
@@ -115,6 +118,9 @@ The first backend is correctness-first:
 - scalar `movss`/`movsd` arithmetic and ordered `ucomiss`/`ucomisd`
   comparisons, with an explicitly initialized IEEE floating-point
   environment;
+- scalar SSE format and integer conversions, including software sequences for
+  the unsigned 64-bit range and explicit traps before invalid
+  floating-to-integer operations;
 - a Linux `_start` shim that exits through syscall 60;
 - no dependency on a target C runtime.
 
@@ -148,6 +154,8 @@ The quality gate contains:
 - static ELF64 linking through LLD;
 - execution under `qemu-x86_64-static`;
 - deterministic generated-program differential tests;
+- executable matrices and boundary traps for every numeric scalar conversion
+  family;
 - deterministic mutation tests and a coverage-guided libFuzzer target;
 - UBSan runs for the host compiler and ASan runs on compatible native hosts;
 - warnings treated as errors.

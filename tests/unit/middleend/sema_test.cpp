@@ -497,7 +497,7 @@ TEST(SemaTest, LowersEveryIntegerConversionPair) {
             } else {
                 ASSERT_NE(conversion, nullptr);
                 EXPECT_EQ(conversion->type, LUNA_TEST_IR_TYPES[target_index]);
-                const auto *operand_type =
+                const LunaIrType *operand_type =
                     static_cast<const LunaIrType *>(luna_vector_at_const(
                         &function->value_types, conversion->left));
                 ASSERT_NE(operand_type, nullptr);
@@ -506,6 +506,130 @@ TEST(SemaTest, LowersEveryIntegerConversionPair) {
             function_index += 1U;
         }
     }
+}
+
+TEST(SemaTest, LowersEveryRemainingNumericConversionPair) {
+    constexpr std::array<std::string_view, 12U>
+        LUNA_TEST_SCALAR_CONVERSION_TYPE_NAMES = {
+            "i8",  "i16", "i32", "i64",   "isize", "u8",
+            "u16", "u32", "u64", "usize", "f32",   "f64",
+        };
+    constexpr std::array<LunaIrType, 12U> LUNA_TEST_SCALAR_CONVERSION_IR_TYPES =
+        {
+            LUNA_IR_TYPE_I8,    LUNA_IR_TYPE_I16,   LUNA_IR_TYPE_I32,
+            LUNA_IR_TYPE_I64,   LUNA_IR_TYPE_ISIZE, LUNA_IR_TYPE_U8,
+            LUNA_IR_TYPE_U16,   LUNA_IR_TYPE_U32,   LUNA_IR_TYPE_U64,
+            LUNA_IR_TYPE_USIZE, LUNA_IR_TYPE_F32,   LUNA_IR_TYPE_F64,
+        };
+    constexpr std::size_t LUNA_TEST_SCALAR_CONVERSION_INTEGER_TYPE_COUNT = 10U;
+    constexpr std::size_t LUNA_TEST_SCALAR_CONVERSION_FUNCTION_COUNT = 44U;
+
+    std::string source{"module test.scalar_conversion_matrix;\n"};
+    for (std::size_t source_index = 0U;
+         source_index < LUNA_TEST_SCALAR_CONVERSION_TYPE_NAMES.size();
+         source_index += 1U) {
+        for (std::size_t target_index = 0U;
+             target_index < LUNA_TEST_SCALAR_CONVERSION_TYPE_NAMES.size();
+             target_index += 1U) {
+            if (source_index < LUNA_TEST_SCALAR_CONVERSION_INTEGER_TYPE_COUNT &&
+                target_index < LUNA_TEST_SCALAR_CONVERSION_INTEGER_TYPE_COUNT) {
+                continue;
+            }
+            const std::string_view source_type =
+                LUNA_TEST_SCALAR_CONVERSION_TYPE_NAMES[source_index];
+            const std::string_view target_type =
+                LUNA_TEST_SCALAR_CONVERSION_TYPE_NAMES[target_index];
+            source.append("fn convert_");
+            source.append(source_type);
+            source.append("_to_");
+            source.append(target_type);
+            source.append("(value: ");
+            source.append(source_type);
+            source.append(") -> ");
+            source.append(target_type);
+            source.append(" { return value as ");
+            source.append(target_type);
+            source.append("; }\n");
+        }
+    }
+    source.append("fn main() -> i32 { return 0; }\n");
+
+    FrontendHarness harness{source};
+    ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    ASSERT_EQ(harness.Module()->functions.length,
+              LUNA_TEST_SCALAR_CONVERSION_FUNCTION_COUNT + 1U);
+
+    std::size_t function_index = 0U;
+    for (std::size_t source_index = 0U;
+         source_index < LUNA_TEST_SCALAR_CONVERSION_IR_TYPES.size();
+         source_index += 1U) {
+        for (std::size_t target_index = 0U;
+             target_index < LUNA_TEST_SCALAR_CONVERSION_IR_TYPES.size();
+             target_index += 1U) {
+            const bool source_is_integer =
+                source_index < LUNA_TEST_SCALAR_CONVERSION_INTEGER_TYPE_COUNT;
+            const bool target_is_integer =
+                target_index < LUNA_TEST_SCALAR_CONVERSION_INTEGER_TYPE_COUNT;
+            if (source_is_integer && target_is_integer) {
+                continue;
+            }
+
+            LunaIrFunction *function = luna_ir_module_function(
+                harness.Module(),
+                static_cast<LunaIrFunctionId>(function_index));
+            ASSERT_NE(function, nullptr);
+            const LunaIrType source_type =
+                LUNA_TEST_SCALAR_CONVERSION_IR_TYPES[source_index];
+            const LunaIrType target_type =
+                LUNA_TEST_SCALAR_CONVERSION_IR_TYPES[target_index];
+            EXPECT_EQ(function->return_type, target_type);
+
+            LunaIrOpcode expected_opcode = LUNA_IR_CONVERT_FLOAT;
+            if (source_is_integer) {
+                expected_opcode = LUNA_IR_CONVERT_INTEGER_TO_FLOAT;
+            } else if (target_is_integer) {
+                expected_opcode = LUNA_IR_CONVERT_FLOAT_TO_INTEGER;
+            }
+            LunaIrInstruction *conversion =
+                FindInstruction(function, expected_opcode);
+            if (source_type == target_type) {
+                EXPECT_EQ(conversion, nullptr);
+            } else {
+                ASSERT_NE(conversion, nullptr);
+                EXPECT_EQ(conversion->type, target_type);
+                const LunaIrType *operand_type =
+                    static_cast<const LunaIrType *>(luna_vector_at_const(
+                        &function->value_types, conversion->left));
+                ASSERT_NE(operand_type, nullptr);
+                EXPECT_EQ(*operand_type, source_type);
+            }
+            function_index += 1U;
+        }
+    }
+    EXPECT_EQ(function_index, LUNA_TEST_SCALAR_CONVERSION_FUNCTION_COUNT);
+}
+
+TEST(SemaTest, PreservesLiteralCategoryAcrossExplicitConversions) {
+    FrontendHarness harness{"module test.scalar_literal_conversions;\n"
+                            "fn negative() -> i32 { return (-42.75) as i32; }\n"
+                            "fn positive() -> f64 { return 42 as f64; }\n"
+                            "fn main() -> i32 { return 0; }\n"};
+
+    ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    LunaIrFunction *negative = luna_ir_module_function(harness.Module(), 0U);
+    LunaIrFunction *positive = luna_ir_module_function(harness.Module(), 1U);
+    ASSERT_NE(negative, nullptr);
+    ASSERT_NE(positive, nullptr);
+    LunaIrInstruction *float_to_integer =
+        FindInstruction(negative, LUNA_IR_CONVERT_FLOAT_TO_INTEGER);
+    LunaIrInstruction *integer_to_float =
+        FindInstruction(positive, LUNA_IR_CONVERT_INTEGER_TO_FLOAT);
+    ASSERT_NE(float_to_integer, nullptr);
+    ASSERT_NE(integer_to_float, nullptr);
+    EXPECT_EQ(float_to_integer->type, LUNA_IR_TYPE_I32);
+    EXPECT_EQ(integer_to_float->type, LUNA_IR_TYPE_F64);
 }
 
 TEST(SemaTest, RejectsImplicitNarrowIntegerMixing) {
@@ -520,13 +644,13 @@ TEST(SemaTest, RejectsImplicitNarrowIntegerMixing) {
               std::string::npos);
 }
 
-TEST(SemaTest, RejectsNonIntegerExplicitConversions) {
+TEST(SemaTest, RejectsNonNumericExplicitConversions) {
     FrontendHarness harness{"module test.invalid_conversion;\n"
                             "fn main() -> i32 { return true as i32; }\n"};
 
     EXPECT_FALSE(harness.ParseAndLower());
     EXPECT_NE(harness.Diagnostics().find(
-                  "explicit conversion requires integer source and target"),
+                  "explicit conversion requires numeric source and target"),
               std::string::npos);
 }
 

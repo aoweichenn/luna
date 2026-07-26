@@ -6,6 +6,7 @@ import argparse
 import pathlib
 import platform
 import shutil
+import struct
 import subprocess
 import sys
 
@@ -181,6 +182,111 @@ def generate_integer_conversion_matrix(work_dir: pathlib.Path) -> pathlib.Path:
     return source
 
 
+def round_f32(value: float) -> float:
+    return struct.unpack("<f", struct.pack("<f", value))[0]
+
+
+def format_float_literal(value: float, type_name: str) -> str:
+    precision = 9 if type_name == "f32" else 17
+    text = format(value, f".{precision}g")
+    if "." not in text and "e" not in text:
+        text += ".0"
+    return text
+
+
+def generate_scalar_conversion_matrix(work_dir: pathlib.Path) -> pathlib.Path:
+    integer_types = (
+        ("i8", -85),
+        ("i16", -21846),
+        ("i32", -1431655766),
+        ("i64", -6148914691236517206),
+        ("isize", -6148914691236517206),
+        ("u8", 171),
+        ("u16", 43690),
+        ("u32", 2863311530),
+        ("u64", 12297829382473034410),
+        ("usize", 12297829382473034410),
+    )
+    float_types = ("f32", "f64")
+    lines = ["module test.all_scalar_conversions;", ""]
+
+    for source_name, _ in integer_types:
+        for target_name in float_types:
+            lines.extend(
+                (
+                    f"fn convert_{source_name}_to_{target_name}("
+                    f"value: {source_name}) -> {target_name} {{",
+                    f"    return value as {target_name};",
+                    "}",
+                    "",
+                )
+            )
+    for source_name in float_types:
+        for target_name, _ in integer_types:
+            lines.extend(
+                (
+                    f"fn convert_{source_name}_to_{target_name}("
+                    f"value: {source_name}) -> {target_name} {{",
+                    f"    return value as {target_name};",
+                    "}",
+                    "",
+                )
+            )
+    lines.extend(
+        (
+            "fn convert_f32_to_f64(value: f32) -> f64 {",
+            "    return value as f64;",
+            "}",
+            "",
+            "fn convert_f64_to_f32(value: f64) -> f32 {",
+            "    return value as f32;",
+            "}",
+            "",
+            "fn main() -> i32 {",
+        )
+    )
+
+    for source_name, source_value in integer_types:
+        for target_name in float_types:
+            expected = float(source_value)
+            if target_name == "f32":
+                expected = round_f32(expected)
+            expected_literal = format_float_literal(expected, target_name)
+            lines.extend(
+                (
+                    f"    if (convert_{source_name}_to_{target_name}("
+                    f"{source_value}) != {expected_literal}) {{",
+                    "        return 1;",
+                    "    }",
+                )
+            )
+    for source_name in float_types:
+        for target_name, _ in integer_types:
+            source_value = -42.75 if target_name.startswith("i") else 42.75
+            expected = -42 if source_value < 0 else 42
+            lines.extend(
+                (
+                    f"    if (convert_{source_name}_to_{target_name}("
+                    f"{source_value}) != {expected}) {{",
+                    "        return 1;",
+                    "    }",
+                )
+            )
+    lines.extend(
+        (
+            "    if (convert_f32_to_f64(1.5) != 1.5) { return 1; }",
+            "    if (convert_f64_to_f32(1.5) != 1.5) { return 1; }",
+            "    return 42;",
+            "}",
+            "",
+        )
+    )
+
+    source = work_dir / "all_scalar_conversions.luna"
+    source.write_text("\n".join(lines), encoding="utf-8")
+    return source
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--compiler", type=pathlib.Path, required=True)
@@ -288,6 +394,14 @@ def main() -> int:
         "usize_division_by_zero.luna": -8,
         "floating_operations.luna": 42,
         "floating_literals.luna": 42,
+        "scalar_conversions.luna": 42,
+        "float_to_integer_nan_trap.luna": -4,
+        "float_to_integer_infinity_trap.luna": -4,
+        "float_to_integer_signed_range_trap.luna": -4,
+        "float_to_integer_unsigned_range_trap.luna": -4,
+        "float_to_i64_upper_trap.luna": -4,
+        "float_to_u64_upper_trap.luna": -4,
+        "float_to_i8_lower_trap.luna": -4,
     }
 
     for case_name, expected_code in executable_cases.items():
@@ -313,6 +427,20 @@ def main() -> int:
         42,
     )
     print("PASS executable: all 100 integer conversion pairs")
+
+    scalar_conversion_matrix = generate_scalar_conversion_matrix(
+        arguments.work_dir
+    )
+    compile_and_run(
+        arguments.compiler,
+        llvm_mc,
+        linker,
+        target_runner,
+        scalar_conversion_matrix,
+        arguments.work_dir,
+        42,
+    )
+    print("PASS executable: all 42 remaining scalar conversion pairs")
 
     negative_cases = {
         "type_error.luna": "expected bool, found i32",
@@ -342,10 +470,10 @@ def main() -> int:
         "narrow_mixed_types.luna": "expected i8, found u8",
         "signed_unsigned_mixed.luna": "expected u64, found i64",
         "invalid_bool_conversion.luna": (
-            "explicit conversion requires integer source and target types"
+            "explicit conversion requires numeric source and target types"
         ),
         "invalid_void_conversion.luna": (
-            "explicit conversion requires integer source and target types"
+            "explicit conversion requires numeric source and target types"
         ),
         "isize_positive_overflow.luna": (
             "integer literal does not fit in isize"
@@ -363,7 +491,7 @@ def main() -> int:
             "is not defined for floating-point operands"
         ),
         "invalid_float_conversion.luna": (
-            "explicit conversion requires integer source and target types"
+            "explicit conversion requires numeric source and target types"
         ),
         "malformed_float_literal.luna": "invalid floating-point literal",
         "too_many_float_arguments.luna": (
@@ -396,6 +524,7 @@ def main() -> int:
         "narrow_ir",
         "pointer_sized_integer_ir",
         "floating_ir",
+        "scalar_conversion_ir",
     ):
         ir_output = arguments.work_dir / f"{snapshot_name}.lir"
         run(
@@ -430,6 +559,7 @@ def main() -> int:
         "narrow_integer_operations",
         "pointer_sized_integer_operations",
         "floating_operations",
+        "scalar_conversions",
     ):
         deterministic_first = (
             arguments.work_dir / f"{deterministic_name}_first.s"

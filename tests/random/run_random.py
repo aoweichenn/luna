@@ -579,6 +579,100 @@ def generate_float_case(
     return source, 42
 
 
+def generate_signed_scalar_conversion_case(
+    engine: random.Random,
+    case_index: int,
+    type_name: str,
+) -> tuple[str, int]:
+    magnitude_bits = 40 if type_name == "f32" else 62
+    source_value = engine.randrange(-(2**magnitude_bits), 2**magnitude_bits)
+    converted_value = round_float(float(source_value), type_name)
+    expected_value = int(converted_value)
+    source = (
+        f"module random.signed_scalar_conversion{case_index};\n"
+        "\n"
+        "fn main() -> i32 {\n"
+        f"    let source: i64 = {source_value};\n"
+        f"    let converted: {type_name} = source as {type_name};\n"
+        "    let round_trip: i64 = converted as i64;\n"
+        f"    if (round_trip == {expected_value}) {{ return 42; }}\n"
+        "    return 1;\n"
+        "}\n"
+    )
+    return source, 42
+
+
+def generate_unsigned_scalar_conversion_case(
+    engine: random.Random,
+    case_index: int,
+) -> tuple[str, int]:
+    source_value = engine.randrange(2**63, 2**64 - 8192)
+    expected_value = int(float(source_value))
+    source = (
+        f"module random.unsigned_scalar_conversion{case_index};\n"
+        "\n"
+        "fn main() -> i32 {\n"
+        f"    let source: u64 = {source_value};\n"
+        "    let converted: f64 = source as f64;\n"
+        "    let round_trip: u64 = converted as u64;\n"
+        f"    if (round_trip == {expected_value}) {{ return 42; }}\n"
+        "    return 1;\n"
+        "}\n"
+    )
+    return source, 42
+
+
+def generate_fractional_scalar_conversion_case(
+    engine: random.Random,
+    case_index: int,
+) -> tuple[str, int]:
+    is_signed = engine.randrange(2) == 0
+    source_type = engine.choice(("f32", "f64"))
+    if is_signed:
+        integral = engine.randrange(-32767, 32767)
+        source_value = integral + (-0.75 if integral < 0 else 0.75)
+        target_type = "i16"
+    else:
+        integral = engine.randrange(0, 65535)
+        source_value = integral + 0.75
+        target_type = "u16"
+    expected_value = int(round_float(source_value, source_type))
+    source_literal = format_float_literal(source_value, source_type)
+    source = (
+        f"module random.fractional_scalar_conversion{case_index};\n"
+        "\n"
+        "fn main() -> i32 {\n"
+        f"    let source: {source_type} = {source_literal};\n"
+        f"    let converted: {target_type} = source as {target_type};\n"
+        f"    if (converted == {expected_value}) {{ return 42; }}\n"
+        "    return 1;\n"
+        "}\n"
+    )
+    return source, 42
+
+
+def generate_float_width_conversion_case(
+    engine: random.Random,
+    case_index: int,
+) -> tuple[str, int]:
+    source_value = engine.randrange(-(2**30), 2**30) / 10.0
+    expected_value = round_f32(source_value)
+    source_literal = format_float_literal(source_value, "f64")
+    expected_literal = format_float_literal(expected_value, "f64")
+    source = (
+        f"module random.float_width_conversion{case_index};\n"
+        "\n"
+        "fn main() -> i32 {\n"
+        f"    let source: f64 = {source_literal};\n"
+        "    let narrowed: f32 = source as f32;\n"
+        "    let widened: f64 = narrowed as f64;\n"
+        f"    if (widened == {expected_literal}) {{ return 42; }}\n"
+        "    return 1;\n"
+        "}\n"
+    )
+    return source, 42
+
+
 def compile_and_run(
     compiler: pathlib.Path,
     llvm_mc: str,
@@ -657,7 +751,7 @@ def main() -> int:
 
     engine = random.Random(arguments.seed)
     for case_index in range(arguments.cases):
-        case_kind = case_index % 12
+        case_kind = case_index % 16
         if case_kind == 0:
             source, expected_code = generate_case(engine, case_index)
         elif case_kind == 1:
@@ -698,10 +792,33 @@ def main() -> int:
             source, expected_code = generate_float_case(
                 engine, case_index, "f32"
             )
-        else:
+        elif case_kind == 11:
             source, expected_code = generate_float_case(
                 engine, case_index, "f64"
             )
+        elif case_kind == 12:
+            source, expected_code = generate_signed_scalar_conversion_case(
+                engine, case_index, "f32"
+            )
+        elif case_kind == 13:
+            source, expected_code = generate_signed_scalar_conversion_case(
+                engine, case_index, "f64"
+            )
+        elif case_kind == 14:
+            source, expected_code = generate_unsigned_scalar_conversion_case(
+                engine, case_index
+            )
+        else:
+            if engine.randrange(2) == 0:
+                source, expected_code = (
+                    generate_fractional_scalar_conversion_case(
+                        engine, case_index
+                    )
+                )
+            else:
+                source, expected_code = generate_float_width_conversion_case(
+                    engine, case_index
+                )
         compile_and_run(
             arguments.compiler,
             llvm_mc,

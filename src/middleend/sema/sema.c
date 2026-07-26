@@ -884,17 +884,24 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
         const LunaTypeKind target_type = expression->as.cast.target_type.kind;
         const LunaTypeKind operand_hint = luna_sema_known_expression_type(
             context, expression->as.cast.operand);
+        const LunaTypeKind operand_default =
+            luna_sema_default_literal_type(expression->as.cast.operand);
+        const bool target_supplies_literal_context =
+            (luna_sema_is_integer_type(target_type) &&
+             luna_sema_is_integer_type(operand_default)) ||
+            (luna_sema_is_float_type(target_type) &&
+             luna_sema_is_float_type(operand_default));
         LunaCheckedValue operand =
-            operand_hint == LUNA_TYPE_INVALID
+            operand_hint == LUNA_TYPE_INVALID && target_supplies_literal_context
                 ? luna_sema_lower_expression_expected(
                       context, expression->as.cast.operand, target_type)
                 : luna_sema_lower_expression(context,
                                              expression->as.cast.operand);
-        if (!luna_sema_is_integer_type(operand.type) ||
-            !luna_sema_is_integer_type(target_type)) {
+        if (!luna_sema_is_numeric_type(operand.type) ||
+            !luna_sema_is_numeric_type(target_type)) {
             luna_diagnostic_error(
                 context->diagnostics, expression->span,
-                "explicit conversion requires integer source and target types");
+                "explicit conversion requires numeric source and target types");
             return luna_sema_invalid_value();
         }
 
@@ -902,8 +909,17 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
             return operand;
         }
 
+        LunaIrOpcode opcode = LUNA_IR_CONVERT_FLOAT_TO_INTEGER;
+        if (luna_sema_is_integer_type(operand.type)) {
+            opcode = luna_sema_is_integer_type(target_type)
+                         ? LUNA_IR_CONVERT_INTEGER
+                         : LUNA_IR_CONVERT_INTEGER_TO_FLOAT;
+        } else if (luna_sema_is_float_type(target_type)) {
+            opcode = LUNA_IR_CONVERT_FLOAT;
+        }
+
         LunaIrInstruction instruction =
-            luna_sema_instruction(LUNA_IR_CONVERT_INTEGER, expression->span);
+            luna_sema_instruction(opcode, expression->span);
         instruction.left = operand.id;
         const LunaIrValueId result = luna_sema_emit_value_instruction(
             context, &instruction, target_type);

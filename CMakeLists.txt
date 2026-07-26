@@ -306,6 +306,7 @@ if(LUNA_BUILD_FUZZERS)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/narrow.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/pointer_sized.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/floating.luna"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/scalar_conversions.luna"
             DESTINATION "${LUNA_FUZZ_CORPUS_DIR}"
         )
 

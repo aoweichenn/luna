@@ -581,6 +581,265 @@ static bool luna_x86_64_emit_narrow_division(
         output, function, instruction->result, instruction->type);
 }
 
+static bool luna_x86_64_float_power_bits(LunaIrType type, uint32_t exponent,
+                                         bool is_negative, uint64_t *bits) {
+    if (type == LUNA_IR_TYPE_F32) {
+        const uint32_t sign = is_negative ? UINT32_C(0x80000000) : 0U;
+        *bits = sign | ((uint64_t)(exponent + 127U) << 23U);
+        return true;
+    }
+    if (type == LUNA_IR_TYPE_F64) {
+        const uint64_t sign = is_negative ? UINT64_C(0x8000000000000000) : 0U;
+        *bits = sign | ((uint64_t)(exponent + 1023U) << 52U);
+        return true;
+    }
+    return false;
+}
+
+static bool luna_x86_64_float_integer_maximum_bits(LunaIrType type,
+                                                   uint32_t integer_width,
+                                                   uint64_t *bits) {
+    uint32_t precision = 0U;
+    uint32_t fraction_width = 0U;
+    uint32_t exponent_bias = 0U;
+    if (type == LUNA_IR_TYPE_F32) {
+        precision = 24U;
+        fraction_width = 23U;
+        exponent_bias = 127U;
+    } else if (type == LUNA_IR_TYPE_F64) {
+        precision = 53U;
+        fraction_width = 52U;
+        exponent_bias = 1023U;
+    } else {
+        return false;
+    }
+    if (integer_width == 0U || integer_width > precision) {
+        return false;
+    }
+
+    const uint64_t fraction = ((UINT64_C(1) << (integer_width - 1U)) - 1U)
+                              << (precision - integer_width);
+    *bits = ((uint64_t)(integer_width - 1U + exponent_bias) << fraction_width) |
+            fraction;
+    return true;
+}
+
+static bool luna_x86_64_emit_float_bits_xmm1(LunaStringBuilder *output,
+                                             LunaIrType type, uint64_t bits) {
+    if (type == LUNA_IR_TYPE_F32) {
+        return luna_string_builder_append_format(output,
+                                                 "    movl $0x%08" PRIx32
+                                                 ", %%eax\n"
+                                                 "    movd %%eax, %%xmm1\n",
+                                                 (uint32_t)bits);
+    }
+    if (type == LUNA_IR_TYPE_F64) {
+        return luna_string_builder_append_format(output,
+                                                 "    movabsq $0x%016" PRIx64
+                                                 ", %%rax\n"
+                                                 "    movq %%rax, %%xmm1\n",
+                                                 bits);
+    }
+    return false;
+}
+
+static bool luna_x86_64_emit_float_to_integer_range_check(
+    LunaStringBuilder *output, size_t function_index,
+    const LunaIrInstruction *instruction, LunaIrType source_type) {
+    const uint32_t target_width = luna_x86_64_type_bit_width(instruction->type);
+    const bool is_signed = luna_ir_type_is_signed_integer(instruction->type);
+    const char *compare =
+        source_type == LUNA_IR_TYPE_F32 ? "ucomiss" : "ucomisd";
+    uint64_t lower_bits = 0U;
+    uint64_t upper_bits = 0U;
+    const uint32_t bound_exponent =
+        is_signed ? target_width - 1U : target_width;
+    const uint32_t maximum_integer_width =
+        is_signed ? target_width - 1U : target_width;
+    const bool has_exact_maximum = luna_x86_64_float_integer_maximum_bits(
+        source_type, maximum_integer_width, &upper_bits);
+    if ((is_signed && !luna_x86_64_float_power_bits(source_type, bound_exponent,
+                                                    true, &lower_bits)) ||
+        (!has_exact_maximum &&
+         !luna_x86_64_float_power_bits(source_type, bound_exponent, false,
+                                       &upper_bits)) ||
+        !luna_x86_64_emit_float_bits_xmm1(output, source_type, lower_bits) ||
+        !luna_string_builder_append_format(output,
+                                           "    %s %%xmm1, %%xmm0\n"
+                                           "    jb .Lfn%zu_fptoi%u_trap\n",
+                                           compare, function_index,
+                                           instruction->result) ||
+        !luna_x86_64_emit_float_bits_xmm1(output, source_type, upper_bits) ||
+        !luna_string_builder_append_format(
+            output,
+            "    %s %%xmm1, %%xmm0\n"
+            "    %s .Lfn%zu_fptoi%u_trap\n",
+            compare, has_exact_maximum ? "ja" : "jae", function_index,
+            instruction->result)) {
+        return false;
+    }
+    return true;
+}
+
+static bool
+luna_x86_64_emit_float_conversion(LunaStringBuilder *output,
+                                  const LunaIrFunction *function,
+                                  const LunaIrInstruction *instruction) {
+    const LunaIrType *source_type =
+        luna_vector_at_const(&function->value_types, (size_t)instruction->left);
+    if (source_type == NULL ||
+        !luna_x86_64_emit_load_xmm0(output, function, instruction->left,
+                                    *source_type)) {
+        return false;
+    }
+
+    const char *mnemonic =
+        *source_type == LUNA_IR_TYPE_F32 ? "cvtss2sd" : "cvtsd2ss";
+    return luna_string_builder_append_format(output, "    %s %%xmm0, %%xmm0\n",
+                                             mnemonic) &&
+           luna_x86_64_emit_store_xmm0(output, function, instruction->result,
+                                       instruction->type);
+}
+
+static bool luna_x86_64_emit_integer_to_float_conversion(
+    LunaStringBuilder *output, const LunaIrFunction *function,
+    size_t function_index, const LunaIrInstruction *instruction) {
+    const LunaIrType *source_type =
+        luna_vector_at_const(&function->value_types, (size_t)instruction->left);
+    if (source_type == NULL) {
+        return false;
+    }
+
+    const uint32_t source_width = luna_x86_64_type_bit_width(*source_type);
+    const char *convert =
+        instruction->type == LUNA_IR_TYPE_F32 ? "cvtsi2ssq" : "cvtsi2sdq";
+    const char *add = instruction->type == LUNA_IR_TYPE_F32 ? "addss" : "addsd";
+    if (luna_ir_type_is_signed_integer(*source_type)) {
+        if (!(source_width == 64U
+                  ? luna_x86_64_emit_load_rax(output, function,
+                                              instruction->left)
+                  : luna_x86_64_emit_signed_load_64(
+                        output, function, instruction->left, *source_type)) ||
+            !luna_string_builder_append_format(output, "    %s %%rax, %%xmm0\n",
+                                               convert)) {
+            return false;
+        }
+    } else if (source_width < 64U) {
+        if (!luna_x86_64_emit_load_eax(output, function, instruction->left) ||
+            !luna_string_builder_append_format(output, "    %s %%rax, %%xmm0\n",
+                                               convert)) {
+            return false;
+        }
+    } else {
+        if (!luna_x86_64_emit_load_rax(output, function, instruction->left) ||
+            !luna_string_builder_append_format(
+                output,
+                "    testq %%rax, %%rax\n"
+                "    js .Lfn%zu_uitofp%u_large\n"
+                "    %s %%rax, %%xmm0\n"
+                "    jmp .Lfn%zu_uitofp%u_done\n"
+                ".Lfn%zu_uitofp%u_large:\n"
+                "    movq %%rax, %%rdx\n"
+                "    shrq $1, %%rax\n"
+                "    andl $1, %%edx\n"
+                "    orq %%rdx, %%rax\n"
+                "    %s %%rax, %%xmm0\n"
+                "    %s %%xmm0, %%xmm0\n"
+                ".Lfn%zu_uitofp%u_done:\n",
+                function_index, instruction->result, convert, function_index,
+                instruction->result, function_index, instruction->result,
+                convert, add, function_index, instruction->result)) {
+            return false;
+        }
+    }
+
+    return luna_x86_64_emit_store_xmm0(output, function, instruction->result,
+                                       instruction->type);
+}
+
+static bool luna_x86_64_emit_float_to_integer_conversion(
+    LunaStringBuilder *output, const LunaIrFunction *function,
+    size_t function_index, const LunaIrInstruction *instruction) {
+    const LunaIrType *source_type =
+        luna_vector_at_const(&function->value_types, (size_t)instruction->left);
+    if (source_type == NULL ||
+        !luna_x86_64_emit_load_xmm0(output, function, instruction->left,
+                                    *source_type) ||
+        !luna_x86_64_emit_float_to_integer_range_check(
+            output, function_index, instruction, *source_type)) {
+        return false;
+    }
+
+    const uint32_t target_width = luna_x86_64_type_bit_width(instruction->type);
+    const bool is_signed = luna_ir_type_is_signed_integer(instruction->type);
+    const char *convert_32 =
+        *source_type == LUNA_IR_TYPE_F32 ? "cvttss2si" : "cvttsd2si";
+    const char *convert_64 =
+        *source_type == LUNA_IR_TYPE_F32 ? "cvttss2siq" : "cvttsd2siq";
+
+    if (is_signed) {
+        if (target_width == 64U) {
+            if (!luna_string_builder_append_format(
+                    output, "    %s %%xmm0, %%rax\n", convert_64) ||
+                !luna_x86_64_emit_store_rax(output, function,
+                                            instruction->result)) {
+                return false;
+            }
+        } else if (!luna_string_builder_append_format(
+                       output, "    %s %%xmm0, %%eax\n", convert_32) ||
+                   !luna_x86_64_emit_store_integer_eax(output, function,
+                                                       instruction->result,
+                                                       instruction->type)) {
+            return false;
+        }
+    } else if (target_width < 64U) {
+        if (!luna_string_builder_append_format(output, "    %s %%xmm0, %%rax\n",
+                                               convert_64) ||
+            !luna_x86_64_emit_store_integer_eax(
+                output, function, instruction->result, instruction->type)) {
+            return false;
+        }
+    } else {
+        uint64_t split_bits = 0U;
+        const char *subtract =
+            *source_type == LUNA_IR_TYPE_F32 ? "subss" : "subsd";
+        if (!luna_x86_64_float_power_bits(*source_type, 63U, false,
+                                          &split_bits) ||
+            !luna_x86_64_emit_float_bits_xmm1(output, *source_type,
+                                              split_bits) ||
+            !luna_string_builder_append_format(
+                output,
+                "    %s %%xmm1, %%xmm0\n"
+                "    jb .Lfn%zu_fptoi%u_low\n"
+                "    %s %%xmm1, %%xmm0\n"
+                "    %s %%xmm0, %%rax\n"
+                "    movabsq $0x8000000000000000, %%rdx\n"
+                "    orq %%rdx, %%rax\n"
+                "    jmp .Lfn%zu_fptoi%u_converted\n"
+                ".Lfn%zu_fptoi%u_low:\n"
+                "    %s %%xmm0, %%rax\n"
+                ".Lfn%zu_fptoi%u_converted:\n",
+                *source_type == LUNA_IR_TYPE_F32 ? "ucomiss" : "ucomisd",
+                function_index, instruction->result, subtract, convert_64,
+                function_index, instruction->result, function_index,
+                instruction->result, convert_64, function_index,
+                instruction->result) ||
+            !luna_x86_64_emit_store_rax(output, function,
+                                        instruction->result)) {
+            return false;
+        }
+    }
+
+    return luna_string_builder_append_format(
+        output,
+        "    jmp .Lfn%zu_fptoi%u_done\n"
+        ".Lfn%zu_fptoi%u_trap:\n"
+        "    ud2\n"
+        ".Lfn%zu_fptoi%u_done:\n",
+        function_index, instruction->result, function_index,
+        instruction->result, function_index, instruction->result);
+}
+
 static bool luna_x86_64_emit_instruction(LunaStringBuilder *output,
                                          const LunaIrModule *module,
                                          const LunaIrFunction *function,
@@ -756,6 +1015,17 @@ static bool luna_x86_64_emit_instruction(LunaStringBuilder *output,
         return luna_x86_64_emit_store_integer_eax(
             output, function, instruction->result, instruction->type);
     }
+
+    case LUNA_IR_CONVERT_FLOAT:
+        return luna_x86_64_emit_float_conversion(output, function, instruction);
+
+    case LUNA_IR_CONVERT_INTEGER_TO_FLOAT:
+        return luna_x86_64_emit_integer_to_float_conversion(
+            output, function, function_index, instruction);
+
+    case LUNA_IR_CONVERT_FLOAT_TO_INTEGER:
+        return luna_x86_64_emit_float_to_integer_conversion(
+            output, function, function_index, instruction);
 
     case LUNA_IR_ADD_INTEGER:
         return luna_x86_64_type_is_64_bit(instruction->type)

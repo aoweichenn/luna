@@ -479,6 +479,79 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
                                      reason);
     }
 
+    case LUNA_IR_CONVERT_FLOAT: {
+        if (!luna_ir_type_is_float(instruction->type)) {
+            return luna_ir_reject(
+                reason, "floating conversion has invalid result type");
+        }
+        if (instruction->left == LUNA_IR_INVALID_ID ||
+            (size_t)instruction->left >= function->value_types.length) {
+            return luna_ir_reject(reason,
+                                  "conversion value id is out of range");
+        }
+        const LunaIrType *source_type = luna_vector_at_const(
+            &function->value_types, (size_t)instruction->left);
+        if (!luna_ir_type_is_float(*source_type)) {
+            return luna_ir_reject(
+                reason, "floating conversion has invalid source type");
+        }
+        if (*source_type == instruction->type) {
+            return luna_ir_reject(reason, "floating conversion is redundant");
+        }
+        return luna_ir_verify_value(function, instruction->left, *source_type,
+                                    defined_in_block, reason) &&
+               luna_ir_verify_result(function, instruction, instruction->type,
+                                     reason);
+    }
+
+    case LUNA_IR_CONVERT_INTEGER_TO_FLOAT: {
+        if (!luna_ir_type_is_float(instruction->type)) {
+            return luna_ir_reject(
+                reason,
+                "integer-to-floating conversion has invalid result type");
+        }
+        if (instruction->left == LUNA_IR_INVALID_ID ||
+            (size_t)instruction->left >= function->value_types.length) {
+            return luna_ir_reject(reason,
+                                  "conversion value id is out of range");
+        }
+        const LunaIrType *source_type = luna_vector_at_const(
+            &function->value_types, (size_t)instruction->left);
+        if (!luna_ir_type_is_integer(*source_type)) {
+            return luna_ir_reject(
+                reason,
+                "integer-to-floating conversion has invalid source type");
+        }
+        return luna_ir_verify_value(function, instruction->left, *source_type,
+                                    defined_in_block, reason) &&
+               luna_ir_verify_result(function, instruction, instruction->type,
+                                     reason);
+    }
+
+    case LUNA_IR_CONVERT_FLOAT_TO_INTEGER: {
+        if (!luna_ir_type_is_integer(instruction->type)) {
+            return luna_ir_reject(
+                reason,
+                "floating-to-integer conversion has invalid result type");
+        }
+        if (instruction->left == LUNA_IR_INVALID_ID ||
+            (size_t)instruction->left >= function->value_types.length) {
+            return luna_ir_reject(reason,
+                                  "conversion value id is out of range");
+        }
+        const LunaIrType *source_type = luna_vector_at_const(
+            &function->value_types, (size_t)instruction->left);
+        if (!luna_ir_type_is_float(*source_type)) {
+            return luna_ir_reject(
+                reason,
+                "floating-to-integer conversion has invalid source type");
+        }
+        return luna_ir_verify_value(function, instruction->left, *source_type,
+                                    defined_in_block, reason) &&
+               luna_ir_verify_result(function, instruction, instruction->type,
+                                     reason);
+    }
+
     case LUNA_IR_ADD_INTEGER:
     case LUNA_IR_SUB_INTEGER:
     case LUNA_IR_MUL_INTEGER:
@@ -1090,6 +1163,49 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
                 luna_ir_type_is_signed_integer(source_type) ? "sext" : "zext";
         }
 
+        if (!luna_string_builder_append_format(
+                output, "%s.%s.%s ", name, luna_ir_type_name(source_type),
+                luna_ir_type_name(instruction->type)) ||
+            !luna_ir_print_value(output, instruction->left)) {
+            return false;
+        }
+        return luna_string_builder_append_c_string(output, "\n");
+    }
+
+    case LUNA_IR_CONVERT_FLOAT: {
+        const LunaIrType source_type =
+            luna_ir_instruction_operand_type(function, instruction);
+        const char *name =
+            source_type == LUNA_IR_TYPE_F32 ? "fpext" : "fptrunc";
+        if (!luna_string_builder_append_format(
+                output, "%s.%s.%s ", name, luna_ir_type_name(source_type),
+                luna_ir_type_name(instruction->type)) ||
+            !luna_ir_print_value(output, instruction->left)) {
+            return false;
+        }
+        return luna_string_builder_append_c_string(output, "\n");
+    }
+
+    case LUNA_IR_CONVERT_INTEGER_TO_FLOAT: {
+        const LunaIrType source_type =
+            luna_ir_instruction_operand_type(function, instruction);
+        const char *name =
+            luna_ir_type_is_signed_integer(source_type) ? "sitofp" : "uitofp";
+        if (!luna_string_builder_append_format(
+                output, "%s.%s.%s ", name, luna_ir_type_name(source_type),
+                luna_ir_type_name(instruction->type)) ||
+            !luna_ir_print_value(output, instruction->left)) {
+            return false;
+        }
+        return luna_string_builder_append_c_string(output, "\n");
+    }
+
+    case LUNA_IR_CONVERT_FLOAT_TO_INTEGER: {
+        const LunaIrType source_type =
+            luna_ir_instruction_operand_type(function, instruction);
+        const char *name = luna_ir_type_is_signed_integer(instruction->type)
+                               ? "fptosi"
+                               : "fptoui";
         if (!luna_string_builder_append_format(
                 output, "%s.%s.%s ", name, luna_ir_type_name(source_type),
                 luna_ir_type_name(instruction->type)) ||

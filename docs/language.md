@@ -224,8 +224,21 @@ The implemented floating-point operators are unary `+` and `-`, arithmetic
 `+`, `-`, `*` and `/`, and all equality and ordering comparisons. Normal and
 compound assignment preserve the exact declared type. There are no implicit
 integer/floating-point conversions and no implicit conversion between `f32`
-and `f64`. Explicit conversions involving floating-point types are reserved
-for the next scalar-language stage.
+and `f64`.
+
+Every numeric scalar pair supports an explicit conversion. `f32` to `f64` is
+exact. `f64` to `f32`, and every integer-to-floating conversion, round to
+nearest with ties to even. Floating-to-integer conversion first requires a
+finite source value inside the target integer's mathematical range, then
+discards the fractional part toward zero. NaN, infinity and an out-of-range
+source trap. Positive and negative zero both convert to integer zero.
+
+An explicit conversion supplies contextual literal typing only when the source
+and target remain in the same numeric category. Thus `1.0 as f32` rounds the
+literal directly to `f32`, while `1 as f64` first creates the default `i32`
+literal and then performs an integer-to-floating conversion. Likewise,
+`1.0 as i32` converts the default `f64` literal. This preserves the rule that
+integer and floating literals are distinct syntax categories.
 
 Assignment and compound assignment are statements, not expressions. There are
 no increment, decrement or comma operators.
