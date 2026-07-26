@@ -9,7 +9,9 @@ typedef enum LunaTypeKind {
     LUNA_TYPE_VOID,
     LUNA_TYPE_BOOL,
     LUNA_TYPE_I32,
-    LUNA_TYPE_I64
+    LUNA_TYPE_I64,
+    LUNA_TYPE_U32,
+    LUNA_TYPE_U64
 } LunaTypeKind;
 
 #ifdef __cplusplus
@@ -18,6 +20,8 @@ extern "C" {
 
 const char *luna_type_kind_name(LunaTypeKind kind);
 bool luna_type_kind_is_integer(LunaTypeKind kind);
+bool luna_type_kind_is_signed_integer(LunaTypeKind kind);
+bool luna_type_kind_is_unsigned_integer(LunaTypeKind kind);
 uint32_t luna_type_kind_bit_width(LunaTypeKind kind);
 
 #ifdef __cplusplus

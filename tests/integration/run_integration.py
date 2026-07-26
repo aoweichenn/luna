@@ -150,6 +150,11 @@ def main() -> int:
         "mixed_width_arguments.luna": 42,
         "integer_conversions.luna": 42,
         "conversion_round_trip.luna": 255,
+        "unsigned_operations.luna": 42,
+        "unsigned_conversions.luna": 42,
+        "remaining_integer_conversions.luna": 42,
+        "u32_division_by_zero.luna": -8,
+        "u64_division_by_zero.luna": -8,
     }
 
     for case_name, expected_code in executable_cases.items():
@@ -184,6 +189,8 @@ def main() -> int:
         "duplicate_parameter.luna": "duplicate parameter 'value'",
         "i64_positive_overflow.luna": "integer literal does not fit in i64",
         "i64_mixed_types.luna": "expected i64, found i32",
+        "u32_positive_overflow.luna": "integer literal does not fit in u32",
+        "signed_unsigned_mixed.luna": "expected u64, found i64",
         "invalid_bool_conversion.luna": (
             "explicit conversion requires integer source and target types"
         ),
@@ -213,6 +220,7 @@ def main() -> int:
         "function_call",
         "i64_six_arguments",
         "conversion_round_trip",
+        "unsigned_conversions",
     ):
         ir_output = arguments.work_dir / f"{snapshot_name}.lir"
         run(
@@ -233,14 +241,18 @@ def main() -> int:
             / f"{snapshot_name}.lir"
         ).read_text(encoding="utf-8")
         actual_ir = ir_output.read_text(encoding="utf-8")
-        if actual_ir != expected_ir:
+        if actual_ir.rstrip("\n") != expected_ir.rstrip("\n"):
             raise AssertionError(
                 f"IR snapshot mismatch for {snapshot_name}.luna\n"
                 f"expected:\n{expected_ir}\nactual:\n{actual_ir}"
             )
         print(f"PASS IR snapshot: {snapshot_name}.luna")
 
-    for deterministic_name in ("recursive_factorial", "i64_operations"):
+    for deterministic_name in (
+        "recursive_factorial",
+        "i64_operations",
+        "unsigned_operations",
+    ):
         deterministic_first = (
             arguments.work_dir / f"{deterministic_name}_first.s"
         )

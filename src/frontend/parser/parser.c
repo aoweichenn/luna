@@ -122,6 +122,12 @@ static LunaTypeRef luna_parser_parse_type(LunaParser *parser) {
     case LUNA_TOKEN_I64:
         kind = LUNA_TYPE_I64;
         break;
+    case LUNA_TOKEN_U32:
+        kind = LUNA_TYPE_U32;
+        break;
+    case LUNA_TOKEN_U64:
+        kind = LUNA_TYPE_U64;
+        break;
     case LUNA_TOKEN_VOID:
         kind = LUNA_TYPE_VOID;
         break;
@@ -221,8 +227,7 @@ static bool luna_parser_parse_integer(LunaParser *parser, LunaToken token,
             return false;
         }
 
-        const uint64_t maximum_magnitude = (uint64_t)INT64_MAX + 1U;
-        if (result > (maximum_magnitude - digit) / base) {
+        if (result > (UINT64_MAX - digit) / base) {
             luna_diagnostic_error(parser->diagnostics, token.span,
                                   "integer literal is too large");
             return false;

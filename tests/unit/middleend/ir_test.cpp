@@ -27,13 +27,27 @@ TEST(IrVerifierTest, AcceptsWellTypedControlFlowGraph) {
     EXPECT_TRUE(harness.Verify()) << harness.Diagnostics();
 }
 
+TEST(IrVerifierTest, AcceptsGenericUnsignedIntegerInstructions) {
+    FrontendHarness harness{
+        "module test.valid_unsigned_ir;\n"
+        "fn calculate(value: u64) -> u64 {\n"
+        "    return (value / 3) >> 2;\n"
+        "}\n"
+        "fn main() -> i32 {\n"
+        "    if (calculate(18446744073709551615) > 1) { return 42; }\n"
+        "    return 1;\n"
+        "}\n"};
+
+    EXPECT_TRUE(harness.Verify()) << harness.Diagnostics();
+}
+
 TEST(IrVerifierTest, RejectsValueUsedBeforeItsDefinition) {
     FrontendHarness harness{"module test.use_before_definition;\n"
                             "fn main() -> i32 { return 1 + 2; }\n"};
     ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
 
     LunaIrInstruction *addition =
-        FindInstruction(MainFunction(harness), LUNA_IR_ADD_I32);
+        FindInstruction(MainFunction(harness), LUNA_IR_ADD_INTEGER);
     ASSERT_NE(addition, nullptr);
     addition->left = addition->result;
 
@@ -52,7 +66,8 @@ TEST(IrVerifierTest, RejectsWrongBranchConditionType) {
     ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
 
     LunaIrFunction *function = MainFunction(harness);
-    LunaIrInstruction *integer = FindInstruction(function, LUNA_IR_CONST_I32);
+    LunaIrInstruction *integer =
+        FindInstruction(function, LUNA_IR_CONST_INTEGER);
     LunaIrInstruction *branch = FindInstruction(function, LUNA_IR_BRANCH);
     ASSERT_NE(integer, nullptr);
     ASSERT_NE(branch, nullptr);
@@ -173,7 +188,7 @@ TEST(IrVerifierTest, RejectsIncorrectCachedTerminationState) {
               std::string::npos);
 }
 
-TEST(IrVerifierTest, RejectsI64OperandOnI32Opcode) {
+TEST(IrVerifierTest, RejectsOperandThatDoesNotMatchGenericOpcodeType) {
     FrontendHarness harness{"module test.i64_opcode_type;\n"
                             "fn wide(value: i64) -> i64 {\n"
                             "    return value + 1;\n"
@@ -182,32 +197,33 @@ TEST(IrVerifierTest, RejectsI64OperandOnI32Opcode) {
     ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
 
     LunaIrFunction *function = luna_ir_module_function(harness.Module(), 0U);
-    LunaIrInstruction *addition = FindInstruction(function, LUNA_IR_ADD_I64);
+    LunaIrInstruction *addition =
+        FindInstruction(function, LUNA_IR_ADD_INTEGER);
     ASSERT_NE(addition, nullptr);
-    addition->opcode = LUNA_IR_ADD_I32;
+    addition->type = LUNA_IR_TYPE_I32;
 
     EXPECT_FALSE(harness.Verify());
     EXPECT_NE(harness.Diagnostics().find("operand type does not match opcode"),
               std::string::npos);
 }
 
-TEST(IrVerifierTest, RejectsOutOfRangeI32Constant) {
+TEST(IrVerifierTest, RejectsConstantThatExceedsItsStorageWidth) {
     FrontendHarness harness{"module test.i32_immediate_range;\n"
                             "fn main() -> i32 { return 1; }\n"};
     ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
 
     LunaIrInstruction *constant =
-        FindInstruction(MainFunction(harness), LUNA_IR_CONST_I32);
+        FindInstruction(MainFunction(harness), LUNA_IR_CONST_INTEGER);
     ASSERT_NE(constant, nullptr);
     constant->immediate =
-        static_cast<std::int64_t>(INT32_MAX) + static_cast<std::int64_t>(1);
+        static_cast<std::uint64_t>(UINT32_MAX) + static_cast<std::uint64_t>(1U);
 
     EXPECT_FALSE(harness.Verify());
-    EXPECT_NE(harness.Diagnostics().find("outside the i32 range"),
+    EXPECT_NE(harness.Diagnostics().find("exceeds its 32-bit storage"),
               std::string::npos);
 }
 
-TEST(IrVerifierTest, RejectsWrongExplicitConversionOperandType) {
+TEST(IrVerifierTest, RejectsRedundantIntegerConversion) {
     FrontendHarness harness{"module test.conversion_ir;\n"
                             "fn widen(value: i32) -> i64 {\n"
                             "    return value as i64;\n"
@@ -217,12 +233,54 @@ TEST(IrVerifierTest, RejectsWrongExplicitConversionOperandType) {
 
     LunaIrFunction *function = luna_ir_module_function(harness.Module(), 0U);
     LunaIrInstruction *conversion =
-        FindInstruction(function, LUNA_IR_SIGN_EXTEND_I32_TO_I64);
+        FindInstruction(function, LUNA_IR_CONVERT_INTEGER);
     ASSERT_NE(conversion, nullptr);
-    conversion->opcode = LUNA_IR_TRUNCATE_I64_TO_I32;
+    conversion->type = LUNA_IR_TYPE_I32;
 
     EXPECT_FALSE(harness.Verify());
-    EXPECT_NE(harness.Diagnostics().find("operand type does not match opcode"),
+    EXPECT_NE(harness.Diagnostics().find("integer conversion is redundant"),
+              std::string::npos);
+}
+
+TEST(IrVerifierTest, RejectsOrderingComparisonOnBooleanOperands) {
+    FrontendHarness harness{"module test.bool_ordering_ir;\n"
+                            "fn main() -> i32 {\n"
+                            "    if (true == false) { return 1; }\n"
+                            "    return 0;\n"
+                            "}\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaIrInstruction *comparison =
+        FindInstruction(MainFunction(harness), LUNA_IR_COMPARE_EQUAL);
+    ASSERT_NE(comparison, nullptr);
+    comparison->opcode = LUNA_IR_COMPARE_LESS_INTEGER;
+
+    EXPECT_FALSE(harness.Verify());
+    EXPECT_NE(
+        harness.Diagnostics().find("ordering operand type is not integer"),
+        std::string::npos);
+}
+
+TEST(IrVerifierTest, RejectsNonIntegerConversionSource) {
+    FrontendHarness harness{"module test.conversion_source_ir;\n"
+                            "fn widen(value: i32) -> i64 {\n"
+                            "    let marker: bool = true;\n"
+                            "    return value as i64;\n"
+                            "}\n"
+                            "fn main() -> i32 { return 0; }\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaIrFunction *function = luna_ir_module_function(harness.Module(), 0U);
+    LunaIrInstruction *boolean = FindInstruction(function, LUNA_IR_CONST_BOOL);
+    LunaIrInstruction *conversion =
+        FindInstruction(function, LUNA_IR_CONVERT_INTEGER);
+    ASSERT_NE(boolean, nullptr);
+    ASSERT_NE(conversion, nullptr);
+    conversion->left = boolean->result;
+
+    EXPECT_FALSE(harness.Verify());
+    EXPECT_NE(harness.Diagnostics().find(
+                  "integer conversion has invalid source type"),
               std::string::npos);
 }
 

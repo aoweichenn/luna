@@ -62,8 +62,9 @@ with virtual values and explicit local slots:
 
 - `const`
 - `load` and `store`
-- width-explicit `i32` and `i64` integer arithmetic
-- explicit sign-extension and truncation conversions
+- type-directed integer arithmetic shared by `i32`, `i64`, `u32` and `u64`
+- explicit integer conversions whose extension or truncation follows source
+  and target type metadata
 - comparisons
 - direct calls
 - unconditional and conditional branches
@@ -88,7 +89,8 @@ instruction encodings and relocations must not appear in it.
 
 The first backend is correctness-first:
 
-- System V 32-bit and 64-bit integer argument and result registers;
+- System V signed and unsigned 32-bit and 64-bit integer argument and result
+  registers;
 - explicit stack frames;
 - virtual values assigned stack homes;
 - deterministic labels and symbol mangling;

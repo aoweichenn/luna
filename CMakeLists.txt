@@ -300,6 +300,7 @@ if(LUNA_BUILD_FUZZERS)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/control_flow.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/i64.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/nested_call.luna"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/unsigned.luna"
             DESTINATION "${LUNA_FUZZ_CORPUS_DIR}"
         )
 

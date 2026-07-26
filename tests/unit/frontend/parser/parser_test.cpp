@@ -81,10 +81,32 @@ TEST(ParserTest, ParsesI64FunctionAndLocalTypes) {
     EXPECT_EQ(function->first_parameter->type.kind, LUNA_TYPE_I64);
 }
 
-TEST(ParserTest, RejectsIntegerMagnitudeBeyondI64Minimum) {
+TEST(ParserTest, ParsesUnsignedFunctionTypesAndMaximumLiteral) {
+    FrontendHarness harness{"module test.unsigned_types;\n"
+                            "fn widen(value: u32) -> u64 {\n"
+                            "    let maximum: u64 = 18446744073709551615;\n"
+                            "    return maximum;\n"
+                            "}\n"
+                            "fn main() -> i32 { return 0; }\n"};
+
+    ASSERT_TRUE(harness.Parse()) << harness.Diagnostics();
+    const LunaFunction *function = harness.Program()->first_function;
+    ASSERT_NE(function, nullptr);
+    EXPECT_EQ(function->return_type.kind, LUNA_TYPE_U64);
+    ASSERT_NE(function->first_parameter, nullptr);
+    EXPECT_EQ(function->first_parameter->type.kind, LUNA_TYPE_U32);
+    ASSERT_NE(function->body, nullptr);
+    const LunaStatement *declaration = function->body->first;
+    ASSERT_NE(declaration, nullptr);
+    ASSERT_EQ(declaration->kind, LUNA_STATEMENT_DECLARATION);
+    ASSERT_NE(declaration->as.declaration.initializer, nullptr);
+    EXPECT_EQ(declaration->as.declaration.initializer->as.integer, UINT64_MAX);
+}
+
+TEST(ParserTest, RejectsIntegerMagnitudeBeyondU64Maximum) {
     FrontendHarness harness{"module test.integer_magnitude;\n"
-                            "fn value() -> i64 {\n"
-                            "    return -9223372036854775809;\n"
+                            "fn value() -> u64 {\n"
+                            "    return 18446744073709551616;\n"
                             "}\n"
                             "fn main() -> i32 { return 0; }\n"};
 

@@ -57,6 +57,10 @@ static LunaIrType luna_sema_ir_type(LunaTypeKind type) {
         return LUNA_IR_TYPE_I32;
     case LUNA_TYPE_I64:
         return LUNA_IR_TYPE_I64;
+    case LUNA_TYPE_U32:
+        return LUNA_IR_TYPE_U32;
+    case LUNA_TYPE_U64:
+        return LUNA_IR_TYPE_U64;
     case LUNA_TYPE_INVALID:
         break;
     }
@@ -86,7 +90,7 @@ static LunaIrInstruction luna_sema_instruction(LunaIrOpcode opcode,
         .callee = LUNA_IR_INVALID_ID,
         .first_argument = 0U,
         .argument_count = 0U,
-        .immediate = 0,
+        .immediate = 0U,
         .span = span,
     };
 }
@@ -296,65 +300,80 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
                                     LunaTypeKind expected_type);
 
 static bool luna_sema_is_integer_type(LunaTypeKind type) {
-    return type == LUNA_TYPE_I32 || type == LUNA_TYPE_I64;
+    return luna_type_kind_is_integer(type);
 }
 
-static LunaIrOpcode luna_sema_unary_integer_opcode(LunaTokenKind operator_kind,
-                                                   LunaTypeKind type) {
+static LunaIrOpcode
+luna_sema_unary_integer_opcode(LunaTokenKind operator_kind) {
     if (operator_kind == LUNA_TOKEN_MINUS) {
-        return type == LUNA_TYPE_I64 ? LUNA_IR_NEG_I64 : LUNA_IR_NEG_I32;
+        return LUNA_IR_NEG_INTEGER;
     }
-    return type == LUNA_TYPE_I64 ? LUNA_IR_BIT_NOT_I64 : LUNA_IR_BIT_NOT_I32;
+    return LUNA_IR_BIT_NOT_INTEGER;
 }
 
-static LunaIrOpcode luna_sema_binary_integer_opcode(LunaTokenKind operator_kind,
-                                                    LunaTypeKind type) {
-    const bool is_i64 = type == LUNA_TYPE_I64;
+static LunaIrOpcode
+luna_sema_binary_integer_opcode(LunaTokenKind operator_kind) {
     switch (operator_kind) {
     case LUNA_TOKEN_PLUS:
     case LUNA_TOKEN_PLUS_EQUAL:
-        return is_i64 ? LUNA_IR_ADD_I64 : LUNA_IR_ADD_I32;
+        return LUNA_IR_ADD_INTEGER;
     case LUNA_TOKEN_MINUS:
     case LUNA_TOKEN_MINUS_EQUAL:
-        return is_i64 ? LUNA_IR_SUB_I64 : LUNA_IR_SUB_I32;
+        return LUNA_IR_SUB_INTEGER;
     case LUNA_TOKEN_STAR:
     case LUNA_TOKEN_STAR_EQUAL:
-        return is_i64 ? LUNA_IR_MUL_I64 : LUNA_IR_MUL_I32;
+        return LUNA_IR_MUL_INTEGER;
     case LUNA_TOKEN_SLASH:
     case LUNA_TOKEN_SLASH_EQUAL:
-        return is_i64 ? LUNA_IR_DIV_I64 : LUNA_IR_DIV_I32;
+        return LUNA_IR_DIV_INTEGER;
     case LUNA_TOKEN_PERCENT:
     case LUNA_TOKEN_PERCENT_EQUAL:
-        return is_i64 ? LUNA_IR_REM_I64 : LUNA_IR_REM_I32;
+        return LUNA_IR_REM_INTEGER;
     case LUNA_TOKEN_AMPERSAND:
     case LUNA_TOKEN_AMPERSAND_EQUAL:
-        return is_i64 ? LUNA_IR_BIT_AND_I64 : LUNA_IR_BIT_AND_I32;
+        return LUNA_IR_BIT_AND_INTEGER;
     case LUNA_TOKEN_PIPE:
     case LUNA_TOKEN_PIPE_EQUAL:
-        return is_i64 ? LUNA_IR_BIT_OR_I64 : LUNA_IR_BIT_OR_I32;
+        return LUNA_IR_BIT_OR_INTEGER;
     case LUNA_TOKEN_CARET:
     case LUNA_TOKEN_CARET_EQUAL:
-        return is_i64 ? LUNA_IR_BIT_XOR_I64 : LUNA_IR_BIT_XOR_I32;
+        return LUNA_IR_BIT_XOR_INTEGER;
     case LUNA_TOKEN_SHIFT_LEFT:
     case LUNA_TOKEN_SHIFT_LEFT_EQUAL:
-        return is_i64 ? LUNA_IR_SHIFT_LEFT_I64 : LUNA_IR_SHIFT_LEFT_I32;
+        return LUNA_IR_SHIFT_LEFT_INTEGER;
     case LUNA_TOKEN_SHIFT_RIGHT:
     case LUNA_TOKEN_SHIFT_RIGHT_EQUAL:
-        return is_i64 ? LUNA_IR_SHIFT_RIGHT_I64 : LUNA_IR_SHIFT_RIGHT_I32;
+        return LUNA_IR_SHIFT_RIGHT_INTEGER;
     case LUNA_TOKEN_LESS:
-        return is_i64 ? LUNA_IR_COMPARE_LESS_I64 : LUNA_IR_COMPARE_LESS_I32;
+        return LUNA_IR_COMPARE_LESS_INTEGER;
     case LUNA_TOKEN_LESS_EQUAL:
-        return is_i64 ? LUNA_IR_COMPARE_LESS_EQUAL_I64
-                      : LUNA_IR_COMPARE_LESS_EQUAL_I32;
+        return LUNA_IR_COMPARE_LESS_EQUAL_INTEGER;
     case LUNA_TOKEN_GREATER:
-        return is_i64 ? LUNA_IR_COMPARE_GREATER_I64
-                      : LUNA_IR_COMPARE_GREATER_I32;
+        return LUNA_IR_COMPARE_GREATER_INTEGER;
     case LUNA_TOKEN_GREATER_EQUAL:
-        return is_i64 ? LUNA_IR_COMPARE_GREATER_EQUAL_I64
-                      : LUNA_IR_COMPARE_GREATER_EQUAL_I32;
+        return LUNA_IR_COMPARE_GREATER_EQUAL_INTEGER;
     default:
-        return LUNA_IR_ADD_I32;
+        return LUNA_IR_ADD_INTEGER;
     }
+}
+
+static uint64_t luna_sema_integer_maximum(LunaTypeKind type) {
+    switch (type) {
+    case LUNA_TYPE_I32:
+        return (uint64_t)INT32_MAX;
+    case LUNA_TYPE_I64:
+        return (uint64_t)INT64_MAX;
+    case LUNA_TYPE_U32:
+        return (uint64_t)UINT32_MAX;
+    case LUNA_TYPE_U64:
+        return UINT64_MAX;
+    case LUNA_TYPE_INVALID:
+    case LUNA_TYPE_VOID:
+    case LUNA_TYPE_BOOL:
+        return 0U;
+    }
+
+    return 0U;
 }
 
 static LunaCheckedValue
@@ -602,10 +621,9 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
     switch (expression->kind) {
     case LUNA_EXPRESSION_INTEGER: {
         const LunaTypeKind literal_type =
-            expected_type == LUNA_TYPE_I64 ? LUNA_TYPE_I64 : LUNA_TYPE_I32;
-        const uint64_t maximum = literal_type == LUNA_TYPE_I64
-                                     ? (uint64_t)INT64_MAX
-                                     : (uint64_t)INT32_MAX;
+            luna_sema_is_integer_type(expected_type) ? expected_type
+                                                     : LUNA_TYPE_I32;
+        const uint64_t maximum = luna_sema_integer_maximum(literal_type);
         if (expression->as.integer > maximum) {
             luna_diagnostic_error(context->diagnostics, expression->span,
                                   "integer literal does not fit in %s",
@@ -613,11 +631,9 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
             return luna_sema_invalid_value();
         }
 
-        LunaIrInstruction instruction = luna_sema_instruction(
-            literal_type == LUNA_TYPE_I64 ? LUNA_IR_CONST_I64
-                                          : LUNA_IR_CONST_I32,
-            expression->span);
-        instruction.immediate = (int64_t)expression->as.integer;
+        LunaIrInstruction instruction =
+            luna_sema_instruction(LUNA_IR_CONST_INTEGER, expression->span);
+        instruction.immediate = expression->as.integer;
         const LunaIrValueId result = luna_sema_emit_value_instruction(
             context, &instruction, literal_type);
         return (LunaCheckedValue){
@@ -664,9 +680,15 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
         return luna_sema_lower_call(context, expression);
 
     case LUNA_EXPRESSION_CAST: {
-        LunaCheckedValue operand =
-            luna_sema_lower_expression(context, expression->as.cast.operand);
         const LunaTypeKind target_type = expression->as.cast.target_type.kind;
+        const LunaTypeKind operand_hint = luna_sema_known_expression_type(
+            context, expression->as.cast.operand);
+        LunaCheckedValue operand =
+            operand_hint == LUNA_TYPE_INVALID
+                ? luna_sema_lower_expression_expected(
+                      context, expression->as.cast.operand, target_type)
+                : luna_sema_lower_expression(context,
+                                             expression->as.cast.operand);
         if (!luna_sema_is_integer_type(operand.type) ||
             !luna_sema_is_integer_type(target_type)) {
             luna_diagnostic_error(
@@ -679,10 +701,8 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
             return operand;
         }
 
-        LunaIrInstruction instruction = luna_sema_instruction(
-            target_type == LUNA_TYPE_I64 ? LUNA_IR_SIGN_EXTEND_I32_TO_I64
-                                         : LUNA_IR_TRUNCATE_I64_TO_I32,
-            expression->span);
+        LunaIrInstruction instruction =
+            luna_sema_instruction(LUNA_IR_CONVERT_INTEGER, expression->span);
         instruction.left = operand.id;
         const LunaIrValueId result = luna_sema_emit_value_instruction(
             context, &instruction, target_type);
@@ -703,16 +723,14 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
         }
 
         if (expression->as.unary.operator_kind == LUNA_TOKEN_MINUS &&
+            luna_type_kind_is_signed_integer(operand_type) &&
             expression->as.unary.operand->kind == LUNA_EXPRESSION_INTEGER &&
             expression->as.unary.operand->as.integer ==
                 (operand_type == LUNA_TYPE_I64 ? (uint64_t)INT64_MAX + 1U
                                                : (uint64_t)INT32_MAX + 1U)) {
-            LunaIrInstruction instruction = luna_sema_instruction(
-                operand_type == LUNA_TYPE_I64 ? LUNA_IR_CONST_I64
-                                              : LUNA_IR_CONST_I32,
-                expression->span);
-            instruction.immediate =
-                operand_type == LUNA_TYPE_I64 ? INT64_MIN : INT32_MIN;
+            LunaIrInstruction instruction =
+                luna_sema_instruction(LUNA_IR_CONST_INTEGER, expression->span);
+            instruction.immediate = expression->as.unary.operand->as.integer;
             const LunaIrValueId result = luna_sema_emit_value_instruction(
                 context, &instruction, operand_type);
             return (LunaCheckedValue){
@@ -774,7 +792,7 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
             expression->as.unary.operator_kind == LUNA_TOKEN_BANG
                 ? LUNA_IR_BOOL_NOT
                 : luna_sema_unary_integer_opcode(
-                      expression->as.unary.operator_kind, operand.type);
+                      expression->as.unary.operator_kind);
 
         LunaIrInstruction instruction =
             luna_sema_instruction(opcode, expression->span);
@@ -851,13 +869,13 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
         return luna_sema_invalid_value();
     }
 
-    LunaIrOpcode opcode = LUNA_IR_ADD_I32;
+    LunaIrOpcode opcode = LUNA_IR_ADD_INTEGER;
     if (is_equality) {
         opcode = operator_kind == LUNA_TOKEN_EQUAL_EQUAL
                      ? LUNA_IR_COMPARE_EQUAL
                      : LUNA_IR_COMPARE_NOT_EQUAL;
     } else {
-        opcode = luna_sema_binary_integer_opcode(operator_kind, operand_type);
+        opcode = luna_sema_binary_integer_opcode(operator_kind);
     }
     const LunaTypeKind result_type =
         is_equality || is_relational ? LUNA_TYPE_BOOL : operand_type;
@@ -1102,7 +1120,7 @@ static bool luna_sema_lower_statement(LunaSemaContext *context,
 
             LunaIrInstruction operation = luna_sema_instruction(
                 luna_sema_binary_integer_opcode(
-                    statement->as.assignment.operator_kind, local->type),
+                    statement->as.assignment.operator_kind),
                 statement->span);
             operation.left = current;
             operation.right = value.id;

@@ -67,9 +67,9 @@ TEST(SemaTest, AcceptsMinimumI32Literal) {
     LunaIrFunction *main_function =
         luna_ir_module_function(harness.Module(), 0U);
     LunaIrInstruction *constant =
-        FindInstruction(main_function, LUNA_IR_CONST_I32);
+        FindInstruction(main_function, LUNA_IR_CONST_INTEGER);
     ASSERT_NE(constant, nullptr);
-    EXPECT_EQ(constant->immediate, INT32_MIN);
+    EXPECT_EQ(constant->immediate, std::uint64_t{1} << 31U);
 }
 
 TEST(SemaTest, RejectsImplicitIntegerTruthiness) {
@@ -136,9 +136,18 @@ TEST(SemaTest, ContextuallyTypesI64LiteralsAndOperators) {
     ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
     ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
     LunaIrFunction *calculate = luna_ir_module_function(harness.Module(), 0U);
-    ASSERT_NE(FindInstruction(calculate, LUNA_IR_CONST_I64), nullptr);
-    ASSERT_NE(FindInstruction(calculate, LUNA_IR_ADD_I64), nullptr);
-    ASSERT_NE(FindInstruction(calculate, LUNA_IR_MUL_I64), nullptr);
+    LunaIrInstruction *constant =
+        FindInstruction(calculate, LUNA_IR_CONST_INTEGER);
+    LunaIrInstruction *addition =
+        FindInstruction(calculate, LUNA_IR_ADD_INTEGER);
+    LunaIrInstruction *multiplication =
+        FindInstruction(calculate, LUNA_IR_MUL_INTEGER);
+    ASSERT_NE(constant, nullptr);
+    ASSERT_NE(addition, nullptr);
+    ASSERT_NE(multiplication, nullptr);
+    EXPECT_EQ(constant->type, LUNA_IR_TYPE_I64);
+    EXPECT_EQ(addition->type, LUNA_IR_TYPE_I64);
+    EXPECT_EQ(multiplication->type, LUNA_IR_TYPE_I64);
 }
 
 TEST(SemaTest, AcceptsMinimumI64Literal) {
@@ -151,9 +160,9 @@ TEST(SemaTest, AcceptsMinimumI64Literal) {
     ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
     ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
     LunaIrInstruction *constant = FindInstruction(
-        luna_ir_module_function(harness.Module(), 0U), LUNA_IR_CONST_I64);
+        luna_ir_module_function(harness.Module(), 0U), LUNA_IR_CONST_INTEGER);
     ASSERT_NE(constant, nullptr);
-    EXPECT_EQ(constant->immediate, INT64_MIN);
+    EXPECT_EQ(constant->immediate, std::uint64_t{1} << 63U);
 }
 
 TEST(SemaTest, RejectsMixedI32AndI64Operands) {
@@ -168,6 +177,47 @@ TEST(SemaTest, RejectsMixedI32AndI64Operands) {
               std::string::npos);
 }
 
+TEST(SemaTest, ContextuallyTypesUnsignedLiteralsAndOperators) {
+    FrontendHarness harness{
+        "module test.unsigned_context;\n"
+        "fn calculate(left: u64, right: u64) -> u64 {\n"
+        "    return ((left + 18446744073709551615) >> right) / 3;\n"
+        "}\n"
+        "fn main() -> i32 {\n"
+        "    if (calculate(2, 1) == 0) { return 42; }\n"
+        "    return 1;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    LunaIrFunction *calculate = luna_ir_module_function(harness.Module(), 0U);
+    LunaIrInstruction *constant =
+        FindInstruction(calculate, LUNA_IR_CONST_INTEGER);
+    LunaIrInstruction *shift =
+        FindInstruction(calculate, LUNA_IR_SHIFT_RIGHT_INTEGER);
+    LunaIrInstruction *division =
+        FindInstruction(calculate, LUNA_IR_DIV_INTEGER);
+    ASSERT_NE(constant, nullptr);
+    ASSERT_NE(shift, nullptr);
+    ASSERT_NE(division, nullptr);
+    EXPECT_EQ(constant->type, LUNA_IR_TYPE_U64);
+    EXPECT_EQ(constant->immediate, UINT64_MAX);
+    EXPECT_EQ(shift->type, LUNA_IR_TYPE_U64);
+    EXPECT_EQ(division->type, LUNA_IR_TYPE_U64);
+}
+
+TEST(SemaTest, RejectsImplicitSignedUnsignedMixing) {
+    FrontendHarness harness{"module test.signed_unsigned_mix;\n"
+                            "fn combine(left: u64, right: i64) -> u64 {\n"
+                            "    return left + right;\n"
+                            "}\n"
+                            "fn main() -> i32 { return 0; }\n"};
+
+    EXPECT_FALSE(harness.ParseAndLower());
+    EXPECT_NE(harness.Diagnostics().find("expected u64, found i64"),
+              std::string::npos);
+}
+
 TEST(SemaTest, LowersExplicitIntegerConversions) {
     FrontendHarness harness{"module test.conversions;\n"
                             "fn convert(value: i32) -> i32 {\n"
@@ -179,9 +229,60 @@ TEST(SemaTest, LowersExplicitIntegerConversions) {
     ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
     LunaIrFunction *convert = luna_ir_module_function(harness.Module(), 0U);
     ASSERT_NE(convert, nullptr);
-    ASSERT_NE(FindInstruction(convert, LUNA_IR_SIGN_EXTEND_I32_TO_I64),
-              nullptr);
-    ASSERT_NE(FindInstruction(convert, LUNA_IR_TRUNCATE_I64_TO_I32), nullptr);
+    std::uint64_t conversion_count = 0U;
+    for (std::size_t block_index = 0U; block_index < convert->blocks.length;
+         block_index += 1U) {
+        const LunaIrBlock *block = static_cast<const LunaIrBlock *>(
+            luna_vector_at_const(&convert->blocks, block_index));
+        ASSERT_NE(block, nullptr);
+        for (std::size_t instruction_index = 0U;
+             instruction_index < block->instructions.length;
+             instruction_index += 1U) {
+            const LunaIrInstruction *instruction =
+                static_cast<const LunaIrInstruction *>(luna_vector_at_const(
+                    &block->instructions, instruction_index));
+            ASSERT_NE(instruction, nullptr);
+            if (instruction->opcode == LUNA_IR_CONVERT_INTEGER) {
+                conversion_count += 1U;
+            }
+        }
+    }
+    EXPECT_EQ(conversion_count, 2U);
+}
+
+TEST(SemaTest, LowersWidthAndSignednessIntegerConversions) {
+    FrontendHarness harness{
+        "module test.unsigned_conversions;\n"
+        "fn convert(signed_value: i32, unsigned_value: u32) -> u64 {\n"
+        "    let reinterpreted: u32 = signed_value as u32;\n"
+        "    let widened: u64 = unsigned_value as u64;\n"
+        "    return (reinterpreted as i64) as u64;\n"
+        "}\n"
+        "fn main() -> i32 { return 0; }\n"};
+
+    ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    LunaIrFunction *convert = luna_ir_module_function(harness.Module(), 0U);
+    ASSERT_NE(convert, nullptr);
+    std::uint64_t conversion_count = 0U;
+    for (std::size_t block_index = 0U; block_index < convert->blocks.length;
+         block_index += 1U) {
+        const LunaIrBlock *block = static_cast<const LunaIrBlock *>(
+            luna_vector_at_const(&convert->blocks, block_index));
+        ASSERT_NE(block, nullptr);
+        for (std::size_t instruction_index = 0U;
+             instruction_index < block->instructions.length;
+             instruction_index += 1U) {
+            const LunaIrInstruction *instruction =
+                static_cast<const LunaIrInstruction *>(luna_vector_at_const(
+                    &block->instructions, instruction_index));
+            ASSERT_NE(instruction, nullptr);
+            if (instruction->opcode == LUNA_IR_CONVERT_INTEGER) {
+                conversion_count += 1U;
+            }
+        }
+    }
+    EXPECT_EQ(conversion_count, 4U);
 }
 
 TEST(SemaTest, RejectsNonIntegerExplicitConversions) {

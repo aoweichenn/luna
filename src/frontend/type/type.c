@@ -12,13 +12,26 @@ const char *luna_type_kind_name(LunaTypeKind kind) {
         return "i32";
     case LUNA_TYPE_I64:
         return "i64";
+    case LUNA_TYPE_U32:
+        return "u32";
+    case LUNA_TYPE_U64:
+        return "u64";
     }
 
     return "<unknown>";
 }
 
 bool luna_type_kind_is_integer(LunaTypeKind kind) {
+    return luna_type_kind_is_signed_integer(kind) ||
+           luna_type_kind_is_unsigned_integer(kind);
+}
+
+bool luna_type_kind_is_signed_integer(LunaTypeKind kind) {
     return kind == LUNA_TYPE_I32 || kind == LUNA_TYPE_I64;
+}
+
+bool luna_type_kind_is_unsigned_integer(LunaTypeKind kind) {
+    return kind == LUNA_TYPE_U32 || kind == LUNA_TYPE_U64;
 }
 
 uint32_t luna_type_kind_bit_width(LunaTypeKind kind) {
@@ -26,8 +39,10 @@ uint32_t luna_type_kind_bit_width(LunaTypeKind kind) {
     case LUNA_TYPE_BOOL:
         return 1U;
     case LUNA_TYPE_I32:
+    case LUNA_TYPE_U32:
         return 32U;
     case LUNA_TYPE_I64:
+    case LUNA_TYPE_U64:
         return 64U;
     case LUNA_TYPE_INVALID:
     case LUNA_TYPE_VOID:

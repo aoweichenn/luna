@@ -146,14 +146,43 @@ const char *luna_ir_type_name(LunaIrType type) {
         return "i32";
     case LUNA_IR_TYPE_I64:
         return "i64";
+    case LUNA_IR_TYPE_U32:
+        return "u32";
+    case LUNA_IR_TYPE_U64:
+        return "u64";
     }
 
     return "<invalid>";
 }
 
+bool luna_ir_type_is_integer(LunaIrType type) {
+    return type == LUNA_IR_TYPE_I32 || type == LUNA_IR_TYPE_I64 ||
+           type == LUNA_IR_TYPE_U32 || type == LUNA_IR_TYPE_U64;
+}
+
+bool luna_ir_type_is_signed_integer(LunaIrType type) {
+    return type == LUNA_IR_TYPE_I32 || type == LUNA_IR_TYPE_I64;
+}
+
+uint32_t luna_ir_type_bit_width(LunaIrType type) {
+    switch (type) {
+    case LUNA_IR_TYPE_BOOL:
+        return 1U;
+    case LUNA_IR_TYPE_I32:
+    case LUNA_IR_TYPE_U32:
+        return 32U;
+    case LUNA_IR_TYPE_I64:
+    case LUNA_IR_TYPE_U64:
+        return 64U;
+    case LUNA_IR_TYPE_VOID:
+        return 0U;
+    }
+
+    return 0U;
+}
+
 static bool luna_ir_type_is_value(LunaIrType type) {
-    return type == LUNA_IR_TYPE_BOOL || type == LUNA_IR_TYPE_I32 ||
-           type == LUNA_IR_TYPE_I64;
+    return type == LUNA_IR_TYPE_BOOL || luna_ir_type_is_integer(type);
 }
 
 static bool luna_ir_type_is_return(LunaIrType type) {
@@ -285,21 +314,21 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
                                        bool *argument_used,
                                        const char **reason) {
     switch (instruction->opcode) {
-    case LUNA_IR_CONST_I32:
-        if (instruction->immediate < INT32_MIN ||
-            instruction->immediate > INT32_MAX) {
+    case LUNA_IR_CONST_INTEGER:
+        if (!luna_ir_type_is_integer(instruction->type)) {
             return luna_ir_reject(reason,
-                                  "i32 constant is outside the i32 range");
+                                  "integer constant has non-integer type");
         }
-        return luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_I32,
-                                     reason);
-
-    case LUNA_IR_CONST_I64:
-        return luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_I64,
+        if (luna_ir_type_bit_width(instruction->type) == 32U &&
+            instruction->immediate > (uint64_t)UINT32_MAX) {
+            return luna_ir_reject(
+                reason, "integer constant exceeds its 32-bit storage");
+        }
+        return luna_ir_verify_result(function, instruction, instruction->type,
                                      reason);
 
     case LUNA_IR_CONST_BOOL:
-        if (instruction->immediate != 0 && instruction->immediate != 1) {
+        if (instruction->immediate != 0U && instruction->immediate != 1U) {
             return luna_ir_reject(reason,
                                   "bool constant must be exactly zero or one");
         }
@@ -327,20 +356,16 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
                                     defined_in_block, reason);
     }
 
-    case LUNA_IR_NEG_I32:
-    case LUNA_IR_BIT_NOT_I32:
+    case LUNA_IR_NEG_INTEGER:
+    case LUNA_IR_BIT_NOT_INTEGER:
+        if (!luna_ir_type_is_integer(instruction->type)) {
+            return luna_ir_reject(reason,
+                                  "integer unary operation has invalid type");
+        }
         return luna_ir_verify_value(function, instruction->left,
-                                    LUNA_IR_TYPE_I32, defined_in_block,
+                                    instruction->type, defined_in_block,
                                     reason) &&
-               luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_I32,
-                                     reason);
-
-    case LUNA_IR_NEG_I64:
-    case LUNA_IR_BIT_NOT_I64:
-        return luna_ir_verify_value(function, instruction->left,
-                                    LUNA_IR_TYPE_I64, defined_in_block,
-                                    reason) &&
-               luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_I64,
+               luna_ir_verify_result(function, instruction, instruction->type,
                                      reason);
 
     case LUNA_IR_BOOL_NOT:
@@ -350,46 +375,47 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
                luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_BOOL,
                                      reason);
 
-    case LUNA_IR_SIGN_EXTEND_I32_TO_I64:
-        return luna_ir_verify_value(function, instruction->left,
-                                    LUNA_IR_TYPE_I32, defined_in_block,
-                                    reason) &&
-               luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_I64,
+    case LUNA_IR_CONVERT_INTEGER: {
+        if (!luna_ir_type_is_integer(instruction->type)) {
+            return luna_ir_reject(reason,
+                                  "integer conversion has invalid result type");
+        }
+        if (instruction->left == LUNA_IR_INVALID_ID ||
+            (size_t)instruction->left >= function->value_types.length) {
+            return luna_ir_reject(reason,
+                                  "conversion value id is out of range");
+        }
+        const LunaIrType *source_type = luna_vector_at_const(
+            &function->value_types, (size_t)instruction->left);
+        if (!luna_ir_type_is_integer(*source_type)) {
+            return luna_ir_reject(reason,
+                                  "integer conversion has invalid source type");
+        }
+        if (*source_type == instruction->type) {
+            return luna_ir_reject(reason, "integer conversion is redundant");
+        }
+        return luna_ir_verify_value(function, instruction->left, *source_type,
+                                    defined_in_block, reason) &&
+               luna_ir_verify_result(function, instruction, instruction->type,
                                      reason);
+    }
 
-    case LUNA_IR_TRUNCATE_I64_TO_I32:
-        return luna_ir_verify_value(function, instruction->left,
-                                    LUNA_IR_TYPE_I64, defined_in_block,
-                                    reason) &&
-               luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_I32,
-                                     reason);
-
-    case LUNA_IR_ADD_I32:
-    case LUNA_IR_SUB_I32:
-    case LUNA_IR_MUL_I32:
-    case LUNA_IR_DIV_I32:
-    case LUNA_IR_REM_I32:
-    case LUNA_IR_BIT_AND_I32:
-    case LUNA_IR_BIT_OR_I32:
-    case LUNA_IR_BIT_XOR_I32:
-    case LUNA_IR_SHIFT_LEFT_I32:
-    case LUNA_IR_SHIFT_RIGHT_I32:
+    case LUNA_IR_ADD_INTEGER:
+    case LUNA_IR_SUB_INTEGER:
+    case LUNA_IR_MUL_INTEGER:
+    case LUNA_IR_DIV_INTEGER:
+    case LUNA_IR_REM_INTEGER:
+    case LUNA_IR_BIT_AND_INTEGER:
+    case LUNA_IR_BIT_OR_INTEGER:
+    case LUNA_IR_BIT_XOR_INTEGER:
+    case LUNA_IR_SHIFT_LEFT_INTEGER:
+    case LUNA_IR_SHIFT_RIGHT_INTEGER:
+        if (!luna_ir_type_is_integer(instruction->type)) {
+            return luna_ir_reject(reason,
+                                  "integer binary operation has invalid type");
+        }
         return luna_ir_verify_binary(function, instruction, defined_in_block,
-                                     LUNA_IR_TYPE_I32, LUNA_IR_TYPE_I32,
-                                     reason);
-
-    case LUNA_IR_ADD_I64:
-    case LUNA_IR_SUB_I64:
-    case LUNA_IR_MUL_I64:
-    case LUNA_IR_DIV_I64:
-    case LUNA_IR_REM_I64:
-    case LUNA_IR_BIT_AND_I64:
-    case LUNA_IR_BIT_OR_I64:
-    case LUNA_IR_BIT_XOR_I64:
-    case LUNA_IR_SHIFT_LEFT_I64:
-    case LUNA_IR_SHIFT_RIGHT_I64:
-        return luna_ir_verify_binary(function, instruction, defined_in_block,
-                                     LUNA_IR_TYPE_I64, LUNA_IR_TYPE_I64,
+                                     instruction->type, instruction->type,
                                      reason);
 
     case LUNA_IR_COMPARE_EQUAL:
@@ -413,21 +439,24 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
                                      reason);
     }
 
-    case LUNA_IR_COMPARE_LESS_I32:
-    case LUNA_IR_COMPARE_LESS_EQUAL_I32:
-    case LUNA_IR_COMPARE_GREATER_I32:
-    case LUNA_IR_COMPARE_GREATER_EQUAL_I32:
+    case LUNA_IR_COMPARE_LESS_INTEGER:
+    case LUNA_IR_COMPARE_LESS_EQUAL_INTEGER:
+    case LUNA_IR_COMPARE_GREATER_INTEGER:
+    case LUNA_IR_COMPARE_GREATER_EQUAL_INTEGER: {
+        if (instruction->left == LUNA_IR_INVALID_ID ||
+            (size_t)instruction->left >= function->value_types.length) {
+            return luna_ir_reject(reason,
+                                  "comparison value id is out of range");
+        }
+        const LunaIrType *operand_type = luna_vector_at_const(
+            &function->value_types, (size_t)instruction->left);
+        if (!luna_ir_type_is_integer(*operand_type)) {
+            return luna_ir_reject(reason,
+                                  "ordering operand type is not integer");
+        }
         return luna_ir_verify_binary(function, instruction, defined_in_block,
-                                     LUNA_IR_TYPE_I32, LUNA_IR_TYPE_BOOL,
-                                     reason);
-
-    case LUNA_IR_COMPARE_LESS_I64:
-    case LUNA_IR_COMPARE_LESS_EQUAL_I64:
-    case LUNA_IR_COMPARE_GREATER_I64:
-    case LUNA_IR_COMPARE_GREATER_EQUAL_I64:
-        return luna_ir_verify_binary(function, instruction, defined_in_block,
-                                     LUNA_IR_TYPE_I64, LUNA_IR_TYPE_BOOL,
-                                     reason);
+                                     *operand_type, LUNA_IR_TYPE_BOOL, reason);
+    }
 
     case LUNA_IR_CALL:
         return luna_ir_verify_call(module, function, instruction,
@@ -829,6 +858,31 @@ static bool luna_ir_print_value(LunaStringBuilder *output,
     return luna_string_builder_append_format(output, "%%%u", value);
 }
 
+static int64_t luna_ir_signed_immediate(LunaIrType type, uint64_t bits) {
+    const uint32_t width = luna_ir_type_bit_width(type);
+    const uint64_t maximum_positive =
+        width == 32U ? (uint64_t)INT32_MAX : (uint64_t)INT64_MAX;
+    if (bits <= maximum_positive) {
+        return (int64_t)bits;
+    }
+
+    const uint64_t maximum_bits =
+        width == 32U ? (uint64_t)UINT32_MAX : UINT64_MAX;
+    const uint64_t magnitude = maximum_bits - bits + 1U;
+    if (magnitude == (UINT64_C(1) << 63U)) {
+        return INT64_MIN;
+    }
+    return -(int64_t)magnitude;
+}
+
+static LunaIrType
+luna_ir_instruction_operand_type(const LunaIrFunction *function,
+                                 const LunaIrInstruction *instruction) {
+    const LunaIrType *type =
+        luna_vector_at_const(&function->value_types, (size_t)instruction->left);
+    return type == NULL ? LUNA_IR_TYPE_VOID : *type;
+}
+
 static bool luna_ir_print_instruction(const LunaIrModule *module,
                                       const LunaIrFunction *function,
                                       const LunaIrInstruction *instruction,
@@ -841,18 +895,22 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
     }
 
     switch (instruction->opcode) {
-    case LUNA_IR_CONST_I32:
+    case LUNA_IR_CONST_INTEGER:
+        if (luna_ir_type_is_signed_integer(instruction->type)) {
+            return luna_string_builder_append_format(
+                output, "const.%s %" PRId64 "\n",
+                luna_ir_type_name(instruction->type),
+                luna_ir_signed_immediate(instruction->type,
+                                         instruction->immediate));
+        }
         return luna_string_builder_append_format(
-            output, "const.i32 %" PRId64 "\n", instruction->immediate);
-
-    case LUNA_IR_CONST_I64:
-        return luna_string_builder_append_format(
-            output, "const.i64 %" PRId64 "\n", instruction->immediate);
+            output, "const.%s %" PRIu64 "\n",
+            luna_ir_type_name(instruction->type), instruction->immediate);
 
     case LUNA_IR_CONST_BOOL:
         return luna_string_builder_append_format(
             output, "const.bool %s\n",
-            instruction->immediate == 0 ? "false" : "true");
+            instruction->immediate == 0U ? "false" : "true");
 
     case LUNA_IR_LOAD:
         return luna_string_builder_append_format(
@@ -867,132 +925,95 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
         }
         return luna_string_builder_append_c_string(output, "\n");
 
-    case LUNA_IR_NEG_I32:
-    case LUNA_IR_NEG_I64:
-    case LUNA_IR_BIT_NOT_I32:
-    case LUNA_IR_BIT_NOT_I64:
+    case LUNA_IR_NEG_INTEGER:
+    case LUNA_IR_BIT_NOT_INTEGER:
     case LUNA_IR_BOOL_NOT: {
-        const char *name = "not.bool";
-        if (instruction->opcode == LUNA_IR_NEG_I32) {
-            name = "neg.i32";
-        } else if (instruction->opcode == LUNA_IR_NEG_I64) {
-            name = "neg.i64";
-        } else if (instruction->opcode == LUNA_IR_BIT_NOT_I32) {
-            name = "bit_not.i32";
-        } else if (instruction->opcode == LUNA_IR_BIT_NOT_I64) {
-            name = "bit_not.i64";
+        if (instruction->opcode == LUNA_IR_BOOL_NOT) {
+            if (!luna_string_builder_append_c_string(output, "not.bool ")) {
+                return false;
+            }
+        } else if (!luna_string_builder_append_format(
+                       output, "%s.%s ",
+                       instruction->opcode == LUNA_IR_NEG_INTEGER ? "neg"
+                                                                  : "bit_not",
+                       luna_ir_type_name(instruction->type))) {
+            return false;
+        }
+        if (!luna_ir_print_value(output, instruction->left)) {
+            return false;
+        }
+        return luna_string_builder_append_c_string(output, "\n");
+    }
+
+    case LUNA_IR_CONVERT_INTEGER: {
+        const LunaIrType source_type =
+            luna_ir_instruction_operand_type(function, instruction);
+        const uint32_t source_width = luna_ir_type_bit_width(source_type);
+        const uint32_t target_width = luna_ir_type_bit_width(instruction->type);
+        const char *name = "bitcast";
+        if (source_width > target_width) {
+            name = "trunc";
+        } else if (source_width < target_width) {
+            name =
+                luna_ir_type_is_signed_integer(source_type) ? "sext" : "zext";
         }
 
-        if (!luna_string_builder_append_c_string(output, name) ||
-            !luna_string_builder_append_c_string(output, " ") ||
+        if (!luna_string_builder_append_format(
+                output, "%s.%s.%s ", name, luna_ir_type_name(source_type),
+                luna_ir_type_name(instruction->type)) ||
             !luna_ir_print_value(output, instruction->left)) {
             return false;
         }
         return luna_string_builder_append_c_string(output, "\n");
     }
 
-    case LUNA_IR_SIGN_EXTEND_I32_TO_I64:
-    case LUNA_IR_TRUNCATE_I64_TO_I32:
-        if (!luna_string_builder_append_c_string(
-                output, instruction->opcode == LUNA_IR_SIGN_EXTEND_I32_TO_I64
-                            ? "sext.i32.i64 "
-                            : "trunc.i64.i32 ") ||
-            !luna_ir_print_value(output, instruction->left)) {
-            return false;
-        }
-        return luna_string_builder_append_c_string(output, "\n");
-
-    case LUNA_IR_ADD_I32:
-    case LUNA_IR_SUB_I32:
-    case LUNA_IR_MUL_I32:
-    case LUNA_IR_DIV_I32:
-    case LUNA_IR_REM_I32:
-    case LUNA_IR_BIT_AND_I32:
-    case LUNA_IR_BIT_OR_I32:
-    case LUNA_IR_BIT_XOR_I32:
-    case LUNA_IR_SHIFT_LEFT_I32:
-    case LUNA_IR_SHIFT_RIGHT_I32:
-    case LUNA_IR_ADD_I64:
-    case LUNA_IR_SUB_I64:
-    case LUNA_IR_MUL_I64:
-    case LUNA_IR_DIV_I64:
-    case LUNA_IR_REM_I64:
-    case LUNA_IR_BIT_AND_I64:
-    case LUNA_IR_BIT_OR_I64:
-    case LUNA_IR_BIT_XOR_I64:
-    case LUNA_IR_SHIFT_LEFT_I64:
-    case LUNA_IR_SHIFT_RIGHT_I64:
+    case LUNA_IR_ADD_INTEGER:
+    case LUNA_IR_SUB_INTEGER:
+    case LUNA_IR_MUL_INTEGER:
+    case LUNA_IR_DIV_INTEGER:
+    case LUNA_IR_REM_INTEGER:
+    case LUNA_IR_BIT_AND_INTEGER:
+    case LUNA_IR_BIT_OR_INTEGER:
+    case LUNA_IR_BIT_XOR_INTEGER:
+    case LUNA_IR_SHIFT_LEFT_INTEGER:
+    case LUNA_IR_SHIFT_RIGHT_INTEGER:
     case LUNA_IR_COMPARE_EQUAL:
     case LUNA_IR_COMPARE_NOT_EQUAL:
-    case LUNA_IR_COMPARE_LESS_I32:
-    case LUNA_IR_COMPARE_LESS_EQUAL_I32:
-    case LUNA_IR_COMPARE_GREATER_I32:
-    case LUNA_IR_COMPARE_GREATER_EQUAL_I32:
-    case LUNA_IR_COMPARE_LESS_I64:
-    case LUNA_IR_COMPARE_LESS_EQUAL_I64:
-    case LUNA_IR_COMPARE_GREATER_I64:
-    case LUNA_IR_COMPARE_GREATER_EQUAL_I64: {
+    case LUNA_IR_COMPARE_LESS_INTEGER:
+    case LUNA_IR_COMPARE_LESS_EQUAL_INTEGER:
+    case LUNA_IR_COMPARE_GREATER_INTEGER:
+    case LUNA_IR_COMPARE_GREATER_EQUAL_INTEGER: {
         const char *name = "<invalid>";
         switch (instruction->opcode) {
-        case LUNA_IR_ADD_I32:
-            name = "add.i32";
+        case LUNA_IR_ADD_INTEGER:
+            name = "add";
             break;
-        case LUNA_IR_SUB_I32:
-            name = "sub.i32";
+        case LUNA_IR_SUB_INTEGER:
+            name = "sub";
             break;
-        case LUNA_IR_MUL_I32:
-            name = "mul.i32";
+        case LUNA_IR_MUL_INTEGER:
+            name = "mul";
             break;
-        case LUNA_IR_DIV_I32:
-            name = "div.i32";
+        case LUNA_IR_DIV_INTEGER:
+            name = "div";
             break;
-        case LUNA_IR_REM_I32:
-            name = "rem.i32";
+        case LUNA_IR_REM_INTEGER:
+            name = "rem";
             break;
-        case LUNA_IR_BIT_AND_I32:
-            name = "and.i32";
+        case LUNA_IR_BIT_AND_INTEGER:
+            name = "and";
             break;
-        case LUNA_IR_BIT_OR_I32:
-            name = "or.i32";
+        case LUNA_IR_BIT_OR_INTEGER:
+            name = "or";
             break;
-        case LUNA_IR_BIT_XOR_I32:
-            name = "xor.i32";
+        case LUNA_IR_BIT_XOR_INTEGER:
+            name = "xor";
             break;
-        case LUNA_IR_SHIFT_LEFT_I32:
-            name = "shl.i32";
+        case LUNA_IR_SHIFT_LEFT_INTEGER:
+            name = "shl";
             break;
-        case LUNA_IR_SHIFT_RIGHT_I32:
-            name = "shr.i32";
-            break;
-        case LUNA_IR_ADD_I64:
-            name = "add.i64";
-            break;
-        case LUNA_IR_SUB_I64:
-            name = "sub.i64";
-            break;
-        case LUNA_IR_MUL_I64:
-            name = "mul.i64";
-            break;
-        case LUNA_IR_DIV_I64:
-            name = "div.i64";
-            break;
-        case LUNA_IR_REM_I64:
-            name = "rem.i64";
-            break;
-        case LUNA_IR_BIT_AND_I64:
-            name = "and.i64";
-            break;
-        case LUNA_IR_BIT_OR_I64:
-            name = "or.i64";
-            break;
-        case LUNA_IR_BIT_XOR_I64:
-            name = "xor.i64";
-            break;
-        case LUNA_IR_SHIFT_LEFT_I64:
-            name = "shl.i64";
-            break;
-        case LUNA_IR_SHIFT_RIGHT_I64:
-            name = "shr.i64";
+        case LUNA_IR_SHIFT_RIGHT_INTEGER:
+            name = "shr";
             break;
         case LUNA_IR_COMPARE_EQUAL:
             name = "eq";
@@ -1000,35 +1021,33 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
         case LUNA_IR_COMPARE_NOT_EQUAL:
             name = "ne";
             break;
-        case LUNA_IR_COMPARE_LESS_I32:
-            name = "lt.i32";
+        case LUNA_IR_COMPARE_LESS_INTEGER:
+            name = "lt";
             break;
-        case LUNA_IR_COMPARE_LESS_EQUAL_I32:
-            name = "le.i32";
+        case LUNA_IR_COMPARE_LESS_EQUAL_INTEGER:
+            name = "le";
             break;
-        case LUNA_IR_COMPARE_GREATER_I32:
-            name = "gt.i32";
+        case LUNA_IR_COMPARE_GREATER_INTEGER:
+            name = "gt";
             break;
-        case LUNA_IR_COMPARE_GREATER_EQUAL_I32:
-            name = "ge.i32";
-            break;
-        case LUNA_IR_COMPARE_LESS_I64:
-            name = "lt.i64";
-            break;
-        case LUNA_IR_COMPARE_LESS_EQUAL_I64:
-            name = "le.i64";
-            break;
-        case LUNA_IR_COMPARE_GREATER_I64:
-            name = "gt.i64";
-            break;
-        case LUNA_IR_COMPARE_GREATER_EQUAL_I64:
-            name = "ge.i64";
+        case LUNA_IR_COMPARE_GREATER_EQUAL_INTEGER:
+            name = "ge";
             break;
         default:
             break;
         }
 
+        const bool has_type_suffix =
+            instruction->opcode != LUNA_IR_COMPARE_EQUAL &&
+            instruction->opcode != LUNA_IR_COMPARE_NOT_EQUAL;
+        const LunaIrType operation_type =
+            instruction->type == LUNA_IR_TYPE_BOOL
+                ? luna_ir_instruction_operand_type(function, instruction)
+                : instruction->type;
         if (!luna_string_builder_append_c_string(output, name) ||
+            (has_type_suffix &&
+             !luna_string_builder_append_format(
+                 output, ".%s", luna_ir_type_name(operation_type))) ||
             !luna_string_builder_append_c_string(output, " ") ||
             !luna_ir_print_value(output, instruction->left) ||
             !luna_string_builder_append_c_string(output, ", ") ||

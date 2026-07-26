@@ -8,9 +8,9 @@ C or C++.
 The project is deliberately narrow at this stage:
 
 - target: x86-64 Linux, System V ABI, ELF64;
-- frontend: explicit `bool`, `i32` and `i64` types, checked integer
-  conversions, functions, expressions, local variables and structured control
-  flow;
+- frontend: explicit `bool`, `i32`, `i64`, `u32` and `u64` types, checked
+  integer conversions, functions, expressions, local variables and structured
+  control flow;
 - middle end: typed, non-SSA control-flow IR;
 - backend: direct x86-64 instruction selection;
 - bootstrap host: conforming C23;

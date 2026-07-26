@@ -20,52 +20,36 @@ typedef enum LunaIrType {
     LUNA_IR_TYPE_VOID,
     LUNA_IR_TYPE_BOOL,
     LUNA_IR_TYPE_I32,
-    LUNA_IR_TYPE_I64
+    LUNA_IR_TYPE_I64,
+    LUNA_IR_TYPE_U32,
+    LUNA_IR_TYPE_U64
 } LunaIrType;
 
 typedef enum LunaIrOpcode {
-    LUNA_IR_CONST_I32,
-    LUNA_IR_CONST_I64,
+    LUNA_IR_CONST_INTEGER,
     LUNA_IR_CONST_BOOL,
     LUNA_IR_LOAD,
     LUNA_IR_STORE,
-    LUNA_IR_NEG_I32,
-    LUNA_IR_NEG_I64,
-    LUNA_IR_BIT_NOT_I32,
-    LUNA_IR_BIT_NOT_I64,
+    LUNA_IR_NEG_INTEGER,
+    LUNA_IR_BIT_NOT_INTEGER,
     LUNA_IR_BOOL_NOT,
-    LUNA_IR_SIGN_EXTEND_I32_TO_I64,
-    LUNA_IR_TRUNCATE_I64_TO_I32,
-    LUNA_IR_ADD_I32,
-    LUNA_IR_SUB_I32,
-    LUNA_IR_MUL_I32,
-    LUNA_IR_DIV_I32,
-    LUNA_IR_REM_I32,
-    LUNA_IR_BIT_AND_I32,
-    LUNA_IR_BIT_OR_I32,
-    LUNA_IR_BIT_XOR_I32,
-    LUNA_IR_SHIFT_LEFT_I32,
-    LUNA_IR_SHIFT_RIGHT_I32,
-    LUNA_IR_ADD_I64,
-    LUNA_IR_SUB_I64,
-    LUNA_IR_MUL_I64,
-    LUNA_IR_DIV_I64,
-    LUNA_IR_REM_I64,
-    LUNA_IR_BIT_AND_I64,
-    LUNA_IR_BIT_OR_I64,
-    LUNA_IR_BIT_XOR_I64,
-    LUNA_IR_SHIFT_LEFT_I64,
-    LUNA_IR_SHIFT_RIGHT_I64,
+    LUNA_IR_CONVERT_INTEGER,
+    LUNA_IR_ADD_INTEGER,
+    LUNA_IR_SUB_INTEGER,
+    LUNA_IR_MUL_INTEGER,
+    LUNA_IR_DIV_INTEGER,
+    LUNA_IR_REM_INTEGER,
+    LUNA_IR_BIT_AND_INTEGER,
+    LUNA_IR_BIT_OR_INTEGER,
+    LUNA_IR_BIT_XOR_INTEGER,
+    LUNA_IR_SHIFT_LEFT_INTEGER,
+    LUNA_IR_SHIFT_RIGHT_INTEGER,
     LUNA_IR_COMPARE_EQUAL,
     LUNA_IR_COMPARE_NOT_EQUAL,
-    LUNA_IR_COMPARE_LESS_I32,
-    LUNA_IR_COMPARE_LESS_EQUAL_I32,
-    LUNA_IR_COMPARE_GREATER_I32,
-    LUNA_IR_COMPARE_GREATER_EQUAL_I32,
-    LUNA_IR_COMPARE_LESS_I64,
-    LUNA_IR_COMPARE_LESS_EQUAL_I64,
-    LUNA_IR_COMPARE_GREATER_I64,
-    LUNA_IR_COMPARE_GREATER_EQUAL_I64,
+    LUNA_IR_COMPARE_LESS_INTEGER,
+    LUNA_IR_COMPARE_LESS_EQUAL_INTEGER,
+    LUNA_IR_COMPARE_GREATER_INTEGER,
+    LUNA_IR_COMPARE_GREATER_EQUAL_INTEGER,
     LUNA_IR_CALL,
     LUNA_IR_JUMP,
     LUNA_IR_BRANCH,
@@ -84,7 +68,7 @@ typedef struct LunaIrInstruction {
     LunaIrFunctionId callee;
     uint32_t first_argument;
     uint32_t argument_count;
-    int64_t immediate;
+    uint64_t immediate;
     LunaSourceSpan span;
 } LunaIrInstruction;
 
@@ -134,5 +118,8 @@ bool luna_ir_block_append(LunaIrBlock *block,
 bool luna_ir_verify(const LunaIrModule *module, FILE *error_stream);
 bool luna_ir_print(const LunaIrModule *module, LunaStringBuilder *output);
 const char *luna_ir_type_name(LunaIrType type);
+bool luna_ir_type_is_integer(LunaIrType type);
+bool luna_ir_type_is_signed_integer(LunaIrType type);
+uint32_t luna_ir_type_bit_width(LunaIrType type);
 
 #endif

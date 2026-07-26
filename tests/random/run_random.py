@@ -14,6 +14,8 @@ import sys
 I32_MIN = -(2**31)
 I32_MAX = 2**31 - 1
 I64_MIN = -(2**63)
+U32_MODULUS = 2**32
+U64_MODULUS = 2**64
 
 
 @dataclasses.dataclass(frozen=True)
@@ -28,6 +30,10 @@ def wrap_i32(value: int) -> int:
 
 def wrap_i64(value: int) -> int:
     return ((value + 2**63) % 2**64) - 2**63
+
+
+def wrap_unsigned(value: int, width: int) -> int:
+    return value % (2**width)
 
 
 def truncate_division(left: int, right: int) -> int:
@@ -245,6 +251,95 @@ def generate_i64_case(engine: random.Random, case_index: int) -> tuple[str, int]
     return source, expected_code
 
 
+def generate_unsigned_expression(
+    engine: random.Random,
+    variables: dict[str, int],
+    depth: int,
+    width: int,
+) -> Expression:
+    if depth == 0 or engine.randrange(5) == 0:
+        if engine.randrange(2) == 0:
+            name = engine.choice(tuple(variables))
+            return Expression(name, variables[name])
+        modulus = 2**width
+        value = modulus - 1 - engine.randrange(0, 4096)
+        return Expression(str(value), value)
+
+    left = generate_unsigned_expression(engine, variables, depth - 1, width)
+    operation = engine.choice(
+        ("+", "-", "*", "&", "|", "^", "<<", ">>", "/", "%")
+    )
+
+    if operation in ("<<", ">>"):
+        shift = engine.randrange(0, width + 16)
+        effective_shift = shift & (width - 1)
+        if operation == "<<":
+            value = wrap_unsigned(left.value << effective_shift, width)
+        else:
+            value = left.value >> effective_shift
+        return Expression(f"({left.text} {operation} {shift})", value)
+
+    if operation in ("/", "%"):
+        divisor = engine.randrange(1, 64)
+        value = (
+            left.value // divisor
+            if operation == "/"
+            else left.value % divisor
+        )
+        return Expression(f"({left.text} {operation} {divisor})", value)
+
+    right = generate_unsigned_expression(engine, variables, depth - 1, width)
+    if operation == "+":
+        value = left.value + right.value
+    elif operation == "-":
+        value = left.value - right.value
+    elif operation == "*":
+        value = left.value * right.value
+    elif operation == "&":
+        value = left.value & right.value
+    elif operation == "|":
+        value = left.value | right.value
+    else:
+        value = left.value ^ right.value
+    return Expression(
+        f"({left.text} {operation} {right.text})",
+        wrap_unsigned(value, width),
+    )
+
+
+def generate_unsigned_case(
+    engine: random.Random,
+    case_index: int,
+    width: int,
+) -> tuple[str, int]:
+    modulus = U32_MODULUS if width == 32 else U64_MODULUS
+    type_name = "u32" if width == 32 else "u64"
+    arguments = {
+        "first": modulus - 1 - engine.randrange(0, 4096),
+        "second": modulus // 2 + engine.randrange(0, 4096),
+        "third": modulus // 4 + engine.randrange(0, 4096),
+    }
+    expression = generate_unsigned_expression(engine, arguments, 4, width)
+    expected_value = expression.value
+    expected_code = expected_value & 255
+    source = (
+        f"module random.unsigned_case{case_index};\n"
+        "\n"
+        f"fn calculate(first: {type_name}, second: {type_name}, "
+        f"third: {type_name}) -> {type_name} {{\n"
+        f"    return {expression.text};\n"
+        "}\n"
+        "\n"
+        "fn main() -> i32 {\n"
+        f"    let result: {type_name} = calculate("
+        f"{arguments['first']}, {arguments['second']}, {arguments['third']});\n"
+        f"    if (result == {expected_value}) {{ return {expected_code}; }}\n"
+        "    return 1;\n"
+        "}\n"
+    )
+    return source, expected_code
+
+
 def compile_and_run(
     compiler: pathlib.Path,
     llvm_mc: str,
@@ -323,10 +418,19 @@ def main() -> int:
 
     engine = random.Random(arguments.seed)
     for case_index in range(arguments.cases):
-        if case_index % 2 == 0:
+        case_kind = case_index % 4
+        if case_kind == 0:
             source, expected_code = generate_case(engine, case_index)
-        else:
+        elif case_kind == 1:
             source, expected_code = generate_i64_case(engine, case_index)
+        elif case_kind == 2:
+            source, expected_code = generate_unsigned_case(
+                engine, case_index, 32
+            )
+        else:
+            source, expected_code = generate_unsigned_case(
+                engine, case_index, 64
+            )
         compile_and_run(
             arguments.compiler,
             llvm_mc,

@@ -193,9 +193,11 @@ let wide: i64 = small as i64;
 let raw: *void = pointer as *void;
 ```
 
-Signed integer widening sign-extends. Narrowing keeps the low bits and never
-traps. A conversion does not happen implicitly merely because the destination
-type could represent the source value.
+Integer widening sign-extends a signed source and zero-extends an unsigned
+source. Narrowing keeps the low bits; changing signedness at the same width
+keeps the bit pattern. Integer conversions never trap. A conversion does not
+happen implicitly merely because the destination type could represent the
+source value.
 
 Assignment and compound assignment are statements, not expressions. There are
 no increment, decrement or comma operators.
