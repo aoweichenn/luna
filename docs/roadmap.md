@@ -27,12 +27,13 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] complete `u32` and `u64` vertical slices with unsigned code generation
 - [x] type-directed integer IR shared by signed and unsigned widths
 - [x] all fixed-width integer types
-- [ ] `isize`, `usize`, `f32`, `f64`
+- [x] target-sized `isize` and `usize`
+- [ ] `f32` and `f64`
 - [ ] explicit conversions for the remaining scalar and pointer types
 - [ ] complete operators and `do`/`for`/`switch`
 - [ ] raw pointers, fixed arrays and string literals
 - [ ] external C declarations
-- [ ] target data-layout tests
+- [x] explicit target model and target data-layout tests
 
 ## M2: aggregate and module completion
 

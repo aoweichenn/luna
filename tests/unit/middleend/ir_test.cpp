@@ -14,25 +14,47 @@ namespace {
     return luna_ir_module_function(module, module->entry_function);
 }
 
+[[nodiscard]] LunaTargetInfo Pointer32Target() {
+    LunaTargetInfo target = *luna_target_info_default();
+    target.triple = "test32-unknown-none";
+    target.architecture = LUNA_TARGET_ARCHITECTURE_UNKNOWN;
+    target.operating_system = LUNA_TARGET_OPERATING_SYSTEM_UNKNOWN;
+    target.abi = LUNA_TARGET_ABI_UNKNOWN;
+    target.data_layout.pointer.size_bits = 32U;
+    target.data_layout.pointer.abi_alignment_bits = 32U;
+    return target;
 }
 
-TEST(IrTypeTest, ReportsAllFixedWidthIntegerMetadata) {
+}
+
+TEST(IrTypeTest, ReportsAllIntegerMetadata) {
+    const LunaDataLayout &layout = luna_target_info_default()->data_layout;
+
     EXPECT_STREQ(luna_ir_type_name(LUNA_IR_TYPE_I8), "i8");
     EXPECT_TRUE(luna_ir_type_is_integer(LUNA_IR_TYPE_I8));
     EXPECT_TRUE(luna_ir_type_is_signed_integer(LUNA_IR_TYPE_I8));
-    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_I8), 8U);
+    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_I8, &layout), 8U);
     EXPECT_STREQ(luna_ir_type_name(LUNA_IR_TYPE_I16), "i16");
     EXPECT_TRUE(luna_ir_type_is_integer(LUNA_IR_TYPE_I16));
     EXPECT_TRUE(luna_ir_type_is_signed_integer(LUNA_IR_TYPE_I16));
-    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_I16), 16U);
+    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_I16, &layout), 16U);
     EXPECT_STREQ(luna_ir_type_name(LUNA_IR_TYPE_U8), "u8");
     EXPECT_TRUE(luna_ir_type_is_integer(LUNA_IR_TYPE_U8));
     EXPECT_FALSE(luna_ir_type_is_signed_integer(LUNA_IR_TYPE_U8));
-    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_U8), 8U);
+    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_U8, &layout), 8U);
     EXPECT_STREQ(luna_ir_type_name(LUNA_IR_TYPE_U16), "u16");
     EXPECT_TRUE(luna_ir_type_is_integer(LUNA_IR_TYPE_U16));
     EXPECT_FALSE(luna_ir_type_is_signed_integer(LUNA_IR_TYPE_U16));
-    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_U16), 16U);
+    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_U16, &layout), 16U);
+    EXPECT_STREQ(luna_ir_type_name(LUNA_IR_TYPE_ISIZE), "isize");
+    EXPECT_TRUE(luna_ir_type_is_integer(LUNA_IR_TYPE_ISIZE));
+    EXPECT_TRUE(luna_ir_type_is_signed_integer(LUNA_IR_TYPE_ISIZE));
+    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_ISIZE, &layout), 64U);
+    EXPECT_STREQ(luna_ir_type_name(LUNA_IR_TYPE_USIZE), "usize");
+    EXPECT_TRUE(luna_ir_type_is_integer(LUNA_IR_TYPE_USIZE));
+    EXPECT_FALSE(luna_ir_type_is_signed_integer(LUNA_IR_TYPE_USIZE));
+    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_USIZE, &layout), 64U);
+    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_ISIZE, nullptr), 0U);
 }
 
 TEST(IrVerifierTest, AcceptsWellTypedControlFlowGraph) {
@@ -58,6 +80,57 @@ TEST(IrVerifierTest, AcceptsGenericUnsignedIntegerInstructions) {
         "}\n"};
 
     EXPECT_TRUE(harness.Verify()) << harness.Diagnostics();
+}
+
+TEST(IrVerifierTest, RejectsAMissingTargetLayout) {
+    FrontendHarness harness{"module test.missing_target;\n"
+                            "fn main() -> i32 { return 0; }\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    harness.Module()->target = nullptr;
+    EXPECT_FALSE(harness.Verify());
+    EXPECT_NE(harness.Diagnostics().find("target data layout"),
+              std::string::npos);
+}
+
+TEST(IrVerifierTest, UsesTargetWidthWhenValidatingPointerSizedConstants) {
+    const LunaTargetInfo target32 = Pointer32Target();
+    FrontendHarness harness{"module test.usize_ir_width;\n"
+                            "fn value() -> usize { return 1; }\n"
+                            "fn main() -> i32 { return 0; }\n",
+                            &target32};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaIrInstruction *constant = FindInstruction(
+        luna_ir_module_function(harness.Module(), 0U), LUNA_IR_CONST_INTEGER);
+    ASSERT_NE(constant, nullptr);
+    constant->immediate = std::uint64_t{1} << 32U;
+
+    EXPECT_FALSE(harness.Verify());
+    EXPECT_NE(harness.Diagnostics().find("exceeds its type storage width"),
+              std::string::npos);
+}
+
+TEST(IrPrinterTest, UsesTargetWidthWhenNamingIntegerConversions) {
+    const LunaTargetInfo target32 = Pointer32Target();
+    FrontendHarness harness{
+        "module test.isize_ir_print;\n"
+        "fn narrow(value: i64) -> isize { return value as isize; }\n"
+        "fn main() -> i32 { return 0; }\n",
+        &target32};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaStringBuilder output{};
+    luna_string_builder_init(&output);
+    const bool printed = luna_ir_print(harness.Module(), &output);
+    const std::string text =
+        printed ? std::string{luna_string_builder_data(&output), output.length}
+                : std::string{};
+    luna_string_builder_destroy(&output);
+
+    ASSERT_TRUE(printed);
+    EXPECT_NE(text.find("target \"test32-unknown-none\""), std::string::npos);
+    EXPECT_NE(text.find("trunc.i64.isize"), std::string::npos);
 }
 
 TEST(IrVerifierTest, RejectsValueUsedBeforeItsDefinition) {

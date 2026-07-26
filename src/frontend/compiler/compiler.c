@@ -66,6 +66,12 @@ int luna_compile(const LunaCompilerOptions *options, FILE *diagnostic_stream) {
         return 1;
     }
 
+    if (!luna_target_info_is_supported(options->target)) {
+        luna_diagnostic_error_plain(
+            &diagnostics, "compiler target is missing or unsupported");
+        return 1;
+    }
+
     if (options->emit_kind != LUNA_EMIT_CHECK && options->output_path == NULL) {
         luna_diagnostic_error_plain(&diagnostics,
                                     "output path must not be null");
@@ -87,7 +93,7 @@ int luna_compile(const LunaCompilerOptions *options, FILE *diagnostic_stream) {
     LunaProgram *program = luna_parser_parse_program(&parser);
 
     LunaIrModule module;
-    luna_ir_module_init(&module);
+    luna_ir_module_init(&module, options->target);
 
     bool success =
         program != NULL && luna_diagnostic_error_count(&diagnostics) == 0U;

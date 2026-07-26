@@ -61,6 +61,8 @@ static LunaIrType luna_sema_ir_type(LunaTypeKind type) {
         return LUNA_IR_TYPE_I32;
     case LUNA_TYPE_I64:
         return LUNA_IR_TYPE_I64;
+    case LUNA_TYPE_ISIZE:
+        return LUNA_IR_TYPE_ISIZE;
     case LUNA_TYPE_U8:
         return LUNA_IR_TYPE_U8;
     case LUNA_TYPE_U16:
@@ -69,6 +71,8 @@ static LunaIrType luna_sema_ir_type(LunaTypeKind type) {
         return LUNA_IR_TYPE_U32;
     case LUNA_TYPE_U64:
         return LUNA_IR_TYPE_U64;
+    case LUNA_TYPE_USIZE:
+        return LUNA_IR_TYPE_USIZE;
     case LUNA_TYPE_INVALID:
         break;
     }
@@ -365,54 +369,29 @@ luna_sema_binary_integer_opcode(LunaTokenKind operator_kind) {
     }
 }
 
-static uint64_t luna_sema_integer_maximum(LunaTypeKind type) {
-    switch (type) {
-    case LUNA_TYPE_I8:
-        return (uint64_t)INT8_MAX;
-    case LUNA_TYPE_I16:
-        return (uint64_t)INT16_MAX;
-    case LUNA_TYPE_I32:
-        return (uint64_t)INT32_MAX;
-    case LUNA_TYPE_I64:
-        return (uint64_t)INT64_MAX;
-    case LUNA_TYPE_U8:
-        return (uint64_t)UINT8_MAX;
-    case LUNA_TYPE_U16:
-        return (uint64_t)UINT16_MAX;
-    case LUNA_TYPE_U32:
-        return (uint64_t)UINT32_MAX;
-    case LUNA_TYPE_U64:
-        return UINT64_MAX;
-    case LUNA_TYPE_INVALID:
-    case LUNA_TYPE_VOID:
-    case LUNA_TYPE_BOOL:
+static uint64_t luna_sema_integer_maximum(const LunaSemaContext *context,
+                                          LunaTypeKind type) {
+    const uint32_t width =
+        luna_type_kind_bit_width(type, &context->module->target->data_layout);
+    if (width == 0U || width > 64U) {
         return 0U;
     }
-
-    return 0U;
+    if (luna_type_kind_is_unsigned_integer(type)) {
+        return width == 64U ? UINT64_MAX : (UINT64_C(1) << width) - 1U;
+    }
+    return width == 64U ? (uint64_t)INT64_MAX
+                        : (UINT64_C(1) << (width - 1U)) - 1U;
 }
 
-static uint64_t luna_sema_signed_minimum_magnitude(LunaTypeKind type) {
-    switch (type) {
-    case LUNA_TYPE_I8:
-        return (uint64_t)INT8_MAX + 1U;
-    case LUNA_TYPE_I16:
-        return (uint64_t)INT16_MAX + 1U;
-    case LUNA_TYPE_I32:
-        return (uint64_t)INT32_MAX + 1U;
-    case LUNA_TYPE_I64:
-        return (uint64_t)INT64_MAX + 1U;
-    case LUNA_TYPE_INVALID:
-    case LUNA_TYPE_VOID:
-    case LUNA_TYPE_BOOL:
-    case LUNA_TYPE_U8:
-    case LUNA_TYPE_U16:
-    case LUNA_TYPE_U32:
-    case LUNA_TYPE_U64:
+static uint64_t
+luna_sema_signed_minimum_magnitude(const LunaSemaContext *context,
+                                   LunaTypeKind type) {
+    if (!luna_type_kind_is_signed_integer(type)) {
         return 0U;
     }
-
-    return 0U;
+    const uint32_t width =
+        luna_type_kind_bit_width(type, &context->module->target->data_layout);
+    return width == 0U || width > 64U ? 0U : UINT64_C(1) << (width - 1U);
 }
 
 static LunaCheckedValue
@@ -662,7 +641,8 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
         const LunaTypeKind literal_type =
             luna_sema_is_integer_type(expected_type) ? expected_type
                                                      : LUNA_TYPE_I32;
-        const uint64_t maximum = luna_sema_integer_maximum(literal_type);
+        const uint64_t maximum =
+            luna_sema_integer_maximum(context, literal_type);
         if (expression->as.integer > maximum) {
             luna_diagnostic_error(context->diagnostics, expression->span,
                                   "integer literal does not fit in %s",
@@ -765,7 +745,7 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
             luna_type_kind_is_signed_integer(operand_type) &&
             expression->as.unary.operand->kind == LUNA_EXPRESSION_INTEGER &&
             expression->as.unary.operand->as.integer ==
-                luna_sema_signed_minimum_magnitude(operand_type)) {
+                luna_sema_signed_minimum_magnitude(context, operand_type)) {
             LunaIrInstruction instruction =
                 luna_sema_instruction(LUNA_IR_CONST_INTEGER, expression->span);
             instruction.immediate = expression->as.unary.operand->as.integer;
@@ -1258,7 +1238,7 @@ static bool luna_sema_collect_functions(LunaSemaContext *context) {
         if (syntax->parameter_count > 6U) {
             luna_diagnostic_error(
                 context->diagnostics, syntax->span,
-                "milestone M0 supports at most six integer arguments");
+                "the bootstrap ABI supports at most six integer arguments");
             continue;
         }
 
@@ -1322,7 +1302,7 @@ static bool luna_sema_find_entry(LunaSemaContext *context) {
         entry->syntax->return_type.kind != LUNA_TYPE_I32) {
         luna_diagnostic_error(
             context->diagnostics, entry->syntax->span,
-            "milestone M0 entry point must be 'fn main() -> i32'");
+            "bootstrap entry point must be 'fn main() -> i32'");
         return false;
     }
 
@@ -1384,6 +1364,13 @@ static void luna_sema_lower_function(LunaSemaContext *context,
 
 bool luna_sema_lower(const LunaProgram *program,
                      LunaDiagnosticEngine *diagnostics, LunaIrModule *module) {
+    if (module == NULL || module->target == NULL ||
+        !luna_data_layout_is_valid(&module->target->data_layout)) {
+        luna_diagnostic_error_plain(
+            diagnostics, "semantic lowering requires a valid target layout");
+        return false;
+    }
+
     LunaSemaContext context = {
         .program = program,
         .diagnostics = diagnostics,

@@ -1,5 +1,7 @@
 #include "luna/frontend/type/type.h"
 
+#include <stddef.h>
+
 const char *luna_type_kind_name(LunaTypeKind kind) {
     switch (kind) {
     case LUNA_TYPE_INVALID:
@@ -16,6 +18,8 @@ const char *luna_type_kind_name(LunaTypeKind kind) {
         return "i32";
     case LUNA_TYPE_I64:
         return "i64";
+    case LUNA_TYPE_ISIZE:
+        return "isize";
     case LUNA_TYPE_U8:
         return "u8";
     case LUNA_TYPE_U16:
@@ -24,6 +28,8 @@ const char *luna_type_kind_name(LunaTypeKind kind) {
         return "u32";
     case LUNA_TYPE_U64:
         return "u64";
+    case LUNA_TYPE_USIZE:
+        return "usize";
     }
 
     return "<unknown>";
@@ -36,15 +42,18 @@ bool luna_type_kind_is_integer(LunaTypeKind kind) {
 
 bool luna_type_kind_is_signed_integer(LunaTypeKind kind) {
     return kind == LUNA_TYPE_I8 || kind == LUNA_TYPE_I16 ||
-           kind == LUNA_TYPE_I32 || kind == LUNA_TYPE_I64;
+           kind == LUNA_TYPE_I32 || kind == LUNA_TYPE_I64 ||
+           kind == LUNA_TYPE_ISIZE;
 }
 
 bool luna_type_kind_is_unsigned_integer(LunaTypeKind kind) {
     return kind == LUNA_TYPE_U8 || kind == LUNA_TYPE_U16 ||
-           kind == LUNA_TYPE_U32 || kind == LUNA_TYPE_U64;
+           kind == LUNA_TYPE_U32 || kind == LUNA_TYPE_U64 ||
+           kind == LUNA_TYPE_USIZE;
 }
 
-uint32_t luna_type_kind_bit_width(LunaTypeKind kind) {
+uint32_t luna_type_kind_bit_width(LunaTypeKind kind,
+                                  const LunaDataLayout *data_layout) {
     switch (kind) {
     case LUNA_TYPE_BOOL:
         return 1U;
@@ -60,6 +69,9 @@ uint32_t luna_type_kind_bit_width(LunaTypeKind kind) {
     case LUNA_TYPE_I64:
     case LUNA_TYPE_U64:
         return 64U;
+    case LUNA_TYPE_ISIZE:
+    case LUNA_TYPE_USIZE:
+        return data_layout == NULL ? 0U : data_layout->pointer.size_bits;
     case LUNA_TYPE_INVALID:
     case LUNA_TYPE_VOID:
         return 0U;

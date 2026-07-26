@@ -10,6 +10,12 @@ The compiler owns the language semantics. LLVM tools are currently used only
 to encode emitted x86-64 assembly and link ELF64 test executables. They are not
 used as the compiler IR, optimizer or instruction selector.
 
+Target selection produces an immutable target description before semantic
+lowering begins. It records the architecture, operating system, ABI, byte
+order, scalar sizes and ABI alignments. The target description is carried by
+the typed IR module so target-sized language types never depend on host C
+properties.
+
 ## Pipeline
 
 ```text
@@ -62,7 +68,8 @@ with virtual values and explicit local slots:
 
 - `const`
 - `load` and `store`
-- type-directed integer arithmetic shared by all fixed-width integer types
+- type-directed integer arithmetic shared by fixed-width and target-sized
+  integer types
 - explicit integer conversions whose extension or truncation follows source
   and target type metadata
 - comparisons
@@ -82,15 +89,19 @@ signatures and flattened argument ownership, terminator placement, cached
 predecessor counts and graph reachability. Backend emission never receives
 unchecked compiler-generated IR.
 
-The IR is target-neutral. Target-specific registers, calling convention,
-instruction encodings and relocations must not appear in it.
+The IR instruction set is target-neutral. Each module is parameterized by an
+explicit target data layout so `isize` and `usize` retain their exact IR types
+while width-dependent verification and conversion printing remain
+deterministic. Textual IR records the target triple. Target-specific
+registers, calling convention, instruction encodings and relocations do not
+appear in IR instructions.
 
 ## x86-64 backend
 
 The first backend is correctness-first:
 
 - System V's first six integer argument-register assignments and integer result
-  register for every fixed-width integer type;
+  register for every fixed-width and target-sized integer type;
 - explicit stack frames;
 - virtual values assigned stack homes;
 - canonical zero-extended raw bits in the low 32 bits for 8-bit and 16-bit

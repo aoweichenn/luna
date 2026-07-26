@@ -14,6 +14,7 @@ extern "C" {
 #include "luna/frontend/token/token.h"
 #include "luna/middleend/ir/ir.h"
 #include "luna/middleend/sema/sema.h"
+#include "luna/target/target.h"
 }
 
 #endif

@@ -1,6 +1,8 @@
 #ifndef LUNA_COMPILER_H
 #define LUNA_COMPILER_H
 
+#include "luna/target/target.h"
+
 #include <stdio.h>
 
 typedef enum LunaEmitKind {
@@ -13,6 +15,7 @@ typedef struct LunaCompilerOptions {
     const char *input_path;
     const char *output_path;
     LunaEmitKind emit_kind;
+    const LunaTargetInfo *target;
 } LunaCompilerOptions;
 
 int luna_compile(const LunaCompilerOptions *options, FILE *diagnostic_stream);

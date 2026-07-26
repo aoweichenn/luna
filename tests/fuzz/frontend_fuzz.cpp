@@ -20,7 +20,7 @@ constexpr std::size_t LUNA_FUZZ_ARENA_BLOCK_SIZE = 32U * 1024U;
     LunaIrModule module{};
     LunaStringBuilder assembly{};
     luna_arena_init(&arena, LUNA_FUZZ_ARENA_BLOCK_SIZE);
-    luna_ir_module_init(&module);
+    luna_ir_module_init(&module, luna_target_info_default());
     luna_string_builder_init(&assembly);
 
     LunaDiagnosticEngine diagnostics{};

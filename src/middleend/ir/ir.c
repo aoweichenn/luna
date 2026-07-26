@@ -26,7 +26,8 @@ static void luna_ir_function_destroy(LunaIrFunction *function) {
     luna_vector_destroy(&function->blocks);
 }
 
-void luna_ir_module_init(LunaIrModule *module) {
+void luna_ir_module_init(LunaIrModule *module, const LunaTargetInfo *target) {
+    module->target = target;
     luna_vector_init(&module->functions, sizeof(LunaIrFunction));
     module->entry_function = LUNA_IR_INVALID_ID;
 }
@@ -38,6 +39,7 @@ void luna_ir_module_destroy(LunaIrModule *module) {
     }
 
     luna_vector_destroy(&module->functions);
+    module->target = NULL;
     module->entry_function = LUNA_IR_INVALID_ID;
 }
 
@@ -150,6 +152,8 @@ const char *luna_ir_type_name(LunaIrType type) {
         return "i32";
     case LUNA_IR_TYPE_I64:
         return "i64";
+    case LUNA_IR_TYPE_ISIZE:
+        return "isize";
     case LUNA_IR_TYPE_U8:
         return "u8";
     case LUNA_IR_TYPE_U16:
@@ -158,6 +162,8 @@ const char *luna_ir_type_name(LunaIrType type) {
         return "u32";
     case LUNA_IR_TYPE_U64:
         return "u64";
+    case LUNA_IR_TYPE_USIZE:
+        return "usize";
     }
 
     return "<invalid>";
@@ -166,16 +172,19 @@ const char *luna_ir_type_name(LunaIrType type) {
 bool luna_ir_type_is_integer(LunaIrType type) {
     return type == LUNA_IR_TYPE_I8 || type == LUNA_IR_TYPE_I16 ||
            type == LUNA_IR_TYPE_I32 || type == LUNA_IR_TYPE_I64 ||
-           type == LUNA_IR_TYPE_U8 || type == LUNA_IR_TYPE_U16 ||
-           type == LUNA_IR_TYPE_U32 || type == LUNA_IR_TYPE_U64;
+           type == LUNA_IR_TYPE_ISIZE || type == LUNA_IR_TYPE_U8 ||
+           type == LUNA_IR_TYPE_U16 || type == LUNA_IR_TYPE_U32 ||
+           type == LUNA_IR_TYPE_U64 || type == LUNA_IR_TYPE_USIZE;
 }
 
 bool luna_ir_type_is_signed_integer(LunaIrType type) {
     return type == LUNA_IR_TYPE_I8 || type == LUNA_IR_TYPE_I16 ||
-           type == LUNA_IR_TYPE_I32 || type == LUNA_IR_TYPE_I64;
+           type == LUNA_IR_TYPE_I32 || type == LUNA_IR_TYPE_I64 ||
+           type == LUNA_IR_TYPE_ISIZE;
 }
 
-uint32_t luna_ir_type_bit_width(LunaIrType type) {
+uint32_t luna_ir_type_bit_width(LunaIrType type,
+                                const LunaDataLayout *data_layout) {
     switch (type) {
     case LUNA_IR_TYPE_BOOL:
         return 1U;
@@ -191,6 +200,9 @@ uint32_t luna_ir_type_bit_width(LunaIrType type) {
     case LUNA_IR_TYPE_I64:
     case LUNA_IR_TYPE_U64:
         return 64U;
+    case LUNA_IR_TYPE_ISIZE:
+    case LUNA_IR_TYPE_USIZE:
+        return data_layout == NULL ? 0U : data_layout->pointer.size_bits;
     case LUNA_IR_TYPE_VOID:
         return 0U;
     }
@@ -206,8 +218,9 @@ static bool luna_ir_type_is_return(LunaIrType type) {
     return type == LUNA_IR_TYPE_VOID || luna_ir_type_is_value(type);
 }
 
-static uint64_t luna_ir_integer_bit_mask(LunaIrType type) {
-    const uint32_t width = luna_ir_type_bit_width(type);
+static uint64_t luna_ir_integer_bit_mask(LunaIrType type,
+                                         const LunaDataLayout *data_layout) {
+    const uint32_t width = luna_ir_type_bit_width(type, data_layout);
     if (width == 64U) {
         return UINT64_MAX;
     }
@@ -348,7 +361,8 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
                                   "integer constant has non-integer type");
         }
         if (instruction->immediate >
-            luna_ir_integer_bit_mask(instruction->type)) {
+            luna_ir_integer_bit_mask(instruction->type,
+                                     &module->target->data_layout)) {
             return luna_ir_reject(
                 reason, "integer constant exceeds its type storage width");
         }
@@ -852,6 +866,15 @@ bool luna_ir_verify(const LunaIrModule *module, FILE *error_stream) {
         return false;
     }
 
+    if (module->target == NULL || module->target->triple == NULL ||
+        module->target->triple[0] == '\0' ||
+        !luna_data_layout_is_valid(&module->target->data_layout)) {
+        (void)fputs(
+            "IR verification: target data layout is missing or invalid\n",
+            stream);
+        return false;
+    }
+
     if (module->entry_function == LUNA_IR_INVALID_ID ||
         (size_t)module->entry_function >= module->functions.length) {
         (void)fputs("IR verification: missing entry function\n", stream);
@@ -886,8 +909,9 @@ static bool luna_ir_print_value(LunaStringBuilder *output,
     return luna_string_builder_append_format(output, "%%%u", value);
 }
 
-static int64_t luna_ir_signed_immediate(LunaIrType type, uint64_t bits) {
-    const uint64_t maximum_bits = luna_ir_integer_bit_mask(type);
+static int64_t luna_ir_signed_immediate(LunaIrType type, uint64_t bits,
+                                        const LunaDataLayout *data_layout) {
+    const uint64_t maximum_bits = luna_ir_integer_bit_mask(type, data_layout);
     const uint64_t maximum_positive = maximum_bits >> 1U;
     if (bits <= maximum_positive) {
         return (int64_t)bits;
@@ -926,7 +950,8 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
                 output, "const.%s %" PRId64 "\n",
                 luna_ir_type_name(instruction->type),
                 luna_ir_signed_immediate(instruction->type,
-                                         instruction->immediate));
+                                         instruction->immediate,
+                                         &module->target->data_layout));
         }
         return luna_string_builder_append_format(
             output, "const.%s %" PRIu64 "\n",
@@ -973,8 +998,10 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
     case LUNA_IR_CONVERT_INTEGER: {
         const LunaIrType source_type =
             luna_ir_instruction_operand_type(function, instruction);
-        const uint32_t source_width = luna_ir_type_bit_width(source_type);
-        const uint32_t target_width = luna_ir_type_bit_width(instruction->type);
+        const uint32_t source_width =
+            luna_ir_type_bit_width(source_type, &module->target->data_layout);
+        const uint32_t target_width = luna_ir_type_bit_width(
+            instruction->type, &module->target->data_layout);
         const char *name = "bitcast";
         if (source_width > target_width) {
             name = "trunc";
@@ -1136,7 +1163,10 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
 }
 
 bool luna_ir_print(const LunaIrModule *module, LunaStringBuilder *output) {
-    if (!luna_string_builder_append_c_string(output, "ir luna.v0\n\n")) {
+    if (module == NULL || module->target == NULL ||
+        module->target->triple == NULL ||
+        !luna_string_builder_append_format(
+            output, "ir luna.v0\ntarget \"%s\"\n\n", module->target->triple)) {
         return false;
     }
 

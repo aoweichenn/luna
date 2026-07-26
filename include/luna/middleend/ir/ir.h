@@ -4,6 +4,7 @@
 #include "luna/frontend/source/source.h"
 #include "luna/frontend/support/buffer.h"
 #include "luna/frontend/support/string_view.h"
+#include "luna/target/target.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -23,10 +24,12 @@ typedef enum LunaIrType {
     LUNA_IR_TYPE_I16,
     LUNA_IR_TYPE_I32,
     LUNA_IR_TYPE_I64,
+    LUNA_IR_TYPE_ISIZE,
     LUNA_IR_TYPE_U8,
     LUNA_IR_TYPE_U16,
     LUNA_IR_TYPE_U32,
-    LUNA_IR_TYPE_U64
+    LUNA_IR_TYPE_U64,
+    LUNA_IR_TYPE_USIZE
 } LunaIrType;
 
 typedef enum LunaIrOpcode {
@@ -94,11 +97,12 @@ typedef struct LunaIrFunction {
 } LunaIrFunction;
 
 typedef struct LunaIrModule {
+    const LunaTargetInfo *target;
     LunaVector functions;
     LunaIrFunctionId entry_function;
 } LunaIrModule;
 
-void luna_ir_module_init(LunaIrModule *module);
+void luna_ir_module_init(LunaIrModule *module, const LunaTargetInfo *target);
 void luna_ir_module_destroy(LunaIrModule *module);
 LunaIrFunctionId luna_ir_module_add_function(LunaIrModule *module,
                                              LunaStringView module_name,
@@ -124,6 +128,7 @@ bool luna_ir_print(const LunaIrModule *module, LunaStringBuilder *output);
 const char *luna_ir_type_name(LunaIrType type);
 bool luna_ir_type_is_integer(LunaIrType type);
 bool luna_ir_type_is_signed_integer(LunaIrType type);
-uint32_t luna_ir_type_bit_width(LunaIrType type);
+uint32_t luna_ir_type_bit_width(LunaIrType type,
+                                const LunaDataLayout *data_layout);
 
 #endif

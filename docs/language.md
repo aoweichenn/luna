@@ -78,6 +78,11 @@ f32 f64
 void
 ```
 
+`isize` and `usize` have the target pointer width. They remain exact,
+independent language types: even when the current target gives them the same
+representation as `i64` and `u64`, mixing those types still requires an
+explicit conversion.
+
 Composite type syntax:
 
 ```luna
@@ -197,7 +202,8 @@ Integer widening sign-extends a signed source and zero-extends an unsigned
 source. Narrowing keeps the low bits; changing signedness at the same width
 keeps the bit pattern. Integer conversions never trap. A conversion does not
 happen implicitly merely because the destination type could represent the
-source value.
+source value. These rules include `isize` and `usize`; their source or
+destination width comes from the selected target data layout.
 
 Assignment and compound assignment are statements, not expressions. There are
 no increment, decrement or comma operators.

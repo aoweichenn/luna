@@ -168,6 +168,107 @@ TEST(SemaTest, AcceptsMinimumI64Literal) {
     EXPECT_EQ(constant->immediate, std::uint64_t{1} << 63U);
 }
 
+TEST(SemaTest, PreservesPointerSizedIntegerTypesInTypedIr) {
+    FrontendHarness harness{
+        "module test.pointer_sized_ir;\n"
+        "fn signed_calculate(left: isize, right: isize) -> isize {\n"
+        "    return (left + right) >> 65;\n"
+        "}\n"
+        "fn unsigned_calculate(left: usize, right: usize) -> usize {\n"
+        "    return (left * right) / 3;\n"
+        "}\n"
+        "fn main() -> i32 {\n"
+        "    let signed: isize = signed_calculate(-16, 8);\n"
+        "    let unsigned: usize = unsigned_calculate(7, 9);\n"
+        "    if (signed == -4 && unsigned == 21) { return 42; }\n"
+        "    return 1;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaIrFunction *signed_function =
+        luna_ir_module_function(harness.Module(), 0U);
+    LunaIrFunction *unsigned_function =
+        luna_ir_module_function(harness.Module(), 1U);
+    ASSERT_NE(signed_function, nullptr);
+    ASSERT_NE(unsigned_function, nullptr);
+    EXPECT_EQ(signed_function->return_type, LUNA_IR_TYPE_ISIZE);
+    EXPECT_EQ(unsigned_function->return_type, LUNA_IR_TYPE_USIZE);
+
+    LunaIrInstruction *signed_shift =
+        FindInstruction(signed_function, LUNA_IR_SHIFT_RIGHT_INTEGER);
+    LunaIrInstruction *unsigned_division =
+        FindInstruction(unsigned_function, LUNA_IR_DIV_INTEGER);
+    ASSERT_NE(signed_shift, nullptr);
+    ASSERT_NE(unsigned_division, nullptr);
+    EXPECT_EQ(signed_shift->type, LUNA_IR_TYPE_ISIZE);
+    EXPECT_EQ(unsigned_division->type, LUNA_IR_TYPE_USIZE);
+}
+
+TEST(SemaTest, UsesTheTargetPointerWidthForIntegerLiteralBounds) {
+    LunaTargetInfo target32 = *luna_target_info_default();
+    target32.triple = "test32-unknown-none";
+    target32.architecture = LUNA_TARGET_ARCHITECTURE_UNKNOWN;
+    target32.operating_system = LUNA_TARGET_OPERATING_SYSTEM_UNKNOWN;
+    target32.abi = LUNA_TARGET_ABI_UNKNOWN;
+    target32.data_layout.pointer.size_bits = 32U;
+    target32.data_layout.pointer.abi_alignment_bits = 32U;
+    ASSERT_TRUE(luna_data_layout_is_valid(&target32.data_layout));
+
+    FrontendHarness valid{
+        "module test.pointer_width_32;\n"
+        "fn signed_minimum() -> isize { return -2147483648; }\n"
+        "fn signed_maximum() -> isize { return 2147483647; }\n"
+        "fn unsigned_maximum() -> usize { return 4294967295; }\n"
+        "fn main() -> i32 { return 0; }\n",
+        &target32};
+    ASSERT_TRUE(valid.ParseAndLower()) << valid.Diagnostics();
+    ASSERT_TRUE(valid.Verify()) << valid.Diagnostics();
+
+    FrontendHarness signed_overflow{
+        "module test.isize_overflow_32;\n"
+        "fn value() -> isize { return 2147483648; }\n"
+        "fn main() -> i32 { return 0; }\n",
+        &target32};
+    EXPECT_FALSE(signed_overflow.ParseAndLower());
+    EXPECT_NE(signed_overflow.Diagnostics().find(
+                  "integer literal does not fit in isize"),
+              std::string::npos);
+
+    FrontendHarness unsigned_overflow{
+        "module test.usize_overflow_32;\n"
+        "fn value() -> usize { return 4294967296; }\n"
+        "fn main() -> i32 { return 0; }\n",
+        &target32};
+    EXPECT_FALSE(unsigned_overflow.ParseAndLower());
+    EXPECT_NE(unsigned_overflow.Diagnostics().find(
+                  "integer literal does not fit in usize"),
+              std::string::npos);
+}
+
+TEST(SemaTest, RejectsImplicitMixingWithStorageEquivalentIntegers) {
+    FrontendHarness signed_harness{
+        "module test.isize_i64_mix;\n"
+        "fn combine(left: isize, right: i64) -> isize {\n"
+        "    return left + right;\n"
+        "}\n"
+        "fn main() -> i32 { return 0; }\n"};
+    EXPECT_FALSE(signed_harness.ParseAndLower());
+    EXPECT_NE(signed_harness.Diagnostics().find("expected isize, found i64"),
+              std::string::npos);
+
+    FrontendHarness unsigned_harness{
+        "module test.usize_u64_mix;\n"
+        "fn combine(left: usize, right: u64) -> usize {\n"
+        "    return left + right;\n"
+        "}\n"
+        "fn main() -> i32 { return 0; }\n"};
+    EXPECT_FALSE(unsigned_harness.ParseAndLower());
+    EXPECT_NE(unsigned_harness.Diagnostics().find("expected usize, found u64"),
+              std::string::npos);
+}
+
 TEST(SemaTest, AcceptsMinimumNarrowSignedLiterals) {
     FrontendHarness harness{"module test.minimum_narrow;\n"
                             "fn minimum_i8() -> i8 { return -128; }\n"
@@ -340,13 +441,15 @@ TEST(SemaTest, LowersWidthAndSignednessIntegerConversions) {
     EXPECT_EQ(conversion_count, 4U);
 }
 
-TEST(SemaTest, LowersEveryFixedWidthIntegerConversionPair) {
-    constexpr std::array<std::string_view, 8U> LUNA_TEST_TYPE_NAMES = {
-        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+TEST(SemaTest, LowersEveryIntegerConversionPair) {
+    constexpr std::array<std::string_view, 10U> LUNA_TEST_TYPE_NAMES = {
+        "i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize",
     };
-    constexpr std::array<LunaIrType, 8U> LUNA_TEST_IR_TYPES = {
-        LUNA_IR_TYPE_I8, LUNA_IR_TYPE_I16, LUNA_IR_TYPE_I32, LUNA_IR_TYPE_I64,
-        LUNA_IR_TYPE_U8, LUNA_IR_TYPE_U16, LUNA_IR_TYPE_U32, LUNA_IR_TYPE_U64,
+    constexpr std::array<LunaIrType, 10U> LUNA_TEST_IR_TYPES = {
+        LUNA_IR_TYPE_I8,    LUNA_IR_TYPE_I16,   LUNA_IR_TYPE_I32,
+        LUNA_IR_TYPE_I64,   LUNA_IR_TYPE_ISIZE, LUNA_IR_TYPE_U8,
+        LUNA_IR_TYPE_U16,   LUNA_IR_TYPE_U32,   LUNA_IR_TYPE_U64,
+        LUNA_IR_TYPE_USIZE,
     };
 
     std::string source{"module test.conversion_matrix;\n"};
@@ -370,7 +473,7 @@ TEST(SemaTest, LowersEveryFixedWidthIntegerConversionPair) {
     FrontendHarness harness{source};
     ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
     ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
-    ASSERT_EQ(harness.Module()->functions.length, 65U);
+    ASSERT_EQ(harness.Module()->functions.length, 101U);
 
     std::size_t function_index = 0U;
     for (std::size_t source_index = 0U;

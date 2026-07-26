@@ -137,4 +137,37 @@ TEST(X8664BackendTest, EmitsCompleteNarrowIntegerSemantics) {
     EXPECT_NE(assembly.find("_safe:"), std::string::npos);
 }
 
+TEST(X8664BackendTest, EmitsPointerSizedIntegerSemanticsAndAbi) {
+    FrontendHarness harness{
+        "module test.pointer_sized_codegen;\n"
+        "fn signed_value(left: isize, right: isize) -> isize {\n"
+        "    let quotient: isize = left / right;\n"
+        "    if (left < right) { return quotient >> right; }\n"
+        "    return quotient;\n"
+        "}\n"
+        "fn unsigned_value(left: usize, right: usize) -> usize {\n"
+        "    let quotient: usize = left / right;\n"
+        "    if (left > right) { return quotient >> right; }\n"
+        "    return quotient;\n"
+        "}\n"
+        "fn main() -> i32 {\n"
+        "    let signed: isize = signed_value(-64, 2);\n"
+        "    let unsigned: usize = unsigned_value(64, 2);\n"
+        "    let signed_bits: i64 = signed as i64;\n"
+        "    let unsigned_bits: u64 = unsigned as u64;\n"
+        "    if (signed_bits < 0 && unsigned_bits > 0) { return 42; }\n"
+        "    return 1;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.EmitAssembly()) << harness.Diagnostics();
+    const std::string assembly = harness.Assembly();
+    EXPECT_NE(assembly.find("movq %rdi"), std::string::npos);
+    EXPECT_NE(assembly.find("idivq"), std::string::npos);
+    EXPECT_NE(assembly.find("divq"), std::string::npos);
+    EXPECT_NE(assembly.find("sarq %cl, %rax"), std::string::npos);
+    EXPECT_NE(assembly.find("shrq %cl, %rax"), std::string::npos);
+    EXPECT_NE(assembly.find("setl %al"), std::string::npos);
+    EXPECT_NE(assembly.find("seta %al"), std::string::npos);
+}
+
 }

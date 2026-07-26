@@ -128,6 +128,9 @@ static LunaTypeRef luna_parser_parse_type(LunaParser *parser) {
     case LUNA_TOKEN_I64:
         kind = LUNA_TYPE_I64;
         break;
+    case LUNA_TOKEN_ISIZE:
+        kind = LUNA_TYPE_ISIZE;
+        break;
     case LUNA_TOKEN_U8:
         kind = LUNA_TYPE_U8;
         break;
@@ -139,6 +142,9 @@ static LunaTypeRef luna_parser_parse_type(LunaParser *parser) {
         break;
     case LUNA_TOKEN_U64:
         kind = LUNA_TYPE_U64;
+        break;
+    case LUNA_TOKEN_USIZE:
+        kind = LUNA_TYPE_USIZE;
         break;
     case LUNA_TOKEN_VOID:
         kind = LUNA_TYPE_VOID;
@@ -703,7 +709,7 @@ static LunaStatement *luna_parser_parse_statement(LunaParser *parser) {
         luna_diagnostic_error(
             parser->diagnostics, unsupported.span,
             "%s is accepted by the language design but is not implemented "
-            "in milestone M0",
+            "in the current bootstrap compiler",
             luna_token_kind_name(unsupported.kind));
         luna_parser_advance(parser);
         return NULL;
@@ -724,7 +730,7 @@ static LunaStatement *luna_parser_parse_statement(LunaParser *parser) {
         if (expression->kind != LUNA_EXPRESSION_NAME) {
             luna_diagnostic_error(
                 parser->diagnostics, expression->span,
-                "milestone M0 assignments require a local variable name");
+                "bootstrap assignments require a local variable name");
             return NULL;
         }
 
@@ -962,7 +968,8 @@ LunaProgram *luna_parser_parse_program(LunaParser *parser) {
         if (!luna_parser_match(parser, LUNA_TOKEN_FN)) {
             luna_diagnostic_error(
                 parser->diagnostics, parser->current.span,
-                "milestone M0 expects a function declaration, found %s",
+                "the bootstrap compiler expects a function declaration, "
+                "found %s",
                 luna_token_kind_name(parser->current.kind));
             luna_parser_advance(parser);
             continue;

@@ -132,6 +132,28 @@ TEST(ParserTest, ParsesAllNarrowIntegerTypes) {
               LUNA_TYPE_U16);
 }
 
+TEST(ParserTest, ParsesPointerSizedIntegerTypes) {
+    FrontendHarness harness{
+        "module test.pointer_sized_types;\n"
+        "fn convert(offset: isize, size: usize) -> usize {\n"
+        "    let adjusted: isize = offset;\n"
+        "    return adjusted as usize;\n"
+        "}\n"
+        "fn main() -> i32 { return 0; }\n"};
+
+    ASSERT_TRUE(harness.Parse()) << harness.Diagnostics();
+    const LunaFunction *function = harness.Program()->first_function;
+    ASSERT_NE(function, nullptr);
+    EXPECT_EQ(function->return_type.kind, LUNA_TYPE_USIZE);
+    ASSERT_NE(function->first_parameter, nullptr);
+    EXPECT_EQ(function->first_parameter->type.kind, LUNA_TYPE_ISIZE);
+    ASSERT_NE(function->first_parameter->next, nullptr);
+    EXPECT_EQ(function->first_parameter->next->type.kind, LUNA_TYPE_USIZE);
+    ASSERT_NE(function->body, nullptr);
+    ASSERT_NE(function->body->first, nullptr);
+    EXPECT_EQ(function->body->first->as.declaration.type.kind, LUNA_TYPE_ISIZE);
+}
+
 TEST(ParserTest, RejectsIntegerMagnitudeBeyondU64Maximum) {
     FrontendHarness harness{"module test.integer_magnitude;\n"
                             "fn value() -> u64 {\n"

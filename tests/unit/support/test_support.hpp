@@ -12,7 +12,9 @@ namespace luna::test {
 
 class FrontendHarness final {
   public:
-    explicit FrontendHarness(std::string_view source_text);
+    explicit FrontendHarness(
+        std::string_view source_text,
+        const LunaTargetInfo *target = luna_target_info_default());
     ~FrontendHarness();
 
     FrontendHarness(const FrontendHarness &) = delete;

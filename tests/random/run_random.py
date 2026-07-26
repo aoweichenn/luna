@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import pathlib
+import platform
 import random
 import shutil
 import subprocess
@@ -71,6 +72,19 @@ def require_tool(name: str) -> str:
         print(f"SKIP: required random-test tool is missing: {name}")
         raise SystemExit(77)
     return path
+
+
+def require_target_runner() -> list[str]:
+    qemu = shutil.which("qemu-x86_64-static")
+    if qemu is not None:
+        return [qemu]
+    if platform.system() == "Linux" and platform.machine().lower() in (
+        "x86_64",
+        "amd64",
+    ):
+        return []
+    print("SKIP: qemu-x86_64-static is required on this host")
+    raise SystemExit(77)
 
 
 def generate_expression(
@@ -222,7 +236,11 @@ def generate_i64_expression(
     return Expression(f"({left.text} {operation} {right.text})", value)
 
 
-def generate_i64_case(engine: random.Random, case_index: int) -> tuple[str, int]:
+def generate_i64_case(
+    engine: random.Random,
+    case_index: int,
+    type_name: str = "i64",
+) -> tuple[str, int]:
     arguments = {
         "first": 2**32 + engine.randrange(0, 4096),
         "second": 2**33 + engine.randrange(0, 4096),
@@ -237,12 +255,13 @@ def generate_i64_case(engine: random.Random, case_index: int) -> tuple[str, int]
     source = (
         f"module random.wide_case{case_index};\n"
         "\n"
-        "fn calculate(first: i64, second: i64, third: i64, narrow: i32) -> i64 {\n"
-        f"    return {expression.text} + (narrow as i64);\n"
+        f"fn calculate(first: {type_name}, second: {type_name}, "
+        f"third: {type_name}, narrow: i32) -> {type_name} {{\n"
+        f"    return {expression.text} + (narrow as {type_name});\n"
         "}\n"
         "\n"
         "fn main() -> i32 {\n"
-        "    let result: i64 = calculate("
+        f"    let result: {type_name} = calculate("
         f"{arguments['first']}, {arguments['second']}, {arguments['third']}, "
         f"{narrow_value});\n"
         "    let truncated: i32 = result as i32;\n"
@@ -409,9 +428,11 @@ def generate_unsigned_case(
     engine: random.Random,
     case_index: int,
     width: int,
+    type_name: str | None = None,
 ) -> tuple[str, int]:
     modulus = 2**width
-    type_name = f"u{width}"
+    if type_name is None:
+        type_name = f"u{width}"
     spread = max(1, min(4096, modulus // 4))
     arguments = {
         "first": modulus - 1 - engine.randrange(0, spread),
@@ -444,7 +465,7 @@ def compile_and_run(
     compiler: pathlib.Path,
     llvm_mc: str,
     linker: str,
-    qemu: str,
+    target_runner: list[str],
     source_text: str,
     expected_code: int,
     case_index: int,
@@ -488,7 +509,7 @@ def compile_and_run(
                 str(object_file),
             ]
         )
-        run([qemu, str(executable)], expected_code=expected_code)
+        run([*target_runner, str(executable)], expected_code=expected_code)
     except (AssertionError, subprocess.TimeoutExpired) as error:
         raise AssertionError(
             f"random case {case_index} failed; expected exit "
@@ -513,12 +534,12 @@ def main() -> int:
 
     llvm_mc = require_tool("llvm-mc")
     linker = require_tool("ld.lld")
-    qemu = require_tool("qemu-x86_64-static")
+    target_runner = require_target_runner()
     arguments.work_dir.mkdir(parents=True, exist_ok=True)
 
     engine = random.Random(arguments.seed)
     for case_index in range(arguments.cases):
-        case_kind = case_index % 8
+        case_kind = case_index % 10
         if case_kind == 0:
             source, expected_code = generate_case(engine, case_index)
         elif case_kind == 1:
@@ -543,15 +564,23 @@ def main() -> int:
             source, expected_code = generate_unsigned_case(
                 engine, case_index, 8
             )
-        else:
+        elif case_kind == 7:
             source, expected_code = generate_unsigned_case(
                 engine, case_index, 16
+            )
+        elif case_kind == 8:
+            source, expected_code = generate_i64_case(
+                engine, case_index, "isize"
+            )
+        else:
+            source, expected_code = generate_unsigned_case(
+                engine, case_index, 64, "usize"
             )
         compile_and_run(
             arguments.compiler,
             llvm_mc,
             linker,
-            qemu,
+            target_runner,
             source,
             expected_code,
             case_index,

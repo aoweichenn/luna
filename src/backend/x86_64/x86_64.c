@@ -6,6 +6,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+static uint32_t luna_x86_64_type_bit_width(LunaIrType type) {
+    const LunaTargetInfo *target = luna_target_info_default();
+    return luna_ir_type_bit_width(type, &target->data_layout);
+}
+
 static bool luna_x86_64_append_hex_byte(LunaStringBuilder *output,
                                         unsigned char byte) {
     static const char digits[] = "0123456789abcdef";
@@ -149,7 +154,7 @@ static bool luna_x86_64_emit_signed_load_32(LunaStringBuilder *output,
                                             LunaIrType type,
                                             const char *register_name) {
     const char *mnemonic = NULL;
-    switch (luna_ir_type_bit_width(type)) {
+    switch (luna_x86_64_type_bit_width(type)) {
     case 8U:
         mnemonic = "movsbl";
         break;
@@ -176,7 +181,7 @@ static bool luna_x86_64_emit_signed_load_64(LunaStringBuilder *output,
                                             LunaIrValueId value,
                                             LunaIrType type) {
     const char *mnemonic = NULL;
-    switch (luna_ir_type_bit_width(type)) {
+    switch (luna_x86_64_type_bit_width(type)) {
     case 8U:
         mnemonic = "movsbq";
         break;
@@ -200,7 +205,7 @@ static bool luna_x86_64_emit_signed_load_64(LunaStringBuilder *output,
 
 static bool luna_x86_64_emit_truncate_eax(LunaStringBuilder *output,
                                           LunaIrType type) {
-    switch (luna_ir_type_bit_width(type)) {
+    switch (luna_x86_64_type_bit_width(type)) {
     case 8U:
         return luna_string_builder_append_c_string(output,
                                                    "    andl $255, %eax\n");
@@ -254,7 +259,7 @@ static bool luna_x86_64_emit_binary_64(LunaStringBuilder *output,
 }
 
 static bool luna_x86_64_type_is_64_bit(LunaIrType type) {
-    return luna_ir_type_bit_width(type) == 64U;
+    return luna_x86_64_type_bit_width(type) == 64U;
 }
 
 static const char *luna_x86_64_set_condition(LunaIrOpcode opcode,
@@ -291,7 +296,7 @@ static bool luna_x86_64_emit_compare(LunaStringBuilder *output,
     const bool is_64_bit = luna_x86_64_type_is_64_bit(*operand_type);
     const bool is_signed_narrow =
         luna_ir_type_is_signed_integer(*operand_type) &&
-        luna_ir_type_bit_width(*operand_type) < 32U;
+        luna_x86_64_type_bit_width(*operand_type) < 32U;
     if (condition == NULL) {
         return false;
     }
@@ -399,7 +404,7 @@ static bool luna_x86_64_emit_call(LunaStringBuilder *output,
 static bool luna_x86_64_emit_narrow_division(
     LunaStringBuilder *output, const LunaIrFunction *function,
     size_t function_index, const LunaIrInstruction *instruction) {
-    const uint32_t width = luna_ir_type_bit_width(instruction->type);
+    const uint32_t width = luna_x86_64_type_bit_width(instruction->type);
     const bool is_signed = luna_ir_type_is_signed_integer(instruction->type);
     if (width != 8U && width != 16U) {
         return false;
@@ -564,8 +569,9 @@ static bool luna_x86_64_emit_instruction(LunaStringBuilder *output,
         if (source_type == NULL) {
             return false;
         }
-        const uint32_t source_width = luna_ir_type_bit_width(*source_type);
-        const uint32_t target_width = luna_ir_type_bit_width(instruction->type);
+        const uint32_t source_width = luna_x86_64_type_bit_width(*source_type);
+        const uint32_t target_width =
+            luna_x86_64_type_bit_width(instruction->type);
         if (target_width == 64U) {
             if (source_width == 64U) {
                 return luna_x86_64_emit_load_rax(output, function,
@@ -645,7 +651,7 @@ static bool luna_x86_64_emit_instruction(LunaStringBuilder *output,
 
     case LUNA_IR_DIV_INTEGER:
     case LUNA_IR_REM_INTEGER: {
-        if (luna_ir_type_bit_width(instruction->type) < 32U) {
+        if (luna_x86_64_type_bit_width(instruction->type) < 32U) {
             return luna_x86_64_emit_narrow_division(
                 output, function, function_index, instruction);
         }
@@ -683,7 +689,7 @@ static bool luna_x86_64_emit_instruction(LunaStringBuilder *output,
 
     case LUNA_IR_SHIFT_LEFT_INTEGER:
     case LUNA_IR_SHIFT_RIGHT_INTEGER: {
-        const uint32_t width = luna_ir_type_bit_width(instruction->type);
+        const uint32_t width = luna_x86_64_type_bit_width(instruction->type);
         const bool is_64_bit = width == 64U;
         const bool is_left = instruction->opcode == LUNA_IR_SHIFT_LEFT_INTEGER;
         const bool is_signed =
@@ -885,6 +891,13 @@ static bool luna_x86_64_emit_function(LunaStringBuilder *output,
 bool luna_x86_64_emit_assembly(const LunaIrModule *module,
                                LunaDiagnosticEngine *diagnostics,
                                LunaStringBuilder *output) {
+    if (module == NULL || !luna_target_info_is_supported(module->target)) {
+        luna_diagnostic_error_plain(
+            diagnostics,
+            "x86-64 backend requires target x86_64-unknown-linux-gnu");
+        return false;
+    }
+
     const LunaIrFunction *entry =
         luna_ir_module_function_const(module, module->entry_function);
     if (entry == NULL) {

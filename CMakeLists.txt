@@ -27,6 +27,7 @@ if(BUILD_TESTING OR LUNA_BUILD_FUZZERS)
 endif()
 
 add_library(luna_compiler STATIC
+    src/target/target.c
     src/frontend/support/arena.c
     src/frontend/ast/ast.c
     src/frontend/support/buffer.c
@@ -164,6 +165,7 @@ if(BUILD_TESTING)
         tests/unit/middleend/sema_test.cpp
         tests/unit/frontend/source/source_test.cpp
         tests/unit/frontend/type_test.cpp
+        tests/unit/target/target_test.cpp
         tests/unit/backend/x86_64_test.cpp
     )
     target_link_libraries(luna_unit_tests
@@ -302,6 +304,7 @@ if(LUNA_BUILD_FUZZERS)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/nested_call.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/unsigned.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/narrow.luna"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/pointer_sized.luna"
             DESTINATION "${LUNA_FUZZ_CORPUS_DIR}"
         )
 

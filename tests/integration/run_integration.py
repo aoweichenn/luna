@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import platform
 import shutil
 import subprocess
 import sys
@@ -39,11 +40,24 @@ def require_tool(name: str) -> str:
     return path
 
 
+def require_target_runner() -> list[str]:
+    qemu = shutil.which("qemu-x86_64-static")
+    if qemu is not None:
+        return [qemu]
+    if platform.system() == "Linux" and platform.machine().lower() in (
+        "x86_64",
+        "amd64",
+    ):
+        return []
+    print("SKIP: qemu-x86_64-static is required on this host")
+    raise SystemExit(77)
+
+
 def compile_and_run(
     compiler: pathlib.Path,
     llvm_mc: str,
     linker: str,
-    qemu: str,
+    target_runner: list[str],
     source: pathlib.Path,
     work_dir: pathlib.Path,
     expected_code: int,
@@ -84,7 +98,7 @@ def compile_and_run(
             str(object_file),
         ]
     )
-    run([qemu, str(executable)], expected_code=expected_code)
+    run([*target_runner, str(executable)], expected_code=expected_code)
 
 
 def convert_integer(
@@ -117,10 +131,12 @@ def generate_integer_conversion_matrix(work_dir: pathlib.Path) -> pathlib.Path:
         ("i16", 16, True, -21846),
         ("i32", 32, True, -1431655766),
         ("i64", 64, True, -6148914691236517206),
+        ("isize", 64, True, -6148914691236517206),
         ("u8", 8, False, 171),
         ("u16", 16, False, 43690),
         ("u32", 32, False, 2863311530),
         ("u64", 64, False, 12297829382473034410),
+        ("usize", 64, False, 12297829382473034410),
     )
     lines = ["module test.all_integer_conversions;", ""]
     for source_name, _, _, _ in integer_types:
@@ -174,7 +190,7 @@ def main() -> int:
 
     llvm_mc = require_tool("llvm-mc")
     linker = require_tool("ld.lld")
-    qemu = require_tool("qemu-x86_64-static")
+    target_runner = require_target_runner()
 
     arguments.work_dir.mkdir(parents=True, exist_ok=True)
     case_dir = arguments.source_root / "tests" / "integration" / "cases"
@@ -182,6 +198,8 @@ def main() -> int:
     help_result = run([str(arguments.compiler), "--help"])
     if "usage: lunac" not in help_result.stdout:
         raise AssertionError("--help did not print the compiler usage")
+    if "x86_64-unknown-linux-gnu" not in help_result.stdout:
+        raise AssertionError("--help did not list the supported target")
     version_result = run([str(arguments.compiler), "--version"])
     if "lunac 0.1.0-dev" not in version_result.stdout:
         raise AssertionError("--version did not print the compiler version")
@@ -189,6 +207,28 @@ def main() -> int:
     run(
         [str(arguments.compiler), "--emit", "invalid", "input.luna"],
         expected_code=2,
+    )
+    run([str(arguments.compiler), "--target"], expected_code=2)
+    unsupported_target = run(
+        [
+            str(arguments.compiler),
+            "--target",
+            "aarch64-unknown-linux-gnu",
+            str(case_dir / "return_42.luna"),
+        ],
+        expected_code=2,
+    )
+    if "unsupported target" not in unsupported_target.stderr:
+        raise AssertionError("unsupported target diagnostic is missing")
+    run(
+        [
+            str(arguments.compiler),
+            "--target",
+            "x86_64-unknown-linux-gnu",
+            "--emit",
+            "check",
+            str(case_dir / "return_42.luna"),
+        ]
     )
     run(
         [
@@ -241,6 +281,11 @@ def main() -> int:
         "i16_remainder_overflow.luna": -8,
         "u32_division_by_zero.luna": -8,
         "u64_division_by_zero.luna": -8,
+        "pointer_sized_integer_operations.luna": 42,
+        "isize_division_by_zero.luna": -8,
+        "isize_division_overflow.luna": -8,
+        "isize_remainder_overflow.luna": -8,
+        "usize_division_by_zero.luna": -8,
     }
 
     for case_name, expected_code in executable_cases.items():
@@ -248,7 +293,7 @@ def main() -> int:
             arguments.compiler,
             llvm_mc,
             linker,
-            qemu,
+            target_runner,
             case_dir / case_name,
             arguments.work_dir,
             expected_code,
@@ -260,12 +305,12 @@ def main() -> int:
         arguments.compiler,
         llvm_mc,
         linker,
-        qemu,
+        target_runner,
         conversion_matrix,
         arguments.work_dir,
         42,
     )
-    print("PASS executable: all 64 fixed-width integer conversion pairs")
+    print("PASS executable: all 100 integer conversion pairs")
 
     negative_cases = {
         "type_error.luna": "expected bool, found i32",
@@ -300,6 +345,10 @@ def main() -> int:
         "invalid_void_conversion.luna": (
             "explicit conversion requires integer source and target types"
         ),
+        "isize_positive_overflow.luna": (
+            "integer literal does not fit in isize"
+        ),
+        "pointer_sized_mixed_types.luna": "expected isize, found i64",
     }
 
     for case_name, expected_diagnostic in negative_cases.items():
@@ -325,6 +374,7 @@ def main() -> int:
         "conversion_round_trip",
         "unsigned_conversions",
         "narrow_ir",
+        "pointer_sized_integer_ir",
     ):
         ir_output = arguments.work_dir / f"{snapshot_name}.lir"
         run(
@@ -357,6 +407,7 @@ def main() -> int:
         "i64_operations",
         "unsigned_operations",
         "narrow_integer_operations",
+        "pointer_sized_integer_operations",
     ):
         deterministic_first = (
             arguments.work_dir / f"{deterministic_name}_first.s"

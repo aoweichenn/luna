@@ -8,11 +8,13 @@ C or C++.
 The project is deliberately narrow at this stage:
 
 - target: x86-64 Linux, System V ABI, ELF64;
-- frontend: explicit `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`
-  and `u64` types, checked integer conversions, functions, expressions, local
-  variables and structured control flow;
+- frontend: explicit `bool`, `i8`, `i16`, `i32`, `i64`, `isize`, `u8`,
+  `u16`, `u32`, `u64` and `usize` types, checked integer conversions,
+  functions, expressions, local variables and structured control flow;
 - middle end: typed, non-SSA control-flow IR;
-- backend: direct x86-64 instruction selection;
+- target model: explicit `x86_64-unknown-linux-gnu` data layout, with
+  target-sized `isize` and `usize`;
+- backend: direct, unoptimized x86-64 instruction selection;
 - bootstrap host: conforming C23;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests, IR
   snapshots, differential random programs, libFuzzer and executable
@@ -65,12 +67,18 @@ Native Linux CI additionally runs the same target with the `fuzz-asan` preset.
 ## Compile
 
 ```sh
-build/debug/lunac --emit asm -o hello.s examples/hello.luna
+build/debug/lunac --target x86_64-unknown-linux-gnu \
+  --emit asm -o hello.s examples/hello.luna
 llvm-mc --triple=x86_64-unknown-linux-gnu --filetype=obj \
   -o hello.o hello.s
 ld.lld -static -e _start -o hello hello.o
 qemu-x86_64-static ./hello
 ```
+
+`--target` defaults to `x86_64-unknown-linux-gnu`, currently the only
+supported target. On an x86-64 Linux host, the integration and differential
+test runners execute generated static binaries natively when
+`qemu-x86_64-static` is unavailable.
 
 See [the language draft](docs/language.md),
 [compiler architecture](docs/architecture.md),

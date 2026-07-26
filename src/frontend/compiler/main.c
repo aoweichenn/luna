@@ -5,12 +5,14 @@
 #include <string.h>
 
 static void luna_print_usage(FILE *stream) {
-    (void)fputs("usage: lunac [--emit check|ir|asm] [-o path] input.luna\n"
+    (void)fputs("usage: lunac [--target triple] [--emit check|ir|asm] "
+                "[-o path] input.luna\n"
                 "\n"
                 "targets:\n"
-                "  x86_64-unknown-linux-gnu (the only M0 target)\n"
+                "  x86_64-unknown-linux-gnu (default)\n"
                 "\n"
                 "options:\n"
+                "  --target name  select the compilation target\n"
                 "  --emit check   parse, type-check and verify IR\n"
                 "  --emit ir      write textual Luna IR\n"
                 "  --emit asm     write x86-64 GNU assembly (default)\n"
@@ -41,6 +43,7 @@ int main(int argument_count, char **arguments) {
         .input_path = NULL,
         .output_path = NULL,
         .emit_kind = LUNA_EMIT_ASSEMBLY,
+        .target = luna_target_info_default(),
     };
 
     for (int index = 1; index < argument_count; index += 1) {
@@ -68,6 +71,22 @@ int main(int argument_count, char **arguments) {
             continue;
         }
 
+        if (strcmp(argument, "--target") == 0) {
+            if (index + 1 >= argument_count) {
+                (void)fputs("error: --target requires a target triple\n",
+                            stderr);
+                return 2;
+            }
+            options.target = luna_target_info_from_triple(arguments[index + 1]);
+            if (options.target == NULL) {
+                (void)fprintf(stderr, "error: unsupported target '%s'\n",
+                              arguments[index + 1]);
+                return 2;
+            }
+            index += 1;
+            continue;
+        }
+
         if (strcmp(argument, "-o") == 0) {
             if (index + 1 >= argument_count) {
                 (void)fputs("error: -o requires an output path\n", stderr);
@@ -84,8 +103,10 @@ int main(int argument_count, char **arguments) {
         }
 
         if (options.input_path != NULL) {
-            (void)fputs("error: milestone M0 accepts exactly one source unit\n",
-                        stderr);
+            (void)fputs(
+                "error: the bootstrap compiler accepts exactly one source "
+                "unit\n",
+                stderr);
             return 2;
         }
         options.input_path = argument;

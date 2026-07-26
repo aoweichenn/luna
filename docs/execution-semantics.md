@@ -1,8 +1,12 @@
 # Bootstrap execution semantics
 
 This document freezes the behavior needed to test the current `i8`, `i16`,
-`i32`, `i64`, `u8`, `u16`, `u32`, `u64` and `bool` subset. It is an explicit
-execution contract, not an optimization policy.
+`i32`, `i64`, `isize`, `u8`, `u16`, `u32`, `u64`, `usize` and `bool`
+subset. It is an explicit execution contract, not an optimization policy.
+
+The selected target and its data layout are explicit compiler inputs. The
+bootstrap target is `x86_64-unknown-linux-gnu`, with little-endian byte order,
+64-bit pointers and 64-bit pointer alignment.
 
 ## Evaluation
 
@@ -23,9 +27,11 @@ an explicit `as` conversion.
 ## Signed integers
 
 `i8`, `i16`, `i32` and `i64` are 8-bit, 16-bit, 32-bit and 64-bit
-two's-complement integers. Addition, subtraction, multiplication and unary
-negation wrap modulo the type's power of two. This behavior is defined; there
-is no signed-overflow undefined behavior.
+two's-complement integers. `isize` is a two's-complement integer whose width is
+the selected target's pointer width, which is 64 bits on the bootstrap target.
+Addition, subtraction, multiplication and unary negation wrap modulo the
+type's power of two. This behavior is defined; there is no signed-overflow
+undefined behavior.
 
 Division truncates toward zero. The remainder has the dividend's sign and
 satisfies:
@@ -36,12 +42,15 @@ left == (left / right) * right + (left % right)
 
 Division by zero traps. Dividing the minimum value by `-1` also traps for every
 signed width: `-128`, `-32768`, `-2147483648` and
-`-9223372036854775808`, respectively. The corresponding remainder operations
-trap for the same inputs.
+`-9223372036854775808`, respectively. `isize` traps at the minimum value for
+its target width; on the bootstrap target this is also
+`-9223372036854775808`. The corresponding remainder operations trap for the
+same inputs.
 
 Shift counts use only the low `log2(width)` bits: three for `i8`, four for
-`i16`, five for `i32` and six for `i64`. Left shift wraps to the operand type;
-right shift is arithmetic and preserves the sign.
+`i16`, five for `i32` and six for `i64`. `isize` uses the rule for its target
+width. Left shift wraps to the operand type; right shift is arithmetic and
+preserves the sign.
 
 Ordering comparisons are signed. Equality is defined separately for each
 integer type and `bool`; these types never compare or convert implicitly.
@@ -49,9 +58,11 @@ integer type and `bool`; these types never compare or convert implicitly.
 ## Unsigned integers
 
 `u8`, `u16`, `u32` and `u64` are 8-bit, 16-bit, 32-bit and 64-bit unsigned
-integers. Addition, subtraction, multiplication and unary negation wrap modulo
-the type's power of two. Division and remainder use unsigned arithmetic and
-trap only when the divisor is zero.
+integers. `usize` is unsigned and has the selected target's pointer width,
+which is 64 bits on the bootstrap target. Addition, subtraction,
+multiplication and unary negation wrap modulo the type's power of two.
+Division and remainder use unsigned arithmetic and trap only when the divisor
+is zero.
 
 Left shift wraps to the operand type. Right shift is logical and shifts in
 zero bits. Shift-count masking follows the same three-, four-, five- and
@@ -60,11 +71,15 @@ unsigned.
 
 ## Explicit integer conversions
 
-Every pair among `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32` and `u64` can
-be converted explicitly. Widening sign-extends a signed source and zero-extends
-an unsigned source, regardless of the target signedness. Narrowing keeps the
-low bits. A same-width signedness change preserves the bit pattern. These
-conversions never trap.
+Every pair among `i8`, `i16`, `i32`, `i64`, `isize`, `u8`, `u16`, `u32`,
+`u64` and `usize` can be converted explicitly. Widening sign-extends a signed
+source and zero-extends an unsigned source, regardless of the target
+signedness. Narrowing keeps the low bits. A same-width type or signedness
+change preserves the bit pattern. These conversions never trap.
+
+`isize` remains distinct from a fixed-width signed type, and `usize` remains
+distinct from a fixed-width unsigned type, even when their widths match.
+Values do not mix implicitly.
 
 Conversions involving `bool` or `void` are rejected. A conversion to the same
 integer type is permitted and has no effect.

@@ -36,9 +36,10 @@ constexpr std::size_t LUNA_TEST_READ_BUFFER_SIZE = 4096U;
 
 }
 
-FrontendHarness::FrontendHarness(std::string_view source_text) {
+FrontendHarness::FrontendHarness(std::string_view source_text,
+                                 const LunaTargetInfo *target) {
     luna_arena_init(&this->arena_, LUNA_TEST_ARENA_BLOCK_SIZE);
-    luna_ir_module_init(&this->module_);
+    luna_ir_module_init(&this->module_, target);
     luna_string_builder_init(&this->assembly_);
 
     this->diagnostic_file_ = std::tmpfile();
