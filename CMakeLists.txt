@@ -27,19 +27,20 @@ if(BUILD_TESTING OR LUNA_BUILD_FUZZERS)
 endif()
 
 add_library(luna_compiler STATIC
-    src/arena.c
-    src/ast.c
-    src/buffer.c
-    src/compiler.c
-    src/diagnostic.c
-    src/ir.c
-    src/lexer.c
-    src/parser.c
-    src/sema.c
-    src/source.c
-    src/string_view.c
-    src/token.c
-    src/x86_64.c
+    src/frontend/support/arena.c
+    src/frontend/ast/ast.c
+    src/frontend/support/buffer.c
+    src/frontend/compiler/compiler.c
+    src/frontend/diagnostic/diagnostic.c
+    src/middleend/ir/ir.c
+    src/frontend/lexer/lexer.c
+    src/frontend/parser/parser.c
+    src/middleend/sema/sema.c
+    src/frontend/source/source.c
+    src/frontend/support/string_view.c
+    src/frontend/token/token.c
+    src/frontend/type/type.c
+    src/backend/x86_64/x86_64.c
 )
 
 target_include_directories(luna_compiler PUBLIC include)
@@ -104,7 +105,7 @@ if(LUNA_BUILD_FUZZERS)
     )
 endif()
 
-add_executable(lunac src/main.c)
+add_executable(lunac src/frontend/compiler/main.c)
 target_link_libraries(lunac PRIVATE luna_compiler)
 
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
@@ -130,10 +131,10 @@ if(BUILD_TESTING)
     include(GoogleTest)
 
     add_library(luna_test_support STATIC
-        tests/unit/test_support.cpp
+        tests/unit/support/test_support.cpp
     )
     target_link_libraries(luna_test_support PUBLIC luna_compiler)
-    target_include_directories(luna_test_support PUBLIC tests/unit)
+    target_include_directories(luna_test_support PUBLIC tests/unit/support)
 
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         target_compile_options(luna_test_support PRIVATE
@@ -154,15 +155,16 @@ if(BUILD_TESTING)
     endif()
 
     add_executable(luna_unit_tests
-        tests/unit/arena_test.cpp
-        tests/unit/buffer_test.cpp
-        tests/unit/diagnostic_test.cpp
-        tests/unit/ir_test.cpp
-        tests/unit/lexer_test.cpp
-        tests/unit/parser_test.cpp
-        tests/unit/sema_test.cpp
-        tests/unit/source_test.cpp
-        tests/unit/x86_64_test.cpp
+        tests/unit/support/arena_test.cpp
+        tests/unit/support/buffer_test.cpp
+        tests/unit/frontend/diagnostic/diagnostic_test.cpp
+        tests/unit/middleend/ir_test.cpp
+        tests/unit/frontend/lexer/lexer_test.cpp
+        tests/unit/frontend/parser/parser_test.cpp
+        tests/unit/middleend/sema_test.cpp
+        tests/unit/frontend/source/source_test.cpp
+        tests/unit/frontend/type_test.cpp
+        tests/unit/backend/x86_64_test.cpp
     )
     target_link_libraries(luna_unit_tests
         PRIVATE
@@ -231,7 +233,7 @@ if(BUILD_TESTING)
         NAME integration.end_to_end
         COMMAND
             "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_integration.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/run_integration.py"
             --compiler "$<TARGET_FILE:lunac>"
             --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
             --work-dir "${CMAKE_CURRENT_BINARY_DIR}/integration"
@@ -248,7 +250,7 @@ if(BUILD_TESTING)
         NAME random.differential
         COMMAND
             "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_random.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/random/run_random.py"
             --compiler "$<TARGET_FILE:lunac>"
             --work-dir "${CMAKE_CURRENT_BINARY_DIR}/random"
             --seed 0x4c554e41
@@ -266,7 +268,7 @@ endif()
 if(LUNA_BUILD_FUZZERS)
     add_executable(luna_frontend_fuzz tests/fuzz/frontend_fuzz.cpp)
     target_link_libraries(luna_frontend_fuzz PRIVATE luna_compiler)
-    target_include_directories(luna_frontend_fuzz PRIVATE tests/unit)
+    target_include_directories(luna_frontend_fuzz PRIVATE tests/unit/support)
     target_compile_options(luna_frontend_fuzz PRIVATE
         -Wall
         -Wextra
