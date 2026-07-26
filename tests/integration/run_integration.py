@@ -148,6 +148,8 @@ def main() -> int:
         "i64_division_by_zero.luna": -8,
         "i64_division_overflow.luna": -8,
         "mixed_width_arguments.luna": 42,
+        "integer_conversions.luna": 42,
+        "conversion_round_trip.luna": 255,
     }
 
     for case_name, expected_code in executable_cases.items():
@@ -182,6 +184,12 @@ def main() -> int:
         "duplicate_parameter.luna": "duplicate parameter 'value'",
         "i64_positive_overflow.luna": "integer literal does not fit in i64",
         "i64_mixed_types.luna": "expected i64, found i32",
+        "invalid_bool_conversion.luna": (
+            "explicit conversion requires integer source and target types"
+        ),
+        "invalid_void_conversion.luna": (
+            "explicit conversion requires integer source and target types"
+        ),
     }
 
     for case_name, expected_diagnostic in negative_cases.items():
@@ -201,7 +209,11 @@ def main() -> int:
             )
         print(f"PASS negative: {case_name}")
 
-    for snapshot_name in ("function_call", "i64_six_arguments"):
+    for snapshot_name in (
+        "function_call",
+        "i64_six_arguments",
+        "conversion_round_trip",
+    ):
         ir_output = arguments.work_dir / f"{snapshot_name}.lir"
         run(
             [

@@ -389,6 +389,23 @@ static LunaExpression *luna_parser_parse_unary(LunaParser *parser) {
     return expression;
 }
 
+static LunaExpression *luna_parser_parse_cast(LunaParser *parser) {
+    LunaExpression *expression = luna_parser_parse_unary(parser);
+    while (expression != NULL && luna_parser_match(parser, LUNA_TOKEN_AS)) {
+        const LunaTypeRef target_type = luna_parser_parse_type(parser);
+        LunaExpression *cast = luna_parser_new_expression(
+            parser, LUNA_EXPRESSION_CAST,
+            luna_parser_join_spans(expression->span, target_type.span));
+        if (cast == NULL) {
+            return expression;
+        }
+        cast->as.cast.operand = expression;
+        cast->as.cast.target_type = target_type;
+        expression = cast;
+    }
+    return expression;
+}
+
 static int luna_parser_binary_precedence(LunaTokenKind kind) {
     switch (kind) {
     case LUNA_TOKEN_LOGICAL_OR:
@@ -426,7 +443,7 @@ static int luna_parser_binary_precedence(LunaTokenKind kind) {
 
 static LunaExpression *luna_parser_parse_binary(LunaParser *parser,
                                                 int minimum_precedence) {
-    LunaExpression *left = luna_parser_parse_unary(parser);
+    LunaExpression *left = luna_parser_parse_cast(parser);
     if (left == NULL) {
         return NULL;
     }

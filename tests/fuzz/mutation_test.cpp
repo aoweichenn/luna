@@ -63,9 +63,9 @@ TEST(MutationFuzzTest, CleanFrontendResultsAlwaysProduceValidTypedIr) {
         " var n: i32 = 0; while (n < 10) { n += 1; } return n;\n"
         "}\n",
         "module fuzz.wide;\n"
-        "fn wide(value: i64) -> i64 { return (value * 3) >> 1; }\n"
+        "fn wide(value: i32) -> i64 { return ((value as i64) * 3) >> 1; }\n"
         "fn main() -> i32 {\n"
-        " if (wide(4294967296) == 6442450944) { return 42; }\n"
+        " if (wide(2147483647) == 3221225470) { return 42; }\n"
         " return 1;\n"
         "}\n",
         "export module fuzz.interface;\nimport other.module;\n",

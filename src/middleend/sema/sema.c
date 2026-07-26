@@ -387,6 +387,8 @@ luna_sema_known_expression_type(LunaSemaContext *context,
         return function == NULL ? LUNA_TYPE_INVALID
                                 : function->syntax->return_type.kind;
     }
+    case LUNA_EXPRESSION_CAST:
+        return expression->as.cast.target_type.kind;
     case LUNA_EXPRESSION_UNARY:
         if (expression->as.unary.operator_kind == LUNA_TOKEN_BANG) {
             return LUNA_TYPE_BOOL;
@@ -660,6 +662,35 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
 
     case LUNA_EXPRESSION_CALL:
         return luna_sema_lower_call(context, expression);
+
+    case LUNA_EXPRESSION_CAST: {
+        LunaCheckedValue operand =
+            luna_sema_lower_expression(context, expression->as.cast.operand);
+        const LunaTypeKind target_type = expression->as.cast.target_type.kind;
+        if (!luna_sema_is_integer_type(operand.type) ||
+            !luna_sema_is_integer_type(target_type)) {
+            luna_diagnostic_error(
+                context->diagnostics, expression->span,
+                "explicit conversion requires integer source and target types");
+            return luna_sema_invalid_value();
+        }
+
+        if (operand.type == target_type) {
+            return operand;
+        }
+
+        LunaIrInstruction instruction = luna_sema_instruction(
+            target_type == LUNA_TYPE_I64 ? LUNA_IR_SIGN_EXTEND_I32_TO_I64
+                                         : LUNA_IR_TRUNCATE_I64_TO_I32,
+            expression->span);
+        instruction.left = operand.id;
+        const LunaIrValueId result = luna_sema_emit_value_instruction(
+            context, &instruction, target_type);
+        return (LunaCheckedValue){
+            .id = result,
+            .type = target_type,
+        };
+    }
 
     case LUNA_EXPRESSION_UNARY: {
         LunaTypeKind operand_type = expected_type;

@@ -168,4 +168,30 @@ TEST(SemaTest, RejectsMixedI32AndI64Operands) {
               std::string::npos);
 }
 
+TEST(SemaTest, LowersExplicitIntegerConversions) {
+    FrontendHarness harness{"module test.conversions;\n"
+                            "fn convert(value: i32) -> i32 {\n"
+                            "    return (value as i64) as i32;\n"
+                            "}\n"
+                            "fn main() -> i32 { return convert(-1); }\n"};
+
+    ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    LunaIrFunction *convert = luna_ir_module_function(harness.Module(), 0U);
+    ASSERT_NE(convert, nullptr);
+    ASSERT_NE(FindInstruction(convert, LUNA_IR_SIGN_EXTEND_I32_TO_I64),
+              nullptr);
+    ASSERT_NE(FindInstruction(convert, LUNA_IR_TRUNCATE_I64_TO_I32), nullptr);
+}
+
+TEST(SemaTest, RejectsNonIntegerExplicitConversions) {
+    FrontendHarness harness{"module test.invalid_conversion;\n"
+                            "fn main() -> i32 { return true as i32; }\n"};
+
+    EXPECT_FALSE(harness.ParseAndLower());
+    EXPECT_NE(harness.Diagnostics().find(
+                  "explicit conversion requires integer source and target"),
+              std::string::npos);
+}
+
 }

@@ -350,6 +350,20 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
                luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_BOOL,
                                      reason);
 
+    case LUNA_IR_SIGN_EXTEND_I32_TO_I64:
+        return luna_ir_verify_value(function, instruction->left,
+                                    LUNA_IR_TYPE_I32, defined_in_block,
+                                    reason) &&
+               luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_I64,
+                                     reason);
+
+    case LUNA_IR_TRUNCATE_I64_TO_I32:
+        return luna_ir_verify_value(function, instruction->left,
+                                    LUNA_IR_TYPE_I64, defined_in_block,
+                                    reason) &&
+               luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_I32,
+                                     reason);
+
     case LUNA_IR_ADD_I32:
     case LUNA_IR_SUB_I32:
     case LUNA_IR_MUL_I32:
@@ -876,6 +890,17 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
         }
         return luna_string_builder_append_c_string(output, "\n");
     }
+
+    case LUNA_IR_SIGN_EXTEND_I32_TO_I64:
+    case LUNA_IR_TRUNCATE_I64_TO_I32:
+        if (!luna_string_builder_append_c_string(
+                output, instruction->opcode == LUNA_IR_SIGN_EXTEND_I32_TO_I64
+                            ? "sext.i32.i64 "
+                            : "trunc.i64.i32 ") ||
+            !luna_ir_print_value(output, instruction->left)) {
+            return false;
+        }
+        return luna_string_builder_append_c_string(output, "\n");
 
     case LUNA_IR_ADD_I32:
     case LUNA_IR_SUB_I32:

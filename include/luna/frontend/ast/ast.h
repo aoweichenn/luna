@@ -20,7 +20,8 @@ typedef enum LunaExpressionKind {
     LUNA_EXPRESSION_NAME,
     LUNA_EXPRESSION_UNARY,
     LUNA_EXPRESSION_BINARY,
-    LUNA_EXPRESSION_CALL
+    LUNA_EXPRESSION_CALL,
+    LUNA_EXPRESSION_CAST
 } LunaExpressionKind;
 
 typedef struct LunaExpression LunaExpression;
@@ -52,6 +53,11 @@ struct LunaExpression {
             LunaExpression *first_argument;
             uint32_t argument_count;
         } call;
+
+        struct {
+            LunaExpression *operand;
+            LunaTypeRef target_type;
+        } cast;
     } as;
 };
 

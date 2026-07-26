@@ -221,18 +221,24 @@ def generate_i64_case(engine: random.Random, case_index: int) -> tuple[str, int]
         "third": 2**34 + engine.randrange(0, 4096),
     }
     expression = generate_i64_expression(engine, arguments, 4)
-    expected_code = expression.value & 255
+    narrow_value = engine.randrange(I32_MIN, I32_MAX + 1)
+    result_value = wrap_i64(expression.value + narrow_value)
+    truncated_value = wrap_i32(result_value)
+    expected_code = result_value & 255
     source = (
         f"module random.wide_case{case_index};\n"
         "\n"
-        "fn calculate(first: i64, second: i64, third: i64) -> i64 {\n"
-        f"    return {expression.text};\n"
+        "fn calculate(first: i64, second: i64, third: i64, narrow: i32) -> i64 {\n"
+        f"    return {expression.text} + (narrow as i64);\n"
         "}\n"
         "\n"
         "fn main() -> i32 {\n"
         "    let result: i64 = calculate("
-        f"{arguments['first']}, {arguments['second']}, {arguments['third']});\n"
-        f"    if (result == {expression.value}) {{ return {expected_code}; }}\n"
+        f"{arguments['first']}, {arguments['second']}, {arguments['third']}, "
+        f"{narrow_value});\n"
+        "    let truncated: i32 = result as i32;\n"
+        f"    if (result == {result_value} && truncated == {truncated_value}) "
+        f"{{ return {expected_code}; }}\n"
         "    return 1;\n"
         "}\n"
     )

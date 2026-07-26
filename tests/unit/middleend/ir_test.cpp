@@ -207,4 +207,23 @@ TEST(IrVerifierTest, RejectsOutOfRangeI32Constant) {
               std::string::npos);
 }
 
+TEST(IrVerifierTest, RejectsWrongExplicitConversionOperandType) {
+    FrontendHarness harness{"module test.conversion_ir;\n"
+                            "fn widen(value: i32) -> i64 {\n"
+                            "    return value as i64;\n"
+                            "}\n"
+                            "fn main() -> i32 { return 0; }\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaIrFunction *function = luna_ir_module_function(harness.Module(), 0U);
+    LunaIrInstruction *conversion =
+        FindInstruction(function, LUNA_IR_SIGN_EXTEND_I32_TO_I64);
+    ASSERT_NE(conversion, nullptr);
+    conversion->opcode = LUNA_IR_TRUNCATE_I64_TO_I32;
+
+    EXPECT_FALSE(harness.Verify());
+    EXPECT_NE(harness.Diagnostics().find("operand type does not match opcode"),
+              std::string::npos);
+}
+
 }

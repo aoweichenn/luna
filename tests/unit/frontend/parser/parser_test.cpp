@@ -93,4 +93,27 @@ TEST(ParserTest, RejectsIntegerMagnitudeBeyondI64Minimum) {
               std::string::npos);
 }
 
+TEST(ParserTest, BuildsChainedExplicitConversionNodes) {
+    FrontendHarness harness{"module test.conversion_syntax;\n"
+                            "fn main() -> i32 {\n"
+                            "    return (1 as i64) as i32;\n"
+                            "}\n"};
+
+    ASSERT_TRUE(harness.Parse()) << harness.Diagnostics();
+    const LunaFunction *function = harness.Program()->first_function;
+    ASSERT_NE(function, nullptr);
+    ASSERT_NE(function->body, nullptr);
+    const LunaStatement *statement = function->body->first;
+    ASSERT_NE(statement, nullptr);
+    ASSERT_EQ(statement->kind, LUNA_STATEMENT_RETURN);
+    const LunaExpression *outer = statement->as.return_value;
+    ASSERT_NE(outer, nullptr);
+    ASSERT_EQ(outer->kind, LUNA_EXPRESSION_CAST);
+    EXPECT_EQ(outer->as.cast.target_type.kind, LUNA_TYPE_I32);
+    const LunaExpression *inner = outer->as.cast.operand;
+    ASSERT_NE(inner, nullptr);
+    ASSERT_EQ(inner->kind, LUNA_EXPRESSION_CAST);
+    EXPECT_EQ(inner->as.cast.target_type.kind, LUNA_TYPE_I64);
+}
+
 }

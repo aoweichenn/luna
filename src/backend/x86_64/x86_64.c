@@ -370,6 +370,23 @@ static bool luna_x86_64_emit_instruction(LunaStringBuilder *output,
         return luna_x86_64_emit_store_rax(output, function,
                                           instruction->result);
 
+    case LUNA_IR_SIGN_EXTEND_I32_TO_I64:
+        if (!luna_string_builder_append_c_string(output, "    movslq ") ||
+            !luna_x86_64_append_value_operand(output, function,
+                                              instruction->left) ||
+            !luna_string_builder_append_c_string(output, ", %rax\n")) {
+            return false;
+        }
+        return luna_x86_64_emit_store_rax(output, function,
+                                          instruction->result);
+
+    case LUNA_IR_TRUNCATE_I64_TO_I32:
+        if (!luna_x86_64_emit_load_eax(output, function, instruction->left)) {
+            return false;
+        }
+        return luna_x86_64_emit_store_eax(output, function,
+                                          instruction->result);
+
     case LUNA_IR_ADD_I32:
         return luna_x86_64_emit_binary(output, function, instruction, "addl");
 

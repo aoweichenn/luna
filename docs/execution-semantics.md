@@ -44,6 +44,13 @@ right shift is arithmetic and preserves the sign.
 Comparisons are signed. Equality is defined separately for `i32`, `i64` and
 `bool`; these types never compare or convert implicitly.
 
+## Explicit integer conversions
+
+`i32 as i64` sign-extends the 32-bit two's-complement value. `i64 as i32`
+keeps the low 32 bits and interprets them as an `i32`; the conversion never
+traps. Conversions involving `bool` or `void` are rejected. A conversion to
+the same integer type is permitted and has no effect.
+
 ## Optimization boundary
 
 The bootstrap compiler performs no optimization. Its stack-homed x86-64

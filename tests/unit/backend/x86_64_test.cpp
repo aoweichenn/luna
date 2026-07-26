@@ -55,4 +55,17 @@ TEST(X8664BackendTest, EmitsI64InstructionsAndCallingConvention) {
     EXPECT_NE(assembly.find("cmpq"), std::string::npos);
 }
 
+TEST(X8664BackendTest, EmitsIntegerExtensionAndTruncation) {
+    FrontendHarness harness{"module test.conversion_codegen;\n"
+                            "fn convert(value: i32) -> i32 {\n"
+                            "    return (value as i64) as i32;\n"
+                            "}\n"
+                            "fn main() -> i32 { return convert(-1); }\n"};
+
+    ASSERT_TRUE(harness.EmitAssembly()) << harness.Diagnostics();
+    const std::string assembly = harness.Assembly();
+    EXPECT_NE(assembly.find("movslq"), std::string::npos);
+    EXPECT_NE(assembly.find("movl"), std::string::npos);
+}
+
 }

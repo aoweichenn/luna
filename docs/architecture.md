@@ -63,6 +63,7 @@ with virtual values and explicit local slots:
 - `const`
 - `load` and `store`
 - width-explicit `i32` and `i64` integer arithmetic
+- explicit sign-extension and truncation conversions
 - comparisons
 - direct calls
 - unconditional and conditional branches

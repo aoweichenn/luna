@@ -23,9 +23,10 @@ M0 supports enough language to compile arithmetic functions, local variables,
 ## M1: accepted scalar language
 
 - [x] complete `i64` vertical slice, including IR, x86-64 ABI and traps
+- [x] explicit `as` conversions between implemented integer types
 - [ ] all fixed-width integer types
 - [ ] `isize`, `usize`, `f32`, `f64`
-- [ ] explicit `as` conversions
+- [ ] explicit conversions for the remaining scalar and pointer types
 - [ ] complete operators and `do`/`for`/`switch`
 - [ ] raw pointers, fixed arrays and string literals
 - [ ] external C declarations
