@@ -103,6 +103,35 @@ TEST(ParserTest, ParsesUnsignedFunctionTypesAndMaximumLiteral) {
     EXPECT_EQ(declaration->as.declaration.initializer->as.integer, UINT64_MAX);
 }
 
+TEST(ParserTest, ParsesAllNarrowIntegerTypes) {
+    FrontendHarness harness{"module test.narrow_types;\n"
+                            "fn signed_pair(left: i8, right: i16) -> i16 {\n"
+                            "    return left as i16;\n"
+                            "}\n"
+                            "fn unsigned_pair(left: u8, right: u16) -> u16 {\n"
+                            "    return left as u16;\n"
+                            "}\n"
+                            "fn main() -> i32 { return 0; }\n"};
+
+    ASSERT_TRUE(harness.Parse()) << harness.Diagnostics();
+    const LunaFunction *signed_function = harness.Program()->first_function;
+    ASSERT_NE(signed_function, nullptr);
+    EXPECT_EQ(signed_function->return_type.kind, LUNA_TYPE_I16);
+    ASSERT_NE(signed_function->first_parameter, nullptr);
+    EXPECT_EQ(signed_function->first_parameter->type.kind, LUNA_TYPE_I8);
+    ASSERT_NE(signed_function->first_parameter->next, nullptr);
+    EXPECT_EQ(signed_function->first_parameter->next->type.kind, LUNA_TYPE_I16);
+
+    const LunaFunction *unsigned_function = signed_function->next;
+    ASSERT_NE(unsigned_function, nullptr);
+    EXPECT_EQ(unsigned_function->return_type.kind, LUNA_TYPE_U16);
+    ASSERT_NE(unsigned_function->first_parameter, nullptr);
+    EXPECT_EQ(unsigned_function->first_parameter->type.kind, LUNA_TYPE_U8);
+    ASSERT_NE(unsigned_function->first_parameter->next, nullptr);
+    EXPECT_EQ(unsigned_function->first_parameter->next->type.kind,
+              LUNA_TYPE_U16);
+}
+
 TEST(ParserTest, RejectsIntegerMagnitudeBeyondU64Maximum) {
     FrontendHarness harness{"module test.integer_magnitude;\n"
                             "fn value() -> u64 {\n"

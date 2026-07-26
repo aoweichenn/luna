@@ -53,10 +53,18 @@ static LunaIrType luna_sema_ir_type(LunaTypeKind type) {
         return LUNA_IR_TYPE_VOID;
     case LUNA_TYPE_BOOL:
         return LUNA_IR_TYPE_BOOL;
+    case LUNA_TYPE_I8:
+        return LUNA_IR_TYPE_I8;
+    case LUNA_TYPE_I16:
+        return LUNA_IR_TYPE_I16;
     case LUNA_TYPE_I32:
         return LUNA_IR_TYPE_I32;
     case LUNA_TYPE_I64:
         return LUNA_IR_TYPE_I64;
+    case LUNA_TYPE_U8:
+        return LUNA_IR_TYPE_U8;
+    case LUNA_TYPE_U16:
+        return LUNA_IR_TYPE_U16;
     case LUNA_TYPE_U32:
         return LUNA_IR_TYPE_U32;
     case LUNA_TYPE_U64:
@@ -359,10 +367,18 @@ luna_sema_binary_integer_opcode(LunaTokenKind operator_kind) {
 
 static uint64_t luna_sema_integer_maximum(LunaTypeKind type) {
     switch (type) {
+    case LUNA_TYPE_I8:
+        return (uint64_t)INT8_MAX;
+    case LUNA_TYPE_I16:
+        return (uint64_t)INT16_MAX;
     case LUNA_TYPE_I32:
         return (uint64_t)INT32_MAX;
     case LUNA_TYPE_I64:
         return (uint64_t)INT64_MAX;
+    case LUNA_TYPE_U8:
+        return (uint64_t)UINT8_MAX;
+    case LUNA_TYPE_U16:
+        return (uint64_t)UINT16_MAX;
     case LUNA_TYPE_U32:
         return (uint64_t)UINT32_MAX;
     case LUNA_TYPE_U64:
@@ -370,6 +386,29 @@ static uint64_t luna_sema_integer_maximum(LunaTypeKind type) {
     case LUNA_TYPE_INVALID:
     case LUNA_TYPE_VOID:
     case LUNA_TYPE_BOOL:
+        return 0U;
+    }
+
+    return 0U;
+}
+
+static uint64_t luna_sema_signed_minimum_magnitude(LunaTypeKind type) {
+    switch (type) {
+    case LUNA_TYPE_I8:
+        return (uint64_t)INT8_MAX + 1U;
+    case LUNA_TYPE_I16:
+        return (uint64_t)INT16_MAX + 1U;
+    case LUNA_TYPE_I32:
+        return (uint64_t)INT32_MAX + 1U;
+    case LUNA_TYPE_I64:
+        return (uint64_t)INT64_MAX + 1U;
+    case LUNA_TYPE_INVALID:
+    case LUNA_TYPE_VOID:
+    case LUNA_TYPE_BOOL:
+    case LUNA_TYPE_U8:
+    case LUNA_TYPE_U16:
+    case LUNA_TYPE_U32:
+    case LUNA_TYPE_U64:
         return 0U;
     }
 
@@ -726,8 +765,7 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
             luna_type_kind_is_signed_integer(operand_type) &&
             expression->as.unary.operand->kind == LUNA_EXPRESSION_INTEGER &&
             expression->as.unary.operand->as.integer ==
-                (operand_type == LUNA_TYPE_I64 ? (uint64_t)INT64_MAX + 1U
-                                               : (uint64_t)INT32_MAX + 1U)) {
+                luna_sema_signed_minimum_magnitude(operand_type)) {
             LunaIrInstruction instruction =
                 luna_sema_instruction(LUNA_IR_CONST_INTEGER, expression->span);
             instruction.immediate = expression->as.unary.operand->as.integer;

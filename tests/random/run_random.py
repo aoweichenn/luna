@@ -14,8 +14,6 @@ import sys
 I32_MIN = -(2**31)
 I32_MAX = 2**31 - 1
 I64_MIN = -(2**63)
-U32_MODULUS = 2**32
-U64_MODULUS = 2**64
 
 
 @dataclasses.dataclass(frozen=True)
@@ -30,6 +28,10 @@ def wrap_i32(value: int) -> int:
 
 def wrap_i64(value: int) -> int:
     return ((value + 2**63) % 2**64) - 2**63
+
+
+def wrap_signed(value: int, width: int) -> int:
+    return ((value + 2 ** (width - 1)) % (2**width)) - 2 ** (width - 1)
 
 
 def wrap_unsigned(value: int, width: int) -> int:
@@ -231,6 +233,7 @@ def generate_i64_case(engine: random.Random, case_index: int) -> tuple[str, int]
     result_value = wrap_i64(expression.value + narrow_value)
     truncated_value = wrap_i32(result_value)
     expected_code = result_value & 255
+    failure_code = (expected_code + 1) & 255
     source = (
         f"module random.wide_case{case_index};\n"
         "\n"
@@ -245,7 +248,102 @@ def generate_i64_case(engine: random.Random, case_index: int) -> tuple[str, int]
         "    let truncated: i32 = result as i32;\n"
         f"    if (result == {result_value} && truncated == {truncated_value}) "
         f"{{ return {expected_code}; }}\n"
-        "    return 1;\n"
+        f"    return {failure_code};\n"
+        "}\n"
+    )
+    return source, expected_code
+
+
+def generate_signed_narrow_expression(
+    engine: random.Random,
+    variables: dict[str, int],
+    depth: int,
+    width: int,
+) -> Expression:
+    if depth == 0 or engine.randrange(5) == 0:
+        if engine.randrange(2) == 0:
+            name = engine.choice(tuple(variables))
+            return Expression(name, variables[name])
+        minimum = -(2 ** (width - 1))
+        maximum = 2 ** (width - 1) - 1
+        value = engine.randrange(minimum, maximum + 1)
+        return Expression(str(value), value)
+
+    left = generate_signed_narrow_expression(
+        engine, variables, depth - 1, width
+    )
+    operation = engine.choice(
+        ("+", "-", "*", "&", "|", "^", "<<", ">>", "/", "%")
+    )
+
+    if operation in ("<<", ">>"):
+        shift = engine.randrange(0, width + 16)
+        effective_shift = shift & (width - 1)
+        if operation == "<<":
+            value = wrap_signed(left.value << effective_shift, width)
+        else:
+            value = left.value >> effective_shift
+        return Expression(f"({left.text} {operation} {shift})", value)
+
+    if operation in ("/", "%"):
+        divisor = engine.randrange(1, min(64, 2 ** (width - 1)))
+        quotient = truncate_division(left.value, divisor)
+        value = quotient if operation == "/" else left.value - quotient * divisor
+        return Expression(f"({left.text} {operation} {divisor})", value)
+
+    right = generate_signed_narrow_expression(
+        engine, variables, depth - 1, width
+    )
+    if operation == "+":
+        value = left.value + right.value
+    elif operation == "-":
+        value = left.value - right.value
+    elif operation == "*":
+        value = left.value * right.value
+    elif operation == "&":
+        value = left.value & right.value
+    elif operation == "|":
+        value = left.value | right.value
+    else:
+        value = left.value ^ right.value
+    return Expression(
+        f"({left.text} {operation} {right.text})",
+        wrap_signed(value, width),
+    )
+
+
+def generate_signed_narrow_case(
+    engine: random.Random,
+    case_index: int,
+    width: int,
+) -> tuple[str, int]:
+    minimum = -(2 ** (width - 1))
+    maximum = 2 ** (width - 1) - 1
+    type_name = f"i{width}"
+    arguments = {
+        "first": engine.randrange(minimum, maximum + 1),
+        "second": engine.randrange(minimum, maximum + 1),
+        "third": engine.randrange(minimum, maximum + 1),
+    }
+    expression = generate_signed_narrow_expression(
+        engine, arguments, 4, width
+    )
+    expected_value = expression.value
+    expected_code = expected_value & 255
+    failure_code = (expected_code + 1) & 255
+    source = (
+        f"module random.signed_narrow_case{case_index};\n"
+        "\n"
+        f"fn calculate(first: {type_name}, second: {type_name}, "
+        f"third: {type_name}) -> {type_name} {{\n"
+        f"    return {expression.text};\n"
+        "}\n"
+        "\n"
+        "fn main() -> i32 {\n"
+        f"    let result: {type_name} = calculate("
+        f"{arguments['first']}, {arguments['second']}, {arguments['third']});\n"
+        f"    if (result == {expected_value}) {{ return {expected_code}; }}\n"
+        f"    return {failure_code};\n"
         "}\n"
     )
     return source, expected_code
@@ -262,7 +360,7 @@ def generate_unsigned_expression(
             name = engine.choice(tuple(variables))
             return Expression(name, variables[name])
         modulus = 2**width
-        value = modulus - 1 - engine.randrange(0, 4096)
+        value = modulus - 1 - engine.randrange(0, min(4096, modulus))
         return Expression(str(value), value)
 
     left = generate_unsigned_expression(engine, variables, depth - 1, width)
@@ -312,16 +410,18 @@ def generate_unsigned_case(
     case_index: int,
     width: int,
 ) -> tuple[str, int]:
-    modulus = U32_MODULUS if width == 32 else U64_MODULUS
-    type_name = "u32" if width == 32 else "u64"
+    modulus = 2**width
+    type_name = f"u{width}"
+    spread = max(1, min(4096, modulus // 4))
     arguments = {
-        "first": modulus - 1 - engine.randrange(0, 4096),
-        "second": modulus // 2 + engine.randrange(0, 4096),
-        "third": modulus // 4 + engine.randrange(0, 4096),
+        "first": modulus - 1 - engine.randrange(0, spread),
+        "second": modulus // 2 + engine.randrange(0, spread),
+        "third": modulus // 4 + engine.randrange(0, spread),
     }
     expression = generate_unsigned_expression(engine, arguments, 4, width)
     expected_value = expression.value
     expected_code = expected_value & 255
+    failure_code = (expected_code + 1) & 255
     source = (
         f"module random.unsigned_case{case_index};\n"
         "\n"
@@ -334,7 +434,7 @@ def generate_unsigned_case(
         f"    let result: {type_name} = calculate("
         f"{arguments['first']}, {arguments['second']}, {arguments['third']});\n"
         f"    if (result == {expected_value}) {{ return {expected_code}; }}\n"
-        "    return 1;\n"
+        f"    return {failure_code};\n"
         "}\n"
     )
     return source, expected_code
@@ -418,7 +518,7 @@ def main() -> int:
 
     engine = random.Random(arguments.seed)
     for case_index in range(arguments.cases):
-        case_kind = case_index % 4
+        case_kind = case_index % 8
         if case_kind == 0:
             source, expected_code = generate_case(engine, case_index)
         elif case_kind == 1:
@@ -427,9 +527,25 @@ def main() -> int:
             source, expected_code = generate_unsigned_case(
                 engine, case_index, 32
             )
-        else:
+        elif case_kind == 3:
             source, expected_code = generate_unsigned_case(
                 engine, case_index, 64
+            )
+        elif case_kind == 4:
+            source, expected_code = generate_signed_narrow_case(
+                engine, case_index, 8
+            )
+        elif case_kind == 5:
+            source, expected_code = generate_signed_narrow_case(
+                engine, case_index, 16
+            )
+        elif case_kind == 6:
+            source, expected_code = generate_unsigned_case(
+                engine, case_index, 8
+            )
+        else:
+            source, expected_code = generate_unsigned_case(
+                engine, case_index, 16
             )
         compile_and_run(
             arguments.compiler,

@@ -142,10 +142,18 @@ const char *luna_ir_type_name(LunaIrType type) {
         return "void";
     case LUNA_IR_TYPE_BOOL:
         return "bool";
+    case LUNA_IR_TYPE_I8:
+        return "i8";
+    case LUNA_IR_TYPE_I16:
+        return "i16";
     case LUNA_IR_TYPE_I32:
         return "i32";
     case LUNA_IR_TYPE_I64:
         return "i64";
+    case LUNA_IR_TYPE_U8:
+        return "u8";
+    case LUNA_IR_TYPE_U16:
+        return "u16";
     case LUNA_IR_TYPE_U32:
         return "u32";
     case LUNA_IR_TYPE_U64:
@@ -156,18 +164,27 @@ const char *luna_ir_type_name(LunaIrType type) {
 }
 
 bool luna_ir_type_is_integer(LunaIrType type) {
-    return type == LUNA_IR_TYPE_I32 || type == LUNA_IR_TYPE_I64 ||
+    return type == LUNA_IR_TYPE_I8 || type == LUNA_IR_TYPE_I16 ||
+           type == LUNA_IR_TYPE_I32 || type == LUNA_IR_TYPE_I64 ||
+           type == LUNA_IR_TYPE_U8 || type == LUNA_IR_TYPE_U16 ||
            type == LUNA_IR_TYPE_U32 || type == LUNA_IR_TYPE_U64;
 }
 
 bool luna_ir_type_is_signed_integer(LunaIrType type) {
-    return type == LUNA_IR_TYPE_I32 || type == LUNA_IR_TYPE_I64;
+    return type == LUNA_IR_TYPE_I8 || type == LUNA_IR_TYPE_I16 ||
+           type == LUNA_IR_TYPE_I32 || type == LUNA_IR_TYPE_I64;
 }
 
 uint32_t luna_ir_type_bit_width(LunaIrType type) {
     switch (type) {
     case LUNA_IR_TYPE_BOOL:
         return 1U;
+    case LUNA_IR_TYPE_I8:
+    case LUNA_IR_TYPE_U8:
+        return 8U;
+    case LUNA_IR_TYPE_I16:
+    case LUNA_IR_TYPE_U16:
+        return 16U;
     case LUNA_IR_TYPE_I32:
     case LUNA_IR_TYPE_U32:
         return 32U;
@@ -187,6 +204,17 @@ static bool luna_ir_type_is_value(LunaIrType type) {
 
 static bool luna_ir_type_is_return(LunaIrType type) {
     return type == LUNA_IR_TYPE_VOID || luna_ir_type_is_value(type);
+}
+
+static uint64_t luna_ir_integer_bit_mask(LunaIrType type) {
+    const uint32_t width = luna_ir_type_bit_width(type);
+    if (width == 64U) {
+        return UINT64_MAX;
+    }
+    if (width == 0U) {
+        return 0U;
+    }
+    return (UINT64_C(1) << width) - 1U;
 }
 
 static bool luna_ir_reject(const char **reason, const char *message) {
@@ -319,10 +347,10 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
             return luna_ir_reject(reason,
                                   "integer constant has non-integer type");
         }
-        if (luna_ir_type_bit_width(instruction->type) == 32U &&
-            instruction->immediate > (uint64_t)UINT32_MAX) {
+        if (instruction->immediate >
+            luna_ir_integer_bit_mask(instruction->type)) {
             return luna_ir_reject(
-                reason, "integer constant exceeds its 32-bit storage");
+                reason, "integer constant exceeds its type storage width");
         }
         return luna_ir_verify_result(function, instruction, instruction->type,
                                      reason);
@@ -859,15 +887,12 @@ static bool luna_ir_print_value(LunaStringBuilder *output,
 }
 
 static int64_t luna_ir_signed_immediate(LunaIrType type, uint64_t bits) {
-    const uint32_t width = luna_ir_type_bit_width(type);
-    const uint64_t maximum_positive =
-        width == 32U ? (uint64_t)INT32_MAX : (uint64_t)INT64_MAX;
+    const uint64_t maximum_bits = luna_ir_integer_bit_mask(type);
+    const uint64_t maximum_positive = maximum_bits >> 1U;
     if (bits <= maximum_positive) {
         return (int64_t)bits;
     }
 
-    const uint64_t maximum_bits =
-        width == 32U ? (uint64_t)UINT32_MAX : UINT64_MAX;
     const uint64_t magnitude = maximum_bits - bits + 1U;
     if (magnitude == (UINT64_C(1) << 63U)) {
         return INT64_MIN;

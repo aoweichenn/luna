@@ -116,11 +116,23 @@ static LunaTypeRef luna_parser_parse_type(LunaParser *parser) {
     case LUNA_TOKEN_BOOL:
         kind = LUNA_TYPE_BOOL;
         break;
+    case LUNA_TOKEN_I8:
+        kind = LUNA_TYPE_I8;
+        break;
+    case LUNA_TOKEN_I16:
+        kind = LUNA_TYPE_I16;
+        break;
     case LUNA_TOKEN_I32:
         kind = LUNA_TYPE_I32;
         break;
     case LUNA_TOKEN_I64:
         kind = LUNA_TYPE_I64;
+        break;
+    case LUNA_TOKEN_U8:
+        kind = LUNA_TYPE_U8;
+        break;
+    case LUNA_TOKEN_U16:
+        kind = LUNA_TYPE_U16;
         break;
     case LUNA_TOKEN_U32:
         kind = LUNA_TYPE_U32;
@@ -137,7 +149,7 @@ static LunaTypeRef luna_parser_parse_type(LunaParser *parser) {
             luna_diagnostic_error(
                 parser->diagnostics, token.span,
                 "type %s is accepted by the language design but is not "
-                "implemented in milestone M0",
+                "implemented in the current bootstrap milestone",
                 luna_token_kind_name(token.kind));
             luna_parser_advance(parser);
             return (LunaTypeRef){

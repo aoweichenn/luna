@@ -62,7 +62,7 @@ with virtual values and explicit local slots:
 
 - `const`
 - `load` and `store`
-- type-directed integer arithmetic shared by `i32`, `i64`, `u32` and `u64`
+- type-directed integer arithmetic shared by all fixed-width integer types
 - explicit integer conversions whose extension or truncation follows source
   and target type metadata
 - comparisons
@@ -89,10 +89,13 @@ instruction encodings and relocations must not appear in it.
 
 The first backend is correctness-first:
 
-- System V signed and unsigned 32-bit and 64-bit integer argument and result
-  registers;
+- System V's first six integer argument-register assignments and integer result
+  register for every fixed-width integer type;
 - explicit stack frames;
 - virtual values assigned stack homes;
+- canonical zero-extended raw bits in the low 32 bits for 8-bit and 16-bit
+  arguments, results and stack homes, with explicit sign extension at signed
+  comparisons, division, right shifts and widening conversions;
 - deterministic labels and symbol mangling;
 - a Linux `_start` shim that exits through syscall 60;
 - no dependency on a target C runtime.

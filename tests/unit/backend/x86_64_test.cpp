@@ -96,4 +96,45 @@ TEST(X8664BackendTest, EmitsUnsignedInstructionsAndConversions) {
     EXPECT_NE(assembly.find("xorq %rdx, %rdx"), std::string::npos);
 }
 
+TEST(X8664BackendTest, EmitsCompleteNarrowIntegerSemantics) {
+    FrontendHarness harness{
+        "module test.narrow_codegen;\n"
+        "fn signed_byte(left: i8, right: i8) -> i8 {\n"
+        "    let quotient: i8 = left / right;\n"
+        "    let shifted: i8 = left >> right;\n"
+        "    if (left < right) { return quotient + shifted; }\n"
+        "    return quotient - shifted;\n"
+        "}\n"
+        "fn signed_word(left: i16, right: i16) -> i16 {\n"
+        "    return (left % right) >> right;\n"
+        "}\n"
+        "fn unsigned_byte(left: u8, right: u8) -> u8 {\n"
+        "    if (left > right) { return (left / right) >> right; }\n"
+        "    return left;\n"
+        "}\n"
+        "fn unsigned_word(left: u16, right: u16) -> u16 {\n"
+        "    return (left % right) << right;\n"
+        "}\n"
+        "fn widen_byte(value: i8) -> i64 { return value as i64; }\n"
+        "fn widen_word(value: i16) -> i64 { return value as i64; }\n"
+        "fn truncate_byte(value: u64) -> u8 { return value as u8; }\n"
+        "fn main() -> i32 { return 0; }\n"};
+
+    ASSERT_TRUE(harness.EmitAssembly()) << harness.Diagnostics();
+    const std::string assembly = harness.Assembly();
+    EXPECT_NE(assembly.find("movsbl"), std::string::npos);
+    EXPECT_NE(assembly.find("movswl"), std::string::npos);
+    EXPECT_NE(assembly.find("movsbq"), std::string::npos);
+    EXPECT_NE(assembly.find("movswq"), std::string::npos);
+    EXPECT_NE(assembly.find("andl $255, %eax"), std::string::npos);
+    EXPECT_NE(assembly.find("andl $65535, %eax"), std::string::npos);
+    EXPECT_NE(assembly.find("andl $7, %ecx"), std::string::npos);
+    EXPECT_NE(assembly.find("andl $15, %ecx"), std::string::npos);
+    EXPECT_NE(assembly.find("idivl %ecx"), std::string::npos);
+    EXPECT_NE(assembly.find("divl %ecx"), std::string::npos);
+    EXPECT_NE(assembly.find("setl %al"), std::string::npos);
+    EXPECT_NE(assembly.find("seta %al"), std::string::npos);
+    EXPECT_NE(assembly.find("_safe:"), std::string::npos);
+}
+
 }

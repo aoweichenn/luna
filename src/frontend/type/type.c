@@ -8,10 +8,18 @@ const char *luna_type_kind_name(LunaTypeKind kind) {
         return "void";
     case LUNA_TYPE_BOOL:
         return "bool";
+    case LUNA_TYPE_I8:
+        return "i8";
+    case LUNA_TYPE_I16:
+        return "i16";
     case LUNA_TYPE_I32:
         return "i32";
     case LUNA_TYPE_I64:
         return "i64";
+    case LUNA_TYPE_U8:
+        return "u8";
+    case LUNA_TYPE_U16:
+        return "u16";
     case LUNA_TYPE_U32:
         return "u32";
     case LUNA_TYPE_U64:
@@ -27,17 +35,25 @@ bool luna_type_kind_is_integer(LunaTypeKind kind) {
 }
 
 bool luna_type_kind_is_signed_integer(LunaTypeKind kind) {
-    return kind == LUNA_TYPE_I32 || kind == LUNA_TYPE_I64;
+    return kind == LUNA_TYPE_I8 || kind == LUNA_TYPE_I16 ||
+           kind == LUNA_TYPE_I32 || kind == LUNA_TYPE_I64;
 }
 
 bool luna_type_kind_is_unsigned_integer(LunaTypeKind kind) {
-    return kind == LUNA_TYPE_U32 || kind == LUNA_TYPE_U64;
+    return kind == LUNA_TYPE_U8 || kind == LUNA_TYPE_U16 ||
+           kind == LUNA_TYPE_U32 || kind == LUNA_TYPE_U64;
 }
 
 uint32_t luna_type_kind_bit_width(LunaTypeKind kind) {
     switch (kind) {
     case LUNA_TYPE_BOOL:
         return 1U;
+    case LUNA_TYPE_I8:
+    case LUNA_TYPE_U8:
+        return 8U;
+    case LUNA_TYPE_I16:
+    case LUNA_TYPE_U16:
+        return 16U;
     case LUNA_TYPE_I32:
     case LUNA_TYPE_U32:
         return 32U;

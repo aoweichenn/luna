@@ -26,7 +26,7 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] explicit `as` conversions between implemented integer types
 - [x] complete `u32` and `u64` vertical slices with unsigned code generation
 - [x] type-directed integer IR shared by signed and unsigned widths
-- [ ] all fixed-width integer types
+- [x] all fixed-width integer types
 - [ ] `isize`, `usize`, `f32`, `f64`
 - [ ] explicit conversions for the remaining scalar and pointer types
 - [ ] complete operators and `do`/`for`/`switch`

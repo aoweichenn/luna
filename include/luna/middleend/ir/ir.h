@@ -19,8 +19,12 @@ typedef uint32_t LunaIrFunctionId;
 typedef enum LunaIrType {
     LUNA_IR_TYPE_VOID,
     LUNA_IR_TYPE_BOOL,
+    LUNA_IR_TYPE_I8,
+    LUNA_IR_TYPE_I16,
     LUNA_IR_TYPE_I32,
     LUNA_IR_TYPE_I64,
+    LUNA_IR_TYPE_U8,
+    LUNA_IR_TYPE_U16,
     LUNA_IR_TYPE_U32,
     LUNA_IR_TYPE_U64
 } LunaIrType;

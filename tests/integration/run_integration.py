@@ -87,6 +87,84 @@ def compile_and_run(
     run([qemu, str(executable)], expected_code=expected_code)
 
 
+def convert_integer(
+    value: int,
+    source_width: int,
+    source_signed: bool,
+    target_width: int,
+    target_signed: bool,
+) -> int:
+    source_modulus = 2**source_width
+    source_bits = value % source_modulus
+    if target_width > source_width and source_signed:
+        source_value = (
+            source_bits - source_modulus
+            if source_bits >= 2 ** (source_width - 1)
+            else source_bits
+        )
+        target_bits = source_value % (2**target_width)
+    else:
+        target_bits = source_bits % (2**target_width)
+
+    if target_signed and target_bits >= 2 ** (target_width - 1):
+        return target_bits - 2**target_width
+    return target_bits
+
+
+def generate_integer_conversion_matrix(work_dir: pathlib.Path) -> pathlib.Path:
+    integer_types = (
+        ("i8", 8, True, -85),
+        ("i16", 16, True, -21846),
+        ("i32", 32, True, -1431655766),
+        ("i64", 64, True, -6148914691236517206),
+        ("u8", 8, False, 171),
+        ("u16", 16, False, 43690),
+        ("u32", 32, False, 2863311530),
+        ("u64", 64, False, 12297829382473034410),
+    )
+    lines = ["module test.all_integer_conversions;", ""]
+    for source_name, _, _, _ in integer_types:
+        for target_name, _, _, _ in integer_types:
+            lines.extend(
+                (
+                    f"fn convert_{source_name}_to_{target_name}("
+                    f"value: {source_name}) -> {target_name} {{",
+                    f"    return value as {target_name};",
+                    "}",
+                    "",
+                )
+            )
+
+    lines.append("fn main() -> i32 {")
+    for (
+        source_name,
+        source_width,
+        source_signed,
+        source_value,
+    ) in integer_types:
+        for target_name, target_width, target_signed, _ in integer_types:
+            expected = convert_integer(
+                source_value,
+                source_width,
+                source_signed,
+                target_width,
+                target_signed,
+            )
+            lines.extend(
+                (
+                    f"    if (convert_{source_name}_to_{target_name}("
+                    f"{source_value}) != {expected}) {{",
+                    "        return 1;",
+                    "    }",
+                )
+            )
+    lines.extend(("    return 42;", "}", ""))
+
+    source = work_dir / "all_integer_conversions.luna"
+    source.write_text("\n".join(lines), encoding="utf-8")
+    return source
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--compiler", type=pathlib.Path, required=True)
@@ -148,11 +226,19 @@ def main() -> int:
         "i64_division_by_zero.luna": -8,
         "i64_division_overflow.luna": -8,
         "mixed_width_arguments.luna": 42,
+        "fixed_width_arguments.luna": 42,
         "integer_conversions.luna": 42,
         "conversion_round_trip.luna": 255,
         "unsigned_operations.luna": 42,
         "unsigned_conversions.luna": 42,
         "remaining_integer_conversions.luna": 42,
+        "narrow_integer_operations.luna": 42,
+        "i8_division_by_zero.luna": -8,
+        "i16_division_by_zero.luna": -8,
+        "u8_division_by_zero.luna": -8,
+        "u16_division_by_zero.luna": -8,
+        "i8_division_overflow.luna": -8,
+        "i16_remainder_overflow.luna": -8,
         "u32_division_by_zero.luna": -8,
         "u64_division_by_zero.luna": -8,
     }
@@ -168,6 +254,18 @@ def main() -> int:
             expected_code,
         )
         print(f"PASS executable: {case_name}")
+
+    conversion_matrix = generate_integer_conversion_matrix(arguments.work_dir)
+    compile_and_run(
+        arguments.compiler,
+        llvm_mc,
+        linker,
+        qemu,
+        conversion_matrix,
+        arguments.work_dir,
+        42,
+    )
+    print("PASS executable: all 64 fixed-width integer conversion pairs")
 
     negative_cases = {
         "type_error.luna": "expected bool, found i32",
@@ -190,6 +288,11 @@ def main() -> int:
         "i64_positive_overflow.luna": "integer literal does not fit in i64",
         "i64_mixed_types.luna": "expected i64, found i32",
         "u32_positive_overflow.luna": "integer literal does not fit in u32",
+        "i8_positive_overflow.luna": "integer literal does not fit in i8",
+        "i16_positive_overflow.luna": "integer literal does not fit in i16",
+        "u8_positive_overflow.luna": "integer literal does not fit in u8",
+        "u16_positive_overflow.luna": "integer literal does not fit in u16",
+        "narrow_mixed_types.luna": "expected i8, found u8",
         "signed_unsigned_mixed.luna": "expected u64, found i64",
         "invalid_bool_conversion.luna": (
             "explicit conversion requires integer source and target types"
@@ -221,6 +324,7 @@ def main() -> int:
         "i64_six_arguments",
         "conversion_round_trip",
         "unsigned_conversions",
+        "narrow_ir",
     ):
         ir_output = arguments.work_dir / f"{snapshot_name}.lir"
         run(
@@ -252,6 +356,7 @@ def main() -> int:
         "recursive_factorial",
         "i64_operations",
         "unsigned_operations",
+        "narrow_integer_operations",
     ):
         deterministic_first = (
             arguments.work_dir / f"{deterministic_name}_first.s"

@@ -16,6 +16,25 @@ namespace {
 
 }
 
+TEST(IrTypeTest, ReportsAllFixedWidthIntegerMetadata) {
+    EXPECT_STREQ(luna_ir_type_name(LUNA_IR_TYPE_I8), "i8");
+    EXPECT_TRUE(luna_ir_type_is_integer(LUNA_IR_TYPE_I8));
+    EXPECT_TRUE(luna_ir_type_is_signed_integer(LUNA_IR_TYPE_I8));
+    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_I8), 8U);
+    EXPECT_STREQ(luna_ir_type_name(LUNA_IR_TYPE_I16), "i16");
+    EXPECT_TRUE(luna_ir_type_is_integer(LUNA_IR_TYPE_I16));
+    EXPECT_TRUE(luna_ir_type_is_signed_integer(LUNA_IR_TYPE_I16));
+    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_I16), 16U);
+    EXPECT_STREQ(luna_ir_type_name(LUNA_IR_TYPE_U8), "u8");
+    EXPECT_TRUE(luna_ir_type_is_integer(LUNA_IR_TYPE_U8));
+    EXPECT_FALSE(luna_ir_type_is_signed_integer(LUNA_IR_TYPE_U8));
+    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_U8), 8U);
+    EXPECT_STREQ(luna_ir_type_name(LUNA_IR_TYPE_U16), "u16");
+    EXPECT_TRUE(luna_ir_type_is_integer(LUNA_IR_TYPE_U16));
+    EXPECT_FALSE(luna_ir_type_is_signed_integer(LUNA_IR_TYPE_U16));
+    EXPECT_EQ(luna_ir_type_bit_width(LUNA_IR_TYPE_U16), 16U);
+}
+
 TEST(IrVerifierTest, AcceptsWellTypedControlFlowGraph) {
     FrontendHarness harness{"module test.valid_ir;\n"
                             "fn main() -> i32 {\n"
@@ -219,7 +238,33 @@ TEST(IrVerifierTest, RejectsConstantThatExceedsItsStorageWidth) {
         static_cast<std::uint64_t>(UINT32_MAX) + static_cast<std::uint64_t>(1U);
 
     EXPECT_FALSE(harness.Verify());
-    EXPECT_NE(harness.Diagnostics().find("exceeds its 32-bit storage"),
+    EXPECT_NE(harness.Diagnostics().find("exceeds its type storage width"),
+              std::string::npos);
+}
+
+TEST(IrVerifierTest, RejectsNarrowConstantsThatExceedTheirStorageWidth) {
+    FrontendHarness harness{"module test.narrow_immediate_range;\n"
+                            "fn byte() -> u8 { return 1; }\n"
+                            "fn word() -> u16 { return 1; }\n"
+                            "fn main() -> i32 { return 0; }\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaIrInstruction *byte_constant = FindInstruction(
+        luna_ir_module_function(harness.Module(), 0U), LUNA_IR_CONST_INTEGER);
+    LunaIrInstruction *word_constant = FindInstruction(
+        luna_ir_module_function(harness.Module(), 1U), LUNA_IR_CONST_INTEGER);
+    ASSERT_NE(byte_constant, nullptr);
+    ASSERT_NE(word_constant, nullptr);
+
+    byte_constant->immediate = std::uint64_t{1} << 8U;
+    EXPECT_FALSE(harness.Verify());
+    EXPECT_NE(harness.Diagnostics().find("exceeds its type storage width"),
+              std::string::npos);
+
+    byte_constant->immediate = 1U;
+    word_constant->immediate = std::uint64_t{1} << 16U;
+    EXPECT_FALSE(harness.Verify());
+    EXPECT_NE(harness.Diagnostics().find("exceeds its type storage width"),
               std::string::npos);
 }
 

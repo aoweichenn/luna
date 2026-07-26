@@ -1,8 +1,8 @@
 # Bootstrap execution semantics
 
-This document freezes the behavior needed to test the current `i32`, `i64`,
-`u32`, `u64` and `bool` subset. It is an explicit execution contract, not an
-optimization policy.
+This document freezes the behavior needed to test the current `i8`, `i16`,
+`i32`, `i64`, `u8`, `u16`, `u32`, `u64` and `bool` subset. It is an explicit
+execution contract, not an optimization policy.
 
 ## Evaluation
 
@@ -22,9 +22,10 @@ an explicit `as` conversion.
 
 ## Signed integers
 
-`i32` and `i64` are 32-bit and 64-bit two's-complement integers. Addition,
-subtraction, multiplication and unary negation wrap modulo 2^32 or 2^64.
-This behavior is defined; there is no signed-overflow undefined behavior.
+`i8`, `i16`, `i32` and `i64` are 8-bit, 16-bit, 32-bit and 64-bit
+two's-complement integers. Addition, subtraction, multiplication and unary
+negation wrap modulo the type's power of two. This behavior is defined; there
+is no signed-overflow undefined behavior.
 
 Division truncates toward zero. The remainder has the dividend's sign and
 satisfies:
@@ -33,12 +34,13 @@ satisfies:
 left == (left / right) * right + (left % right)
 ```
 
-Division by zero traps. Dividing the minimum value by `-1` also traps:
-`-2147483648 / -1` for `i32` and `-9223372036854775808 / -1` for `i64`.
-The corresponding remainder operations trap for the same inputs.
+Division by zero traps. Dividing the minimum value by `-1` also traps for every
+signed width: `-128`, `-32768`, `-2147483648` and
+`-9223372036854775808`, respectively. The corresponding remainder operations
+trap for the same inputs.
 
-`i32` shift counts use their low five bits (`count & 31`); `i64` shift counts
-use their low six bits (`count & 63`). Left shift wraps to the operand type;
+Shift counts use only the low `log2(width)` bits: three for `i8`, four for
+`i16`, five for `i32` and six for `i64`. Left shift wraps to the operand type;
 right shift is arithmetic and preserves the sign.
 
 Ordering comparisons are signed. Equality is defined separately for each
@@ -46,23 +48,23 @@ integer type and `bool`; these types never compare or convert implicitly.
 
 ## Unsigned integers
 
-`u32` and `u64` are 32-bit and 64-bit unsigned integers. Addition,
-subtraction, multiplication and unary negation wrap modulo 2^32 or 2^64.
-Division and remainder use unsigned arithmetic and trap only when the divisor
-is zero.
+`u8`, `u16`, `u32` and `u64` are 8-bit, 16-bit, 32-bit and 64-bit unsigned
+integers. Addition, subtraction, multiplication and unary negation wrap modulo
+the type's power of two. Division and remainder use unsigned arithmetic and
+trap only when the divisor is zero.
 
 Left shift wraps to the operand type. Right shift is logical and shifts in
-zero bits. As with signed integers, `u32` shift counts use their low five bits
-and `u64` shift counts use their low six bits. Ordering comparisons are
+zero bits. Shift-count masking follows the same three-, four-, five- and
+six-bit rule as the corresponding signed widths. Ordering comparisons are
 unsigned.
 
 ## Explicit integer conversions
 
-Every pair among `i32`, `i64`, `u32` and `u64` can be converted explicitly.
-Widening sign-extends a signed source and zero-extends an unsigned source,
-regardless of the target signedness. Narrowing keeps the low bits. A
-same-width signedness change preserves the bit pattern. These conversions
-never trap.
+Every pair among `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32` and `u64` can
+be converted explicitly. Widening sign-extends a signed source and zero-extends
+an unsigned source, regardless of the target signedness. Narrowing keeps the
+low bits. A same-width signedness change preserves the bit pattern. These
+conversions never trap.
 
 Conversions involving `bool` or `void` are rejected. A conversion to the same
 integer type is permitted and has no effect.

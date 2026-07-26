@@ -2,9 +2,12 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 namespace luna::test {
 
@@ -165,6 +168,58 @@ TEST(SemaTest, AcceptsMinimumI64Literal) {
     EXPECT_EQ(constant->immediate, std::uint64_t{1} << 63U);
 }
 
+TEST(SemaTest, AcceptsMinimumNarrowSignedLiterals) {
+    FrontendHarness harness{"module test.minimum_narrow;\n"
+                            "fn minimum_i8() -> i8 { return -128; }\n"
+                            "fn minimum_i16() -> i16 { return -32768; }\n"
+                            "fn main() -> i32 { return 0; }\n"};
+
+    ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    LunaIrInstruction *minimum_i8 = FindInstruction(
+        luna_ir_module_function(harness.Module(), 0U), LUNA_IR_CONST_INTEGER);
+    LunaIrInstruction *minimum_i16 = FindInstruction(
+        luna_ir_module_function(harness.Module(), 1U), LUNA_IR_CONST_INTEGER);
+    ASSERT_NE(minimum_i8, nullptr);
+    ASSERT_NE(minimum_i16, nullptr);
+    EXPECT_EQ(minimum_i8->type, LUNA_IR_TYPE_I8);
+    EXPECT_EQ(minimum_i8->immediate, std::uint64_t{1} << 7U);
+    EXPECT_EQ(minimum_i16->type, LUNA_IR_TYPE_I16);
+    EXPECT_EQ(minimum_i16->immediate, std::uint64_t{1} << 15U);
+}
+
+TEST(SemaTest, RejectsNarrowIntegerLiteralOverflow) {
+    struct OverflowCase final {
+        std::string_view type_name;
+        std::string_view literal;
+    };
+    constexpr std::array<OverflowCase, 6U> LUNA_TEST_OVERFLOW_CASES = {{
+        {"i8", "128"},
+        {"i8", "-129"},
+        {"i16", "32768"},
+        {"i16", "-32769"},
+        {"u8", "256"},
+        {"u16", "65536"},
+    }};
+
+    for (const OverflowCase &test_case : LUNA_TEST_OVERFLOW_CASES) {
+        std::string source{"module test.narrow_overflow;\nfn value() -> "};
+        source.append(test_case.type_name);
+        source.append(" { return ");
+        source.append(test_case.literal);
+        source.append("; }\nfn main() -> i32 { return 0; }\n");
+
+        FrontendHarness harness{source};
+        EXPECT_FALSE(harness.ParseAndLower())
+            << test_case.type_name << ' ' << test_case.literal;
+        EXPECT_NE(
+            harness.Diagnostics().find("integer literal does not fit in " +
+                                       std::string{test_case.type_name}),
+            std::string::npos)
+            << harness.Diagnostics();
+    }
+}
+
 TEST(SemaTest, RejectsMixedI32AndI64Operands) {
     FrontendHarness harness{"module test.mixed_integer_types;\n"
                             "fn combine(wide: i64, narrow: i32) -> i64 {\n"
@@ -283,6 +338,83 @@ TEST(SemaTest, LowersWidthAndSignednessIntegerConversions) {
         }
     }
     EXPECT_EQ(conversion_count, 4U);
+}
+
+TEST(SemaTest, LowersEveryFixedWidthIntegerConversionPair) {
+    constexpr std::array<std::string_view, 8U> LUNA_TEST_TYPE_NAMES = {
+        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+    };
+    constexpr std::array<LunaIrType, 8U> LUNA_TEST_IR_TYPES = {
+        LUNA_IR_TYPE_I8, LUNA_IR_TYPE_I16, LUNA_IR_TYPE_I32, LUNA_IR_TYPE_I64,
+        LUNA_IR_TYPE_U8, LUNA_IR_TYPE_U16, LUNA_IR_TYPE_U32, LUNA_IR_TYPE_U64,
+    };
+
+    std::string source{"module test.conversion_matrix;\n"};
+    for (const std::string_view source_type : LUNA_TEST_TYPE_NAMES) {
+        for (const std::string_view target_type : LUNA_TEST_TYPE_NAMES) {
+            source.append("fn convert_");
+            source.append(source_type);
+            source.append("_to_");
+            source.append(target_type);
+            source.append("(value: ");
+            source.append(source_type);
+            source.append(") -> ");
+            source.append(target_type);
+            source.append(" { return value as ");
+            source.append(target_type);
+            source.append("; }\n");
+        }
+    }
+    source.append("fn main() -> i32 { return 0; }\n");
+
+    FrontendHarness harness{source};
+    ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    ASSERT_EQ(harness.Module()->functions.length, 65U);
+
+    std::size_t function_index = 0U;
+    for (std::size_t source_index = 0U;
+         source_index < LUNA_TEST_IR_TYPES.size(); source_index += 1U) {
+        for (std::size_t target_index = 0U;
+             target_index < LUNA_TEST_IR_TYPES.size(); target_index += 1U) {
+            LunaIrFunction *function = luna_ir_module_function(
+                harness.Module(),
+                static_cast<LunaIrFunctionId>(function_index));
+            ASSERT_NE(function, nullptr);
+            EXPECT_EQ(function->return_type, LUNA_TEST_IR_TYPES[target_index]);
+            const auto *parameter_type = static_cast<const LunaIrType *>(
+                luna_vector_at_const(&function->parameter_types, 0U));
+            ASSERT_NE(parameter_type, nullptr);
+            EXPECT_EQ(*parameter_type, LUNA_TEST_IR_TYPES[source_index]);
+
+            LunaIrInstruction *conversion =
+                FindInstruction(function, LUNA_IR_CONVERT_INTEGER);
+            if (source_index == target_index) {
+                EXPECT_EQ(conversion, nullptr);
+            } else {
+                ASSERT_NE(conversion, nullptr);
+                EXPECT_EQ(conversion->type, LUNA_TEST_IR_TYPES[target_index]);
+                const auto *operand_type =
+                    static_cast<const LunaIrType *>(luna_vector_at_const(
+                        &function->value_types, conversion->left));
+                ASSERT_NE(operand_type, nullptr);
+                EXPECT_EQ(*operand_type, LUNA_TEST_IR_TYPES[source_index]);
+            }
+            function_index += 1U;
+        }
+    }
+}
+
+TEST(SemaTest, RejectsImplicitNarrowIntegerMixing) {
+    FrontendHarness harness{"module test.narrow_mixing;\n"
+                            "fn combine(left: i8, right: u8) -> i8 {\n"
+                            "    return left + right;\n"
+                            "}\n"
+                            "fn main() -> i32 { return 0; }\n"};
+
+    EXPECT_FALSE(harness.ParseAndLower());
+    EXPECT_NE(harness.Diagnostics().find("expected i8, found u8"),
+              std::string::npos);
 }
 
 TEST(SemaTest, RejectsNonIntegerExplicitConversions) {

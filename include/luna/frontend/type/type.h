@@ -8,8 +8,12 @@ typedef enum LunaTypeKind {
     LUNA_TYPE_INVALID,
     LUNA_TYPE_VOID,
     LUNA_TYPE_BOOL,
+    LUNA_TYPE_I8,
+    LUNA_TYPE_I16,
     LUNA_TYPE_I32,
     LUNA_TYPE_I64,
+    LUNA_TYPE_U8,
+    LUNA_TYPE_U16,
     LUNA_TYPE_U32,
     LUNA_TYPE_U64
 } LunaTypeKind;
