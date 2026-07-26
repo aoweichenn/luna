@@ -2,7 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <climits>
 #include <cstddef>
+#include <cstdint>
 
 namespace luna::test {
 namespace {
@@ -168,6 +170,40 @@ TEST(IrVerifierTest, RejectsIncorrectCachedTerminationState) {
 
     EXPECT_FALSE(harness.Verify());
     EXPECT_NE(harness.Diagnostics().find("cached termination state is wrong"),
+              std::string::npos);
+}
+
+TEST(IrVerifierTest, RejectsI64OperandOnI32Opcode) {
+    FrontendHarness harness{"module test.i64_opcode_type;\n"
+                            "fn wide(value: i64) -> i64 {\n"
+                            "    return value + 1;\n"
+                            "}\n"
+                            "fn main() -> i32 { return 0; }\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaIrFunction *function = luna_ir_module_function(harness.Module(), 0U);
+    LunaIrInstruction *addition = FindInstruction(function, LUNA_IR_ADD_I64);
+    ASSERT_NE(addition, nullptr);
+    addition->opcode = LUNA_IR_ADD_I32;
+
+    EXPECT_FALSE(harness.Verify());
+    EXPECT_NE(harness.Diagnostics().find("operand type does not match opcode"),
+              std::string::npos);
+}
+
+TEST(IrVerifierTest, RejectsOutOfRangeI32Constant) {
+    FrontendHarness harness{"module test.i32_immediate_range;\n"
+                            "fn main() -> i32 { return 1; }\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaIrInstruction *constant =
+        FindInstruction(MainFunction(harness), LUNA_IR_CONST_I32);
+    ASSERT_NE(constant, nullptr);
+    constant->immediate =
+        static_cast<std::int64_t>(INT32_MAX) + static_cast<std::int64_t>(1);
+
+    EXPECT_FALSE(harness.Verify());
+    EXPECT_NE(harness.Diagnostics().find("outside the i32 range"),
               std::string::npos);
 }
 

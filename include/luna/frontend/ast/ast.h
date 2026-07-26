@@ -32,7 +32,7 @@ struct LunaExpression {
     LunaExpression *next;
 
     union {
-        int64_t integer;
+        uint64_t integer;
         bool boolean;
         LunaStringView name;
 
@@ -147,7 +147,5 @@ typedef struct LunaProgram {
     LunaImport *first_import;
     LunaFunction *first_function;
 } LunaProgram;
-
-const char *luna_type_kind_name(LunaTypeKind kind);
 
 #endif

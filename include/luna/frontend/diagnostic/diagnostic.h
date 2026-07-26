@@ -1,8 +1,8 @@
 #ifndef LUNA_DIAGNOSTIC_H
 #define LUNA_DIAGNOSTIC_H
 
-#include "luna/frontend/support/attributes.h"
 #include "luna/frontend/source/source.h"
+#include "luna/frontend/support/attributes.h"
 
 #include <stddef.h>
 #include <stdio.h>

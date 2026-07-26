@@ -119,6 +119,9 @@ static LunaTypeRef luna_parser_parse_type(LunaParser *parser) {
     case LUNA_TOKEN_I32:
         kind = LUNA_TYPE_I32;
         break;
+    case LUNA_TOKEN_I64:
+        kind = LUNA_TYPE_I64;
+        break;
     case LUNA_TOKEN_VOID:
         kind = LUNA_TYPE_VOID;
         break;
@@ -154,7 +157,7 @@ static LunaTypeRef luna_parser_parse_type(LunaParser *parser) {
 }
 
 static bool luna_parser_parse_integer(LunaParser *parser, LunaToken token,
-                                      int64_t *value) {
+                                      uint64_t *value) {
     const LunaStringView text = luna_parser_token_text(token);
     size_t index = 0U;
     uint64_t base = 10U;
@@ -218,18 +221,13 @@ static bool luna_parser_parse_integer(LunaParser *parser, LunaToken token,
             return false;
         }
 
-        if (result > (uint64_t)INT64_MAX / base) {
+        const uint64_t maximum_magnitude = (uint64_t)INT64_MAX + 1U;
+        if (result > (maximum_magnitude - digit) / base) {
             luna_diagnostic_error(parser->diagnostics, token.span,
                                   "integer literal is too large");
             return false;
         }
         result *= base;
-
-        if (result > (uint64_t)INT64_MAX - digit) {
-            luna_diagnostic_error(parser->diagnostics, token.span,
-                                  "integer literal is too large");
-            return false;
-        }
         result += digit;
         saw_digit = true;
         previous_was_separator = false;
@@ -241,7 +239,7 @@ static bool luna_parser_parse_integer(LunaParser *parser, LunaToken token,
         return false;
     }
 
-    *value = (int64_t)result;
+    *value = result;
     return true;
 }
 
@@ -308,7 +306,7 @@ static LunaExpression *luna_parser_parse_primary(LunaParser *parser) {
         LunaExpression *expression = luna_parser_new_expression(
             parser, LUNA_EXPRESSION_INTEGER, token.span);
         if (expression != NULL) {
-            int64_t value = 0;
+            uint64_t value = 0U;
             (void)luna_parser_parse_integer(parser, token, &value);
             expression->as.integer = value;
         }

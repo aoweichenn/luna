@@ -1,5 +1,7 @@
 #include "luna/middleend/ir/ir.h"
 
+#include <inttypes.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -142,13 +144,16 @@ const char *luna_ir_type_name(LunaIrType type) {
         return "bool";
     case LUNA_IR_TYPE_I32:
         return "i32";
+    case LUNA_IR_TYPE_I64:
+        return "i64";
     }
 
     return "<invalid>";
 }
 
 static bool luna_ir_type_is_value(LunaIrType type) {
-    return type == LUNA_IR_TYPE_BOOL || type == LUNA_IR_TYPE_I32;
+    return type == LUNA_IR_TYPE_BOOL || type == LUNA_IR_TYPE_I32 ||
+           type == LUNA_IR_TYPE_I64;
 }
 
 static bool luna_ir_type_is_return(LunaIrType type) {
@@ -213,14 +218,14 @@ static bool luna_ir_verify_result(const LunaIrFunction *function,
     return true;
 }
 
-static bool luna_ir_verify_binary_i32(const LunaIrFunction *function,
-                                      const LunaIrInstruction *instruction,
-                                      const bool *defined_in_block,
-                                      LunaIrType result_type,
-                                      const char **reason) {
-    return luna_ir_verify_value(function, instruction->left, LUNA_IR_TYPE_I32,
+static bool luna_ir_verify_binary(const LunaIrFunction *function,
+                                  const LunaIrInstruction *instruction,
+                                  const bool *defined_in_block,
+                                  LunaIrType operand_type,
+                                  LunaIrType result_type, const char **reason) {
+    return luna_ir_verify_value(function, instruction->left, operand_type,
                                 defined_in_block, reason) &&
-           luna_ir_verify_value(function, instruction->right, LUNA_IR_TYPE_I32,
+           luna_ir_verify_value(function, instruction->right, operand_type,
                                 defined_in_block, reason) &&
            luna_ir_verify_result(function, instruction, result_type, reason);
 }
@@ -281,7 +286,16 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
                                        const char **reason) {
     switch (instruction->opcode) {
     case LUNA_IR_CONST_I32:
+        if (instruction->immediate < INT32_MIN ||
+            instruction->immediate > INT32_MAX) {
+            return luna_ir_reject(reason,
+                                  "i32 constant is outside the i32 range");
+        }
         return luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_I32,
+                                     reason);
+
+    case LUNA_IR_CONST_I64:
+        return luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_I64,
                                      reason);
 
     case LUNA_IR_CONST_BOOL:
@@ -321,6 +335,14 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
                luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_I32,
                                      reason);
 
+    case LUNA_IR_NEG_I64:
+    case LUNA_IR_BIT_NOT_I64:
+        return luna_ir_verify_value(function, instruction->left,
+                                    LUNA_IR_TYPE_I64, defined_in_block,
+                                    reason) &&
+               luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_I64,
+                                     reason);
+
     case LUNA_IR_BOOL_NOT:
         return luna_ir_verify_value(function, instruction->left,
                                     LUNA_IR_TYPE_BOOL, defined_in_block,
@@ -338,8 +360,23 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
     case LUNA_IR_BIT_XOR_I32:
     case LUNA_IR_SHIFT_LEFT_I32:
     case LUNA_IR_SHIFT_RIGHT_I32:
-        return luna_ir_verify_binary_i32(
-            function, instruction, defined_in_block, LUNA_IR_TYPE_I32, reason);
+        return luna_ir_verify_binary(function, instruction, defined_in_block,
+                                     LUNA_IR_TYPE_I32, LUNA_IR_TYPE_I32,
+                                     reason);
+
+    case LUNA_IR_ADD_I64:
+    case LUNA_IR_SUB_I64:
+    case LUNA_IR_MUL_I64:
+    case LUNA_IR_DIV_I64:
+    case LUNA_IR_REM_I64:
+    case LUNA_IR_BIT_AND_I64:
+    case LUNA_IR_BIT_OR_I64:
+    case LUNA_IR_BIT_XOR_I64:
+    case LUNA_IR_SHIFT_LEFT_I64:
+    case LUNA_IR_SHIFT_RIGHT_I64:
+        return luna_ir_verify_binary(function, instruction, defined_in_block,
+                                     LUNA_IR_TYPE_I64, LUNA_IR_TYPE_I64,
+                                     reason);
 
     case LUNA_IR_COMPARE_EQUAL:
     case LUNA_IR_COMPARE_NOT_EQUAL: {
@@ -366,8 +403,17 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
     case LUNA_IR_COMPARE_LESS_EQUAL_I32:
     case LUNA_IR_COMPARE_GREATER_I32:
     case LUNA_IR_COMPARE_GREATER_EQUAL_I32:
-        return luna_ir_verify_binary_i32(
-            function, instruction, defined_in_block, LUNA_IR_TYPE_BOOL, reason);
+        return luna_ir_verify_binary(function, instruction, defined_in_block,
+                                     LUNA_IR_TYPE_I32, LUNA_IR_TYPE_BOOL,
+                                     reason);
+
+    case LUNA_IR_COMPARE_LESS_I64:
+    case LUNA_IR_COMPARE_LESS_EQUAL_I64:
+    case LUNA_IR_COMPARE_GREATER_I64:
+    case LUNA_IR_COMPARE_GREATER_EQUAL_I64:
+        return luna_ir_verify_binary(function, instruction, defined_in_block,
+                                     LUNA_IR_TYPE_I64, LUNA_IR_TYPE_BOOL,
+                                     reason);
 
     case LUNA_IR_CALL:
         return luna_ir_verify_call(module, function, instruction,
@@ -782,8 +828,12 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
 
     switch (instruction->opcode) {
     case LUNA_IR_CONST_I32:
-        return luna_string_builder_append_format(output, "const.i32 %d\n",
-                                                 instruction->immediate);
+        return luna_string_builder_append_format(
+            output, "const.i32 %" PRId64 "\n", instruction->immediate);
+
+    case LUNA_IR_CONST_I64:
+        return luna_string_builder_append_format(
+            output, "const.i64 %" PRId64 "\n", instruction->immediate);
 
     case LUNA_IR_CONST_BOOL:
         return luna_string_builder_append_format(
@@ -804,13 +854,19 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
         return luna_string_builder_append_c_string(output, "\n");
 
     case LUNA_IR_NEG_I32:
+    case LUNA_IR_NEG_I64:
     case LUNA_IR_BIT_NOT_I32:
+    case LUNA_IR_BIT_NOT_I64:
     case LUNA_IR_BOOL_NOT: {
         const char *name = "not.bool";
         if (instruction->opcode == LUNA_IR_NEG_I32) {
             name = "neg.i32";
+        } else if (instruction->opcode == LUNA_IR_NEG_I64) {
+            name = "neg.i64";
         } else if (instruction->opcode == LUNA_IR_BIT_NOT_I32) {
             name = "bit_not.i32";
+        } else if (instruction->opcode == LUNA_IR_BIT_NOT_I64) {
+            name = "bit_not.i64";
         }
 
         if (!luna_string_builder_append_c_string(output, name) ||
@@ -831,12 +887,26 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
     case LUNA_IR_BIT_XOR_I32:
     case LUNA_IR_SHIFT_LEFT_I32:
     case LUNA_IR_SHIFT_RIGHT_I32:
+    case LUNA_IR_ADD_I64:
+    case LUNA_IR_SUB_I64:
+    case LUNA_IR_MUL_I64:
+    case LUNA_IR_DIV_I64:
+    case LUNA_IR_REM_I64:
+    case LUNA_IR_BIT_AND_I64:
+    case LUNA_IR_BIT_OR_I64:
+    case LUNA_IR_BIT_XOR_I64:
+    case LUNA_IR_SHIFT_LEFT_I64:
+    case LUNA_IR_SHIFT_RIGHT_I64:
     case LUNA_IR_COMPARE_EQUAL:
     case LUNA_IR_COMPARE_NOT_EQUAL:
     case LUNA_IR_COMPARE_LESS_I32:
     case LUNA_IR_COMPARE_LESS_EQUAL_I32:
     case LUNA_IR_COMPARE_GREATER_I32:
-    case LUNA_IR_COMPARE_GREATER_EQUAL_I32: {
+    case LUNA_IR_COMPARE_GREATER_EQUAL_I32:
+    case LUNA_IR_COMPARE_LESS_I64:
+    case LUNA_IR_COMPARE_LESS_EQUAL_I64:
+    case LUNA_IR_COMPARE_GREATER_I64:
+    case LUNA_IR_COMPARE_GREATER_EQUAL_I64: {
         const char *name = "<invalid>";
         switch (instruction->opcode) {
         case LUNA_IR_ADD_I32:
@@ -869,6 +939,36 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
         case LUNA_IR_SHIFT_RIGHT_I32:
             name = "shr.i32";
             break;
+        case LUNA_IR_ADD_I64:
+            name = "add.i64";
+            break;
+        case LUNA_IR_SUB_I64:
+            name = "sub.i64";
+            break;
+        case LUNA_IR_MUL_I64:
+            name = "mul.i64";
+            break;
+        case LUNA_IR_DIV_I64:
+            name = "div.i64";
+            break;
+        case LUNA_IR_REM_I64:
+            name = "rem.i64";
+            break;
+        case LUNA_IR_BIT_AND_I64:
+            name = "and.i64";
+            break;
+        case LUNA_IR_BIT_OR_I64:
+            name = "or.i64";
+            break;
+        case LUNA_IR_BIT_XOR_I64:
+            name = "xor.i64";
+            break;
+        case LUNA_IR_SHIFT_LEFT_I64:
+            name = "shl.i64";
+            break;
+        case LUNA_IR_SHIFT_RIGHT_I64:
+            name = "shr.i64";
+            break;
         case LUNA_IR_COMPARE_EQUAL:
             name = "eq";
             break;
@@ -886,6 +986,18 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
             break;
         case LUNA_IR_COMPARE_GREATER_EQUAL_I32:
             name = "ge.i32";
+            break;
+        case LUNA_IR_COMPARE_LESS_I64:
+            name = "lt.i64";
+            break;
+        case LUNA_IR_COMPARE_LESS_EQUAL_I64:
+            name = "le.i64";
+            break;
+        case LUNA_IR_COMPARE_GREATER_I64:
+            name = "gt.i64";
+            break;
+        case LUNA_IR_COMPARE_GREATER_EQUAL_I64:
+            name = "ge.i64";
             break;
         default:
             break;

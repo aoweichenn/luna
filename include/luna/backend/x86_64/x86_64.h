@@ -1,8 +1,8 @@
 #ifndef LUNA_X86_64_H
 #define LUNA_X86_64_H
 
-#include "luna/frontend/support/buffer.h"
 #include "luna/frontend/diagnostic/diagnostic.h"
+#include "luna/frontend/support/buffer.h"
 #include "luna/middleend/ir/ir.h"
 
 #include <stdbool.h>

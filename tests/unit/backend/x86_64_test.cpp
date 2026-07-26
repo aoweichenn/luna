@@ -35,4 +35,24 @@ TEST(X8664BackendTest, EmitsShortCircuitControlFlowAsBranches) {
     EXPECT_NE(assembly.find("idivl"), std::string::npos);
 }
 
+TEST(X8664BackendTest, EmitsI64InstructionsAndCallingConvention) {
+    FrontendHarness harness{
+        "module test.i64_codegen;\n"
+        "fn calculate(left: i64, right: i64) -> i64 {\n"
+        "    return ((left * right) + left) >> 2;\n"
+        "}\n"
+        "fn main() -> i32 {\n"
+        "    if (calculate(4294967296, 7) == 8589934592) { return 42; }\n"
+        "    return 1;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.EmitAssembly()) << harness.Diagnostics();
+    const std::string assembly = harness.Assembly();
+    EXPECT_NE(assembly.find("movq %rdi"), std::string::npos);
+    EXPECT_NE(assembly.find("movabsq $4294967296"), std::string::npos);
+    EXPECT_NE(assembly.find("imulq"), std::string::npos);
+    EXPECT_NE(assembly.find("sarq %cl, %rax"), std::string::npos);
+    EXPECT_NE(assembly.find("cmpq"), std::string::npos);
+}
+
 }

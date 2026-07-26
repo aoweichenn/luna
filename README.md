@@ -8,8 +8,8 @@ C or C++.
 The project is deliberately narrow at this stage:
 
 - target: x86-64 Linux, System V ABI, ELF64;
-- frontend: explicit types, functions, expressions, local variables and
-  structured control flow;
+- frontend: explicit `bool`, `i32` and `i64` types, functions, expressions,
+  local variables and structured control flow;
 - middle end: typed, non-SSA control-flow IR;
 - backend: direct x86-64 instruction selection;
 - bootstrap host: conforming C23;
@@ -73,5 +73,5 @@ qemu-x86_64-static ./hello
 
 See [the language draft](docs/language.md),
 [compiler architecture](docs/architecture.md),
-[M0 execution semantics](docs/execution-semantics.md), and the
+[bootstrap execution semantics](docs/execution-semantics.md), and the
 [implementation roadmap](docs/roadmap.md).

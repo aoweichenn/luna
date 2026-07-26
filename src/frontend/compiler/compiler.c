@@ -1,14 +1,14 @@
 #include "luna/frontend/compiler/compiler.h"
 
-#include "luna/frontend/support/arena.h"
-#include "luna/frontend/ast/ast.h"
-#include "luna/frontend/support/buffer.h"
-#include "luna/frontend/diagnostic/diagnostic.h"
-#include "luna/middleend/ir/ir.h"
-#include "luna/frontend/parser/parser.h"
-#include "luna/middleend/sema/sema.h"
-#include "luna/frontend/source/source.h"
 #include "luna/backend/x86_64/x86_64.h"
+#include "luna/frontend/ast/ast.h"
+#include "luna/frontend/diagnostic/diagnostic.h"
+#include "luna/frontend/parser/parser.h"
+#include "luna/frontend/source/source.h"
+#include "luna/frontend/support/arena.h"
+#include "luna/frontend/support/buffer.h"
+#include "luna/middleend/ir/ir.h"
+#include "luna/middleend/sema/sema.h"
 
 #include <stdbool.h>
 #include <stdio.h>

@@ -165,6 +165,11 @@ pointer->field
 
 Unary operators are `+ - ! ~ * &`.
 
+An unsuffixed integer literal takes the integer type required by its
+declaration, return, argument or enclosing integer expression. It defaults to
+`i32` when no integer context exists. This rule applies only to literals and
+does not convert an already typed value.
+
 Binary operators, from tighter to looser groups, are:
 
 ```text

@@ -4,6 +4,7 @@
 
 #include <climits>
 #include <cstddef>
+#include <cstdint>
 
 namespace luna::test {
 
@@ -119,6 +120,52 @@ TEST(SemaTest, KeepsWellTypedUnreachableCodeOutsideLiveControlFlow) {
                             "}\n"};
 
     EXPECT_TRUE(harness.Verify()) << harness.Diagnostics();
+}
+
+TEST(SemaTest, ContextuallyTypesI64LiteralsAndOperators) {
+    FrontendHarness harness{
+        "module test.i64_context;\n"
+        "fn calculate(value: i64) -> i64 {\n"
+        "    return (value + 4294967296) * 2;\n"
+        "}\n"
+        "fn main() -> i32 {\n"
+        "    if (calculate(5) == 8589934602) { return 42; }\n"
+        "    return 1;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    LunaIrFunction *calculate = luna_ir_module_function(harness.Module(), 0U);
+    ASSERT_NE(FindInstruction(calculate, LUNA_IR_CONST_I64), nullptr);
+    ASSERT_NE(FindInstruction(calculate, LUNA_IR_ADD_I64), nullptr);
+    ASSERT_NE(FindInstruction(calculate, LUNA_IR_MUL_I64), nullptr);
+}
+
+TEST(SemaTest, AcceptsMinimumI64Literal) {
+    FrontendHarness harness{"module test.minimum_i64;\n"
+                            "fn minimum() -> i64 {\n"
+                            "    return -9223372036854775808;\n"
+                            "}\n"
+                            "fn main() -> i32 { return 0; }\n"};
+
+    ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    LunaIrInstruction *constant = FindInstruction(
+        luna_ir_module_function(harness.Module(), 0U), LUNA_IR_CONST_I64);
+    ASSERT_NE(constant, nullptr);
+    EXPECT_EQ(constant->immediate, INT64_MIN);
+}
+
+TEST(SemaTest, RejectsMixedI32AndI64Operands) {
+    FrontendHarness harness{"module test.mixed_integer_types;\n"
+                            "fn combine(wide: i64, narrow: i32) -> i64 {\n"
+                            "    return wide + narrow;\n"
+                            "}\n"
+                            "fn main() -> i32 { return 0; }\n"};
+
+    EXPECT_FALSE(harness.ParseAndLower());
+    EXPECT_NE(harness.Diagnostics().find("expected i64, found i32"),
+              std::string::npos);
 }
 
 }

@@ -62,7 +62,7 @@ with virtual values and explicit local slots:
 
 - `const`
 - `load` and `store`
-- integer arithmetic
+- width-explicit `i32` and `i64` integer arithmetic
 - comparisons
 - direct calls
 - unconditional and conditional branches
@@ -87,7 +87,7 @@ instruction encodings and relocations must not appear in it.
 
 The first backend is correctness-first:
 
-- System V integer argument and result registers;
+- System V 32-bit and 64-bit integer argument and result registers;
 - explicit stack frames;
 - virtual values assigned stack homes;
 - deterministic labels and symbol mangling;

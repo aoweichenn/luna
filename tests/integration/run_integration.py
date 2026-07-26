@@ -136,10 +136,18 @@ def main() -> int:
         "six_arguments.luna": 21,
         "signed_arithmetic.luna": 36,
         "defined_i32_semantics.luna": 42,
+        "defined_i64_semantics.luna": 42,
         "division_by_zero.luna": -8,
         "division_overflow.luna": -8,
         "void_call.luna": 42,
         "bool_call.luna": 42,
+        "i64_operations.luna": 42,
+        "i64_boundaries.luna": 42,
+        "i64_six_arguments.luna": 42,
+        "i64_recursive_factorial.luna": 42,
+        "i64_division_by_zero.luna": -8,
+        "i64_division_overflow.luna": -8,
+        "mixed_width_arguments.luna": 42,
     }
 
     for case_name, expected_code in executable_cases.items():
@@ -172,6 +180,8 @@ def main() -> int:
         "wrong_return_type.luna": "expected i32, found bool",
         "continue_outside_loop.luna": "continue is only valid inside a loop",
         "duplicate_parameter.luna": "duplicate parameter 'value'",
+        "i64_positive_overflow.luna": "integer literal does not fit in i64",
+        "i64_mixed_types.luna": "expected i64, found i32",
     }
 
     for case_name, expected_diagnostic in negative_cases.items():
@@ -191,44 +201,56 @@ def main() -> int:
             )
         print(f"PASS negative: {case_name}")
 
-    ir_output = arguments.work_dir / "function_call.lir"
-    run(
-        [
-            str(arguments.compiler),
-            "--emit",
-            "ir",
-            "-o",
-            str(ir_output),
-            str(case_dir / "function_call.luna"),
-        ]
-    )
-    expected_ir = (
-        arguments.source_root / "tests" / "integration" / "golden" / "function_call.lir"
-    ).read_text(encoding="utf-8")
-    actual_ir = ir_output.read_text(encoding="utf-8")
-    if actual_ir != expected_ir:
-        raise AssertionError(
-            "IR snapshot mismatch for function_call.luna\n"
-            f"expected:\n{expected_ir}\nactual:\n{actual_ir}"
-        )
-    print("PASS IR snapshot: function_call.luna")
-
-    deterministic_first = arguments.work_dir / "deterministic_first.s"
-    deterministic_second = arguments.work_dir / "deterministic_second.s"
-    for output in (deterministic_first, deterministic_second):
+    for snapshot_name in ("function_call", "i64_six_arguments"):
+        ir_output = arguments.work_dir / f"{snapshot_name}.lir"
         run(
             [
                 str(arguments.compiler),
                 "--emit",
-                "asm",
+                "ir",
                 "-o",
-                str(output),
-                str(case_dir / "recursive_factorial.luna"),
+                str(ir_output),
+                str(case_dir / f"{snapshot_name}.luna"),
             ]
         )
-    if deterministic_first.read_bytes() != deterministic_second.read_bytes():
-        raise AssertionError("assembly output is not deterministic")
-    print("PASS deterministic assembly output")
+        expected_ir = (
+            arguments.source_root
+            / "tests"
+            / "integration"
+            / "golden"
+            / f"{snapshot_name}.lir"
+        ).read_text(encoding="utf-8")
+        actual_ir = ir_output.read_text(encoding="utf-8")
+        if actual_ir != expected_ir:
+            raise AssertionError(
+                f"IR snapshot mismatch for {snapshot_name}.luna\n"
+                f"expected:\n{expected_ir}\nactual:\n{actual_ir}"
+            )
+        print(f"PASS IR snapshot: {snapshot_name}.luna")
+
+    for deterministic_name in ("recursive_factorial", "i64_operations"):
+        deterministic_first = (
+            arguments.work_dir / f"{deterministic_name}_first.s"
+        )
+        deterministic_second = (
+            arguments.work_dir / f"{deterministic_name}_second.s"
+        )
+        for output in (deterministic_first, deterministic_second):
+            run(
+                [
+                    str(arguments.compiler),
+                    "--emit",
+                    "asm",
+                    "-o",
+                    str(output),
+                    str(case_dir / f"{deterministic_name}.luna"),
+                ]
+            )
+        if deterministic_first.read_bytes() != deterministic_second.read_bytes():
+            raise AssertionError(
+                f"assembly output is not deterministic: {deterministic_name}"
+            )
+        print(f"PASS deterministic assembly: {deterministic_name}.luna")
 
     print("all integration tests passed")
     return 0

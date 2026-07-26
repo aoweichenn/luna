@@ -1,10 +1,10 @@
 #ifndef LUNA_PARSER_H
 #define LUNA_PARSER_H
 
-#include "luna/frontend/support/arena.h"
 #include "luna/frontend/ast/ast.h"
 #include "luna/frontend/diagnostic/diagnostic.h"
 #include "luna/frontend/lexer/lexer.h"
+#include "luna/frontend/support/arena.h"
 
 #include <stdint.h>
 

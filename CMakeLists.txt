@@ -298,6 +298,7 @@ if(LUNA_BUILD_FUZZERS)
             COPY
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/minimal.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/control_flow.luna"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/i64.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/nested_call.luna"
             DESTINATION "${LUNA_FUZZ_CORPUS_DIR}"
         )

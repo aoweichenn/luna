@@ -22,6 +22,7 @@ M0 supports enough language to compile arithmetic functions, local variables,
 
 ## M1: accepted scalar language
 
+- [x] complete `i64` vertical slice, including IR, x86-64 ABI and traps
 - [ ] all fixed-width integer types
 - [ ] `isize`, `usize`, `f32`, `f64`
 - [ ] explicit `as` conversions

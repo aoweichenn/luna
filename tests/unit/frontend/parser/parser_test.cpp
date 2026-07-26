@@ -65,4 +65,32 @@ TEST(ParserTest, RejectsPathologicalNestingWithoutStackOverflow) {
               std::string::npos);
 }
 
+TEST(ParserTest, ParsesI64FunctionAndLocalTypes) {
+    FrontendHarness harness{"module test.i64_types;\n"
+                            "fn widen(value: i64) -> i64 {\n"
+                            "    let copy: i64 = value;\n"
+                            "    return copy;\n"
+                            "}\n"
+                            "fn main() -> i32 { return 0; }\n"};
+
+    ASSERT_TRUE(harness.Parse()) << harness.Diagnostics();
+    const LunaFunction *function = harness.Program()->first_function;
+    ASSERT_NE(function, nullptr);
+    EXPECT_EQ(function->return_type.kind, LUNA_TYPE_I64);
+    ASSERT_NE(function->first_parameter, nullptr);
+    EXPECT_EQ(function->first_parameter->type.kind, LUNA_TYPE_I64);
+}
+
+TEST(ParserTest, RejectsIntegerMagnitudeBeyondI64Minimum) {
+    FrontendHarness harness{"module test.integer_magnitude;\n"
+                            "fn value() -> i64 {\n"
+                            "    return -9223372036854775809;\n"
+                            "}\n"
+                            "fn main() -> i32 { return 0; }\n"};
+
+    EXPECT_FALSE(harness.Parse());
+    EXPECT_NE(harness.Diagnostics().find("integer literal is too large"),
+              std::string::npos);
+}
+
 }

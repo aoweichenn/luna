@@ -1,5 +1,6 @@
 #include "luna/backend/x86_64/x86_64.h"
 
+#include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -106,6 +107,30 @@ static bool luna_x86_64_emit_load_eax(LunaStringBuilder *output,
     return luna_string_builder_append_c_string(output, ", %eax\n");
 }
 
+static bool luna_x86_64_emit_store_rax(LunaStringBuilder *output,
+                                       const LunaIrFunction *function,
+                                       LunaIrValueId result) {
+    if (!luna_string_builder_append_c_string(output, "    movq %rax, ")) {
+        return false;
+    }
+    if (!luna_x86_64_append_value_operand(output, function, result)) {
+        return false;
+    }
+    return luna_string_builder_append_c_string(output, "\n");
+}
+
+static bool luna_x86_64_emit_load_rax(LunaStringBuilder *output,
+                                      const LunaIrFunction *function,
+                                      LunaIrValueId value) {
+    if (!luna_string_builder_append_c_string(output, "    movq ")) {
+        return false;
+    }
+    if (!luna_x86_64_append_value_operand(output, function, value)) {
+        return false;
+    }
+    return luna_string_builder_append_c_string(output, ", %rax\n");
+}
+
 static bool luna_x86_64_emit_binary(LunaStringBuilder *output,
                                     const LunaIrFunction *function,
                                     const LunaIrInstruction *instruction,
@@ -121,6 +146,21 @@ static bool luna_x86_64_emit_binary(LunaStringBuilder *output,
     return luna_x86_64_emit_store_eax(output, function, instruction->result);
 }
 
+static bool luna_x86_64_emit_binary_i64(LunaStringBuilder *output,
+                                        const LunaIrFunction *function,
+                                        const LunaIrInstruction *instruction,
+                                        const char *mnemonic) {
+    if (!luna_x86_64_emit_load_rax(output, function, instruction->left) ||
+        !luna_string_builder_append_format(output, "    %s ", mnemonic) ||
+        !luna_x86_64_append_value_operand(output, function,
+                                          instruction->right) ||
+        !luna_string_builder_append_c_string(output, ", %rax\n")) {
+        return false;
+    }
+
+    return luna_x86_64_emit_store_rax(output, function, instruction->result);
+}
+
 static const char *luna_x86_64_set_condition(LunaIrOpcode opcode) {
     switch (opcode) {
     case LUNA_IR_COMPARE_EQUAL:
@@ -128,12 +168,16 @@ static const char *luna_x86_64_set_condition(LunaIrOpcode opcode) {
     case LUNA_IR_COMPARE_NOT_EQUAL:
         return "setne";
     case LUNA_IR_COMPARE_LESS_I32:
+    case LUNA_IR_COMPARE_LESS_I64:
         return "setl";
     case LUNA_IR_COMPARE_LESS_EQUAL_I32:
+    case LUNA_IR_COMPARE_LESS_EQUAL_I64:
         return "setle";
     case LUNA_IR_COMPARE_GREATER_I32:
+    case LUNA_IR_COMPARE_GREATER_I64:
         return "setg";
     case LUNA_IR_COMPARE_GREATER_EQUAL_I32:
+    case LUNA_IR_COMPARE_GREATER_EQUAL_I64:
         return "setge";
     default:
         return NULL;
@@ -144,12 +188,21 @@ static bool luna_x86_64_emit_compare(LunaStringBuilder *output,
                                      const LunaIrFunction *function,
                                      const LunaIrInstruction *instruction) {
     const char *condition = luna_x86_64_set_condition(instruction->opcode);
+    const LunaIrType *operand_type =
+        luna_vector_at_const(&function->value_types, (size_t)instruction->left);
+    const bool is_i64 =
+        operand_type != NULL && *operand_type == LUNA_IR_TYPE_I64;
     if (condition == NULL ||
-        !luna_x86_64_emit_load_eax(output, function, instruction->left) ||
-        !luna_string_builder_append_c_string(output, "    cmpl ") ||
+        !(is_i64
+              ? luna_x86_64_emit_load_rax(output, function, instruction->left)
+              : luna_x86_64_emit_load_eax(output, function,
+                                          instruction->left)) ||
+        !luna_string_builder_append_c_string(output, is_i64 ? "    cmpq "
+                                                            : "    cmpl ") ||
         !luna_x86_64_append_value_operand(output, function,
                                           instruction->right) ||
-        !luna_string_builder_append_c_string(output, ", %eax\n") ||
+        !luna_string_builder_append_c_string(output, is_i64 ? ", %rax\n"
+                                                            : ", %eax\n") ||
         !luna_string_builder_append_format(output, "    %s %%al\n",
                                            condition) ||
         !luna_string_builder_append_c_string(output,
@@ -164,12 +217,21 @@ static bool luna_x86_64_emit_call(LunaStringBuilder *output,
                                   const LunaIrModule *module,
                                   const LunaIrFunction *function,
                                   const LunaIrInstruction *instruction) {
-    static const char *argument_registers[] = {
+    static const char *argument_registers_i32[] = {
         "%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d",
+    };
+    static const char *argument_registers_i64[] = {
+        "%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9",
     };
 
     if (instruction->argument_count >
-        sizeof(argument_registers) / sizeof(argument_registers[0])) {
+        sizeof(argument_registers_i32) / sizeof(argument_registers_i32[0])) {
+        return false;
+    }
+
+    const LunaIrFunction *callee =
+        luna_ir_module_function_const(module, instruction->callee);
+    if (callee == NULL) {
         return false;
     }
 
@@ -177,16 +239,21 @@ static bool luna_x86_64_emit_call(LunaStringBuilder *output,
          index += 1U) {
         const LunaIrValueId *argument = luna_vector_at_const(
             &function->arguments, (size_t)instruction->first_argument + index);
-        if (!luna_string_builder_append_c_string(output, "    movl ") ||
+        const LunaIrType *parameter_type =
+            luna_vector_at_const(&callee->parameter_types, (size_t)index);
+        const bool is_i64 =
+            parameter_type != NULL && *parameter_type == LUNA_IR_TYPE_I64;
+        if (!luna_string_builder_append_c_string(
+                output, is_i64 ? "    movq " : "    movl ") ||
             !luna_x86_64_append_value_operand(output, function, *argument) ||
-            !luna_string_builder_append_format(output, ", %s\n",
-                                               argument_registers[index])) {
+            !luna_string_builder_append_format(
+                output, ", %s\n",
+                is_i64 ? argument_registers_i64[index]
+                       : argument_registers_i32[index])) {
             return false;
         }
     }
 
-    const LunaIrFunction *callee =
-        luna_ir_module_function_const(module, instruction->callee);
     if (!luna_string_builder_append_c_string(output, "    call ") ||
         !luna_x86_64_append_symbol(output, callee) ||
         !luna_string_builder_append_c_string(output, "\n")) {
@@ -194,8 +261,11 @@ static bool luna_x86_64_emit_call(LunaStringBuilder *output,
     }
 
     if (instruction->result != LUNA_IR_INVALID_ID) {
-        return luna_x86_64_emit_store_eax(output, function,
-                                          instruction->result);
+        return instruction->type == LUNA_IR_TYPE_I64
+                   ? luna_x86_64_emit_store_rax(output, function,
+                                                instruction->result)
+                   : luna_x86_64_emit_store_eax(output, function,
+                                                instruction->result);
     }
 
     return true;
@@ -209,32 +279,57 @@ static bool luna_x86_64_emit_instruction(LunaStringBuilder *output,
     switch (instruction->opcode) {
     case LUNA_IR_CONST_I32:
     case LUNA_IR_CONST_BOOL:
-        if (!luna_string_builder_append_format(output, "    movl $%d, ",
-                                               instruction->immediate) ||
+        if (!luna_string_builder_append_format(
+                output, "    movl $%" PRId64 ", ", instruction->immediate) ||
             !luna_x86_64_append_value_operand(output, function,
                                               instruction->result)) {
             return false;
         }
         return luna_string_builder_append_c_string(output, "\n");
 
-    case LUNA_IR_LOAD:
-        if (!luna_string_builder_append_c_string(output, "    movl ") ||
-            !luna_x86_64_append_slot_operand(output, function,
-                                             instruction->slot) ||
-            !luna_string_builder_append_c_string(output, ", %eax\n")) {
+    case LUNA_IR_CONST_I64:
+        if (!luna_string_builder_append_format(
+                output, "    movabsq $%" PRId64 ", %%rax\n",
+                instruction->immediate)) {
             return false;
         }
-        return luna_x86_64_emit_store_eax(output, function,
+        return luna_x86_64_emit_store_rax(output, function,
                                           instruction->result);
 
-    case LUNA_IR_STORE:
-        if (!luna_x86_64_emit_load_eax(output, function, instruction->left) ||
-            !luna_string_builder_append_c_string(output, "    movl %eax, ") ||
+    case LUNA_IR_LOAD:
+        if (!luna_string_builder_append_c_string(
+                output, instruction->type == LUNA_IR_TYPE_I64 ? "    movq "
+                                                              : "    movl ") ||
+            !luna_x86_64_append_slot_operand(output, function,
+                                             instruction->slot) ||
+            !luna_string_builder_append_c_string(
+                output, instruction->type == LUNA_IR_TYPE_I64 ? ", %rax\n"
+                                                              : ", %eax\n")) {
+            return false;
+        }
+        return instruction->type == LUNA_IR_TYPE_I64
+                   ? luna_x86_64_emit_store_rax(output, function,
+                                                instruction->result)
+                   : luna_x86_64_emit_store_eax(output, function,
+                                                instruction->result);
+
+    case LUNA_IR_STORE: {
+        const LunaIrType *value_type = luna_vector_at_const(
+            &function->value_types, (size_t)instruction->left);
+        const bool is_i64 =
+            value_type != NULL && *value_type == LUNA_IR_TYPE_I64;
+        if (!(is_i64 ? luna_x86_64_emit_load_rax(output, function,
+                                                 instruction->left)
+                     : luna_x86_64_emit_load_eax(output, function,
+                                                 instruction->left)) ||
+            !luna_string_builder_append_c_string(
+                output, is_i64 ? "    movq %rax, " : "    movl %eax, ") ||
             !luna_x86_64_append_slot_operand(output, function,
                                              instruction->slot)) {
             return false;
         }
         return luna_string_builder_append_c_string(output, "\n");
+    }
 
     case LUNA_IR_NEG_I32:
     case LUNA_IR_BIT_NOT_I32:
@@ -263,6 +358,18 @@ static bool luna_x86_64_emit_instruction(LunaStringBuilder *output,
         return luna_x86_64_emit_store_eax(output, function,
                                           instruction->result);
 
+    case LUNA_IR_NEG_I64:
+    case LUNA_IR_BIT_NOT_I64:
+        if (!luna_x86_64_emit_load_rax(output, function, instruction->left) ||
+            !luna_string_builder_append_c_string(
+                output, instruction->opcode == LUNA_IR_NEG_I64
+                            ? "    negq %rax\n"
+                            : "    notq %rax\n")) {
+            return false;
+        }
+        return luna_x86_64_emit_store_rax(output, function,
+                                          instruction->result);
+
     case LUNA_IR_ADD_I32:
         return luna_x86_64_emit_binary(output, function, instruction, "addl");
 
@@ -280,6 +387,25 @@ static bool luna_x86_64_emit_instruction(LunaStringBuilder *output,
 
     case LUNA_IR_BIT_XOR_I32:
         return luna_x86_64_emit_binary(output, function, instruction, "xorl");
+
+    case LUNA_IR_ADD_I64:
+        return luna_x86_64_emit_binary_i64(output, function, instruction,
+                                           "addq");
+    case LUNA_IR_SUB_I64:
+        return luna_x86_64_emit_binary_i64(output, function, instruction,
+                                           "subq");
+    case LUNA_IR_MUL_I64:
+        return luna_x86_64_emit_binary_i64(output, function, instruction,
+                                           "imulq");
+    case LUNA_IR_BIT_AND_I64:
+        return luna_x86_64_emit_binary_i64(output, function, instruction,
+                                           "andq");
+    case LUNA_IR_BIT_OR_I64:
+        return luna_x86_64_emit_binary_i64(output, function, instruction,
+                                           "orq");
+    case LUNA_IR_BIT_XOR_I64:
+        return luna_x86_64_emit_binary_i64(output, function, instruction,
+                                           "xorq");
 
     case LUNA_IR_DIV_I32:
     case LUNA_IR_REM_I32:
@@ -302,6 +428,25 @@ static bool luna_x86_64_emit_instruction(LunaStringBuilder *output,
         return luna_x86_64_emit_store_eax(output, function,
                                           instruction->result);
 
+    case LUNA_IR_DIV_I64:
+    case LUNA_IR_REM_I64:
+        if (!luna_x86_64_emit_load_rax(output, function, instruction->left) ||
+            !luna_string_builder_append_c_string(output, "    cqto\n"
+                                                         "    idivq ") ||
+            !luna_x86_64_append_value_operand(output, function,
+                                              instruction->right) ||
+            !luna_string_builder_append_c_string(output, "\n")) {
+            return false;
+        }
+
+        if (instruction->opcode == LUNA_IR_REM_I64 &&
+            !luna_string_builder_append_c_string(output,
+                                                 "    movq %rdx, %rax\n")) {
+            return false;
+        }
+        return luna_x86_64_emit_store_rax(output, function,
+                                          instruction->result);
+
     case LUNA_IR_SHIFT_LEFT_I32:
     case LUNA_IR_SHIFT_RIGHT_I32:
         if (!luna_x86_64_emit_load_eax(output, function, instruction->left) ||
@@ -319,12 +464,32 @@ static bool luna_x86_64_emit_instruction(LunaStringBuilder *output,
         return luna_x86_64_emit_store_eax(output, function,
                                           instruction->result);
 
+    case LUNA_IR_SHIFT_LEFT_I64:
+    case LUNA_IR_SHIFT_RIGHT_I64:
+        if (!luna_x86_64_emit_load_rax(output, function, instruction->left) ||
+            !luna_string_builder_append_c_string(output, "    movq ") ||
+            !luna_x86_64_append_value_operand(output, function,
+                                              instruction->right) ||
+            !luna_string_builder_append_c_string(output, ", %rcx\n") ||
+            !luna_string_builder_append_c_string(
+                output, instruction->opcode == LUNA_IR_SHIFT_LEFT_I64
+                            ? "    shlq %cl, %rax\n"
+                            : "    sarq %cl, %rax\n")) {
+            return false;
+        }
+        return luna_x86_64_emit_store_rax(output, function,
+                                          instruction->result);
+
     case LUNA_IR_COMPARE_EQUAL:
     case LUNA_IR_COMPARE_NOT_EQUAL:
     case LUNA_IR_COMPARE_LESS_I32:
     case LUNA_IR_COMPARE_LESS_EQUAL_I32:
     case LUNA_IR_COMPARE_GREATER_I32:
     case LUNA_IR_COMPARE_GREATER_EQUAL_I32:
+    case LUNA_IR_COMPARE_LESS_I64:
+    case LUNA_IR_COMPARE_LESS_EQUAL_I64:
+    case LUNA_IR_COMPARE_GREATER_I64:
+    case LUNA_IR_COMPARE_GREATER_EQUAL_I64:
         return luna_x86_64_emit_compare(output, function, instruction);
 
     case LUNA_IR_CALL:
@@ -350,9 +515,16 @@ static bool luna_x86_64_emit_instruction(LunaStringBuilder *output,
         return true;
 
     case LUNA_IR_RETURN:
-        if (instruction->left != LUNA_IR_INVALID_ID &&
-            !luna_x86_64_emit_load_eax(output, function, instruction->left)) {
-            return false;
+        if (instruction->left != LUNA_IR_INVALID_ID) {
+            if (function->return_type == LUNA_IR_TYPE_I64) {
+                if (!luna_x86_64_emit_load_rax(output, function,
+                                               instruction->left)) {
+                    return false;
+                }
+            } else if (!luna_x86_64_emit_load_eax(output, function,
+                                                  instruction->left)) {
+                return false;
+            }
         }
         return luna_string_builder_append_format(
             output, "    jmp .Lfn%zu_return\n", function_index);
@@ -380,13 +552,17 @@ static bool luna_x86_64_emit_function(LunaStringBuilder *output,
                                       const LunaIrModule *module,
                                       const LunaIrFunction *function,
                                       size_t function_index) {
-    static const char *argument_registers[] = {
+    static const char *argument_registers_i32[] = {
         "%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d",
+    };
+    static const char *argument_registers_i64[] = {
+        "%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9",
     };
 
     uint32_t frame_size = 0U;
     if (function->parameter_types.length >
-            sizeof(argument_registers) / sizeof(argument_registers[0]) ||
+            sizeof(argument_registers_i32) /
+                sizeof(argument_registers_i32[0]) ||
         !luna_x86_64_frame_size(function, &frame_size)) {
         return false;
     }
@@ -410,8 +586,14 @@ static bool luna_x86_64_emit_function(LunaStringBuilder *output,
     for (size_t parameter_index = 0U;
          parameter_index < function->parameter_types.length;
          parameter_index += 1U) {
+        const LunaIrType *parameter_type =
+            luna_vector_at_const(&function->parameter_types, parameter_index);
+        const bool is_i64 =
+            parameter_type != NULL && *parameter_type == LUNA_IR_TYPE_I64;
         if (!luna_string_builder_append_format(
-                output, "    movl %s, ", argument_registers[parameter_index]) ||
+                output, is_i64 ? "    movq %s, " : "    movl %s, ",
+                is_i64 ? argument_registers_i64[parameter_index]
+                       : argument_registers_i32[parameter_index]) ||
             !luna_x86_64_append_slot_operand(output, function,
                                              (LunaIrSlotId)parameter_index) ||
             !luna_string_builder_append_c_string(output, "\n")) {
