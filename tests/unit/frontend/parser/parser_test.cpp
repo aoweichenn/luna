@@ -311,4 +311,73 @@ TEST(ParserTest, AcceptsEmptyForClauses) {
     EXPECT_EQ(statement->as.for_statement.update, nullptr);
 }
 
+TEST(ParserTest, BuildsPointerArrayStringAndLvalueNodes) {
+    FrontendHarness harness{"module test.memory_syntax;\n"
+                            "fn inspect(input: *const [3]u8) -> *const u8 {\n"
+                            "    return \"ok\\n\";\n"
+                            "}\n"
+                            "fn main() -> i32 {\n"
+                            "    var matrix: [2][3]i16 = {};\n"
+                            "    matrix[1][2] = -7;\n"
+                            "    let pointer: *i16 = &matrix[1][2];\n"
+                            "    let absent: *i16 = null;\n"
+                            "    return 0;\n"
+                            "}\n"};
+
+    ASSERT_TRUE(harness.Parse()) << harness.Diagnostics();
+    const LunaFunction *inspect = harness.Program()->first_function;
+    ASSERT_NE(inspect, nullptr);
+    ASSERT_NE(inspect->first_parameter, nullptr);
+    const LunaTypeRef &pointer_type = inspect->first_parameter->type;
+    ASSERT_EQ(pointer_type.kind, LUNA_TYPE_POINTER);
+    EXPECT_TRUE(pointer_type.as.pointer.is_read_only);
+    ASSERT_NE(pointer_type.as.pointer.pointee, nullptr);
+    const LunaTypeRef &array_type = *pointer_type.as.pointer.pointee;
+    ASSERT_EQ(array_type.kind, LUNA_TYPE_ARRAY);
+    EXPECT_EQ(array_type.as.array.count, 3U);
+    ASSERT_NE(array_type.as.array.element, nullptr);
+    EXPECT_EQ(array_type.as.array.element->kind, LUNA_TYPE_U8);
+    ASSERT_NE(inspect->body, nullptr);
+    ASSERT_NE(inspect->body->first, nullptr);
+    ASSERT_NE(inspect->body->first->as.return_value, nullptr);
+    EXPECT_EQ(inspect->body->first->as.return_value->kind,
+              LUNA_EXPRESSION_STRING);
+
+    const LunaFunction *main_function = inspect->next;
+    ASSERT_NE(main_function, nullptr);
+    const LunaStatement *declaration = main_function->body->first;
+    ASSERT_NE(declaration, nullptr);
+    ASSERT_EQ(declaration->kind, LUNA_STATEMENT_DECLARATION);
+    ASSERT_EQ(declaration->as.declaration.type.kind, LUNA_TYPE_ARRAY);
+    ASSERT_NE(declaration->as.declaration.type.as.array.element, nullptr);
+    EXPECT_EQ(declaration->as.declaration.type.as.array.element->kind,
+              LUNA_TYPE_ARRAY);
+    EXPECT_EQ(declaration->as.declaration.initializer->kind,
+              LUNA_EXPRESSION_ZERO_INITIALIZER);
+
+    const LunaStatement *assignment = declaration->next;
+    ASSERT_NE(assignment, nullptr);
+    ASSERT_EQ(assignment->kind, LUNA_STATEMENT_ASSIGNMENT);
+    ASSERT_NE(assignment->as.assignment.target, nullptr);
+    ASSERT_EQ(assignment->as.assignment.target->kind, LUNA_EXPRESSION_INDEX);
+    ASSERT_NE(assignment->as.assignment.target->as.index.base, nullptr);
+    EXPECT_EQ(assignment->as.assignment.target->as.index.base->kind,
+              LUNA_EXPRESSION_INDEX);
+
+    const LunaStatement *pointer_declaration = assignment->next;
+    ASSERT_NE(pointer_declaration, nullptr);
+    ASSERT_NE(pointer_declaration->as.declaration.initializer, nullptr);
+    EXPECT_EQ(pointer_declaration->as.declaration.initializer->kind,
+              LUNA_EXPRESSION_UNARY);
+    EXPECT_EQ(
+        pointer_declaration->as.declaration.initializer->as.unary.operator_kind,
+        LUNA_TOKEN_AMPERSAND);
+
+    const LunaStatement *null_declaration = pointer_declaration->next;
+    ASSERT_NE(null_declaration, nullptr);
+    ASSERT_NE(null_declaration->as.declaration.initializer, nullptr);
+    EXPECT_EQ(null_declaration->as.declaration.initializer->kind,
+              LUNA_EXPRESSION_NULL);
+}
+
 }

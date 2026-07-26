@@ -755,6 +755,66 @@ def generate_structured_control_flow_case(
     return source, 42
 
 
+def generate_memory_case(
+    engine: random.Random,
+    case_index: int,
+) -> tuple[str, int]:
+    length = engine.randrange(2, 13)
+    values = [engine.randrange(0, 1000) for _ in range(length)]
+    update_index = engine.randrange(length)
+    delta = engine.randrange(-100, 101)
+    updated_value = wrap_i32(values[update_index] + delta)
+    values[update_index] = updated_value
+    first_index = engine.randrange(length)
+    second_index = engine.randrange(length)
+    select_first = engine.randrange(2) == 0
+    selected_index = first_index if select_first else second_index
+    selected_value = values[selected_index]
+    row = engine.randrange(2)
+    column = engine.randrange(3)
+    matrix_value = engine.randrange(-30000, 30001)
+    condition = "true" if select_first else "false"
+
+    assignments = "".join(
+        f"    values[{index}] = {value};\n"
+        for index, value in enumerate(values)
+        if index != update_index
+    )
+    source = (
+        f"module random.memory_case{case_index};\n"
+        "\n"
+        "fn update(base: *i32, index: usize, delta: i32) -> i32 {\n"
+        "    base[index] += delta;\n"
+        "    return base[index];\n"
+        "}\n"
+        "\n"
+        "fn main() -> i32 {\n"
+        f"    var values: [{length}]i32 = {{}};\n"
+        f"{assignments}"
+        f"    values[{update_index}] = "
+        f"{updated_value - delta};\n"
+        "    let base: *i32 = &values[0];\n"
+        f"    if (update(base, {update_index}, {delta}) != "
+        f"{updated_value}) {{ return 1; }}\n"
+        "    let address: usize = base as usize;\n"
+        "    let round_trip: *i32 = address as *i32;\n"
+        "    let read_only: *const i32 = round_trip as *const i32;\n"
+        f"    let selected: *i32 = {condition} ? &values[{first_index}] : "
+        f"&values[{second_index}];\n"
+        f"    if (*selected != {selected_value} || "
+        f"read_only[{update_index}] != {updated_value}) {{ return 2; }}\n"
+        "    var matrix: [2][3]i16 = {};\n"
+        f"    matrix[{row}][{column}] = {matrix_value};\n"
+        f"    if (matrix[{row}][{column}] != {matrix_value}) "
+        "{ return 3; }\n"
+        "    let text: *const u8 = \"random\\n\";\n"
+        "    if (text[6] != 10 || text[7] != 0) { return 4; }\n"
+        "    return 42;\n"
+        "}\n"
+    )
+    return source, 42
+
+
 def compile_and_run(
     compiler: pathlib.Path,
     llvm_mc: str,
@@ -833,7 +893,7 @@ def main() -> int:
 
     engine = random.Random(arguments.seed)
     for case_index in range(arguments.cases):
-        case_kind = case_index % 18
+        case_kind = case_index % 19
         if case_kind == 0:
             source, expected_code = generate_case(engine, case_index)
         elif case_kind == 1:
@@ -905,10 +965,12 @@ def main() -> int:
             source, expected_code = generate_conditional_case(
                 engine, case_index
             )
-        else:
+        elif case_kind == 17:
             source, expected_code = generate_structured_control_flow_case(
                 engine, case_index
             )
+        else:
+            source, expected_code = generate_memory_case(engine, case_index)
         compile_and_run(
             arguments.compiler,
             llvm_mc,

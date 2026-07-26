@@ -20,7 +20,7 @@ static void luna_ir_function_destroy(LunaIrFunction *function) {
     }
 
     luna_vector_destroy(&function->parameter_types);
-    luna_vector_destroy(&function->slot_types);
+    luna_vector_destroy(&function->slots);
     luna_vector_destroy(&function->value_types);
     luna_vector_destroy(&function->arguments);
     luna_vector_destroy(&function->blocks);
@@ -28,16 +28,22 @@ static void luna_ir_function_destroy(LunaIrFunction *function) {
 
 void luna_ir_module_init(LunaIrModule *module, const LunaTargetInfo *target) {
     module->target = target;
+    luna_vector_init(&module->globals, sizeof(LunaIrGlobal));
     luna_vector_init(&module->functions, sizeof(LunaIrFunction));
     module->entry_function = LUNA_IR_INVALID_ID;
 }
 
 void luna_ir_module_destroy(LunaIrModule *module) {
+    for (size_t index = 0U; index < module->globals.length; index += 1U) {
+        LunaIrGlobal *global = luna_vector_at(&module->globals, index);
+        luna_vector_destroy(&global->bytes);
+    }
     for (size_t index = 0U; index < module->functions.length; index += 1U) {
         LunaIrFunction *function = luna_vector_at(&module->functions, index);
         luna_ir_function_destroy(function);
     }
 
+    luna_vector_destroy(&module->globals);
     luna_vector_destroy(&module->functions);
     module->target = NULL;
     module->entry_function = LUNA_IR_INVALID_ID;
@@ -57,7 +63,7 @@ LunaIrFunctionId luna_ir_module_add_function(LunaIrModule *module,
         .return_type = return_type,
     };
     luna_vector_init(&function.parameter_types, sizeof(LunaIrType));
-    luna_vector_init(&function.slot_types, sizeof(LunaIrType));
+    luna_vector_init(&function.slots, sizeof(LunaIrSlot));
     luna_vector_init(&function.value_types, sizeof(LunaIrType));
     luna_vector_init(&function.arguments, sizeof(LunaIrValueId));
     luna_vector_init(&function.blocks, sizeof(LunaIrBlock));
@@ -81,14 +87,87 @@ luna_ir_module_function_const(const LunaIrModule *module,
     return luna_vector_at_const(&module->functions, (size_t)function_id);
 }
 
-LunaIrSlotId luna_ir_function_add_slot(LunaIrFunction *function,
-                                       LunaIrType type) {
-    if (function->slot_types.length >= UINT32_MAX ||
-        !luna_vector_push(&function->slot_types, &type)) {
+LunaIrGlobalId luna_ir_module_add_global(LunaIrModule *module,
+                                         const uint8_t *bytes,
+                                         uint64_t byte_count,
+                                         uint32_t alignment_bytes,
+                                         bool is_read_only) {
+    if (module == NULL || bytes == NULL || byte_count == 0U ||
+        byte_count > SIZE_MAX || alignment_bytes == 0U ||
+        (alignment_bytes & (alignment_bytes - 1U)) != 0U ||
+        module->globals.length >= UINT32_MAX) {
         return LUNA_IR_INVALID_ID;
     }
 
-    return (LunaIrSlotId)(function->slot_types.length - 1U);
+    for (size_t index = 0U; index < module->globals.length; index += 1U) {
+        const LunaIrGlobal *existing =
+            luna_vector_at_const(&module->globals, index);
+        if (existing->is_read_only == is_read_only &&
+            existing->alignment_bytes == alignment_bytes &&
+            existing->bytes.length == (size_t)byte_count &&
+            memcmp(existing->bytes.data, bytes, (size_t)byte_count) == 0) {
+            return (LunaIrGlobalId)index;
+        }
+    }
+
+    LunaIrGlobal global = {
+        .alignment_bytes = alignment_bytes,
+        .is_read_only = is_read_only,
+    };
+    luna_vector_init(&global.bytes, sizeof(uint8_t));
+    for (uint64_t index = 0U; index < byte_count; index += 1U) {
+        if (!luna_vector_push(&global.bytes, &bytes[index])) {
+            luna_vector_destroy(&global.bytes);
+            return LUNA_IR_INVALID_ID;
+        }
+    }
+    if (!luna_vector_push(&module->globals, &global)) {
+        luna_vector_destroy(&global.bytes);
+        return LUNA_IR_INVALID_ID;
+    }
+    return (LunaIrGlobalId)(module->globals.length - 1U);
+}
+
+const LunaIrGlobal *luna_ir_module_global(const LunaIrModule *module,
+                                          LunaIrGlobalId global_id) {
+    if (module == NULL) {
+        return NULL;
+    }
+    return luna_vector_at_const(&module->globals, (size_t)global_id);
+}
+
+LunaIrSlotId luna_ir_function_add_slot(LunaIrFunction *function,
+                                       LunaIrType type) {
+    const LunaIrSlot slot = {
+        .type = type,
+        .size_bytes = 8U,
+        .alignment_bytes = 8U,
+        .is_scalar = true,
+    };
+    if (function->slots.length >= UINT32_MAX ||
+        !luna_vector_push(&function->slots, &slot)) {
+        return LUNA_IR_INVALID_ID;
+    }
+
+    return (LunaIrSlotId)(function->slots.length - 1U);
+}
+
+LunaIrSlotId luna_ir_function_add_memory_slot(LunaIrFunction *function,
+                                              uint64_t size_bytes,
+                                              uint32_t alignment_bytes) {
+    const LunaIrSlot slot = {
+        .type = LUNA_IR_TYPE_VOID,
+        .size_bytes = size_bytes,
+        .alignment_bytes = alignment_bytes,
+        .is_scalar = false,
+    };
+    if (size_bytes == 0U || alignment_bytes == 0U ||
+        (alignment_bytes & (alignment_bytes - 1U)) != 0U ||
+        function->slots.length >= UINT32_MAX ||
+        !luna_vector_push(&function->slots, &slot)) {
+        return LUNA_IR_INVALID_ID;
+    }
+    return (LunaIrSlotId)(function->slots.length - 1U);
 }
 
 LunaIrValueId luna_ir_function_add_value(LunaIrFunction *function,
@@ -168,6 +247,8 @@ const char *luna_ir_type_name(LunaIrType type) {
         return "f32";
     case LUNA_IR_TYPE_F64:
         return "f64";
+    case LUNA_IR_TYPE_POINTER:
+        return "ptr";
     }
 
     return "<invalid>";
@@ -210,6 +291,7 @@ uint32_t luna_ir_type_bit_width(LunaIrType type,
         return 64U;
     case LUNA_IR_TYPE_ISIZE:
     case LUNA_IR_TYPE_USIZE:
+    case LUNA_IR_TYPE_POINTER:
         return data_layout == NULL ? 0U : data_layout->pointer.size_bits;
     case LUNA_IR_TYPE_F32:
         return 32U;
@@ -224,7 +306,7 @@ uint32_t luna_ir_type_bit_width(LunaIrType type,
 
 static bool luna_ir_type_is_value(LunaIrType type) {
     return type == LUNA_IR_TYPE_BOOL || luna_ir_type_is_integer(type) ||
-           luna_ir_type_is_float(type);
+           luna_ir_type_is_float(type) || type == LUNA_IR_TYPE_POINTER;
 }
 
 static bool luna_ir_type_is_return(LunaIrType type) {
@@ -403,26 +485,119 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
         return luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_BOOL,
                                      reason);
 
+    case LUNA_IR_CONST_NULL:
+        if (instruction->immediate != 0U) {
+            return luna_ir_reject(reason,
+                                  "null constant must have zero address bits");
+        }
+        return luna_ir_verify_result(function, instruction,
+                                     LUNA_IR_TYPE_POINTER, reason);
+
     case LUNA_IR_LOAD: {
-        if ((size_t)instruction->slot >= function->slot_types.length) {
+        if ((size_t)instruction->slot >= function->slots.length) {
             return luna_ir_reject(reason, "load slot id is out of range");
         }
-        const LunaIrType *slot_type = luna_vector_at_const(
-            &function->slot_types, (size_t)instruction->slot);
-        return luna_ir_verify_result(function, instruction, *slot_type, reason);
+        const LunaIrSlot *slot =
+            luna_vector_at_const(&function->slots, (size_t)instruction->slot);
+        if (!slot->is_scalar) {
+            return luna_ir_reject(reason, "direct load requires a scalar slot");
+        }
+        return luna_ir_verify_result(function, instruction, slot->type, reason);
     }
 
     case LUNA_IR_STORE: {
-        if ((size_t)instruction->slot >= function->slot_types.length) {
+        if ((size_t)instruction->slot >= function->slots.length) {
             return luna_ir_reject(reason, "store slot id is out of range");
         }
-        const LunaIrType *slot_type = luna_vector_at_const(
-            &function->slot_types, (size_t)instruction->slot);
+        const LunaIrSlot *slot =
+            luna_vector_at_const(&function->slots, (size_t)instruction->slot);
+        if (!slot->is_scalar) {
+            return luna_ir_reject(reason,
+                                  "direct store requires a scalar slot");
+        }
         return luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_VOID,
                                      reason) &&
-               luna_ir_verify_value(function, instruction->left, *slot_type,
+               luna_ir_verify_value(function, instruction->left, slot->type,
                                     defined_in_block, reason);
     }
+
+    case LUNA_IR_ADDRESS_OF_SLOT:
+        if ((size_t)instruction->slot >= function->slots.length) {
+            return luna_ir_reject(reason, "addressed slot id is out of range");
+        }
+        return luna_ir_verify_result(function, instruction,
+                                     LUNA_IR_TYPE_POINTER, reason);
+
+    case LUNA_IR_GLOBAL_ADDRESS:
+        if ((size_t)instruction->global >= module->globals.length) {
+            return luna_ir_reject(reason, "global id is out of range");
+        }
+        return luna_ir_verify_result(function, instruction,
+                                     LUNA_IR_TYPE_POINTER, reason);
+
+    case LUNA_IR_ZERO_SLOT:
+        if ((size_t)instruction->slot >= function->slots.length) {
+            return luna_ir_reject(reason, "zeroed slot id is out of range");
+        }
+        return luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_VOID,
+                                     reason);
+
+    case LUNA_IR_LOAD_INDIRECT:
+        if (!luna_ir_type_is_value(instruction->type)) {
+            return luna_ir_reject(reason,
+                                  "indirect load has invalid access type");
+        }
+        return luna_ir_verify_value(function, instruction->left,
+                                    LUNA_IR_TYPE_POINTER, defined_in_block,
+                                    reason) &&
+               luna_ir_verify_result(function, instruction, instruction->type,
+                                     reason);
+
+    case LUNA_IR_STORE_INDIRECT:
+        if (!luna_ir_type_is_value(instruction->memory_type)) {
+            return luna_ir_reject(reason,
+                                  "indirect store has invalid access type");
+        }
+        return luna_ir_verify_value(function, instruction->left,
+                                    LUNA_IR_TYPE_POINTER, defined_in_block,
+                                    reason) &&
+               luna_ir_verify_value(function, instruction->right,
+                                    instruction->memory_type, defined_in_block,
+                                    reason) &&
+               luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_VOID,
+                                     reason);
+
+    case LUNA_IR_NULL_CHECK:
+        return luna_ir_verify_value(function, instruction->left,
+                                    LUNA_IR_TYPE_POINTER, defined_in_block,
+                                    reason) &&
+               luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_VOID,
+                                     reason);
+
+    case LUNA_IR_BOUNDS_CHECK:
+        if (instruction->immediate == 0U) {
+            return luna_ir_reject(reason,
+                                  "bounds check requires a positive bound");
+        }
+        return luna_ir_verify_value(function, instruction->left,
+                                    LUNA_IR_TYPE_USIZE, defined_in_block,
+                                    reason) &&
+               luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_VOID,
+                                     reason);
+
+    case LUNA_IR_POINTER_OFFSET:
+        if (instruction->immediate == 0U) {
+            return luna_ir_reject(reason,
+                                  "pointer offset requires a positive stride");
+        }
+        return luna_ir_verify_value(function, instruction->left,
+                                    LUNA_IR_TYPE_POINTER, defined_in_block,
+                                    reason) &&
+               luna_ir_verify_value(function, instruction->right,
+                                    LUNA_IR_TYPE_USIZE, defined_in_block,
+                                    reason) &&
+               luna_ir_verify_result(function, instruction,
+                                     LUNA_IR_TYPE_POINTER, reason);
 
     case LUNA_IR_NEG_INTEGER:
     case LUNA_IR_BIT_NOT_INTEGER:
@@ -551,6 +726,28 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
                luna_ir_verify_result(function, instruction, instruction->type,
                                      reason);
     }
+
+    case LUNA_IR_CONVERT_POINTER_TO_INTEGER:
+        if (instruction->type != LUNA_IR_TYPE_USIZE) {
+            return luna_ir_reject(
+                reason, "pointer-to-integer conversion must produce usize");
+        }
+        return luna_ir_verify_value(function, instruction->left,
+                                    LUNA_IR_TYPE_POINTER, defined_in_block,
+                                    reason) &&
+               luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_USIZE,
+                                     reason);
+
+    case LUNA_IR_CONVERT_INTEGER_TO_POINTER:
+        if (instruction->type != LUNA_IR_TYPE_POINTER) {
+            return luna_ir_reject(
+                reason, "integer-to-pointer conversion must produce a pointer");
+        }
+        return luna_ir_verify_value(function, instruction->left,
+                                    LUNA_IR_TYPE_USIZE, defined_in_block,
+                                    reason) &&
+               luna_ir_verify_result(function, instruction,
+                                     LUNA_IR_TYPE_POINTER, reason);
 
     case LUNA_IR_ADD_INTEGER:
     case LUNA_IR_SUB_INTEGER:
@@ -718,7 +915,7 @@ static bool luna_ir_verify_function(const LunaIrModule *module,
         goto cleanup;
     }
 
-    if (function->parameter_types.length > function->slot_types.length) {
+    if (function->parameter_types.length > function->slots.length) {
         (void)fprintf(
             error_stream,
             "IR verification: function %zu has fewer slots than parameters\n",
@@ -730,10 +927,9 @@ static bool luna_ir_verify_function(const LunaIrModule *module,
          index += 1U) {
         const LunaIrType *parameter_type =
             luna_vector_at_const(&function->parameter_types, index);
-        const LunaIrType *slot_type =
-            luna_vector_at_const(&function->slot_types, index);
-        if (!luna_ir_type_is_value(*parameter_type) ||
-            *slot_type != *parameter_type) {
+        const LunaIrSlot *slot = luna_vector_at_const(&function->slots, index);
+        if (!luna_ir_type_is_value(*parameter_type) || !slot->is_scalar ||
+            slot->type != *parameter_type) {
             (void)fprintf(error_stream,
                           "IR verification: invalid parameter %zu in function "
                           "%zu\n",
@@ -742,12 +938,20 @@ static bool luna_ir_verify_function(const LunaIrModule *module,
         }
     }
 
-    for (size_t index = 0U; index < function->slot_types.length; index += 1U) {
-        const LunaIrType *type =
-            luna_vector_at_const(&function->slot_types, index);
-        if (!luna_ir_type_is_value(*type)) {
+    for (size_t index = 0U; index < function->slots.length; index += 1U) {
+        const LunaIrSlot *slot = luna_vector_at_const(&function->slots, index);
+        const bool valid_alignment =
+            slot->alignment_bytes != 0U &&
+            (slot->alignment_bytes & (slot->alignment_bytes - 1U)) == 0U;
+        const bool valid_scalar =
+            slot->is_scalar && luna_ir_type_is_value(slot->type) &&
+            slot->size_bytes == 8U && slot->alignment_bytes == 8U;
+        const bool valid_memory = !slot->is_scalar &&
+                                  slot->type == LUNA_IR_TYPE_VOID &&
+                                  slot->size_bytes != 0U && valid_alignment;
+        if (!valid_scalar && !valid_memory) {
             (void)fprintf(error_stream,
-                          "IR verification: invalid slot type at %zu in "
+                          "IR verification: invalid slot layout at %zu in "
                           "function %zu\n",
                           index, function_index);
             goto cleanup;
@@ -1016,6 +1220,19 @@ bool luna_ir_verify(const LunaIrModule *module, FILE *error_stream) {
         return false;
     }
 
+    for (size_t index = 0U; index < module->globals.length; index += 1U) {
+        const LunaIrGlobal *global =
+            luna_vector_at_const(&module->globals, index);
+        if (global->bytes.element_size != sizeof(uint8_t) ||
+            global->bytes.length == 0U || global->alignment_bytes == 0U ||
+            (global->alignment_bytes & (global->alignment_bytes - 1U)) != 0U) {
+            (void)fprintf(stream,
+                          "IR verification: global %zu has invalid layout\n",
+                          index);
+            return false;
+        }
+    }
+
     if (module->entry_function == LUNA_IR_INVALID_ID ||
         (size_t)module->entry_function >= module->functions.length) {
         (void)fputs("IR verification: missing entry function\n", stream);
@@ -1112,6 +1329,9 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
             output, "const.bool %s\n",
             instruction->immediate == 0U ? "false" : "true");
 
+    case LUNA_IR_CONST_NULL:
+        return luna_string_builder_append_c_string(output, "const.ptr null\n");
+
     case LUNA_IR_LOAD:
         return luna_string_builder_append_format(
             output, "load.%s $%u\n", luna_ir_type_name(instruction->type),
@@ -1121,6 +1341,64 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
         if (!luna_string_builder_append_format(output, "store $%u, ",
                                                instruction->slot) ||
             !luna_ir_print_value(output, instruction->left)) {
+            return false;
+        }
+        return luna_string_builder_append_c_string(output, "\n");
+
+    case LUNA_IR_ADDRESS_OF_SLOT:
+        return luna_string_builder_append_format(output, "address $%u\n",
+                                                 instruction->slot);
+
+    case LUNA_IR_GLOBAL_ADDRESS:
+        return luna_string_builder_append_format(
+            output, "global_address @g%u\n", instruction->global);
+
+    case LUNA_IR_ZERO_SLOT:
+        return luna_string_builder_append_format(output, "zero $%u\n",
+                                                 instruction->slot);
+
+    case LUNA_IR_LOAD_INDIRECT:
+        if (!luna_string_builder_append_format(
+                output, "load_indirect.%s ",
+                luna_ir_type_name(instruction->type)) ||
+            !luna_ir_print_value(output, instruction->left)) {
+            return false;
+        }
+        return luna_string_builder_append_c_string(output, "\n");
+
+    case LUNA_IR_STORE_INDIRECT:
+        if (!luna_string_builder_append_format(
+                output, "store_indirect.%s ",
+                luna_ir_type_name(instruction->memory_type)) ||
+            !luna_ir_print_value(output, instruction->left) ||
+            !luna_string_builder_append_c_string(output, ", ") ||
+            !luna_ir_print_value(output, instruction->right)) {
+            return false;
+        }
+        return luna_string_builder_append_c_string(output, "\n");
+
+    case LUNA_IR_NULL_CHECK:
+        if (!luna_string_builder_append_c_string(output, "null_check ") ||
+            !luna_ir_print_value(output, instruction->left)) {
+            return false;
+        }
+        return luna_string_builder_append_c_string(output, "\n");
+
+    case LUNA_IR_BOUNDS_CHECK:
+        if (!luna_string_builder_append_format(
+                output, "bounds_check %" PRIu64 ", ", instruction->immediate) ||
+            !luna_ir_print_value(output, instruction->left)) {
+            return false;
+        }
+        return luna_string_builder_append_c_string(output, "\n");
+
+    case LUNA_IR_POINTER_OFFSET:
+        if (!luna_string_builder_append_format(output,
+                                               "pointer_offset %" PRIu64 ", ",
+                                               instruction->immediate) ||
+            !luna_ir_print_value(output, instruction->left) ||
+            !luna_string_builder_append_c_string(output, ", ") ||
+            !luna_ir_print_value(output, instruction->right)) {
             return false;
         }
         return luna_string_builder_append_c_string(output, "\n");
@@ -1214,6 +1492,20 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
         }
         return luna_string_builder_append_c_string(output, "\n");
     }
+
+    case LUNA_IR_CONVERT_POINTER_TO_INTEGER:
+        if (!luna_string_builder_append_c_string(output, "ptrtoint.usize ") ||
+            !luna_ir_print_value(output, instruction->left)) {
+            return false;
+        }
+        return luna_string_builder_append_c_string(output, "\n");
+
+    case LUNA_IR_CONVERT_INTEGER_TO_POINTER:
+        if (!luna_string_builder_append_c_string(output, "inttoptr.usize ") ||
+            !luna_ir_print_value(output, instruction->left)) {
+            return false;
+        }
+        return luna_string_builder_append_c_string(output, "\n");
 
     case LUNA_IR_ADD_INTEGER:
     case LUNA_IR_SUB_INTEGER:
@@ -1379,6 +1671,36 @@ bool luna_ir_print(const LunaIrModule *module, LunaStringBuilder *output) {
         module->target->triple == NULL ||
         !luna_string_builder_append_format(
             output, "ir luna.v0\ntarget \"%s\"\n\n", module->target->triple)) {
+        return false;
+    }
+
+    for (size_t global_index = 0U; global_index < module->globals.length;
+         global_index += 1U) {
+        const LunaIrGlobal *global =
+            luna_vector_at_const(&module->globals, global_index);
+        if (!luna_string_builder_append_format(
+                output, "global @g%zu %s align %u [", global_index,
+                global->is_read_only ? "readonly" : "mutable",
+                global->alignment_bytes)) {
+            return false;
+        }
+        for (size_t byte_index = 0U; byte_index < global->bytes.length;
+             byte_index += 1U) {
+            const uint8_t *byte =
+                luna_vector_at_const(&global->bytes, byte_index);
+            if ((byte_index > 0U &&
+                 !luna_string_builder_append_c_string(output, ", ")) ||
+                !luna_string_builder_append_format(output, "0x%02" PRIx8,
+                                                   *byte)) {
+                return false;
+            }
+        }
+        if (!luna_string_builder_append_c_string(output, "]\n")) {
+            return false;
+        }
+    }
+    if (module->globals.length > 0U &&
+        !luna_string_builder_append_c_string(output, "\n")) {
         return false;
     }
 

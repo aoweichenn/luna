@@ -9,19 +9,37 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-typedef struct LunaTypeRef {
+typedef struct LunaTypeRef LunaTypeRef;
+
+struct LunaTypeRef {
     LunaTypeKind kind;
     LunaSourceSpan span;
-} LunaTypeRef;
+
+    union {
+        struct {
+            LunaTypeRef *pointee;
+            bool is_read_only;
+        } pointer;
+
+        struct {
+            LunaTypeRef *element;
+            uint64_t count;
+        } array;
+    } as;
+};
 
 typedef enum LunaExpressionKind {
     LUNA_EXPRESSION_INTEGER,
     LUNA_EXPRESSION_FLOAT,
     LUNA_EXPRESSION_BOOLEAN,
+    LUNA_EXPRESSION_STRING,
+    LUNA_EXPRESSION_NULL,
+    LUNA_EXPRESSION_ZERO_INITIALIZER,
     LUNA_EXPRESSION_NAME,
     LUNA_EXPRESSION_UNARY,
     LUNA_EXPRESSION_BINARY,
     LUNA_EXPRESSION_CONDITIONAL,
+    LUNA_EXPRESSION_INDEX,
     LUNA_EXPRESSION_CALL,
     LUNA_EXPRESSION_CAST
 } LunaExpressionKind;
@@ -38,6 +56,7 @@ struct LunaExpression {
         uint64_t integer;
         LunaStringView floating;
         bool boolean;
+        LunaStringView string;
         LunaStringView name;
 
         struct {
@@ -56,6 +75,11 @@ struct LunaExpression {
             LunaExpression *then_expression;
             LunaExpression *else_expression;
         } conditional;
+
+        struct {
+            LunaExpression *base;
+            LunaExpression *index;
+        } index;
 
         struct {
             LunaStringView name;
@@ -120,7 +144,7 @@ struct LunaStatement {
         } declaration;
 
         struct {
-            LunaStringView name;
+            LunaExpression *target;
             LunaTokenKind operator_kind;
             LunaExpression *value;
         } assignment;

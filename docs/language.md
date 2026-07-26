@@ -97,6 +97,19 @@ callback: fn(i32, i32) -> i32;
 Arrays do not decay to pointers. There are no implicit integer promotions,
 implicit pointer/integer conversions or truthiness conversions.
 
+In the bootstrap memory milestone, a pointer qualifier applies to writes
+through that pointer: `*T` permits reads and writes, while `*const T` permits
+only reads. Taking the address of a mutable lvalue produces `*T`; taking the
+address of an immutable lvalue produces `*const T`. `*void` and `*const void`
+are opaque pointer types and cannot be dereferenced or indexed.
+
+Fixed-array lengths are positive integer literals. Arrays may be nested and
+their total target layout must fit in the compiler's supported object-size
+range. They are local storage objects in this milestone: arrays cannot be
+passed or returned by value, assigned as a whole or used as scalar
+expressions. Those operations wait for aggregate ABI support. Elements remain
+ordinary lvalues and may be read, written or addressed.
+
 ## Functions
 
 ```luna
@@ -189,6 +202,22 @@ pointer->field
 
 Unary operators are `+ - ! ~ * &`.
 
+Indexing a fixed array performs a checked `usize` bounds test. Indexing a raw
+pointer accepts `usize` and has no bounds information. In both cases the
+address is scaled by the target size of the element type. Dereferencing or
+indexing a null pointer traps. Other invalid raw addresses retain the target
+machine's fault behavior.
+
+`null` is a context-dependent pointer literal and has no standalone default
+type. Pointer equality requires the same exact pointer type. Pointer ordering
+and implicit pointer arithmetic are not part of Luna 0.
+
+A string literal has type `*const u8` and points at immutable static bytes
+followed by one terminating zero byte. The supported escapes are `\\`, `\"`,
+`\n`, `\r`, `\t`, `\0` and `\xHH` with exactly two hexadecimal digits.
+Source text is otherwise preserved as UTF-8 bytes. String literals are never
+writable and adjacent literal concatenation is not implicit.
+
 An unsuffixed integer literal takes the integer type required by its
 declaration, return, argument or enclosing integer expression. It defaults to
 `i32` when no integer context exists. This rule applies only to literals and
@@ -265,6 +294,15 @@ literal and then performs an integer-to-floating conversion. Likewise,
 `1.0 as i32` converts the default `f64` literal. This preserves the rule that
 integer and floating literals are distinct syntax categories.
 
+Explicit raw-pointer conversions preserve the address bits. A pointer may be
+converted to another pointer type when the conversion does not remove
+read-only qualification. A mutable pointer may therefore become read-only,
+but a read-only pointer can never become writable. Pointer values convert to
+and from `usize`; no other integer type participates in pointer conversion.
+Pointer conversions never happen implicitly. Read-only qualification is
+checked through nested pointer and fixed-array layers, so an intermediate
+`*void` or differently shaped pointee cannot erase it.
+
 Assignment and compound assignment are statements, not expressions. There are
 no increment, decrement or comma operators.
 
@@ -286,6 +324,15 @@ return Point {
 
 `{}` is explicit zero initialization. Local variables are never implicitly
 uninitialized.
+
+For an array, `{}` initializes every byte of the object to zero. Array
+elements are subsequently assigned through indexing:
+
+```luna
+var values: [4]i32 = {};
+values[0] = 42;
+let first: *i32 = &values[0];
+```
 
 ## Compile-time surface
 

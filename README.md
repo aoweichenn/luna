@@ -10,15 +10,18 @@ The project is deliberately narrow at this stage:
 - target: x86-64 Linux, System V ABI, ELF64;
 - frontend: explicit `bool`, `i8`, `i16`, `i32`, `i64`, `isize`, `u8`,
   `u16`, `u32`, `u64`, `usize`, `f32` and `f64` types, explicit numeric
-  conversions with checked floating-to-integer bounds, functions, expressions,
-  the short-circuit conditional operator, local variables, `if`, `while`,
-  `do`, `for` and non-fallthrough `switch` control flow;
-- middle end: typed, non-SSA control-flow IR;
+  and raw-pointer conversions with checked floating-to-integer bounds, raw
+  pointers, local fixed arrays, immutable string literals, functions,
+  expressions, the short-circuit conditional operator, local variables, `if`,
+  `while`, `do`, `for` and non-fallthrough `switch` control flow;
+- middle end: typed, non-SSA control-flow IR with explicit object layouts,
+  static data and typed memory operations;
 - target model: explicit `x86_64-unknown-linux-gnu` data layout, with
   target-sized `isize` and `usize`;
 - backend: direct, unoptimized x86-64 instruction selection, including
   IEEE-754 scalar SSE floating-point operations and checked numeric
-  conversions;
+  conversions, exact-width indirect memory access, checked fixed-array
+  indexing and read-only static data;
 - bootstrap host: conforming C23 with IEC 60559 binary32 and binary64;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests, IR
   snapshots, differential random programs, libFuzzer and executable

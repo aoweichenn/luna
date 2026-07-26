@@ -56,6 +56,14 @@ switch arms directly. Semantic lowering uses one ordered control-frame stack:
 for the innermost loop frame. This preserves nesting semantics without adding
 target-specific control constructs.
 
+Parsed type references preserve pointer qualification and recursive
+fixed-array shape. Semantic lowering interns those references into canonical
+types, so exact pointer and array equality is independent of syntax-node
+identity. Canonical semantic type IDs are distinct from the closed syntax
+type-kind enum; dynamic composite identities are never stored in that enum.
+Composite values are kept out of the scalar ABI until aggregate ABI
+classification is implemented.
+
 Compilation is split into global and local phases:
 
 1. parse every source unit;
@@ -93,6 +101,19 @@ equality branches. `do` and `for` are expressed entirely with ordinary basic
 blocks. No conditional, loop or switch opcode is hidden from the verifier or
 backend.
 
+IR pointers are intentionally opaque address values, while every indirect
+load, store and element-address instruction carries the scalar access type or
+element size it needs. This follows the same separation as modern opaque
+pointer IRs: source-level pointee compatibility is established by semantic
+checking, and the verifier independently checks address operands, access
+types, bounds checks, slot layouts and global-data references.
+
+Local slots record byte size and ABI alignment instead of assuming one
+eight-byte home. Fixed arrays therefore occupy their exact target layout while
+scalar virtual values remain stack-homed. Immutable string bytes live in a
+module global-data table and are referenced through target-neutral global
+address instructions.
+
 Every reachable basic block has exactly one terminator. Detached empty merge
 blocks are permitted, while non-empty detached blocks must also terminate.
 Virtual values are defined once, remain local to one basic block and must be
@@ -126,6 +147,8 @@ The first backend is correctness-first:
 - canonical zero-extended raw bits in the low 32 bits for 8-bit and 16-bit
   arguments, results and stack homes, with explicit sign extension at signed
   comparisons, division, right shifts and widening conversions;
+- canonical `bool` values after both direct and indirect memory loads,
+  including raw-pointer aliasing;
 - deterministic labels and symbol mangling;
 - scalar `movss`/`movsd` arithmetic and ordered `ucomiss`/`ucomisd`
   comparisons, with an explicitly initialized IEEE floating-point
@@ -133,6 +156,8 @@ The first backend is correctness-first:
 - scalar SSE format and integer conversions, including software sequences for
   the unsigned 64-bit range and explicit traps before invalid
   floating-to-integer operations;
+- exact-width indirect scalar loads and stores, checked fixed-array indexing,
+  raw-pointer scaled addressing and deterministic read-only data emission;
 - a Linux `_start` shim that exits through syscall 60;
 - no dependency on a target C runtime.
 
@@ -170,6 +195,8 @@ The quality gate contains:
   family;
 - executable conditional matrices for every scalar type and switch-boundary
   matrices for every integer type;
+- exact-width memory matrices, null and bounds traps, read-only qualification
+  negatives and typed-memory IR mutation checks;
 - structured-control negative cases, IR snapshots and randomized differential
   programs;
 - deterministic mutation tests and a coverage-guided libFuzzer target;

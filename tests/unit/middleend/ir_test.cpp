@@ -602,4 +602,59 @@ TEST(IrVerifierTest, RejectsNonIntegerConversionSource) {
               std::string::npos);
 }
 
+TEST(IrVerifierTest, ValidatesTypedMemoryInstructionsAndLayouts) {
+    const std::string source{"module test.memory_verifier;\n"
+                             "fn main() -> i32 {\n"
+                             "    var values: [2]i32 = {};\n"
+                             "    values[1] = 42;\n"
+                             "    let pointer: *i32 = &values[0];\n"
+                             "    let text: *const u8 = \"A\";\n"
+                             "    return pointer[1] + (text[0] as i32);\n"
+                             "}\n"};
+
+    FrontendHarness invalid_store{source};
+    ASSERT_TRUE(invalid_store.Verify()) << invalid_store.Diagnostics();
+    LunaIrFunction *store_function = MainFunction(invalid_store);
+    LunaIrInstruction *store =
+        FindInstruction(store_function, LUNA_IR_STORE_INDIRECT);
+    ASSERT_NE(store, nullptr);
+    store->memory_type = LUNA_IR_TYPE_VOID;
+    EXPECT_FALSE(invalid_store.Verify());
+    EXPECT_NE(invalid_store.Diagnostics().find(
+                  "indirect store has invalid access type"),
+              std::string::npos);
+
+    FrontendHarness invalid_bounds{source};
+    ASSERT_TRUE(invalid_bounds.Verify()) << invalid_bounds.Diagnostics();
+    LunaIrInstruction *bounds =
+        FindInstruction(MainFunction(invalid_bounds), LUNA_IR_BOUNDS_CHECK);
+    ASSERT_NE(bounds, nullptr);
+    bounds->immediate = 0U;
+    EXPECT_FALSE(invalid_bounds.Verify());
+    EXPECT_NE(invalid_bounds.Diagnostics().find(
+                  "bounds check requires a positive bound"),
+              std::string::npos);
+
+    FrontendHarness invalid_global{source};
+    ASSERT_TRUE(invalid_global.Verify()) << invalid_global.Diagnostics();
+    LunaIrInstruction *global =
+        FindInstruction(MainFunction(invalid_global), LUNA_IR_GLOBAL_ADDRESS);
+    ASSERT_NE(global, nullptr);
+    global->global = LUNA_IR_INVALID_ID;
+    EXPECT_FALSE(invalid_global.Verify());
+    EXPECT_NE(invalid_global.Diagnostics().find("global id is out of range"),
+              std::string::npos);
+
+    FrontendHarness invalid_layout{source};
+    ASSERT_TRUE(invalid_layout.Verify()) << invalid_layout.Diagnostics();
+    LunaIrFunction *layout_function = MainFunction(invalid_layout);
+    LunaIrSlot *slot =
+        static_cast<LunaIrSlot *>(luna_vector_at(&layout_function->slots, 0U));
+    ASSERT_NE(slot, nullptr);
+    slot->alignment_bytes = 3U;
+    EXPECT_FALSE(invalid_layout.Verify());
+    EXPECT_NE(invalid_layout.Diagnostics().find("invalid slot layout"),
+              std::string::npos);
+}
+
 }

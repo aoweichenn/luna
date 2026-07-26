@@ -229,4 +229,36 @@ TEST(X8664BackendTest, EmitsCheckedScalarConversions) {
     EXPECT_NE(assembly.find("ud2"), std::string::npos);
 }
 
+TEST(X8664BackendTest, EmitsTypedMemoryAndReadOnlyGlobalData) {
+    FrontendHarness harness{"module test.memory_codegen;\n"
+                            "fn main() -> i32 {\n"
+                            "    var matrix: [2][3]i16 = {};\n"
+                            "    matrix[1][2] = 42;\n"
+                            "    let pointer: *i16 = &matrix[0][0];\n"
+                            "    pointer[1] = matrix[1][2];\n"
+                            "    var values: [2]f32 = {};\n"
+                            "    values[1] = 1.5;\n"
+                            "    let text: *const u8 = \"A\";\n"
+                            "    if (pointer != null && text[0] == 65) {\n"
+                            "        return pointer[1] as i32;\n"
+                            "    }\n"
+                            "    return 0;\n"
+                            "}\n"};
+
+    ASSERT_TRUE(harness.EmitAssembly()) << harness.Diagnostics();
+    const std::string assembly = harness.Assembly();
+    EXPECT_NE(assembly.find(".section .rodata"), std::string::npos);
+    EXPECT_NE(assembly.find(".Lglobal0"), std::string::npos);
+    EXPECT_NE(assembly.find(".byte 0x41"), std::string::npos);
+    EXPECT_NE(assembly.find("rep stosb"), std::string::npos);
+    EXPECT_NE(assembly.find("leaq"), std::string::npos);
+    EXPECT_NE(assembly.find("imulq $6"), std::string::npos);
+    EXPECT_NE(assembly.find("movw %cx, (%rax)"), std::string::npos);
+    EXPECT_NE(assembly.find("movzwl (%rax), %eax"), std::string::npos);
+    EXPECT_NE(assembly.find("movss %xmm0, (%rax)"), std::string::npos);
+    EXPECT_NE(assembly.find("cmpq $"), std::string::npos);
+    EXPECT_NE(assembly.find("testq %rax, %rax"), std::string::npos);
+    EXPECT_NE(assembly.find("ud2"), std::string::npos);
+}
+
 }

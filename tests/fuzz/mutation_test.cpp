@@ -53,7 +53,7 @@ void Mutate(std::string &input, std::mt19937_64 &random_engine) {
 }
 
 TEST(MutationFuzzTest, CleanFrontendResultsAlwaysProduceValidTypedIr) {
-    constexpr std::array<std::string_view, 12U> LUNA_TEST_SEEDS = {
+    constexpr std::array<std::string_view, 13U> LUNA_TEST_SEEDS = {
         "module fuzz.empty;\nfn main() -> i32 { return 0; }\n",
         "module fuzz.call;\n"
         "fn id(value: i32) -> i32 { return value; }\n"
@@ -122,6 +122,14 @@ TEST(MutationFuzzTest, CleanFrontendResultsAlwaysProduceValidTypedIr) {
         " return value;\n"
         "}\n",
         "export module fuzz.interface;\nimport other.module;\n",
+        "module fuzz.memory;\n"
+        "fn main() -> i32 {\n"
+        " var values: [4]i32 = {}; values[2] = 42;\n"
+        " let pointer: *i32 = &values[0];\n"
+        " let text: *const u8 = \"fuzz\\n\";\n"
+        " if (pointer[2] == 42 && text[4] == 10) { return 42; }\n"
+        " return 1;\n"
+        "}\n",
         "",
     };
 

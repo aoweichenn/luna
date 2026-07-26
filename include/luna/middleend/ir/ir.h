@@ -16,6 +16,7 @@ typedef uint32_t LunaIrValueId;
 typedef uint32_t LunaIrSlotId;
 typedef uint32_t LunaIrBlockId;
 typedef uint32_t LunaIrFunctionId;
+typedef uint32_t LunaIrGlobalId;
 
 typedef enum LunaIrType {
     LUNA_IR_TYPE_VOID,
@@ -31,15 +32,25 @@ typedef enum LunaIrType {
     LUNA_IR_TYPE_U64,
     LUNA_IR_TYPE_USIZE,
     LUNA_IR_TYPE_F32,
-    LUNA_IR_TYPE_F64
+    LUNA_IR_TYPE_F64,
+    LUNA_IR_TYPE_POINTER
 } LunaIrType;
 
 typedef enum LunaIrOpcode {
     LUNA_IR_CONST_INTEGER,
     LUNA_IR_CONST_FLOAT,
     LUNA_IR_CONST_BOOL,
+    LUNA_IR_CONST_NULL,
     LUNA_IR_LOAD,
     LUNA_IR_STORE,
+    LUNA_IR_ADDRESS_OF_SLOT,
+    LUNA_IR_GLOBAL_ADDRESS,
+    LUNA_IR_ZERO_SLOT,
+    LUNA_IR_LOAD_INDIRECT,
+    LUNA_IR_STORE_INDIRECT,
+    LUNA_IR_NULL_CHECK,
+    LUNA_IR_BOUNDS_CHECK,
+    LUNA_IR_POINTER_OFFSET,
     LUNA_IR_NEG_INTEGER,
     LUNA_IR_NEG_FLOAT,
     LUNA_IR_BIT_NOT_INTEGER,
@@ -48,6 +59,8 @@ typedef enum LunaIrOpcode {
     LUNA_IR_CONVERT_FLOAT,
     LUNA_IR_CONVERT_INTEGER_TO_FLOAT,
     LUNA_IR_CONVERT_FLOAT_TO_INTEGER,
+    LUNA_IR_CONVERT_POINTER_TO_INTEGER,
+    LUNA_IR_CONVERT_INTEGER_TO_POINTER,
     LUNA_IR_ADD_INTEGER,
     LUNA_IR_SUB_INTEGER,
     LUNA_IR_MUL_INTEGER,
@@ -81,6 +94,7 @@ typedef enum LunaIrOpcode {
 typedef struct LunaIrInstruction {
     LunaIrOpcode opcode;
     LunaIrType type;
+    LunaIrType memory_type;
     LunaIrValueId result;
     LunaIrValueId left;
     LunaIrValueId right;
@@ -88,11 +102,25 @@ typedef struct LunaIrInstruction {
     LunaIrBlockId true_block;
     LunaIrBlockId false_block;
     LunaIrFunctionId callee;
+    LunaIrGlobalId global;
     uint32_t first_argument;
     uint32_t argument_count;
     uint64_t immediate;
     LunaSourceSpan span;
 } LunaIrInstruction;
+
+typedef struct LunaIrSlot {
+    LunaIrType type;
+    uint64_t size_bytes;
+    uint32_t alignment_bytes;
+    bool is_scalar;
+} LunaIrSlot;
+
+typedef struct LunaIrGlobal {
+    LunaVector bytes;
+    uint32_t alignment_bytes;
+    bool is_read_only;
+} LunaIrGlobal;
 
 typedef struct LunaIrBlock {
     LunaVector instructions;
@@ -105,7 +133,7 @@ typedef struct LunaIrFunction {
     LunaStringView name;
     LunaIrType return_type;
     LunaVector parameter_types;
-    LunaVector slot_types;
+    LunaVector slots;
     LunaVector value_types;
     LunaVector arguments;
     LunaVector blocks;
@@ -113,6 +141,7 @@ typedef struct LunaIrFunction {
 
 typedef struct LunaIrModule {
     const LunaTargetInfo *target;
+    LunaVector globals;
     LunaVector functions;
     LunaIrFunctionId entry_function;
 } LunaIrModule;
@@ -128,9 +157,19 @@ LunaIrFunction *luna_ir_module_function(LunaIrModule *module,
 const LunaIrFunction *
 luna_ir_module_function_const(const LunaIrModule *module,
                               LunaIrFunctionId function_id);
+LunaIrGlobalId luna_ir_module_add_global(LunaIrModule *module,
+                                         const uint8_t *bytes,
+                                         uint64_t byte_count,
+                                         uint32_t alignment_bytes,
+                                         bool is_read_only);
+const LunaIrGlobal *luna_ir_module_global(const LunaIrModule *module,
+                                          LunaIrGlobalId global_id);
 
 LunaIrSlotId luna_ir_function_add_slot(LunaIrFunction *function,
                                        LunaIrType type);
+LunaIrSlotId luna_ir_function_add_memory_slot(LunaIrFunction *function,
+                                              uint64_t size_bytes,
+                                              uint32_t alignment_bytes);
 LunaIrValueId luna_ir_function_add_value(LunaIrFunction *function,
                                          LunaIrType type);
 LunaIrBlockId luna_ir_function_add_block(LunaIrFunction *function);

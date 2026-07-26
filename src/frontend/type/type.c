@@ -34,6 +34,10 @@ const char *luna_type_kind_name(LunaTypeKind kind) {
         return "f32";
     case LUNA_TYPE_F64:
         return "f64";
+    case LUNA_TYPE_POINTER:
+        return "pointer";
+    case LUNA_TYPE_ARRAY:
+        return "array";
     }
 
     return "<unknown>";
@@ -86,6 +90,8 @@ uint32_t luna_type_kind_bit_width(LunaTypeKind kind,
         return 64U;
     case LUNA_TYPE_INVALID:
     case LUNA_TYPE_VOID:
+    case LUNA_TYPE_POINTER:
+    case LUNA_TYPE_ARRAY:
         return 0U;
     }
 

@@ -501,6 +501,15 @@ def main() -> int:
         "floating_literals.luna": 42,
         "scalar_conversions.luna": 42,
         "structured_control_flow.luna": 42,
+        "memory_operations.luna": 42,
+        "memory_control_flow.luna": 42,
+        "memory_scalar_matrix.luna": 42,
+        "zero_initializer_scalars.luna": 42,
+        "null_dereference.luna": -4,
+        "null_pointer_index.luna": -4,
+        "null_pointer_write.luna": -4,
+        "array_out_of_bounds.luna": -4,
+        "array_out_of_bounds_write.luna": -4,
         "float_to_integer_nan_trap.luna": -4,
         "float_to_integer_infinity_trap.luna": -4,
         "float_to_integer_signed_range_trap.luna": -4,
@@ -651,6 +660,54 @@ def main() -> int:
         "invalid_switch_label.luna": (
             "expected integer literal as switch case label"
         ),
+        "readonly_pointer_write.luna": (
+            "cannot assign through an immutable lvalue"
+        ),
+        "readonly_pointer_cast.luna": (
+            "pointer conversion cannot remove read-only qualification"
+        ),
+        "nested_readonly_pointer_cast.luna": (
+            "pointer conversion cannot remove read-only qualification"
+        ),
+        "readonly_pointer_void_laundering.luna": (
+            "pointer conversion cannot remove read-only qualification"
+        ),
+        "readonly_pointer_array_laundering.luna": (
+            "pointer conversion cannot remove read-only qualification"
+        ),
+        "pointer_type_mismatch.luna": (
+            "expected *u32, found *i32"
+        ),
+        "invalid_pointer_integer_cast.luna": (
+            "or a pointer and usize"
+        ),
+        "invalid_array_index_type.luna": (
+            "expected usize, found i32"
+        ),
+        "zero_length_array.luna": (
+            "fixed-array length must be positive"
+        ),
+        "void_element_array.luna": (
+            "fixed-array element type cannot be void"
+        ),
+        "array_parameter.luna": (
+            "fixed arrays cannot be passed by value"
+        ),
+        "array_return.luna": (
+            "fixed arrays cannot be returned by value"
+        ),
+        "array_whole_assignment.luna": (
+            "fixed arrays cannot be assigned as a whole"
+        ),
+        "array_scalar_use.luna": (
+            "fixed arrays are not scalar values"
+        ),
+        "void_pointer_dereference.luna": (
+            "cannot dereference a pointer to void"
+        ),
+        "invalid_string_escape.luna": (
+            "invalid escape in string literal"
+        ),
     }
 
     for case_name, expected_diagnostic in negative_cases.items():
@@ -680,6 +737,7 @@ def main() -> int:
         "floating_ir",
         "scalar_conversion_ir",
         "structured_control_flow_ir",
+        "memory_ir",
     ):
         ir_output = arguments.work_dir / f"{snapshot_name}.lir"
         run(
@@ -716,6 +774,7 @@ def main() -> int:
         "floating_operations",
         "scalar_conversions",
         "structured_control_flow",
+        "memory_operations",
     ):
         deterministic_first = (
             arguments.work_dir / f"{deterministic_name}_first.s"

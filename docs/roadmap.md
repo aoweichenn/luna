@@ -20,7 +20,7 @@ separate. A checked box means the feature has executable tests.
 M0 supports enough language to compile arithmetic functions, local variables,
 `if`, `while`, calls and integer-returning `main`.
 
-## M1: accepted scalar language
+## M1: accepted scalar and memory language
 
 - [x] complete `i64` vertical slice, including IR, x86-64 ABI and traps
 - [x] explicit `as` conversions between implemented integer types
@@ -30,9 +30,9 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] target-sized `isize` and `usize`
 - [x] `f32` and `f64`
 - [x] explicit conversions among every numeric scalar type
-- [ ] explicit raw-pointer conversions
+- [x] explicit raw-pointer conversions
 - [x] complete scalar operators and `do`/`for`/`switch`
-- [ ] raw pointers, fixed arrays and string literals
+- [x] raw pointers, fixed arrays and string literals
 - [ ] external C declarations
 - [x] explicit target model and target data-layout tests
 

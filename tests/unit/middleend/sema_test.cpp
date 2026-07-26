@@ -901,4 +901,161 @@ TEST(SemaTest, RejectsInvalidSwitchForms) {
         std::string::npos);
 }
 
+TEST(SemaTest, LowersPointersArraysAndStringsToTypedMemoryIr) {
+    FrontendHarness harness{"module test.memory_ir;\n"
+                            "fn update(pointer: *i32) -> i32 {\n"
+                            "    *pointer += 1;\n"
+                            "    return *pointer;\n"
+                            "}\n"
+                            "fn main() -> i32 {\n"
+                            "    var values: [3]i32 = {};\n"
+                            "    values[1] = 41;\n"
+                            "    let pointer: *i32 = &values[1];\n"
+                            "    let bits: usize = pointer as usize;\n"
+                            "    let round_trip: *i32 = bits as *i32;\n"
+                            "    let text: *const u8 = \"A\";\n"
+                            "    if (round_trip != null && text[0] == 65) {\n"
+                            "        return update(round_trip);\n"
+                            "    }\n"
+                            "    return 0;\n"
+                            "}\n"};
+
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    LunaIrModule *module = harness.Module();
+    ASSERT_EQ(module->globals.length, 1U);
+    const LunaIrGlobal *global = luna_ir_module_global(module, 0U);
+    ASSERT_NE(global, nullptr);
+    EXPECT_TRUE(global->is_read_only);
+    ASSERT_EQ(global->bytes.length, 2U);
+    EXPECT_EQ(*static_cast<const std::uint8_t *>(
+                  luna_vector_at_const(&global->bytes, 0U)),
+              static_cast<std::uint8_t>('A'));
+    EXPECT_EQ(*static_cast<const std::uint8_t *>(
+                  luna_vector_at_const(&global->bytes, 1U)),
+              0U);
+
+    LunaIrFunction *main_function =
+        luna_ir_module_function(module, module->entry_function);
+    ASSERT_NE(main_function, nullptr);
+    ASSERT_FALSE(main_function->slots.length == 0U);
+    const LunaIrSlot *array_slot = static_cast<const LunaIrSlot *>(
+        luna_vector_at_const(&main_function->slots, 0U));
+    ASSERT_NE(array_slot, nullptr);
+    EXPECT_FALSE(array_slot->is_scalar);
+    EXPECT_EQ(array_slot->size_bytes, 12U);
+    EXPECT_EQ(array_slot->alignment_bytes, 4U);
+
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_ZERO_SLOT), nullptr);
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_ADDRESS_OF_SLOT), nullptr);
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_BOUNDS_CHECK), nullptr);
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_POINTER_OFFSET), nullptr);
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_STORE_INDIRECT), nullptr);
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_LOAD_INDIRECT), nullptr);
+    EXPECT_NE(
+        FindInstruction(main_function, LUNA_IR_CONVERT_POINTER_TO_INTEGER),
+        nullptr);
+    EXPECT_NE(
+        FindInstruction(main_function, LUNA_IR_CONVERT_INTEGER_TO_POINTER),
+        nullptr);
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_GLOBAL_ADDRESS), nullptr);
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_CONST_NULL), nullptr);
+}
+
+TEST(SemaTest, PreservesSequencedMemoryValuesAcrossControlFlowExpressions) {
+    FrontendHarness harness{
+        "module test.memory_control_flow;\n"
+        "fn combine(first: i32, second: i32) -> i32 {\n"
+        "    return first + second;\n"
+        "}\n"
+        "fn main() -> i32 {\n"
+        "    var values: [2]i32 = {};\n"
+        "    values[true ? 0 : 1] = 10 + (false ? 32 : 31);\n"
+        "    let pointer: *i32 = &values[0];\n"
+        "    pointer[false ? 1 : 0] += true ? 1 : 2;\n"
+        "    let computed: i32 = 1 + (true ? 2 : 3);\n"
+        "    let called: i32 = combine(4 + computed, false ? 5 : 6);\n"
+        "    if (called != 13) { return 1; }\n"
+        "    return values[0];\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
+    EXPECT_TRUE(harness.Verify()) << harness.Diagnostics();
+}
+
+TEST(SemaTest, RejectsUnsafePointerAndArrayOperations) {
+    FrontendHarness read_only{"module test.read_only;\n"
+                              "fn main() -> i32 {\n"
+                              "    let value: i32 = 1;\n"
+                              "    let pointer: *const i32 = &value;\n"
+                              "    *pointer = 2;\n"
+                              "    return value;\n"
+                              "}\n"};
+    EXPECT_FALSE(read_only.ParseAndLower());
+    EXPECT_NE(read_only.Diagnostics().find(
+                  "cannot assign through an immutable lvalue"),
+              std::string::npos);
+
+    FrontendHarness invalid_index{"module test.invalid_index;\n"
+                                  "fn main() -> i32 {\n"
+                                  "    var values: [2]i32 = {};\n"
+                                  "    let index: i32 = 0;\n"
+                                  "    return values[index];\n"
+                                  "}\n"};
+    EXPECT_FALSE(invalid_index.ParseAndLower());
+    EXPECT_NE(invalid_index.Diagnostics().find("expected usize, found i32"),
+              std::string::npos);
+
+    FrontendHarness array_parameter{
+        "module test.array_parameter;\n"
+        "fn invalid(values: [2]i32) -> i32 { return values[0]; }\n"
+        "fn main() -> i32 { return 0; }\n"};
+    EXPECT_FALSE(array_parameter.ParseAndLower());
+    EXPECT_NE(array_parameter.Diagnostics().find(
+                  "fixed arrays cannot be passed by value"),
+              std::string::npos);
+
+    FrontendHarness nested_read_only_cast{
+        "module test.nested_read_only_cast;\n"
+        "fn main() -> i32 {\n"
+        "    var value: i32 = 1;\n"
+        "    var inner: *const i32 = (&value) as *const i32;\n"
+        "    let nested: **const i32 = &inner;\n"
+        "    let invalid: **i32 = nested as **i32;\n"
+        "    return **invalid;\n"
+        "}\n"};
+    EXPECT_FALSE(nested_read_only_cast.ParseAndLower());
+    EXPECT_NE(nested_read_only_cast.Diagnostics().find(
+                  "pointer conversion cannot remove read-only qualification"),
+              std::string::npos);
+
+    FrontendHarness void_laundering{
+        "module test.void_laundering;\n"
+        "fn main() -> i32 {\n"
+        "    var value: i32 = 1;\n"
+        "    var inner: *const i32 = (&value) as *const i32;\n"
+        "    let nested: **const i32 = &inner;\n"
+        "    let invalid: *void = nested as *void;\n"
+        "    return 0;\n"
+        "}\n"};
+    EXPECT_FALSE(void_laundering.ParseAndLower());
+    EXPECT_NE(void_laundering.Diagnostics().find(
+                  "pointer conversion cannot remove read-only qualification"),
+              std::string::npos);
+
+    FrontendHarness array_laundering{
+        "module test.array_laundering;\n"
+        "fn main() -> i32 {\n"
+        "    var value: i32 = 1;\n"
+        "    var entries: [1]*const i32 = {};\n"
+        "    entries[0] = (&value) as *const i32;\n"
+        "    let source: *[1]*const i32 = &entries;\n"
+        "    let invalid: *[1]*i32 = source as *[1]*i32;\n"
+        "    return 0;\n"
+        "}\n"};
+    EXPECT_FALSE(array_laundering.ParseAndLower());
+    EXPECT_NE(array_laundering.Diagnostics().find(
+                  "pointer conversion cannot remove read-only qualification"),
+              std::string::npos);
+}
+
 }

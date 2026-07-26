@@ -85,9 +85,71 @@ static bool luna_parser_expect(LunaParser *parser, LunaTokenKind kind,
     return false;
 }
 
+static bool luna_parser_parse_integer(LunaParser *parser, LunaToken token,
+                                      uint64_t *value);
+
+static LunaTypeRef *luna_parser_allocate_type_ref(LunaParser *parser,
+                                                  LunaTypeRef type) {
+    LunaTypeRef *result = luna_parser_allocate(parser, sizeof(LunaTypeRef),
+                                               _Alignof(LunaTypeRef));
+    if (result != NULL) {
+        *result = type;
+    }
+    return result;
+}
+
 static LunaTypeRef luna_parser_parse_type(LunaParser *parser) {
     const LunaToken token = parser->current;
     LunaTypeKind kind = LUNA_TYPE_INVALID;
+
+    if (luna_parser_match(parser, LUNA_TOKEN_STAR)) {
+        if (!luna_parser_enter_nesting(parser, token.span)) {
+            return (LunaTypeRef){
+                .kind = LUNA_TYPE_INVALID,
+                .span = token.span,
+            };
+        }
+        const bool is_read_only = luna_parser_match(parser, LUNA_TOKEN_CONST);
+        const LunaTypeRef pointee = luna_parser_parse_type(parser);
+        luna_parser_leave_nesting(parser);
+        return (LunaTypeRef){
+            .kind = LUNA_TYPE_POINTER,
+            .span = luna_parser_join_spans(token.span, pointee.span),
+            .as.pointer =
+                {
+                    .pointee = luna_parser_allocate_type_ref(parser, pointee),
+                    .is_read_only = is_read_only,
+                },
+        };
+    }
+
+    if (luna_parser_match(parser, LUNA_TOKEN_LEFT_BRACKET)) {
+        if (!luna_parser_enter_nesting(parser, token.span)) {
+            return (LunaTypeRef){
+                .kind = LUNA_TYPE_INVALID,
+                .span = token.span,
+            };
+        }
+        const LunaToken count_token = parser->current;
+        uint64_t count = 0U;
+        if (luna_parser_expect(parser, LUNA_TOKEN_INTEGER,
+                               "as fixed-array length")) {
+            (void)luna_parser_parse_integer(parser, count_token, &count);
+        }
+        (void)luna_parser_expect(parser, LUNA_TOKEN_RIGHT_BRACKET,
+                                 "after fixed-array length");
+        const LunaTypeRef element = luna_parser_parse_type(parser);
+        luna_parser_leave_nesting(parser);
+        return (LunaTypeRef){
+            .kind = LUNA_TYPE_ARRAY,
+            .span = luna_parser_join_spans(token.span, element.span),
+            .as.array =
+                {
+                    .element = luna_parser_allocate_type_ref(parser, element),
+                    .count = count,
+                },
+        };
+    }
 
     switch (token.kind) {
     case LUNA_TOKEN_BOOL:
@@ -386,6 +448,28 @@ static LunaExpression *luna_parser_parse_primary(LunaParser *parser) {
         return expression;
     }
 
+    if (luna_parser_match(parser, LUNA_TOKEN_STRING)) {
+        LunaExpression *expression = luna_parser_new_expression(
+            parser, LUNA_EXPRESSION_STRING, token.span);
+        if (expression != NULL) {
+            expression->as.string = luna_parser_token_text(token);
+        }
+        return expression;
+    }
+
+    if (luna_parser_match(parser, LUNA_TOKEN_NULL)) {
+        return luna_parser_new_expression(parser, LUNA_EXPRESSION_NULL,
+                                          token.span);
+    }
+
+    if (luna_parser_match(parser, LUNA_TOKEN_LEFT_BRACE)) {
+        (void)luna_parser_expect(parser, LUNA_TOKEN_RIGHT_BRACE,
+                                 "for zero initializer");
+        return luna_parser_new_expression(
+            parser, LUNA_EXPRESSION_ZERO_INITIALIZER,
+            luna_parser_join_spans(token.span, parser->previous.span));
+    }
+
     if (luna_parser_match(parser, LUNA_TOKEN_IDENTIFIER)) {
         if (luna_parser_match(parser, LUNA_TOKEN_LEFT_PAREN)) {
             return luna_parser_parse_call(parser, token);
@@ -421,14 +505,44 @@ static LunaExpression *luna_parser_parse_primary(LunaParser *parser) {
     return NULL;
 }
 
+static LunaExpression *luna_parser_parse_postfix(LunaParser *parser) {
+    LunaExpression *expression = luna_parser_parse_primary(parser);
+    while (expression != NULL &&
+           luna_parser_match(parser, LUNA_TOKEN_LEFT_BRACKET)) {
+        const LunaToken left_bracket = parser->previous;
+        if (!luna_parser_enter_nesting(parser, left_bracket.span)) {
+            return expression;
+        }
+        LunaExpression *index = luna_parser_parse_expression(parser);
+        (void)luna_parser_expect(parser, LUNA_TOKEN_RIGHT_BRACKET,
+                                 "after index expression");
+        luna_parser_leave_nesting(parser);
+        if (index == NULL) {
+            return expression;
+        }
+
+        LunaExpression *indexed = luna_parser_new_expression(
+            parser, LUNA_EXPRESSION_INDEX,
+            luna_parser_join_spans(expression->span, parser->previous.span));
+        if (indexed == NULL) {
+            return expression;
+        }
+        indexed->as.index.base = expression;
+        indexed->as.index.index = index;
+        expression = indexed;
+    }
+    return expression;
+}
+
 static bool luna_parser_is_unary_operator(LunaTokenKind kind) {
     return kind == LUNA_TOKEN_PLUS || kind == LUNA_TOKEN_MINUS ||
-           kind == LUNA_TOKEN_BANG || kind == LUNA_TOKEN_TILDE;
+           kind == LUNA_TOKEN_BANG || kind == LUNA_TOKEN_TILDE ||
+           kind == LUNA_TOKEN_STAR || kind == LUNA_TOKEN_AMPERSAND;
 }
 
 static LunaExpression *luna_parser_parse_unary(LunaParser *parser) {
     if (!luna_parser_is_unary_operator(parser->current.kind)) {
-        return luna_parser_parse_primary(parser);
+        return luna_parser_parse_postfix(parser);
     }
 
     const LunaToken operator_token = parser->current;
@@ -728,18 +842,11 @@ static LunaStatement *luna_parser_parse_expression_or_assignment_statement(
         LunaExpression *value = luna_parser_parse_expression(parser);
         (void)luna_parser_expect(parser, terminator, context);
 
-        if (expression->kind != LUNA_EXPRESSION_NAME) {
-            luna_diagnostic_error(
-                parser->diagnostics, expression->span,
-                "bootstrap assignments require a local variable name");
-            return NULL;
-        }
-
         LunaStatement *statement = luna_parser_new_statement(
             parser, LUNA_STATEMENT_ASSIGNMENT,
             luna_parser_join_spans(expression->span, parser->previous.span));
         if (statement != NULL) {
-            statement->as.assignment.name = expression->as.name;
+            statement->as.assignment.target = expression;
             statement->as.assignment.operator_kind = operator_token.kind;
             statement->as.assignment.value = value;
         }
