@@ -55,6 +55,8 @@ static LunaIrType luna_sema_ir_type(LunaTypeKind type) {
         return LUNA_IR_TYPE_BOOL;
     case LUNA_TYPE_I32:
         return LUNA_IR_TYPE_I32;
+    case LUNA_TYPE_I64:
+        break;
     case LUNA_TYPE_INVALID:
         break;
     }

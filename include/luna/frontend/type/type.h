@@ -8,7 +8,8 @@ typedef enum LunaTypeKind {
     LUNA_TYPE_INVALID,
     LUNA_TYPE_VOID,
     LUNA_TYPE_BOOL,
-    LUNA_TYPE_I32
+    LUNA_TYPE_I32,
+    LUNA_TYPE_I64
 } LunaTypeKind;
 
 #ifdef __cplusplus
