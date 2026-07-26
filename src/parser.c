@@ -5,6 +5,23 @@
 #include <stddef.h>
 #include <stdint.h>
 
+static const uint32_t luna_parser_max_nesting_depth = 256U;
+
+static bool luna_parser_enter_nesting(LunaParser *parser, LunaSourceSpan span) {
+    if (parser->nesting_depth >= luna_parser_max_nesting_depth) {
+        luna_diagnostic_error(parser->diagnostics, span,
+                              "maximum parser nesting depth exceeded");
+        return false;
+    }
+
+    parser->nesting_depth += 1U;
+    return true;
+}
+
+static void luna_parser_leave_nesting(LunaParser *parser) {
+    parser->nesting_depth -= 1U;
+}
+
 static void *luna_parser_allocate(LunaParser *parser, size_t size,
                                   size_t alignment) {
     void *allocation = luna_arena_allocate_zero(parser->arena, size, alignment);
@@ -255,11 +272,15 @@ static LunaExpression *luna_parser_parse_call(LunaParser *parser,
 
     call->as.call.name = luna_parser_token_text(name_token);
     LunaExpression **next_argument = &call->as.call.first_argument;
+    if (!luna_parser_enter_nesting(parser, name_token.span)) {
+        return call;
+    }
 
     if (!luna_parser_check(parser, LUNA_TOKEN_RIGHT_PAREN)) {
         do {
             LunaExpression *argument = luna_parser_parse_expression(parser);
             if (argument == NULL) {
+                luna_parser_leave_nesting(parser);
                 return call;
             }
 
@@ -271,9 +292,11 @@ static LunaExpression *luna_parser_parse_call(LunaParser *parser,
 
     if (!luna_parser_expect(parser, LUNA_TOKEN_RIGHT_PAREN,
                             "after function arguments")) {
+        luna_parser_leave_nesting(parser);
         return call;
     }
 
+    luna_parser_leave_nesting(parser);
     call->span = luna_parser_join_spans(name_token.span, parser->previous.span);
     return call;
 }
@@ -316,7 +339,11 @@ static LunaExpression *luna_parser_parse_primary(LunaParser *parser) {
     }
 
     if (luna_parser_match(parser, LUNA_TOKEN_LEFT_PAREN)) {
+        if (!luna_parser_enter_nesting(parser, token.span)) {
+            return NULL;
+        }
         LunaExpression *expression = luna_parser_parse_expression(parser);
+        luna_parser_leave_nesting(parser);
         (void)luna_parser_expect(parser, LUNA_TOKEN_RIGHT_PAREN,
                                  "after expression");
         return expression;
@@ -344,8 +371,12 @@ static LunaExpression *luna_parser_parse_unary(LunaParser *parser) {
     }
 
     const LunaToken operator_token = parser->current;
+    if (!luna_parser_enter_nesting(parser, operator_token.span)) {
+        return NULL;
+    }
     luna_parser_advance(parser);
     LunaExpression *operand = luna_parser_parse_unary(parser);
+    luna_parser_leave_nesting(parser);
     if (operand == NULL) {
         return NULL;
     }
@@ -468,6 +499,9 @@ static LunaStatement *luna_parser_wrap_block(LunaParser *parser,
 
 static LunaStatement *luna_parser_parse_if_statement(LunaParser *parser) {
     const LunaToken if_token = parser->previous;
+    if (!luna_parser_enter_nesting(parser, if_token.span)) {
+        return NULL;
+    }
     (void)luna_parser_expect(parser, LUNA_TOKEN_LEFT_PAREN, "after 'if'");
     LunaExpression *condition = luna_parser_parse_expression(parser);
     (void)luna_parser_expect(parser, LUNA_TOKEN_RIGHT_PAREN,
@@ -500,6 +534,7 @@ static LunaStatement *luna_parser_parse_if_statement(LunaParser *parser) {
         statement->as.if_statement.then_block = then_block;
         statement->as.if_statement.else_branch = else_branch;
     }
+    luna_parser_leave_nesting(parser);
     return statement;
 }
 
@@ -687,10 +722,14 @@ static LunaBlock *luna_parser_parse_block(LunaParser *parser) {
         return NULL;
     }
     const LunaSourceSpan start_span = parser->previous.span;
+    if (!luna_parser_enter_nesting(parser, start_span)) {
+        return NULL;
+    }
 
     LunaBlock *block =
         luna_parser_allocate(parser, sizeof(LunaBlock), _Alignof(LunaBlock));
     if (block == NULL) {
+        luna_parser_leave_nesting(parser);
         return NULL;
     }
 
@@ -715,6 +754,7 @@ static LunaBlock *luna_parser_parse_block(LunaParser *parser) {
 
     (void)luna_parser_expect(parser, LUNA_TOKEN_RIGHT_BRACE, "to end block");
     block->span = luna_parser_join_spans(start_span, parser->previous.span);
+    luna_parser_leave_nesting(parser);
     return block;
 }
 
@@ -836,6 +876,7 @@ void luna_parser_init(LunaParser *parser, const LunaSourceFile *source,
     parser->arena = arena;
     parser->current = (LunaToken){0};
     parser->previous = (LunaToken){0};
+    parser->nesting_depth = 0U;
     luna_parser_advance(parser);
 }
 

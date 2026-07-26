@@ -14,7 +14,8 @@ separate. A checked box means the feature has executable tests.
 - [x] direct internal calls with up to six integer arguments
 - [x] x86-64 System V stack-homed backend
 - [x] standalone Linux `_start`
-- [x] unit, negative, IR snapshot and executable QEMU tests
+- [x] GoogleTest unit, negative, IR snapshot and executable QEMU tests
+- [x] deterministic differential random tests and libFuzzer frontend target
 
 M0 supports enough language to compile arithmetic functions, local variables,
 `if`, `while`, calls and integer-returning `main`.

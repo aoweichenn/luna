@@ -13,8 +13,9 @@ The project is deliberately narrow at this stage:
 - middle end: typed, non-SSA control-flow IR;
 - backend: direct x86-64 instruction selection;
 - bootstrap host: conforming C23;
-- quality gate: warnings-as-errors, unit tests, negative tests, IR snapshots
-  and executable cross-target tests.
+- quality gate: warnings-as-errors, GoogleTest unit tests, negative tests, IR
+  snapshots, differential random programs, libFuzzer and executable
+  cross-target tests.
 
 The language and compiler are under active construction. Implemented syntax is
 tracked separately from accepted language design so that documentation never
@@ -41,6 +42,25 @@ ASan cannot reserve its shadow address space inside some Android/PRoot AArch64
 environments; that host limitation occurs before the test process reaches
 `main`.
 
+GoogleTest 1.14 or newer and Python 3.10 or newer are required when
+`BUILD_TESTING` is enabled. Test groups can be run independently:
+
+```sh
+ctest --preset debug -L unit
+ctest --preset debug -L integration
+ctest --preset debug -L random
+```
+
+The coverage-guided fuzz gate uses Clang:
+
+```sh
+cmake --preset fuzz
+cmake --build --preset fuzz
+ctest --preset fuzz -L fuzz
+```
+
+Native Linux CI additionally runs the same target with the `fuzz-asan` preset.
+
 ## Compile
 
 ```sh
@@ -52,5 +72,6 @@ qemu-x86_64-static ./hello
 ```
 
 See [the language draft](docs/language.md),
-[compiler architecture](docs/architecture.md), and
+[compiler architecture](docs/architecture.md),
+[M0 execution semantics](docs/execution-semantics.md), and the
 [implementation roadmap](docs/roadmap.md).

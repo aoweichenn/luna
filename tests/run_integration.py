@@ -101,6 +101,28 @@ def main() -> int:
     arguments.work_dir.mkdir(parents=True, exist_ok=True)
     case_dir = arguments.source_root / "tests" / "cases"
 
+    help_result = run([str(arguments.compiler), "--help"])
+    if "usage: lunac" not in help_result.stdout:
+        raise AssertionError("--help did not print the compiler usage")
+    version_result = run([str(arguments.compiler), "--version"])
+    if "lunac 0.1.0-dev" not in version_result.stdout:
+        raise AssertionError("--version did not print the compiler version")
+    run([str(arguments.compiler)], expected_code=2)
+    run(
+        [str(arguments.compiler), "--emit", "invalid", "input.luna"],
+        expected_code=2,
+    )
+    run(
+        [
+            str(arguments.compiler),
+            "--emit",
+            "check",
+            str(case_dir / "does_not_exist.luna"),
+        ],
+        expected_code=1,
+    )
+    print("PASS compiler command-line contract")
+
     executable_cases = {
         "return_42.luna": 42,
         "arithmetic.luna": 42,
@@ -108,6 +130,16 @@ def main() -> int:
         "if_else.luna": 17,
         "while_loop.luna": 45,
         "short_circuit.luna": 42,
+        "nested_call.luna": 42,
+        "recursive_factorial.luna": 120,
+        "break_continue.luna": 25,
+        "six_arguments.luna": 21,
+        "signed_arithmetic.luna": 36,
+        "defined_i32_semantics.luna": 42,
+        "division_by_zero.luna": -8,
+        "division_overflow.luna": -8,
+        "void_call.luna": 42,
+        "bool_call.luna": 42,
     }
 
     for case_name, expected_code in executable_cases.items():
@@ -127,6 +159,19 @@ def main() -> int:
         "immutable_assignment.luna": "cannot assign to immutable local",
         "missing_return.luna": "not every path",
         "parse_error.luna": "expected ';'",
+        "unknown_function.luna": "unknown function 'missing'",
+        "wrong_arity.luna": "expects 1 arguments, found 2",
+        "duplicate_local.luna": "duplicate local variable 'answer'",
+        "break_outside_loop.luna": "break is only valid inside a loop",
+        "integer_overflow.luna": "integer literal does not fit in i32",
+        "module_interface_pending.luna": "module interface compilation",
+        "import_pending.luna": "cross-module import resolution",
+        "duplicate_function.luna": "duplicate function 'main'",
+        "unreachable_type_error.luna": "expected bool, found i32",
+        "void_local.luna": "local variables cannot have type void",
+        "wrong_return_type.luna": "expected i32, found bool",
+        "continue_outside_loop.luna": "continue is only valid inside a loop",
+        "duplicate_parameter.luna": "duplicate parameter 'value'",
     }
 
     for case_name, expected_diagnostic in negative_cases.items():
@@ -167,6 +212,23 @@ def main() -> int:
             f"expected:\n{expected_ir}\nactual:\n{actual_ir}"
         )
     print("PASS IR snapshot: function_call.luna")
+
+    deterministic_first = arguments.work_dir / "deterministic_first.s"
+    deterministic_second = arguments.work_dir / "deterministic_second.s"
+    for output in (deterministic_first, deterministic_second):
+        run(
+            [
+                str(arguments.compiler),
+                "--emit",
+                "asm",
+                "-o",
+                str(output),
+                str(case_dir / "recursive_factorial.luna"),
+            ]
+        )
+    if deterministic_first.read_bytes() != deterministic_second.read_bytes():
+        raise AssertionError("assembly output is not deterministic")
+    print("PASS deterministic assembly output")
 
     print("all integration tests passed")
     return 0

@@ -43,6 +43,7 @@ typedef struct LunaSemaContext {
     LunaIrBlockId current_block;
     uint32_t scope_depth;
     bool reachable;
+    bool checking_dead_code;
     bool allocation_failed;
 } LunaSemaContext;
 
@@ -390,12 +391,8 @@ static LunaCheckedValue luna_sema_lower_call(LunaSemaContext *context,
         return luna_sema_invalid_value();
     }
 
-    if (context->current_function->arguments.length > UINT32_MAX) {
-        luna_sema_report_allocation_failure(context);
-        return luna_sema_invalid_value();
-    }
-    const uint32_t first_argument =
-        (uint32_t)context->current_function->arguments.length;
+    LunaVector arguments;
+    luna_vector_init(&arguments, sizeof(LunaIrValueId));
 
     const LunaExpression *argument = expression->as.call.first_argument;
     const LunaParameter *parameter = callee->syntax->first_parameter;
@@ -403,18 +400,39 @@ static LunaCheckedValue luna_sema_lower_call(LunaSemaContext *context,
         LunaCheckedValue value = luna_sema_lower_expression(context, argument);
         if (!luna_sema_require_type(context, value, parameter->type.kind,
                                     argument->span)) {
+            luna_vector_destroy(&arguments);
             return luna_sema_invalid_value();
         }
 
-        if (!luna_vector_push(&context->current_function->arguments,
-                              &value.id)) {
+        if (!luna_vector_push(&arguments, &value.id)) {
             luna_sema_report_allocation_failure(context);
+            luna_vector_destroy(&arguments);
             return luna_sema_invalid_value();
         }
 
         argument = argument->next;
         parameter = parameter->next;
     }
+
+    if (arguments.length > UINT32_MAX ||
+        context->current_function->arguments.length >
+            UINT32_MAX - arguments.length) {
+        luna_sema_report_allocation_failure(context);
+        luna_vector_destroy(&arguments);
+        return luna_sema_invalid_value();
+    }
+
+    const uint32_t first_argument =
+        (uint32_t)context->current_function->arguments.length;
+    for (size_t index = 0U; index < arguments.length; index += 1U) {
+        const LunaIrValueId *value = luna_vector_at_const(&arguments, index);
+        if (!luna_vector_push(&context->current_function->arguments, value)) {
+            luna_sema_report_allocation_failure(context);
+            luna_vector_destroy(&arguments);
+            return luna_sema_invalid_value();
+        }
+    }
+    luna_vector_destroy(&arguments);
 
     LunaIrInstruction call =
         luna_sema_instruction(LUNA_IR_CALL, expression->span);
@@ -507,6 +525,21 @@ luna_sema_lower_expression(LunaSemaContext *context,
         return luna_sema_lower_call(context, expression);
 
     case LUNA_EXPRESSION_UNARY: {
+        if (expression->as.unary.operator_kind == LUNA_TOKEN_MINUS &&
+            expression->as.unary.operand->kind == LUNA_EXPRESSION_INTEGER &&
+            expression->as.unary.operand->as.integer ==
+                (int64_t)INT32_MAX + 1) {
+            LunaIrInstruction instruction =
+                luna_sema_instruction(LUNA_IR_CONST_I32, expression->span);
+            instruction.immediate = INT32_MIN;
+            const LunaIrValueId result = luna_sema_emit_value_instruction(
+                context, &instruction, LUNA_TYPE_I32);
+            return (LunaCheckedValue){
+                .id = result,
+                .type = LUNA_TYPE_I32,
+            };
+        }
+
         LunaCheckedValue operand =
             luna_sema_lower_expression(context, expression->as.unary.operand);
         LunaTypeKind result_type = LUNA_TYPE_I32;
@@ -684,9 +717,33 @@ static void luna_sema_lower_block(LunaSemaContext *context,
         luna_sema_enter_scope(context);
     }
 
-    for (const LunaStatement *statement = block->first;
-         statement != NULL && context->reachable; statement = statement->next) {
+    bool owns_dead_region = false;
+    for (const LunaStatement *statement = block->first; statement != NULL;
+         statement = statement->next) {
+        if (!context->reachable) {
+            const LunaIrBlockId dead_block = luna_sema_add_block(context);
+            if (dead_block == LUNA_IR_INVALID_ID) {
+                break;
+            }
+
+            context->current_block = dead_block;
+            context->reachable = true;
+            if (!context->checking_dead_code) {
+                context->checking_dead_code = true;
+                owns_dead_region = true;
+            }
+        }
+
         (void)luna_sema_lower_statement(context, statement);
+    }
+
+    if (owns_dead_region) {
+        if (context->reachable) {
+            (void)luna_sema_emit_jump(context, context->current_block,
+                                      block->span);
+        }
+        context->checking_dead_code = false;
+        context->reachable = false;
     }
 
     if (create_scope) {
@@ -1081,6 +1138,7 @@ static void luna_sema_lower_function(LunaSemaContext *context,
     context->locals.length = 0U;
     context->loops.length = 0U;
     context->scope_depth = 0U;
+    context->checking_dead_code = false;
 
     const LunaIrBlockId entry_block = luna_sema_add_block(context);
     if (entry_block == LUNA_IR_INVALID_ID) {

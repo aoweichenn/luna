@@ -6,12 +6,15 @@
 #include "luna/diagnostic.h"
 #include "luna/lexer.h"
 
+#include <stdint.h>
+
 typedef struct LunaParser {
     LunaLexer lexer;
     LunaToken current;
     LunaToken previous;
     LunaDiagnosticEngine *diagnostics;
     LunaArena *arena;
+    uint32_t nesting_depth;
 } LunaParser;
 
 void luna_parser_init(LunaParser *parser, const LunaSourceFile *source,

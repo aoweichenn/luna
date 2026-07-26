@@ -31,7 +31,13 @@ static void luna_diagnostic_print_source_line(FILE *stream,
         (void)fputc(character == '\t' ? '\t' : ' ', stream);
     }
 
-    const size_t caret_count = span.length == 0U ? 1U : span.length;
+    const size_t available = line_end - span.offset;
+    size_t caret_count = span.length == 0U ? 1U : span.length;
+    if (available == 0U) {
+        caret_count = 1U;
+    } else if (caret_count > available) {
+        caret_count = available;
+    }
     for (size_t index = 0U; index < caret_count; index += 1U) {
         (void)fputc('^', stream);
     }
@@ -39,7 +45,7 @@ static void luna_diagnostic_print_source_line(FILE *stream,
 }
 
 void luna_diagnostic_init(LunaDiagnosticEngine *diagnostics, FILE *stream) {
-    diagnostics->stream = stream;
+    diagnostics->stream = stream == NULL ? stderr : stream;
     diagnostics->error_count = 0U;
 }
 
@@ -47,7 +53,9 @@ void luna_diagnostic_error(LunaDiagnosticEngine *diagnostics,
                            LunaSourceSpan span, const char *format, ...) {
     diagnostics->error_count += 1U;
 
-    const char *path = span.source == NULL ? "<unknown>" : span.source->path;
+    const char *path = span.source == NULL || span.source->path == NULL
+                           ? "<unknown>"
+                           : span.source->path;
     (void)fprintf(diagnostics->stream, "%s:%u:%u: error: ", path, span.line,
                   span.column);
 

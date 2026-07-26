@@ -68,9 +68,17 @@ with virtual values and explicit local slots:
 - unconditional and conditional branches
 - return
 
-Every basic block has exactly one terminator. IR verification runs before the
-backend in every build mode. Mutable variables use slots, avoiding phi nodes
-until optimization work demonstrates that SSA is worth its compiler cost.
+Every reachable basic block has exactly one terminator. Detached empty merge
+blocks are permitted, while non-empty detached blocks must also terminate.
+Virtual values are defined once, remain local to one basic block and must be
+defined before use. IR verification runs before the backend in every build
+mode. Mutable variables use slots, avoiding phi nodes until optimization work
+demonstrates that SSA is worth its compiler cost.
+
+The verifier independently checks exact operand and result types, call
+signatures and flattened argument ownership, terminator placement, cached
+predecessor counts and graph reachability. Backend emission never receives
+unchecked compiler-generated IR.
 
 The IR is target-neutral. Target-specific registers, calling convention,
 instruction encodings and relocations must not appear in it.
@@ -108,12 +116,15 @@ Allocation and I/O failures are propagated explicitly.
 
 The quality gate contains:
 
-- C unit tests for memory utilities and lexing;
-- parser and type-error negative tests;
+- GoogleTest unit tests for utilities, source handling, lexing, parsing,
+  semantic lowering, IR invariants and x86-64 emission;
+- parser, type and module-error negative tests;
 - textual IR snapshots;
 - x86-64 assembly validation through LLVM MC;
 - static ELF64 linking through LLD;
 - execution under `qemu-x86_64-static`;
+- deterministic generated-program differential tests;
+- deterministic mutation tests and a coverage-guided libFuzzer target;
 - UBSan runs for the host compiler and ASan runs on compatible native hosts;
 - warnings treated as errors.
 

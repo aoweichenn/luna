@@ -24,6 +24,8 @@ typedef struct LunaSourceSpan {
 bool luna_source_load(const char *path, LunaSourceFile *source);
 bool luna_source_from_memory(const char *path, const char *text,
                              LunaSourceFile *source);
+bool luna_source_from_bytes(const char *path, const char *text, size_t length,
+                            LunaSourceFile *source);
 void luna_source_destroy(LunaSourceFile *source);
 LunaStringView luna_source_span_text(LunaSourceSpan span);
 

@@ -1,0 +1,92 @@
+#include "test_support.hpp"
+
+#include <gtest/gtest.h>
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <random>
+#include <string>
+#include <string_view>
+
+namespace luna::test {
+namespace {
+
+constexpr std::uint64_t LUNA_TEST_MUTATION_SEED = UINT64_C(0x4c554e41);
+constexpr std::uint64_t LUNA_TEST_MUTATION_CASES = 1000U;
+constexpr std::size_t LUNA_TEST_MAX_INPUT_SIZE = 4096U;
+
+[[nodiscard]] std::size_t RandomIndex(std::mt19937_64 &random_engine,
+                                      std::size_t upper_bound) {
+    std::uniform_int_distribution<std::size_t> distribution{0U,
+                                                            upper_bound - 1U};
+    return distribution(random_engine);
+}
+
+void Mutate(std::string &input, std::mt19937_64 &random_engine) {
+    const std::uint64_t mutation_count = 1U + random_engine() % 8U;
+    for (std::uint64_t mutation = 0U; mutation < mutation_count;
+         mutation += 1U) {
+        const std::uint64_t operation = random_engine() % 4U;
+        const char random_byte =
+            static_cast<char>(random_engine() & UINT64_C(0xff));
+
+        if (operation == 0U && !input.empty()) {
+            input[RandomIndex(random_engine, input.size())] = random_byte;
+        } else if (operation == 1U && input.size() < LUNA_TEST_MAX_INPUT_SIZE) {
+            const std::size_t index =
+                input.empty() ? 0U
+                              : RandomIndex(random_engine, input.size() + 1U);
+            input.insert(input.begin() + static_cast<std::ptrdiff_t>(index),
+                         random_byte);
+        } else if (operation == 2U && !input.empty()) {
+            input.erase(RandomIndex(random_engine, input.size()), 1U);
+        } else if (!input.empty()) {
+            const std::size_t index = RandomIndex(random_engine, input.size());
+            input[index] =
+                static_cast<char>(static_cast<unsigned char>(input[index]) ^
+                                  static_cast<unsigned char>(random_byte));
+        }
+    }
+}
+
+}
+
+TEST(MutationFuzzTest, CleanFrontendResultsAlwaysProduceValidTypedIr) {
+    constexpr std::array<std::string_view, 5U> LUNA_TEST_SEEDS = {
+        "module fuzz.empty;\nfn main() -> i32 { return 0; }\n",
+        "module fuzz.call;\n"
+        "fn id(value: i32) -> i32 { return value; }\n"
+        "fn main() -> i32 { return id(id(42)); }\n",
+        "module fuzz.loop;\n"
+        "fn main() -> i32 {\n"
+        " var n: i32 = 0; while (n < 10) { n += 1; } return n;\n"
+        "}\n",
+        "export module fuzz.interface;\nimport other.module;\n",
+        "",
+    };
+
+    std::mt19937_64 random_engine{LUNA_TEST_MUTATION_SEED};
+    for (std::uint64_t case_index = 0U; case_index < LUNA_TEST_MUTATION_CASES;
+         case_index += 1U) {
+        const std::size_t seed_index =
+            RandomIndex(random_engine, LUNA_TEST_SEEDS.size());
+        std::string input{LUNA_TEST_SEEDS[seed_index]};
+        Mutate(input, random_engine);
+
+        FrontendHarness harness{std::string_view(input.data(), input.size())};
+        ASSERT_TRUE(harness.IsReady()) << "case " << case_index;
+        if (!harness.ParseAndLower()) {
+            continue;
+        }
+
+        EXPECT_TRUE(harness.Verify())
+            << "case " << case_index << ", seed " << seed_index << '\n'
+            << harness.Diagnostics();
+        EXPECT_TRUE(harness.EmitAssembly())
+            << "case " << case_index << ", seed " << seed_index << '\n'
+            << harness.Diagnostics();
+    }
+}
+
+}
