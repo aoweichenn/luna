@@ -778,4 +778,127 @@ TEST(SemaTest, EnforcesIndependentScalarArgumentRegisterLimits) {
               std::string::npos);
 }
 
+TEST(SemaTest, LowersConditionalAndStructuredControlFlowToValidIr) {
+    FrontendHarness harness{
+        "module test.structured_lowering;\n"
+        "fn select(condition: bool, left: i64, right: i64) -> i64 {\n"
+        "    return condition ? left : right;\n"
+        "}\n"
+        "fn classify(value: u8) -> i32 {\n"
+        "    switch (value) {\n"
+        "        case -1 { return 1; }\n"
+        "        case 0, 1 { return 2; }\n"
+        "        default { return 3; }\n"
+        "    }\n"
+        "}\n"
+        "fn main() -> i32 {\n"
+        "    var total: i32 = 0;\n"
+        "    do { total += 1; } while (total < 2);\n"
+        "    for (var index: i32 = 0; index < 4; index += 1) {\n"
+        "        switch (index) {\n"
+        "            case 1 { continue; }\n"
+        "            case 2 { break; }\n"
+        "            default { total += index; }\n"
+        "        }\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    LunaIrFunction *select = luna_ir_module_function(harness.Module(), 0U);
+    LunaIrFunction *main_function =
+        luna_ir_module_function(harness.Module(), 2U);
+    ASSERT_NE(select, nullptr);
+    ASSERT_NE(main_function, nullptr);
+    EXPECT_GT(select->blocks.length, 1U);
+    EXPECT_GT(main_function->blocks.length, 8U);
+    EXPECT_NE(FindInstruction(select, LUNA_IR_BRANCH), nullptr);
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_COMPARE_EQUAL), nullptr);
+}
+
+TEST(SemaTest, KeepsDetachedLoopClausesWellTypedAndValid) {
+    FrontendHarness harness{
+        "module test.detached_loop_clauses;\n"
+        "fn do_value() -> i32 {\n"
+        "    do { return 7; } while (false);\n"
+        "}\n"
+        "fn for_value() -> i32 {\n"
+        "    for (var index: i32 = 0; index < 1; index += 1) {\n"
+        "        return 9;\n"
+        "    }\n"
+        "    return 11;\n"
+        "}\n"
+        "fn main() -> i32 { return 0; }\n"};
+
+    EXPECT_TRUE(harness.Verify()) << harness.Diagnostics();
+}
+
+TEST(SemaTest, RejectsInvalidConditionalOperands) {
+    FrontendHarness condition{"module test.bad_conditional_condition;\n"
+                              "fn main() -> i32 { return 1 ? 2 : 3; }\n"};
+    EXPECT_FALSE(condition.ParseAndLower());
+    EXPECT_NE(condition.Diagnostics().find("expected bool, found i32"),
+              std::string::npos);
+
+    FrontendHarness operands{"module test.bad_conditional_operands;\n"
+                             "fn main() -> i32 {\n"
+                             "    let choose: bool = true;\n"
+                             "    let value: i32 = choose ? 1 : false;\n"
+                             "    return value;\n"
+                             "}\n"};
+    EXPECT_FALSE(operands.ParseAndLower());
+    EXPECT_NE(operands.Diagnostics().find("expected i32, found bool"),
+              std::string::npos);
+}
+
+TEST(SemaTest, RejectsInvalidSwitchForms) {
+    FrontendHarness non_integer{"module test.non_integer_switch;\n"
+                                "fn main() -> i32 {\n"
+                                "    switch (1.0) { default { return 0; } }\n"
+                                "}\n"};
+    EXPECT_FALSE(non_integer.ParseAndLower());
+    EXPECT_NE(non_integer.Diagnostics().find(
+                  "switch expression requires an integer type"),
+              std::string::npos);
+
+    FrontendHarness duplicate{"module test.duplicate_switch_case;\n"
+                              "fn main() -> i32 {\n"
+                              "    let value: u8 = 0;\n"
+                              "    switch (value) {\n"
+                              "        case -1 { return 1; }\n"
+                              "        case 255 { return 2; }\n"
+                              "        default { return 3; }\n"
+                              "    }\n"
+                              "}\n"};
+    EXPECT_FALSE(duplicate.ParseAndLower());
+    EXPECT_NE(duplicate.Diagnostics().find("duplicate switch case value"),
+              std::string::npos);
+
+    FrontendHarness duplicate_default{"module test.duplicate_switch_default;\n"
+                                      "fn main() -> i32 {\n"
+                                      "    switch (0) {\n"
+                                      "        default { return 1; }\n"
+                                      "        default { return 2; }\n"
+                                      "    }\n"
+                                      "}\n"};
+    EXPECT_FALSE(duplicate_default.ParseAndLower());
+    EXPECT_NE(duplicate_default.Diagnostics().find(
+                  "switch has more than one default arm"),
+              std::string::npos);
+
+    FrontendHarness overflow{"module test.switch_label_overflow;\n"
+                             "fn main() -> i32 {\n"
+                             "    let value: i8 = 0;\n"
+                             "    switch (value) {\n"
+                             "        case 128 { return 1; }\n"
+                             "        default { return 0; }\n"
+                             "    }\n"
+                             "}\n"};
+    EXPECT_FALSE(overflow.ParseAndLower());
+    EXPECT_NE(
+        overflow.Diagnostics().find("switch case label does not fit in i8"),
+        std::string::npos);
+}
+
 }

@@ -21,6 +21,7 @@ typedef enum LunaExpressionKind {
     LUNA_EXPRESSION_NAME,
     LUNA_EXPRESSION_UNARY,
     LUNA_EXPRESSION_BINARY,
+    LUNA_EXPRESSION_CONDITIONAL,
     LUNA_EXPRESSION_CALL,
     LUNA_EXPRESSION_CAST
 } LunaExpressionKind;
@@ -51,6 +52,12 @@ struct LunaExpression {
         } binary;
 
         struct {
+            LunaExpression *condition;
+            LunaExpression *then_expression;
+            LunaExpression *else_expression;
+        } conditional;
+
+        struct {
             LunaStringView name;
             LunaExpression *first_argument;
             uint32_t argument_count;
@@ -65,6 +72,7 @@ struct LunaExpression {
 
 typedef struct LunaBlock LunaBlock;
 typedef struct LunaStatement LunaStatement;
+typedef struct LunaSwitchArm LunaSwitchArm;
 
 typedef enum LunaStatementKind {
     LUNA_STATEMENT_BLOCK,
@@ -73,6 +81,9 @@ typedef enum LunaStatementKind {
     LUNA_STATEMENT_EXPRESSION,
     LUNA_STATEMENT_IF,
     LUNA_STATEMENT_WHILE,
+    LUNA_STATEMENT_DO,
+    LUNA_STATEMENT_FOR,
+    LUNA_STATEMENT_SWITCH,
     LUNA_STATEMENT_BREAK,
     LUNA_STATEMENT_CONTINUE,
     LUNA_STATEMENT_RETURN
@@ -82,6 +93,15 @@ struct LunaBlock {
     LunaSourceSpan span;
     LunaStatement *first;
     LunaStatement *last;
+};
+
+struct LunaSwitchArm {
+    LunaSourceSpan span;
+    bool is_default;
+    LunaExpression *first_label;
+    uint32_t label_count;
+    LunaBlock *body;
+    LunaSwitchArm *next;
 };
 
 struct LunaStatement {
@@ -117,6 +137,24 @@ struct LunaStatement {
             LunaExpression *condition;
             LunaBlock *body;
         } while_statement;
+
+        struct {
+            LunaBlock *body;
+            LunaExpression *condition;
+        } do_statement;
+
+        struct {
+            LunaStatement *initializer;
+            LunaExpression *condition;
+            LunaStatement *update;
+            LunaBlock *body;
+        } for_statement;
+
+        struct {
+            LunaExpression *expression;
+            LunaSwitchArm *first_arm;
+            uint32_t arm_count;
+        } switch_statement;
 
         LunaExpression *return_value;
     } as;

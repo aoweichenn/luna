@@ -543,8 +543,39 @@ static LunaExpression *luna_parser_parse_binary(LunaParser *parser,
     return left;
 }
 
+static LunaExpression *luna_parser_parse_conditional(LunaParser *parser) {
+    LunaExpression *condition = luna_parser_parse_binary(parser, 1);
+    if (condition == NULL || !luna_parser_match(parser, LUNA_TOKEN_QUESTION)) {
+        return condition;
+    }
+
+    const LunaToken question_token = parser->previous;
+    if (!luna_parser_enter_nesting(parser, question_token.span)) {
+        return condition;
+    }
+
+    LunaExpression *then_expression = luna_parser_parse_expression(parser);
+    (void)luna_parser_expect(parser, LUNA_TOKEN_COLON,
+                             "between conditional operands");
+    LunaExpression *else_expression = luna_parser_parse_conditional(parser);
+    luna_parser_leave_nesting(parser);
+    if (then_expression == NULL || else_expression == NULL) {
+        return condition;
+    }
+
+    LunaExpression *expression = luna_parser_new_expression(
+        parser, LUNA_EXPRESSION_CONDITIONAL,
+        luna_parser_join_spans(condition->span, else_expression->span));
+    if (expression != NULL) {
+        expression->as.conditional.condition = condition;
+        expression->as.conditional.then_expression = then_expression;
+        expression->as.conditional.else_expression = else_expression;
+    }
+    return expression;
+}
+
 static LunaExpression *luna_parser_parse_expression(LunaParser *parser) {
-    return luna_parser_parse_binary(parser, 1);
+    return luna_parser_parse_conditional(parser);
 }
 
 static LunaBlock *luna_parser_parse_block(LunaParser *parser);
@@ -684,6 +715,257 @@ static bool luna_parser_is_assignment_operator(LunaTokenKind kind) {
     }
 }
 
+static LunaStatement *luna_parser_parse_expression_or_assignment_statement(
+    LunaParser *parser, LunaTokenKind terminator, const char *context) {
+    LunaExpression *expression = luna_parser_parse_expression(parser);
+    if (expression == NULL) {
+        return NULL;
+    }
+
+    if (luna_parser_is_assignment_operator(parser->current.kind)) {
+        const LunaToken operator_token = parser->current;
+        luna_parser_advance(parser);
+        LunaExpression *value = luna_parser_parse_expression(parser);
+        (void)luna_parser_expect(parser, terminator, context);
+
+        if (expression->kind != LUNA_EXPRESSION_NAME) {
+            luna_diagnostic_error(
+                parser->diagnostics, expression->span,
+                "bootstrap assignments require a local variable name");
+            return NULL;
+        }
+
+        LunaStatement *statement = luna_parser_new_statement(
+            parser, LUNA_STATEMENT_ASSIGNMENT,
+            luna_parser_join_spans(expression->span, parser->previous.span));
+        if (statement != NULL) {
+            statement->as.assignment.name = expression->as.name;
+            statement->as.assignment.operator_kind = operator_token.kind;
+            statement->as.assignment.value = value;
+        }
+        return statement;
+    }
+
+    (void)luna_parser_expect(parser, terminator, context);
+    LunaStatement *statement = luna_parser_new_statement(
+        parser, LUNA_STATEMENT_EXPRESSION,
+        luna_parser_join_spans(expression->span, parser->previous.span));
+    if (statement != NULL) {
+        statement->as.expression = expression;
+    }
+    return statement;
+}
+
+static LunaStatement *luna_parser_parse_do_statement(LunaParser *parser) {
+    const LunaToken do_token = parser->previous;
+    if (!luna_parser_enter_nesting(parser, do_token.span)) {
+        return NULL;
+    }
+
+    LunaBlock *body = luna_parser_parse_block(parser);
+    (void)luna_parser_expect(parser, LUNA_TOKEN_WHILE, "after do body");
+    (void)luna_parser_expect(parser, LUNA_TOKEN_LEFT_PAREN, "after 'while'");
+    LunaExpression *condition = luna_parser_parse_expression(parser);
+    (void)luna_parser_expect(parser, LUNA_TOKEN_RIGHT_PAREN,
+                             "after do-while condition");
+    (void)luna_parser_expect(parser, LUNA_TOKEN_SEMICOLON,
+                             "after do-while statement");
+
+    LunaStatement *statement = luna_parser_new_statement(
+        parser, LUNA_STATEMENT_DO,
+        luna_parser_join_spans(do_token.span, parser->previous.span));
+    if (statement != NULL) {
+        statement->as.do_statement.body = body;
+        statement->as.do_statement.condition = condition;
+    }
+    luna_parser_leave_nesting(parser);
+    return statement;
+}
+
+static LunaStatement *luna_parser_parse_for_statement(LunaParser *parser) {
+    const LunaToken for_token = parser->previous;
+    if (!luna_parser_enter_nesting(parser, for_token.span)) {
+        return NULL;
+    }
+    (void)luna_parser_expect(parser, LUNA_TOKEN_LEFT_PAREN, "after 'for'");
+
+    LunaStatement *initializer = NULL;
+    if (!luna_parser_match(parser, LUNA_TOKEN_SEMICOLON)) {
+        if (luna_parser_match(parser, LUNA_TOKEN_LET)) {
+            initializer = luna_parser_parse_declaration(parser, false,
+                                                        parser->previous.span);
+        } else if (luna_parser_match(parser, LUNA_TOKEN_VAR)) {
+            initializer = luna_parser_parse_declaration(parser, true,
+                                                        parser->previous.span);
+        } else {
+            initializer = luna_parser_parse_expression_or_assignment_statement(
+                parser, LUNA_TOKEN_SEMICOLON, "after for initializer");
+        }
+    }
+
+    LunaExpression *condition = NULL;
+    if (!luna_parser_match(parser, LUNA_TOKEN_SEMICOLON)) {
+        condition = luna_parser_parse_expression(parser);
+        (void)luna_parser_expect(parser, LUNA_TOKEN_SEMICOLON,
+                                 "after for condition");
+    }
+
+    LunaStatement *update = NULL;
+    if (!luna_parser_match(parser, LUNA_TOKEN_RIGHT_PAREN)) {
+        update = luna_parser_parse_expression_or_assignment_statement(
+            parser, LUNA_TOKEN_RIGHT_PAREN, "after for update");
+    }
+
+    LunaBlock *body = luna_parser_parse_block(parser);
+    LunaStatement *statement = luna_parser_new_statement(
+        parser, LUNA_STATEMENT_FOR,
+        body == NULL ? for_token.span
+                     : luna_parser_join_spans(for_token.span, body->span));
+    if (statement != NULL) {
+        statement->as.for_statement.initializer = initializer;
+        statement->as.for_statement.condition = condition;
+        statement->as.for_statement.update = update;
+        statement->as.for_statement.body = body;
+    }
+    luna_parser_leave_nesting(parser);
+    return statement;
+}
+
+static LunaExpression *luna_parser_parse_switch_label(LunaParser *parser) {
+    LunaToken sign_token = {
+        .kind = LUNA_TOKEN_INVALID,
+    };
+    if (luna_parser_check(parser, LUNA_TOKEN_PLUS) ||
+        luna_parser_check(parser, LUNA_TOKEN_MINUS)) {
+        sign_token = parser->current;
+        luna_parser_advance(parser);
+    }
+
+    const LunaToken literal_token = parser->current;
+    if (!luna_parser_expect(parser, LUNA_TOKEN_INTEGER,
+                            "as switch case label")) {
+        return NULL;
+    }
+
+    LunaExpression *literal = luna_parser_new_expression(
+        parser, LUNA_EXPRESSION_INTEGER, literal_token.span);
+    if (literal == NULL) {
+        return NULL;
+    }
+    (void)luna_parser_parse_integer(parser, literal_token,
+                                    &literal->as.integer);
+
+    if (sign_token.kind == LUNA_TOKEN_INVALID) {
+        return literal;
+    }
+
+    LunaExpression *expression = luna_parser_new_expression(
+        parser, LUNA_EXPRESSION_UNARY,
+        luna_parser_join_spans(sign_token.span, literal->span));
+    if (expression != NULL) {
+        expression->as.unary.operator_kind = sign_token.kind;
+        expression->as.unary.operand = literal;
+    }
+    return expression;
+}
+
+static LunaStatement *luna_parser_parse_switch_statement(LunaParser *parser) {
+    const LunaToken switch_token = parser->previous;
+    if (!luna_parser_enter_nesting(parser, switch_token.span)) {
+        return NULL;
+    }
+
+    (void)luna_parser_expect(parser, LUNA_TOKEN_LEFT_PAREN, "after 'switch'");
+    LunaExpression *expression = luna_parser_parse_expression(parser);
+    (void)luna_parser_expect(parser, LUNA_TOKEN_RIGHT_PAREN,
+                             "after switch expression");
+    (void)luna_parser_expect(parser, LUNA_TOKEN_LEFT_BRACE, "to begin switch");
+
+    LunaSwitchArm *first_arm = NULL;
+    LunaSwitchArm **next_arm = &first_arm;
+    uint32_t arm_count = 0U;
+    while (!luna_parser_check(parser, LUNA_TOKEN_RIGHT_BRACE) &&
+           !luna_parser_check(parser, LUNA_TOKEN_END)) {
+        const LunaToken arm_token = parser->current;
+        const bool is_case = luna_parser_match(parser, LUNA_TOKEN_CASE);
+        const bool is_default =
+            !is_case && luna_parser_match(parser, LUNA_TOKEN_DEFAULT);
+        if (!is_case && !is_default) {
+            luna_diagnostic_error(parser->diagnostics, parser->current.span,
+                                  "expected 'case' or 'default' inside switch");
+            luna_parser_advance(parser);
+            continue;
+        }
+
+        LunaExpression *first_label = NULL;
+        LunaExpression **next_label = &first_label;
+        uint32_t label_count = 0U;
+        bool label_failed = false;
+        if (is_case) {
+            do {
+                LunaExpression *label = luna_parser_parse_switch_label(parser);
+                if (label == NULL) {
+                    label_failed = true;
+                    break;
+                }
+                *next_label = label;
+                next_label = &label->next;
+                if (label_count == UINT32_MAX) {
+                    luna_diagnostic_error(parser->diagnostics, label->span,
+                                          "too many switch case labels");
+                    break;
+                }
+                label_count += 1U;
+            } while (luna_parser_match(parser, LUNA_TOKEN_COMMA));
+        }
+
+        if (label_failed) {
+            while (!luna_parser_check(parser, LUNA_TOKEN_LEFT_BRACE) &&
+                   !luna_parser_check(parser, LUNA_TOKEN_CASE) &&
+                   !luna_parser_check(parser, LUNA_TOKEN_DEFAULT) &&
+                   !luna_parser_check(parser, LUNA_TOKEN_RIGHT_BRACE) &&
+                   !luna_parser_check(parser, LUNA_TOKEN_END)) {
+                luna_parser_advance(parser);
+            }
+        }
+
+        LunaBlock *body = luna_parser_parse_block(parser);
+        LunaSwitchArm *arm = luna_parser_allocate(parser, sizeof(LunaSwitchArm),
+                                                  _Alignof(LunaSwitchArm));
+        if (arm == NULL) {
+            break;
+        }
+        arm->span = body == NULL
+                        ? arm_token.span
+                        : luna_parser_join_spans(arm_token.span, body->span);
+        arm->is_default = is_default;
+        arm->first_label = first_label;
+        arm->label_count = label_count;
+        arm->body = body;
+        *next_arm = arm;
+        next_arm = &arm->next;
+
+        if (arm_count == UINT32_MAX) {
+            luna_diagnostic_error(parser->diagnostics, arm->span,
+                                  "too many switch arms");
+            break;
+        }
+        arm_count += 1U;
+    }
+
+    (void)luna_parser_expect(parser, LUNA_TOKEN_RIGHT_BRACE, "to end switch");
+    LunaStatement *statement = luna_parser_new_statement(
+        parser, LUNA_STATEMENT_SWITCH,
+        luna_parser_join_spans(switch_token.span, parser->previous.span));
+    if (statement != NULL) {
+        statement->as.switch_statement.expression = expression;
+        statement->as.switch_statement.first_arm = first_arm;
+        statement->as.switch_statement.arm_count = arm_count;
+    }
+    luna_parser_leave_nesting(parser);
+    return statement;
+}
+
 static LunaStatement *luna_parser_parse_statement(LunaParser *parser) {
     if (luna_parser_check(parser, LUNA_TOKEN_LEFT_BRACE)) {
         return luna_parser_wrap_block(parser, luna_parser_parse_block(parser));
@@ -705,6 +987,18 @@ static LunaStatement *luna_parser_parse_statement(LunaParser *parser) {
 
     if (luna_parser_match(parser, LUNA_TOKEN_WHILE)) {
         return luna_parser_parse_while_statement(parser);
+    }
+
+    if (luna_parser_match(parser, LUNA_TOKEN_DO)) {
+        return luna_parser_parse_do_statement(parser);
+    }
+
+    if (luna_parser_match(parser, LUNA_TOKEN_FOR)) {
+        return luna_parser_parse_for_statement(parser);
+    }
+
+    if (luna_parser_match(parser, LUNA_TOKEN_SWITCH)) {
+        return luna_parser_parse_switch_statement(parser);
     }
 
     if (luna_parser_match(parser, LUNA_TOKEN_BREAK)) {
@@ -742,57 +1036,8 @@ static LunaStatement *luna_parser_parse_statement(LunaParser *parser) {
         return statement;
     }
 
-    if (luna_parser_check(parser, LUNA_TOKEN_DO) ||
-        luna_parser_check(parser, LUNA_TOKEN_FOR) ||
-        luna_parser_check(parser, LUNA_TOKEN_SWITCH)) {
-        const LunaToken unsupported = parser->current;
-        luna_diagnostic_error(
-            parser->diagnostics, unsupported.span,
-            "%s is accepted by the language design but is not implemented "
-            "in the current bootstrap compiler",
-            luna_token_kind_name(unsupported.kind));
-        luna_parser_advance(parser);
-        return NULL;
-    }
-
-    LunaExpression *expression = luna_parser_parse_expression(parser);
-    if (expression == NULL) {
-        return NULL;
-    }
-
-    if (luna_parser_is_assignment_operator(parser->current.kind)) {
-        const LunaToken operator_token = parser->current;
-        luna_parser_advance(parser);
-        LunaExpression *value = luna_parser_parse_expression(parser);
-        (void)luna_parser_expect(parser, LUNA_TOKEN_SEMICOLON,
-                                 "after assignment");
-
-        if (expression->kind != LUNA_EXPRESSION_NAME) {
-            luna_diagnostic_error(
-                parser->diagnostics, expression->span,
-                "bootstrap assignments require a local variable name");
-            return NULL;
-        }
-
-        LunaStatement *statement = luna_parser_new_statement(
-            parser, LUNA_STATEMENT_ASSIGNMENT,
-            luna_parser_join_spans(expression->span, parser->previous.span));
-        if (statement != NULL) {
-            statement->as.assignment.name = expression->as.name;
-            statement->as.assignment.operator_kind = operator_token.kind;
-            statement->as.assignment.value = value;
-        }
-        return statement;
-    }
-
-    (void)luna_parser_expect(parser, LUNA_TOKEN_SEMICOLON, "after expression");
-    LunaStatement *statement = luna_parser_new_statement(
-        parser, LUNA_STATEMENT_EXPRESSION,
-        luna_parser_join_spans(expression->span, parser->previous.span));
-    if (statement != NULL) {
-        statement->as.expression = expression;
-    }
-    return statement;
+    return luna_parser_parse_expression_or_assignment_statement(
+        parser, LUNA_TOKEN_SEMICOLON, "after expression");
 }
 
 static LunaBlock *luna_parser_parse_block(LunaParser *parser) {

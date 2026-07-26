@@ -50,6 +50,12 @@ Source locations are byte spans into immutable source files. Tokens and syntax
 nodes retain spans so every parser, type and IR error can point to the original
 text. The parser uses an arena and never owns isolated syntax nodes.
 
+The syntax tree represents `if`, all three loop forms and non-fallthrough
+switch arms directly. Semantic lowering uses one ordered control-frame stack:
+`break` selects its innermost loop or switch frame, while `continue` searches
+for the innermost loop frame. This preserves nesting semantics without adding
+target-specific control constructs.
+
 Compilation is split into global and local phases:
 
 1. parse every source unit;
@@ -80,6 +86,12 @@ with virtual values and explicit local slots:
 - direct calls
 - unconditional and conditional branches
 - return
+
+Conditional expressions use a typed temporary slot at their merge. Switch
+lowering stores the controlling value once and emits an ordered chain of typed
+equality branches. `do` and `for` are expressed entirely with ordinary basic
+blocks. No conditional, loop or switch opcode is hidden from the verifier or
+backend.
 
 Every reachable basic block has exactly one terminator. Detached empty merge
 blocks are permitted, while non-empty detached blocks must also terminate.
@@ -156,6 +168,10 @@ The quality gate contains:
 - deterministic generated-program differential tests;
 - executable matrices and boundary traps for every numeric scalar conversion
   family;
+- executable conditional matrices for every scalar type and switch-boundary
+  matrices for every integer type;
+- structured-control negative cases, IR snapshots and randomized differential
+  programs;
 - deterministic mutation tests and a coverage-guided libFuzzer target;
 - UBSan runs for the host compiler and ASan runs on compatible native hosts;
 - warnings treated as errors.

@@ -287,6 +287,111 @@ def generate_scalar_conversion_matrix(work_dir: pathlib.Path) -> pathlib.Path:
     return source
 
 
+def generate_conditional_matrix(work_dir: pathlib.Path) -> pathlib.Path:
+    scalar_types = (
+        ("bool", "true", "false"),
+        ("i8", "-85", "42"),
+        ("i16", "-21846", "12345"),
+        ("i32", "-1431655766", "1431655765"),
+        ("i64", "-6148914691236517206", "6148914691236517205"),
+        ("isize", "-4096", "8192"),
+        ("u8", "171", "85"),
+        ("u16", "43690", "21845"),
+        ("u32", "2863311530", "1431655765"),
+        ("u64", "12297829382473034410", "6148914691236517205"),
+        ("usize", "8192", "4096"),
+        ("f32", "1.25", "-2.5"),
+        ("f64", "9007199254740992.0", "-0.125"),
+    )
+    lines = ["module test.all_conditional_types;", ""]
+    for type_name, _, _ in scalar_types:
+        lines.extend(
+            (
+                f"fn select_{type_name}(condition: bool, left: {type_name}, "
+                f"right: {type_name}) -> {type_name} {{",
+                "    return condition ? left : right;",
+                "}",
+                "",
+            )
+        )
+
+    lines.append("fn main() -> i32 {")
+    for type_name, left_value, right_value in scalar_types:
+        lines.extend(
+            (
+                f"    if (select_{type_name}(true, {left_value}, "
+                f"{right_value}) != {left_value}) {{ return 1; }}",
+                f"    if (select_{type_name}(false, {left_value}, "
+                f"{right_value}) != {right_value}) {{ return 1; }}",
+            )
+        )
+    lines.extend(("    return 42;", "}", ""))
+
+    source = work_dir / "all_conditional_types.luna"
+    source.write_text("\n".join(lines), encoding="utf-8")
+    return source
+
+
+def generate_switch_matrix(work_dir: pathlib.Path) -> pathlib.Path:
+    integer_types = (
+        ("i8", "-128", "127", "42"),
+        ("i16", "-32768", "32767", "42"),
+        ("i32", "-2147483648", "2147483647", "42"),
+        (
+            "i64",
+            "-9223372036854775808",
+            "9223372036854775807",
+            "42",
+        ),
+        (
+            "isize",
+            "-9223372036854775808",
+            "9223372036854775807",
+            "42",
+        ),
+        ("u8", "0", "255", "42"),
+        ("u16", "0", "65535", "42"),
+        ("u32", "0", "4294967295", "42"),
+        ("u64", "0", "18446744073709551615", "42"),
+        ("usize", "0", "18446744073709551615", "42"),
+    )
+    lines = ["module test.all_switch_integer_types;", ""]
+    for type_name, minimum, maximum, other in integer_types:
+        maximum_label = (
+            "-1" if type_name.startswith("u") else maximum
+        )
+        lines.extend(
+            (
+                f"fn classify_{type_name}(value: {type_name}) -> i32 {{",
+                "    switch (value) {",
+                f"        case {minimum} {{ return 1; }}",
+                f"        case {maximum_label} {{ return 2; }}",
+                "        default { return 3; }",
+                "    }",
+                "}",
+                "",
+            )
+        )
+
+    lines.append("fn main() -> i32 {")
+    for type_name, minimum, maximum, other in integer_types:
+        lines.extend(
+            (
+                f"    if (classify_{type_name}({minimum}) != 1) "
+                "{ return 1; }",
+                f"    if (classify_{type_name}({maximum}) != 2) "
+                "{ return 1; }",
+                f"    if (classify_{type_name}({other}) != 3) "
+                "{ return 1; }",
+            )
+        )
+    lines.extend(("    return 42;", "}", ""))
+
+    source = work_dir / "all_switch_integer_types.luna"
+    source.write_text("\n".join(lines), encoding="utf-8")
+    return source
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--compiler", type=pathlib.Path, required=True)
@@ -395,6 +500,7 @@ def main() -> int:
         "floating_operations.luna": 42,
         "floating_literals.luna": 42,
         "scalar_conversions.luna": 42,
+        "structured_control_flow.luna": 42,
         "float_to_integer_nan_trap.luna": -4,
         "float_to_integer_infinity_trap.luna": -4,
         "float_to_integer_signed_range_trap.luna": -4,
@@ -442,6 +548,30 @@ def main() -> int:
     )
     print("PASS executable: all 42 remaining scalar conversion pairs")
 
+    conditional_matrix = generate_conditional_matrix(arguments.work_dir)
+    compile_and_run(
+        arguments.compiler,
+        llvm_mc,
+        linker,
+        target_runner,
+        conditional_matrix,
+        arguments.work_dir,
+        42,
+    )
+    print("PASS executable: conditional operator for all scalar types")
+
+    switch_matrix = generate_switch_matrix(arguments.work_dir)
+    compile_and_run(
+        arguments.compiler,
+        llvm_mc,
+        linker,
+        target_runner,
+        switch_matrix,
+        arguments.work_dir,
+        42,
+    )
+    print("PASS executable: switch boundaries for all integer types")
+
     negative_cases = {
         "type_error.luna": "expected bool, found i32",
         "immutable_assignment.luna": "cannot assign to immutable local",
@@ -450,7 +580,9 @@ def main() -> int:
         "unknown_function.luna": "unknown function 'missing'",
         "wrong_arity.luna": "expects 1 arguments, found 2",
         "duplicate_local.luna": "duplicate local variable 'answer'",
-        "break_outside_loop.luna": "break is only valid inside a loop",
+        "break_outside_loop.luna": (
+            "break is only valid inside a loop or switch"
+        ),
         "integer_overflow.luna": "integer literal does not fit in i32",
         "module_interface_pending.luna": "module interface compilation",
         "import_pending.luna": "cross-module import resolution",
@@ -497,6 +629,28 @@ def main() -> int:
         "too_many_float_arguments.luna": (
             "at most six integer-class and eight floating-point arguments"
         ),
+        "conditional_condition_error.luna": "expected bool, found i32",
+        "conditional_type_error.luna": "expected i32, found bool",
+        "conditional_numeric_type_error.luna": "expected i32, found i64",
+        "do_condition_error.luna": "expected bool, found i32",
+        "for_condition_error.luna": "expected bool, found i32",
+        "for_scope_error.luna": "unknown local variable 'index'",
+        "switch_type_error.luna": (
+            "switch expression requires an integer type"
+        ),
+        "switch_duplicate_case.luna": "duplicate switch case value",
+        "switch_duplicate_default.luna": (
+            "switch has more than one default arm"
+        ),
+        "switch_label_overflow.luna": (
+            "switch case label does not fit in i8"
+        ),
+        "continue_in_switch_without_loop.luna": (
+            "continue is only valid inside a loop"
+        ),
+        "invalid_switch_label.luna": (
+            "expected integer literal as switch case label"
+        ),
     }
 
     for case_name, expected_diagnostic in negative_cases.items():
@@ -525,6 +679,7 @@ def main() -> int:
         "pointer_sized_integer_ir",
         "floating_ir",
         "scalar_conversion_ir",
+        "structured_control_flow_ir",
     ):
         ir_output = arguments.work_dir / f"{snapshot_name}.lir"
         run(
@@ -560,6 +715,7 @@ def main() -> int:
         "pointer_sized_integer_operations",
         "floating_operations",
         "scalar_conversions",
+        "structured_control_flow",
     ):
         deterministic_first = (
             arguments.work_dir / f"{deterministic_name}_first.s"

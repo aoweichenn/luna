@@ -673,6 +673,88 @@ def generate_float_width_conversion_case(
     return source, 42
 
 
+def generate_conditional_case(
+    engine: random.Random,
+    case_index: int,
+) -> tuple[str, int]:
+    first_condition = engine.randrange(2) == 0
+    second_condition = engine.randrange(2) == 0
+    first_value = engine.randrange(-100000, 100001)
+    second_value = engine.randrange(-100000, 100001)
+    third_value = engine.randrange(-100000, 100001)
+    expected_value = (
+        first_value
+        if first_condition
+        else second_value if second_condition else third_value
+    )
+    first_text = "true" if first_condition else "false"
+    second_text = "true" if second_condition else "false"
+    source = (
+        f"module random.conditional_case{case_index};\n"
+        "\n"
+        "fn main() -> i32 {\n"
+        f"    let selected: i32 = {first_text} ? {first_value} : "
+        f"{second_text} ? {second_value} : {third_value};\n"
+        "    let safe: i32 = true ? selected : 1 / 0;\n"
+        f"    if (safe == {expected_value}) {{ return 42; }}\n"
+        "    return 1;\n"
+        "}\n"
+    )
+    return source, 42
+
+
+def generate_structured_control_flow_case(
+    engine: random.Random,
+    case_index: int,
+) -> tuple[str, int]:
+    initial_value = engine.randrange(-50, 51)
+    do_limit = engine.randrange(1, 9)
+    for_limit = engine.randrange(4, 12)
+    selected_labels = engine.sample(range(for_limit), 3)
+    first_skip = selected_labels[0]
+    second_skip = selected_labels[1]
+    switch_break = selected_labels[2]
+
+    expected_value = initial_value
+    for iteration in range(1, do_limit + 1):
+        expected_value = wrap_i32(expected_value + iteration)
+        if iteration % 2 != 0:
+            expected_value = wrap_i32(expected_value - 1)
+
+    for index in range(for_limit):
+        if index == first_skip or index == second_skip:
+            continue
+        if index != switch_break:
+            expected_value = wrap_i32(expected_value + index)
+        expected_value = wrap_i32(expected_value + 1)
+
+    source = (
+        f"module random.structured_control_flow_case{case_index};\n"
+        "\n"
+        "fn main() -> i32 {\n"
+        f"    var total: i32 = {initial_value};\n"
+        "    var iteration: i32 = 0;\n"
+        "    do {\n"
+        "        iteration += 1;\n"
+        "        total += iteration;\n"
+        "        if ((iteration % 2) == 0) { continue; }\n"
+        "        total -= 1;\n"
+        f"    }} while (iteration < {do_limit});\n"
+        f"    for (var index: i32 = 0; index < {for_limit}; index += 1) {{\n"
+        "        switch (index) {\n"
+        f"            case {first_skip}, {second_skip} {{ continue; }}\n"
+        f"            case {switch_break} {{ break; }}\n"
+        "            default { total += index; }\n"
+        "        }\n"
+        "        total += 1;\n"
+        "    }\n"
+        f"    if (total == {expected_value}) {{ return 42; }}\n"
+        "    return 1;\n"
+        "}\n"
+    )
+    return source, 42
+
+
 def compile_and_run(
     compiler: pathlib.Path,
     llvm_mc: str,
@@ -751,7 +833,7 @@ def main() -> int:
 
     engine = random.Random(arguments.seed)
     for case_index in range(arguments.cases):
-        case_kind = case_index % 16
+        case_kind = case_index % 18
         if case_kind == 0:
             source, expected_code = generate_case(engine, case_index)
         elif case_kind == 1:
@@ -808,7 +890,7 @@ def main() -> int:
             source, expected_code = generate_unsigned_scalar_conversion_case(
                 engine, case_index
             )
-        else:
+        elif case_kind == 15:
             if engine.randrange(2) == 0:
                 source, expected_code = (
                     generate_fractional_scalar_conversion_case(
@@ -819,6 +901,14 @@ def main() -> int:
                 source, expected_code = generate_float_width_conversion_case(
                     engine, case_index
                 )
+        elif case_kind == 16:
+            source, expected_code = generate_conditional_case(
+                engine, case_index
+            )
+        else:
+            source, expected_code = generate_structured_control_flow_case(
+                engine, case_index
+            )
         compile_and_run(
             arguments.compiler,
             llvm_mc,

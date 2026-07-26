@@ -139,6 +139,14 @@ for (var index: usize = 0; index < count; index += 1) {
 }
 ```
 
+The three `for` clauses are independently optional. The initializer is either
+a `let`/`var` declaration, an assignment statement or an expression
+statement. The update is an assignment or expression statement. The
+initializer declaration is scoped across the condition, update and body, and
+is not visible after the loop. `continue` transfers to the condition in
+`while` and `do` loops, and to the update clause in a `for` loop before the
+condition is tested again.
+
 Switch cases are scoped and never fall through:
 
 ```luna
@@ -153,8 +161,19 @@ switch (token.kind) {
 }
 ```
 
+The controlling expression is evaluated exactly once. In the scalar
+bootstrap, it must have an integer type and each `case` label is an integer
+literal with an optional unary `+` or `-`. A label is contextually interpreted
+as the controlling integer type. Duplicate values after that interpretation
+are rejected, including spellings such as `-1` and `255` in a `u8` switch.
+There may be at most one `default`, and it may appear anywhere among the
+cases. Typed constants and scoped enum values extend the label syntax in the
+aggregate milestone.
+
 The jump statements are `break`, `continue`, `return` and `return value`.
-There are no labels or `goto` in Luna 0.
+`break` exits the innermost loop or switch. `continue` targets the innermost
+enclosing loop even when it appears inside a switch nested in that loop. There
+are no labels or `goto` in Luna 0.
 
 ## Expressions
 
@@ -205,6 +224,12 @@ Binary operators, from tighter to looser groups, are:
 ||
 ?: 
 ```
+
+The conditional operator is right-associative. Its condition must be `bool`;
+its two result operands must have the same exact non-`void` scalar type, and
+only the selected operand is evaluated. The surrounding expected type
+contextually types literals in both result operands, but it never converts an
+already typed value.
 
 Explicit conversions use `as`:
 

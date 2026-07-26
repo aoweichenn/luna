@@ -232,4 +232,83 @@ TEST(ParserTest, RejectsMalformedFloatingPointLiterals) {
     }
 }
 
+TEST(ParserTest, BuildsConditionalAndStructuredControlFlowNodes) {
+    FrontendHarness harness{
+        "module test.structured_syntax;\n"
+        "fn main() -> i32 {\n"
+        "    let selected: i32 = true ? 1 : false ? 2 : 3;\n"
+        "    do { return selected; } while (false);\n"
+        "    for (var index: i32 = 0; index < 4; index += 1) {\n"
+        "        switch (index) {\n"
+        "            case -1, 0 { break; }\n"
+        "            default { continue; }\n"
+        "        }\n"
+        "    }\n"
+        "    return selected;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.Parse()) << harness.Diagnostics();
+    const LunaFunction *function = harness.Program()->first_function;
+    ASSERT_NE(function, nullptr);
+    ASSERT_NE(function->body, nullptr);
+
+    const LunaStatement *declaration = function->body->first;
+    ASSERT_NE(declaration, nullptr);
+    ASSERT_EQ(declaration->kind, LUNA_STATEMENT_DECLARATION);
+    const LunaExpression *conditional = declaration->as.declaration.initializer;
+    ASSERT_NE(conditional, nullptr);
+    ASSERT_EQ(conditional->kind, LUNA_EXPRESSION_CONDITIONAL);
+    ASSERT_NE(conditional->as.conditional.else_expression, nullptr);
+    EXPECT_EQ(conditional->as.conditional.else_expression->kind,
+              LUNA_EXPRESSION_CONDITIONAL);
+
+    const LunaStatement *do_statement = declaration->next;
+    ASSERT_NE(do_statement, nullptr);
+    EXPECT_EQ(do_statement->kind, LUNA_STATEMENT_DO);
+    ASSERT_NE(do_statement->as.do_statement.body, nullptr);
+    ASSERT_NE(do_statement->as.do_statement.condition, nullptr);
+
+    const LunaStatement *for_statement = do_statement->next;
+    ASSERT_NE(for_statement, nullptr);
+    ASSERT_EQ(for_statement->kind, LUNA_STATEMENT_FOR);
+    ASSERT_NE(for_statement->as.for_statement.initializer, nullptr);
+    EXPECT_EQ(for_statement->as.for_statement.initializer->kind,
+              LUNA_STATEMENT_DECLARATION);
+    ASSERT_NE(for_statement->as.for_statement.condition, nullptr);
+    ASSERT_NE(for_statement->as.for_statement.update, nullptr);
+    EXPECT_EQ(for_statement->as.for_statement.update->kind,
+              LUNA_STATEMENT_ASSIGNMENT);
+
+    const LunaBlock *for_body = for_statement->as.for_statement.body;
+    ASSERT_NE(for_body, nullptr);
+    const LunaStatement *switch_statement = for_body->first;
+    ASSERT_NE(switch_statement, nullptr);
+    ASSERT_EQ(switch_statement->kind, LUNA_STATEMENT_SWITCH);
+    EXPECT_EQ(switch_statement->as.switch_statement.arm_count, 2U);
+    const LunaSwitchArm *first_arm =
+        switch_statement->as.switch_statement.first_arm;
+    ASSERT_NE(first_arm, nullptr);
+    EXPECT_FALSE(first_arm->is_default);
+    EXPECT_EQ(first_arm->label_count, 2U);
+    ASSERT_NE(first_arm->next, nullptr);
+    EXPECT_TRUE(first_arm->next->is_default);
+}
+
+TEST(ParserTest, AcceptsEmptyForClauses) {
+    FrontendHarness harness{"module test.empty_for_clauses;\n"
+                            "fn main() -> i32 {\n"
+                            "    for (;;) { break; }\n"
+                            "    return 0;\n"
+                            "}\n"};
+
+    ASSERT_TRUE(harness.Parse()) << harness.Diagnostics();
+    const LunaStatement *statement =
+        harness.Program()->first_function->body->first;
+    ASSERT_NE(statement, nullptr);
+    ASSERT_EQ(statement->kind, LUNA_STATEMENT_FOR);
+    EXPECT_EQ(statement->as.for_statement.initializer, nullptr);
+    EXPECT_EQ(statement->as.for_statement.condition, nullptr);
+    EXPECT_EQ(statement->as.for_statement.update, nullptr);
+}
+
 }

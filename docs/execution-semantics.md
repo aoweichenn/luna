@@ -12,12 +12,26 @@ bootstrap target is `x86_64-unknown-linux-gnu`, with little-endian byte order,
 ## Evaluation
 
 Expressions and function arguments are evaluated from left to right. `&&` and
-`||` short-circuit. Conditions accept only `bool`; integers never convert to
-truth values.
+`||` short-circuit. The conditional operator evaluates its `bool` condition
+first and then exactly one of its two same-typed result operands. Conditions
+accept only `bool`; integers never convert to truth values.
 
 Every statement is name-checked and type-checked, including statements that
 cannot be reached at run time. Unreachable code is lowered into detached IR
 blocks and cannot affect live control flow.
+
+`do` executes its body before the first condition test. A `for` statement
+executes its initializer once, then repeats condition, body and update in that
+order. An omitted condition behaves as `true`; omitted initializer and update
+clauses perform no work. The scope introduced by `for` includes all three
+clauses and the body.
+
+A switch evaluates its integer controlling expression once and compares it
+against case values in source order. It executes exactly one matching case,
+the default case when no value matches, or no body when neither exists. Cases
+never fall through. `break` exits the innermost loop or switch; `continue`
+always targets the innermost loop. In a `for` loop that target runs the update
+before testing the condition again.
 
 An integer literal takes the exact integer type required by an enclosing
 declaration, return, argument or integer expression. Without an integer

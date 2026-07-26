@@ -11,7 +11,8 @@ The project is deliberately narrow at this stage:
 - frontend: explicit `bool`, `i8`, `i16`, `i32`, `i64`, `isize`, `u8`,
   `u16`, `u32`, `u64`, `usize`, `f32` and `f64` types, explicit numeric
   conversions with checked floating-to-integer bounds, functions, expressions,
-  local variables and structured control flow;
+  the short-circuit conditional operator, local variables, `if`, `while`,
+  `do`, `for` and non-fallthrough `switch` control flow;
 - middle end: typed, non-SSA control-flow IR;
 - target model: explicit `x86_64-unknown-linux-gnu` data layout, with
   target-sized `isize` and `usize`;
