@@ -128,6 +128,37 @@ Parameters are passed by value and their bindings are immutable. Pointer
 parameters express mutation explicitly. There is no overloading, default
 argument or variadic Luna function.
 
+An `extern fn` is a declaration of one function implemented outside Luna. It
+has no body, must end in `;`, and names the exact C/ELF symbol to call:
+
+```luna
+extern fn hash(bytes: *const u8, length: usize) -> u64;
+```
+
+The current target uses the x86-64 System V C ABI. External declarations may
+use `void` as the return type and may otherwise pass and return only scalar or
+pointer types. The bootstrap backend supports at most six integer-class
+arguments and eight floating-point arguments, counted independently; stack
+arguments, aggregate arguments and variadic calls are deferred. Luna does not
+implicitly link a C runtime or any library—the final linker invocation must
+supply an object or library that defines every referenced external symbol.
+
+For `x86_64-unknown-linux-gnu`, the interoperable C23 spellings are:
+
+| Luna | C23 |
+| --- | --- |
+| `bool` | `_Bool` |
+| `i8`, `u8` | `signed char`, `unsigned char` |
+| `i16`, `u16` | `short`, `unsigned short` |
+| `i32`, `u32` | `int`, `unsigned int` |
+| `i64`, `u64` | `long long`, `unsigned long long` |
+| `isize`, `usize` | `long`, `unsigned long` |
+| `f32`, `f64` | `float`, `double` |
+| `*T`, `*const T` | the corresponding C pointer type |
+
+The names `_start` and every name beginning with `_L` are reserved at this
+boundary for the bootstrap runtime and Luna's internal symbol encoding.
+
 ## Statements
 
 Conditions require `bool`; control-flow bodies require braces.

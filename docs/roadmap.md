@@ -33,7 +33,7 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] explicit raw-pointer conversions
 - [x] complete scalar operators and `do`/`for`/`switch`
 - [x] raw pointers, fixed arrays and string literals
-- [ ] external C declarations
+- [x] external C declarations
 - [x] explicit target model and target data-layout tests
 
 ## M2: aggregate and module completion

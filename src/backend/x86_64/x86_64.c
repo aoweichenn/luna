@@ -48,6 +48,14 @@ static bool luna_x86_64_append_symbol(LunaStringBuilder *output,
     return true;
 }
 
+static bool luna_x86_64_append_linkage_symbol(LunaStringBuilder *output,
+                                              const LunaIrFunction *function) {
+    if (function->linkage == LUNA_IR_LINKAGE_EXTERNAL_C) {
+        return luna_string_builder_append_view(output, function->name);
+    }
+    return luna_x86_64_append_symbol(output, function);
+}
+
 static bool luna_x86_64_align_up(uint64_t value, uint32_t alignment,
                                  uint64_t *aligned) {
     if (alignment == 0U || (alignment & (alignment - 1U)) != 0U ||
@@ -204,6 +212,13 @@ static bool luna_x86_64_emit_load_rax(LunaStringBuilder *output,
 static bool luna_x86_64_emit_normalize_bool_eax(LunaStringBuilder *output) {
     return luna_string_builder_append_c_string(output,
                                                "    testl %eax, %eax\n"
+                                               "    setne %al\n"
+                                               "    movzbl %al, %eax\n");
+}
+
+static bool luna_x86_64_emit_normalize_bool_al(LunaStringBuilder *output) {
+    return luna_string_builder_append_c_string(output,
+                                               "    testb %al, %al\n"
                                                "    setne %al\n"
                                                "    movzbl %al, %eax\n");
 }
@@ -552,25 +567,43 @@ static bool luna_x86_64_emit_call(LunaStringBuilder *output,
             return false;
         }
         const bool is_64_bit = luna_x86_64_type_is_64_bit(*parameter_type);
-        if (!luna_string_builder_append_c_string(
-                output, is_64_bit ? "    movq " : "    movl ") ||
-            !luna_x86_64_append_value_operand(output, function, *argument) ||
-            !luna_string_builder_append_format(
-                output, ", %s\n",
-                is_64_bit ? argument_registers_64_bit[integer_register]
-                          : argument_registers_32_bit[integer_register])) {
-            return false;
+        const uint32_t width = luna_x86_64_type_bit_width(*parameter_type);
+        const bool needs_external_sign_extension =
+            callee->linkage == LUNA_IR_LINKAGE_EXTERNAL_C &&
+            luna_ir_type_is_signed_integer(*parameter_type) && width < 32U;
+        if (needs_external_sign_extension) {
+            if (!luna_x86_64_emit_signed_load_32(
+                    output, function, *argument, *parameter_type,
+                    argument_registers_32_bit[integer_register])) {
+                return false;
+            }
+        } else {
+            if (!luna_string_builder_append_c_string(
+                    output, is_64_bit ? "    movq " : "    movl ") ||
+                !luna_x86_64_append_value_operand(output, function,
+                                                  *argument) ||
+                !luna_string_builder_append_format(
+                    output, ", %s\n",
+                    is_64_bit ? argument_registers_64_bit[integer_register]
+                              : argument_registers_32_bit[integer_register])) {
+                return false;
+            }
         }
         integer_register += 1U;
     }
 
     if (!luna_string_builder_append_c_string(output, "    call ") ||
-        !luna_x86_64_append_symbol(output, callee) ||
+        !luna_x86_64_append_linkage_symbol(output, callee) ||
         !luna_string_builder_append_c_string(output, "\n")) {
         return false;
     }
 
     if (instruction->result != LUNA_IR_INVALID_ID) {
+        if (callee->linkage == LUNA_IR_LINKAGE_EXTERNAL_C &&
+            instruction->type == LUNA_IR_TYPE_BOOL &&
+            !luna_x86_64_emit_normalize_bool_al(output)) {
+            return false;
+        }
         if (luna_ir_type_is_float(instruction->type)) {
             return luna_x86_64_emit_store_xmm0(
                 output, function, instruction->result, instruction->type);
@@ -1713,6 +1746,28 @@ static bool luna_x86_64_emit_globals(LunaStringBuilder *output,
     return true;
 }
 
+static bool luna_x86_64_emit_external_declarations(LunaStringBuilder *output,
+                                                   const LunaIrModule *module) {
+    bool emitted_declaration = false;
+    for (size_t function_index = 0U; function_index < module->functions.length;
+         function_index += 1U) {
+        const LunaIrFunction *function =
+            luna_vector_at_const(&module->functions, function_index);
+        if (function == NULL ||
+            function->linkage != LUNA_IR_LINKAGE_EXTERNAL_C) {
+            continue;
+        }
+        if (!luna_string_builder_append_c_string(output, "    .extern ") ||
+            !luna_x86_64_append_linkage_symbol(output, function) ||
+            !luna_string_builder_append_c_string(output, "\n")) {
+            return false;
+        }
+        emitted_declaration = true;
+    }
+    return !emitted_declaration ||
+           luna_string_builder_append_c_string(output, "\n");
+}
+
 bool luna_x86_64_emit_assembly(const LunaIrModule *module,
                                LunaDiagnosticEngine *diagnostics,
                                LunaStringBuilder *output) {
@@ -1732,6 +1787,7 @@ bool luna_x86_64_emit_assembly(const LunaIrModule *module,
     }
 
     if (!luna_x86_64_emit_globals(output, module) ||
+        !luna_x86_64_emit_external_declarations(output, module) ||
         !luna_string_builder_append_c_string(output,
                                              "    .text\n"
                                              "    .globl _start\n"
@@ -1760,6 +1816,9 @@ bool luna_x86_64_emit_assembly(const LunaIrModule *module,
          function_index += 1U) {
         const LunaIrFunction *function =
             luna_vector_at_const(&module->functions, function_index);
+        if (function->linkage == LUNA_IR_LINKAGE_EXTERNAL_C) {
+            continue;
+        }
         if (!luna_x86_64_emit_function(output, module, function,
                                        function_index)) {
             luna_diagnostic_error_plain(

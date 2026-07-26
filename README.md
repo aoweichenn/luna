@@ -12,6 +12,7 @@ The project is deliberately narrow at this stage:
   `u16`, `u32`, `u64`, `usize`, `f32` and `f64` types, explicit numeric
   and raw-pointer conversions with checked floating-to-integer bounds, raw
   pointers, local fixed arrays, immutable string literals, functions,
+  typed external C function declarations,
   expressions, the short-circuit conditional operator, local variables, `if`,
   `while`, `do`, `for` and non-fallthrough `switch` control flow;
 - middle end: typed, non-SSA control-flow IR with explicit object layouts,
@@ -21,7 +22,8 @@ The project is deliberately narrow at this stage:
 - backend: direct, unoptimized x86-64 instruction selection, including
   IEEE-754 scalar SSE floating-point operations and checked numeric
   conversions, exact-width indirect memory access, checked fixed-array
-  indexing and read-only static data;
+  indexing, read-only static data and direct System V calls to unmangled
+  external C symbols;
 - bootstrap host: conforming C23 with IEC 60559 binary32 and binary64;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests, IR
   snapshots, differential random programs, libFuzzer and executable
@@ -86,6 +88,18 @@ qemu-x86_64-static ./hello
 supported target. On an x86-64 Linux host, the integration and differential
 test runners execute generated static binaries natively when
 `qemu-x86_64-static` is unavailable.
+
+An external definition is declared without a body:
+
+```luna
+extern fn c_value(input: i32) -> i32;
+```
+
+Compile the C23 implementation to an x86-64 object and include that object in
+the final `ld.lld` command. Luna emits the exact symbol name and does not
+implicitly link libc. The current external ABI accepts non-variadic
+scalar/pointer signatures that fit in the six integer and eight SSE System V
+argument registers; stack and aggregate arguments remain deferred.
 
 See [the language draft](docs/language.md),
 [compiler architecture](docs/architecture.md),

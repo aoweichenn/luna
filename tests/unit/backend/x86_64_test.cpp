@@ -22,6 +22,22 @@ TEST(X8664BackendTest, EmitsDirectAssemblyForTypedIr) {
     EXPECT_NE(assembly.find(".note.GNU-stack"), std::string::npos);
 }
 
+TEST(X8664BackendTest, EmitsRawExternalSymbolsAndCAbiBoundaryFixups) {
+    FrontendHarness harness{
+        "module test.external_codegen;\n"
+        "extern fn c_ready(value: i8) -> bool;\n"
+        "fn main() -> i32 { return c_ready(-1) ? 42 : 1; }\n"};
+
+    ASSERT_TRUE(harness.EmitAssembly()) << harness.Diagnostics();
+    const std::string assembly = harness.Assembly();
+    EXPECT_NE(assembly.find(".extern c_ready"), std::string::npos);
+    EXPECT_NE(assembly.find("call c_ready"), std::string::npos);
+    EXPECT_NE(assembly.find("movsbl"), std::string::npos);
+    EXPECT_NE(assembly.find(", %edi"), std::string::npos);
+    EXPECT_NE(assembly.find("testb %al, %al"), std::string::npos);
+    EXPECT_EQ(assembly.find(".type c_ready, @function"), std::string::npos);
+}
+
 TEST(X8664BackendTest, EmitsShortCircuitControlFlowAsBranches) {
     FrontendHarness harness{"module test.short_circuit_codegen;\n"
                             "fn main() -> i32 {\n"

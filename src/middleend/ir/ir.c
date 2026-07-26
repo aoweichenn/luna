@@ -52,7 +52,8 @@ void luna_ir_module_destroy(LunaIrModule *module) {
 LunaIrFunctionId luna_ir_module_add_function(LunaIrModule *module,
                                              LunaStringView module_name,
                                              LunaStringView name,
-                                             LunaIrType return_type) {
+                                             LunaIrType return_type,
+                                             LunaIrFunctionLinkage linkage) {
     if (module->functions.length >= UINT32_MAX) {
         return LUNA_IR_INVALID_ID;
     }
@@ -60,6 +61,7 @@ LunaIrFunctionId luna_ir_module_add_function(LunaIrModule *module,
     LunaIrFunction function = {
         .module_name = module_name,
         .name = name,
+        .linkage = linkage,
         .return_type = return_type,
     };
     luna_vector_init(&function.parameter_types, sizeof(LunaIrType));
@@ -908,6 +910,42 @@ static bool luna_ir_verify_function(const LunaIrModule *module,
         goto cleanup;
     }
 
+    if (function->linkage != LUNA_IR_LINKAGE_INTERNAL &&
+        function->linkage != LUNA_IR_LINKAGE_EXTERNAL_C) {
+        (void)fprintf(error_stream,
+                      "IR verification: function %zu has invalid linkage\n",
+                      function_index);
+        goto cleanup;
+    }
+
+    if (function->linkage == LUNA_IR_LINKAGE_EXTERNAL_C) {
+        for (size_t index = 0U; index < function->parameter_types.length;
+             index += 1U) {
+            const LunaIrType *parameter_type =
+                luna_vector_at_const(&function->parameter_types, index);
+            if (parameter_type == NULL ||
+                !luna_ir_type_is_value(*parameter_type)) {
+                (void)fprintf(
+                    error_stream,
+                    "IR verification: invalid external parameter %zu in "
+                    "function %zu\n",
+                    index, function_index);
+                goto cleanup;
+            }
+        }
+        if (function->slots.length != 0U ||
+            function->value_types.length != 0U ||
+            function->arguments.length != 0U || function->blocks.length != 0U) {
+            (void)fprintf(
+                error_stream,
+                "IR verification: external function %zu has a definition\n",
+                function_index);
+            goto cleanup;
+        }
+        success = true;
+        goto cleanup;
+    }
+
     if (function->blocks.length == 0U) {
         (void)fprintf(error_stream,
                       "IR verification: function %zu has no blocks\n",
@@ -1241,10 +1279,12 @@ bool luna_ir_verify(const LunaIrModule *module, FILE *error_stream) {
 
     const LunaIrFunction *entry =
         luna_ir_module_function_const(module, module->entry_function);
-    if (entry->return_type != LUNA_IR_TYPE_I32 ||
+    if (entry->linkage != LUNA_IR_LINKAGE_INTERNAL ||
+        entry->return_type != LUNA_IR_TYPE_I32 ||
         entry->parameter_types.length != 0U) {
         (void)fputs(
-            "IR verification: entry function must have type fn() -> i32\n",
+            "IR verification: entry function must be an internal fn() -> "
+            "i32\n",
             stream);
         return false;
     }
@@ -1708,6 +1748,33 @@ bool luna_ir_print(const LunaIrModule *module, LunaStringBuilder *output) {
          function_index += 1U) {
         const LunaIrFunction *function =
             luna_vector_at_const(&module->functions, function_index);
+
+        if (function->linkage == LUNA_IR_LINKAGE_EXTERNAL_C) {
+            if (!luna_string_builder_append_c_string(output, "extern fn @") ||
+                !luna_string_builder_append_view(output, function->name) ||
+                !luna_string_builder_append_c_string(output, "(")) {
+                return false;
+            }
+            for (size_t parameter_index = 0U;
+                 parameter_index < function->parameter_types.length;
+                 parameter_index += 1U) {
+                const LunaIrType *type = luna_vector_at_const(
+                    &function->parameter_types, parameter_index);
+                if ((parameter_index > 0U &&
+                     !luna_string_builder_append_c_string(output, ", ")) ||
+                    type == NULL ||
+                    !luna_string_builder_append_c_string(
+                        output, luna_ir_type_name(*type))) {
+                    return false;
+                }
+            }
+            if (!luna_string_builder_append_format(
+                    output, ") -> %s\n\n",
+                    luna_ir_type_name(function->return_type))) {
+                return false;
+            }
+            continue;
+        }
 
         if (!luna_string_builder_append_c_string(output, "fn @") ||
             !luna_string_builder_append_view(output, function->name) ||

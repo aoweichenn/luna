@@ -11,6 +11,40 @@
 
 namespace luna::test {
 
+TEST(SemaTest, LowersExternalDeclarationsAndCallsToTypedIr) {
+    FrontendHarness harness{
+        "module test.external_sema;\n"
+        "extern fn c_mix(value: i16, scale: f64, pointer: *i32) -> i64;\n"
+        "fn main() -> i32 {\n"
+        "    var value: i32 = 7;\n"
+        "    return c_mix(-12, 1.5, &value) as i32;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.ParseAndLower()) << harness.Diagnostics();
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    LunaIrModule *module = harness.Module();
+    ASSERT_EQ(module->functions.length, 2U);
+
+    LunaIrFunction *external = luna_ir_module_function(module, 0U);
+    ASSERT_NE(external, nullptr);
+    EXPECT_EQ(external->linkage, LUNA_IR_LINKAGE_EXTERNAL_C);
+    EXPECT_EQ(external->return_type, LUNA_IR_TYPE_I64);
+    EXPECT_EQ(external->parameter_types.length, 3U);
+    EXPECT_EQ(external->slots.length, 0U);
+    EXPECT_EQ(external->value_types.length, 0U);
+    EXPECT_EQ(external->arguments.length, 0U);
+    EXPECT_EQ(external->blocks.length, 0U);
+
+    LunaIrFunction *main_function = luna_ir_module_function(module, 1U);
+    ASSERT_NE(main_function, nullptr);
+    EXPECT_EQ(main_function->linkage, LUNA_IR_LINKAGE_INTERNAL);
+    LunaIrInstruction *call = FindInstruction(main_function, LUNA_IR_CALL);
+    ASSERT_NE(call, nullptr);
+    EXPECT_EQ(call->callee, 0U);
+    EXPECT_EQ(call->argument_count, 3U);
+    EXPECT_EQ(call->type, LUNA_IR_TYPE_I64);
+}
+
 TEST(SemaTest, LowersNestedCallsWithoutOverlappingArguments) {
     FrontendHarness harness{
         "module test.nested;\n"

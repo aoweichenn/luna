@@ -36,6 +36,11 @@ typedef enum LunaIrType {
     LUNA_IR_TYPE_POINTER
 } LunaIrType;
 
+typedef enum LunaIrFunctionLinkage {
+    LUNA_IR_LINKAGE_INTERNAL,
+    LUNA_IR_LINKAGE_EXTERNAL_C
+} LunaIrFunctionLinkage;
+
 typedef enum LunaIrOpcode {
     LUNA_IR_CONST_INTEGER,
     LUNA_IR_CONST_FLOAT,
@@ -131,6 +136,7 @@ typedef struct LunaIrBlock {
 typedef struct LunaIrFunction {
     LunaStringView module_name;
     LunaStringView name;
+    LunaIrFunctionLinkage linkage;
     LunaIrType return_type;
     LunaVector parameter_types;
     LunaVector slots;
@@ -151,7 +157,8 @@ void luna_ir_module_destroy(LunaIrModule *module);
 LunaIrFunctionId luna_ir_module_add_function(LunaIrModule *module,
                                              LunaStringView module_name,
                                              LunaStringView name,
-                                             LunaIrType return_type);
+                                             LunaIrType return_type,
+                                             LunaIrFunctionLinkage linkage);
 LunaIrFunction *luna_ir_module_function(LunaIrModule *module,
                                         LunaIrFunctionId function_id);
 const LunaIrFunction *

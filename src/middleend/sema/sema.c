@@ -3311,11 +3311,29 @@ static bool luna_sema_lower_statement(LunaSemaContext *context,
 static bool luna_sema_collect_functions(LunaSemaContext *context) {
     for (const LunaFunction *syntax = context->program->first_function;
          syntax != NULL; syntax = syntax->next) {
-        if (syntax->is_declaration) {
+        if (syntax->is_external && !syntax->is_declaration) {
+            luna_diagnostic_error(
+                context->diagnostics, syntax->span,
+                "external function '%.*s' must be a declaration",
+                (int)syntax->name.length, syntax->name.data);
+            continue;
+        }
+        if (!syntax->is_external && syntax->is_declaration) {
             luna_diagnostic_error(
                 context->diagnostics, syntax->span,
                 "separate module interface implementations are scheduled "
                 "for milestone M2");
+            continue;
+        }
+        if (syntax->is_external &&
+            (luna_string_view_equal_c_string(syntax->name, "_start") ||
+             (syntax->name.length >= 2U && syntax->name.data[0] == '_' &&
+              syntax->name.data[1] == 'L'))) {
+            luna_diagnostic_error(
+                context->diagnostics, syntax->span,
+                "external function name '%.*s' is reserved by the bootstrap "
+                "ABI",
+                (int)syntax->name.length, syntax->name.data);
             continue;
         }
 
@@ -3380,7 +3398,9 @@ static bool luna_sema_collect_functions(LunaSemaContext *context) {
 
         const LunaIrFunctionId ir_id = luna_ir_module_add_function(
             context->module, context->program->module_name, syntax->name,
-            luna_sema_ir_type(context, return_type));
+            luna_sema_ir_type(context, return_type),
+            syntax->is_external ? LUNA_IR_LINKAGE_EXTERNAL_C
+                                : LUNA_IR_LINKAGE_INTERNAL);
         if (ir_id == LUNA_IR_INVALID_ID) {
             luna_sema_report_allocation_failure(context);
             return false;
@@ -3397,8 +3417,9 @@ static bool luna_sema_collect_functions(LunaSemaContext *context) {
                 luna_sema_report_allocation_failure(context);
                 return false;
             }
-            if (luna_ir_function_add_slot(ir_function, type) ==
-                LUNA_IR_INVALID_ID) {
+            if (!syntax->is_external &&
+                luna_ir_function_add_slot(ir_function, type) ==
+                    LUNA_IR_INVALID_ID) {
                 luna_sema_report_allocation_failure(context);
                 return false;
             }
@@ -3423,6 +3444,13 @@ static bool luna_sema_find_entry(LunaSemaContext *context) {
     if (entry == NULL) {
         luna_diagnostic_error_plain(context->diagnostics,
                                     "program has no main function");
+        return false;
+    }
+
+    if (entry->syntax->is_external) {
+        luna_diagnostic_error(
+            context->diagnostics, entry->syntax->span,
+            "bootstrap entry point 'main' must be defined in Luna");
         return false;
     }
 
@@ -3536,7 +3564,9 @@ bool luna_sema_lower(const LunaProgram *program,
         for (size_t index = 0U; index < context.functions.length; index += 1U) {
             LunaSemaFunction *function =
                 luna_vector_at(&context.functions, index);
-            luna_sema_lower_function(&context, function);
+            if (!function->syntax->is_external) {
+                luna_sema_lower_function(&context, function);
+            }
         }
     }
 

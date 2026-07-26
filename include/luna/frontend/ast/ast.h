@@ -195,6 +195,7 @@ typedef struct LunaFunction {
     LunaStringView name;
     LunaSourceSpan span;
     bool is_exported;
+    bool is_external;
     bool is_declaration;
     LunaParameter *first_parameter;
     uint32_t parameter_count;

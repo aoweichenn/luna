@@ -30,6 +30,38 @@ TEST(ParserTest, BuildsModuleImportsAndFunctionShape) {
     EXPECT_EQ(program->first_function->return_type.kind, LUNA_TYPE_I32);
 }
 
+TEST(ParserTest, BuildsExternalFunctionDeclarations) {
+    FrontendHarness harness{
+        "module test.external_syntax;\n"
+        "export extern fn c_mix(value: i16, pointer: *void) -> i64;\n"
+        "fn main() -> i32 { return 0; }\n"};
+
+    ASSERT_TRUE(harness.Parse()) << harness.Diagnostics();
+    const LunaFunction *function = harness.Program()->first_function;
+    ASSERT_NE(function, nullptr);
+    EXPECT_TRUE(function->is_exported);
+    EXPECT_TRUE(function->is_external);
+    EXPECT_TRUE(function->is_declaration);
+    EXPECT_EQ(function->body, nullptr);
+    EXPECT_EQ(function->parameter_count, 2U);
+    EXPECT_EQ(function->return_type.kind, LUNA_TYPE_I64);
+    ASSERT_NE(function->first_parameter, nullptr);
+    EXPECT_EQ(function->first_parameter->type.kind, LUNA_TYPE_I16);
+    ASSERT_NE(function->first_parameter->next, nullptr);
+    EXPECT_EQ(function->first_parameter->next->type.kind, LUNA_TYPE_POINTER);
+}
+
+TEST(ParserTest, RejectsAnExternalFunctionBody) {
+    FrontendHarness harness{"module test.external_body;\n"
+                            "extern fn c_value() -> i32 { return 42; }\n"
+                            "fn main() -> i32 { return 0; }\n"};
+
+    EXPECT_FALSE(harness.Parse());
+    EXPECT_NE(harness.Diagnostics().find(
+                  "external function declaration must end with ';'"),
+              std::string::npos);
+}
+
 TEST(ParserTest, ReportsMissingDelimiterWithoutHanging) {
     FrontendHarness harness{"module test.bad;\n"
                             "fn main() -> i32 {\n"

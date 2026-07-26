@@ -10,6 +10,10 @@ The compiler owns the language semantics. LLVM tools are currently used only
 to encode emitted x86-64 assembly and link ELF64 test executables. They are not
 used as the compiler IR, optimizer or instruction selector.
 
+External C functions are represented directly throughout the pipeline; Luna
+never generates a C translation unit. The final ELF link may combine a
+Luna-generated object with caller-supplied C23 objects or libraries.
+
 Target selection produces an immutable target description before semantic
 lowering begins. It records the architecture, operating system, ABI, byte
 order, scalar sizes and ABI alignments. The target description is carried by
@@ -91,7 +95,7 @@ with virtual values and explicit local slots:
   signed/unsigned integer-to-floating and checked floating-to-integer
   conversions
 - comparisons
-- direct calls
+- direct calls to internal definitions and typed external C declarations
 - unconditional and conditional branches
 - return
 
@@ -126,6 +130,12 @@ signatures and flattened argument ownership, terminator placement, cached
 predecessor counts and graph reachability. Backend emission never receives
 unchecked compiler-generated IR.
 
+Function linkage is explicit IR metadata. An internal function owns parameter
+slots, values and a CFG body. An external C function owns only its typed
+signature and must have no slots, values, call-argument storage or blocks.
+External functions may be callees but may never be the module entry point.
+Textual IR prints them as bodyless `extern fn` declarations.
+
 The IR instruction set is target-neutral. Each module is parameterized by an
 explicit target data layout so `isize` and `usize` retain their exact IR types
 while width-dependent verification and conversion printing remain
@@ -150,6 +160,10 @@ The first backend is correctness-first:
 - canonical `bool` values after both direct and indirect memory loads,
   including raw-pointer aliasing;
 - deterministic labels and symbol mangling;
+- exact, unmangled ELF names for external C functions, with `.extern`
+  declarations and unresolved relocations left for the final linker;
+- C ABI sign extension for external `i8` and `i16` arguments and explicit
+  canonicalization of external `_Bool` results at the language boundary;
 - scalar `movss`/`movsd` arithmetic and ordered `ucomiss`/`ucomisd`
   comparisons, with an explicitly initialized IEEE floating-point
   environment;
@@ -197,6 +211,9 @@ The quality gate contains:
   matrices for every integer type;
 - exact-width memory matrices, null and bounds traps, read-only qualification
   negatives and typed-memory IR mutation checks;
+- real C23-to-Luna static linking tests covering every scalar type, pointers,
+  no-result calls, narrow signed promotion and independently classified
+  integer/SSE register banks;
 - structured-control negative cases, IR snapshots and randomized differential
   programs;
 - deterministic mutation tests and a coverage-guided libFuzzer target;

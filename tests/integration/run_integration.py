@@ -62,6 +62,7 @@ def compile_and_run(
     source: pathlib.Path,
     work_dir: pathlib.Path,
     expected_code: int,
+    additional_objects: tuple[pathlib.Path, ...] = (),
 ) -> None:
     stem = source.stem
     assembly = work_dir / f"{stem}.s"
@@ -97,9 +98,51 @@ def compile_and_run(
             "-o",
             str(executable),
             str(object_file),
+            *(str(path) for path in additional_objects),
         ]
     )
     run([*target_runner, str(executable)], expected_code=expected_code)
+
+
+def compile_external_support(
+    clang: str,
+    source_root: pathlib.Path,
+    work_dir: pathlib.Path,
+) -> pathlib.Path:
+    source = (
+        source_root
+        / "tests"
+        / "integration"
+        / "support"
+        / "external_functions.c"
+    )
+    object_file = work_dir / "external_functions.o"
+    run(
+        [
+            clang,
+            "--target=x86_64-unknown-linux-gnu",
+            "-std=c23",
+            "-O2",
+            "-ffreestanding",
+            "-fno-builtin",
+            "-fno-stack-protector",
+            "-fno-pic",
+            "-fno-pie",
+            "-Wall",
+            "-Wextra",
+            "-Wpedantic",
+            "-Werror",
+            "-Wconversion",
+            "-Wsign-conversion",
+            "-Wstrict-prototypes",
+            "-Wmissing-prototypes",
+            "-c",
+            str(source),
+            "-o",
+            str(object_file),
+        ]
+    )
+    return object_file
 
 
 def convert_integer(
@@ -401,10 +444,14 @@ def main() -> int:
 
     llvm_mc = require_tool("llvm-mc")
     linker = require_tool("ld.lld")
+    clang = require_tool("clang")
     target_runner = require_target_runner()
 
     arguments.work_dir.mkdir(parents=True, exist_ok=True)
     case_dir = arguments.source_root / "tests" / "integration" / "cases"
+    external_support = compile_external_support(
+        clang, arguments.source_root, arguments.work_dir
+    )
 
     help_result = run([str(arguments.compiler), "--help"])
     if "usage: lunac" not in help_result.stdout:
@@ -530,6 +577,18 @@ def main() -> int:
             expected_code,
         )
         print(f"PASS executable: {case_name}")
+
+    compile_and_run(
+        arguments.compiler,
+        llvm_mc,
+        linker,
+        target_runner,
+        case_dir / "external_c_abi.luna",
+        arguments.work_dir,
+        42,
+        (external_support,),
+    )
+    print("PASS executable: external_c_abi.luna with a real C23 object")
 
     conversion_matrix = generate_integer_conversion_matrix(arguments.work_dir)
     compile_and_run(
@@ -708,6 +767,39 @@ def main() -> int:
         "invalid_string_escape.luna": (
             "invalid escape in string literal"
         ),
+        "external_body.luna": (
+            "external function declaration must end with ';'"
+        ),
+        "plain_function_declaration.luna": (
+            "separate module interface implementations"
+        ),
+        "external_array_parameter.luna": (
+            "fixed arrays cannot be passed by value"
+        ),
+        "external_array_return.luna": (
+            "fixed arrays cannot be returned by value"
+        ),
+        "external_void_parameter.luna": (
+            "parameter 'value' has an invalid type"
+        ),
+        "external_reserved_start.luna": (
+            "external function name '_start' is reserved"
+        ),
+        "external_reserved_mangled.luna": (
+            "external function name '_Lreserved' is reserved"
+        ),
+        "external_main.luna": (
+            "bootstrap entry point 'main' must be defined in Luna"
+        ),
+        "external_duplicate_definition.luna": (
+            "duplicate function 'c_value'"
+        ),
+        "external_too_many_integer_arguments.luna": (
+            "at most six integer-class and eight floating-point arguments"
+        ),
+        "external_too_many_float_arguments.luna": (
+            "at most six integer-class and eight floating-point arguments"
+        ),
     }
 
     for case_name, expected_diagnostic in negative_cases.items():
@@ -738,6 +830,7 @@ def main() -> int:
         "scalar_conversion_ir",
         "structured_control_flow_ir",
         "memory_ir",
+        "external_ir",
     ):
         ir_output = arguments.work_dir / f"{snapshot_name}.lir"
         run(
@@ -775,6 +868,7 @@ def main() -> int:
         "scalar_conversions",
         "structured_control_flow",
         "memory_operations",
+        "external_c_abi",
     ):
         deterministic_first = (
             arguments.work_dir / f"{deterministic_name}_first.s"

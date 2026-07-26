@@ -1227,6 +1227,7 @@ static LunaParameter *luna_parser_parse_parameters(LunaParser *parser,
 
 static LunaFunction *luna_parser_parse_function(LunaParser *parser,
                                                 bool is_exported,
+                                                bool is_external,
                                                 LunaSourceSpan start_span) {
     const LunaToken name_token = parser->current;
     if (!luna_parser_expect(parser, LUNA_TOKEN_IDENTIFIER,
@@ -1269,6 +1270,7 @@ static LunaFunction *luna_parser_parse_function(LunaParser *parser,
     }
     function->span = luna_parser_join_spans(start_span, end_span);
     function->is_exported = is_exported;
+    function->is_external = is_external;
     function->is_declaration = is_declaration;
     function->first_parameter = parameters;
     function->parameter_count = parameter_count;
@@ -1354,8 +1356,9 @@ LunaProgram *luna_parser_parse_program(LunaParser *parser) {
 
     LunaFunction **next_function = &program->first_function;
     while (!luna_parser_check(parser, LUNA_TOKEN_END)) {
-        const bool is_exported = luna_parser_match(parser, LUNA_TOKEN_EXPORT);
         const LunaSourceSpan start_span = parser->current.span;
+        const bool is_exported = luna_parser_match(parser, LUNA_TOKEN_EXPORT);
+        const bool is_external = luna_parser_match(parser, LUNA_TOKEN_EXTERN);
 
         if (!luna_parser_match(parser, LUNA_TOKEN_FN)) {
             luna_diagnostic_error(
@@ -1367,9 +1370,14 @@ LunaProgram *luna_parser_parse_program(LunaParser *parser) {
             continue;
         }
 
-        LunaFunction *function =
-            luna_parser_parse_function(parser, is_exported, start_span);
+        LunaFunction *function = luna_parser_parse_function(
+            parser, is_exported, is_external, start_span);
         if (function != NULL) {
+            if (is_external && !function->is_declaration) {
+                luna_diagnostic_error(
+                    parser->diagnostics, function->span,
+                    "external function declaration must end with ';'");
+            }
             *next_function = function;
             next_function = &function->next;
         }

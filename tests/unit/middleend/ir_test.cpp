@@ -104,6 +104,45 @@ TEST(IrVerifierTest, AcceptsWellTypedFloatingPointInstructions) {
     EXPECT_TRUE(harness.Verify()) << harness.Diagnostics();
 }
 
+TEST(IrVerifierTest, AcceptsBodylessExternalCDeclarations) {
+    FrontendHarness harness{
+        "module test.external_ir;\n"
+        "extern fn c_mix(value: i8, size: usize, factor: f32) -> bool;\n"
+        "fn main() -> i32 { return c_mix(-1, 2, 3.0) ? 42 : 1; }\n"};
+
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    LunaIrFunction *external = luna_ir_module_function(harness.Module(), 0U);
+    ASSERT_NE(external, nullptr);
+    EXPECT_EQ(external->linkage, LUNA_IR_LINKAGE_EXTERNAL_C);
+    EXPECT_EQ(external->blocks.length, 0U);
+    EXPECT_EQ(external->slots.length, 0U);
+}
+
+TEST(IrVerifierTest, RejectsDefinitionsAndEntryPointsWithExternalLinkage) {
+    FrontendHarness definition{"module test.external_definition_ir;\n"
+                               "extern fn c_value() -> i32;\n"
+                               "fn main() -> i32 { return c_value(); }\n"};
+    ASSERT_TRUE(definition.Verify()) << definition.Diagnostics();
+    LunaIrFunction *external = luna_ir_module_function(definition.Module(), 0U);
+    ASSERT_NE(external, nullptr);
+    ASSERT_NE(luna_ir_function_add_slot(external, LUNA_IR_TYPE_I32),
+              LUNA_IR_INVALID_ID);
+    EXPECT_FALSE(definition.Verify());
+    EXPECT_NE(definition.Diagnostics().find("external function 0 has a "
+                                            "definition"),
+              std::string::npos);
+
+    FrontendHarness entry{"module test.external_entry_ir;\n"
+                          "extern fn c_value() -> i32;\n"
+                          "fn main() -> i32 { return c_value(); }\n"};
+    ASSERT_TRUE(entry.Verify()) << entry.Diagnostics();
+    entry.Module()->entry_function = 0U;
+    EXPECT_FALSE(entry.Verify());
+    EXPECT_NE(entry.Diagnostics().find(
+                  "entry function must be an internal fn() -> i32"),
+              std::string::npos);
+}
+
 TEST(IrVerifierTest, RejectsAMissingTargetLayout) {
     FrontendHarness harness{"module test.missing_target;\n"
                             "fn main() -> i32 { return 0; }\n"};
@@ -153,6 +192,27 @@ TEST(IrPrinterTest, UsesTargetWidthWhenNamingIntegerConversions) {
     ASSERT_TRUE(printed);
     EXPECT_NE(text.find("target \"test32-unknown-none\""), std::string::npos);
     EXPECT_NE(text.find("trunc.i64.isize"), std::string::npos);
+}
+
+TEST(IrPrinterTest, PrintsExternalSignaturesWithoutBodiesOrSlots) {
+    FrontendHarness harness{
+        "module test.external_ir_print;\n"
+        "extern fn c_mix(value: i8, size: usize, factor: f64) -> bool;\n"
+        "fn main() -> i32 { return c_mix(-1, 2, 3.0) ? 42 : 1; }\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaStringBuilder output{};
+    luna_string_builder_init(&output);
+    const bool printed = luna_ir_print(harness.Module(), &output);
+    const std::string text =
+        printed ? std::string{luna_string_builder_data(&output), output.length}
+                : std::string{};
+    luna_string_builder_destroy(&output);
+
+    ASSERT_TRUE(printed);
+    EXPECT_NE(text.find("extern fn @c_mix(i8, usize, f64) -> bool"),
+              std::string::npos);
+    EXPECT_EQ(text.find("fn @c_mix($0:"), std::string::npos);
 }
 
 TEST(IrVerifierTest, RejectsValueUsedBeforeItsDefinition) {
