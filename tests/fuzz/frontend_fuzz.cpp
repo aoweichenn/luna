@@ -429,6 +429,19 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
     return invariant_holds;
 }
 
+[[nodiscard]] bool RunSyscallAbiVerifier(const std::uint8_t *data,
+                                         std::size_t size) {
+    const LunaStringView object = {
+        .data = reinterpret_cast<const char *>(data),
+        .length = size,
+    };
+    const bool first =
+        luna_x86_64_linux_syscall_abi_verify_object(object, nullptr);
+    const bool second =
+        luna_x86_64_linux_syscall_abi_verify_object(object, nullptr);
+    return first == second;
+}
+
 }
 
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data,
@@ -437,7 +450,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data,
         (!RunAggregateAbiClassification(data, size) ||
          !RunFrontend(data, size) || !RunModuleCompilation(data, size) ||
          !RunMetadataDecoder(data, size) || !RunObjectAssembler(data, size) ||
-         !RunObjectLinker(data, size))) {
+         !RunObjectLinker(data, size) || !RunSyscallAbiVerifier(data, size))) {
         __builtin_trap();
     }
     return 0;

@@ -283,6 +283,22 @@ constexpr std::string_view LUNA_TEST_LIBRARY_ASSEMBLY =
     "    .size answer, .-answer\n"
     "    .section .note.GNU-stack,\"\",@progbits\n";
 
+constexpr std::string_view LUNA_TEST_SYSCALL_OVERRIDE_ASSEMBLY =
+    "    .text\n"
+    "    .globl _start\n"
+    "    .type _start, @function\n"
+    "_start:\n"
+    "    movl $42, %edi\n"
+    "    movq $60, %rax\n"
+    "    syscall\n"
+    "    .size _start, .-_start\n"
+    "    .globl luna_linux_syscall0\n"
+    "    .type luna_linux_syscall0, @function\n"
+    "luna_linux_syscall0:\n"
+    "    ret\n"
+    "    .size luna_linux_syscall0, .-luna_linux_syscall0\n"
+    "    .section .note.GNU-stack,\"\",@progbits\n";
+
 TEST(X8664ElfLinkerTest, EmitsDeterministicVerifiedStaticExecutable) {
     FrontendHarness harness{"module test.native_link;\n"
                             "fn main() -> i32 { return 42; }\n"};
@@ -373,6 +389,31 @@ TEST(X8664ElfLinkerTest, RejectsUndefinedAndDuplicateStrongSymbols) {
     EXPECT_NE(
         ReadStream(diagnostic_file.get()).find("duplicate strong definition"),
         std::string::npos);
+    luna_string_builder_destroy(&executable);
+}
+
+TEST(X8664ElfLinkerTest, RejectsOverrideOfProjectOwnedSyscallAbi) {
+    const std::string override_object =
+        Assemble(LUNA_TEST_SYSCALL_OVERRIDE_ASSEMBLY);
+    ASSERT_FALSE(override_object.empty());
+    const std::array<std::string_view, 3U> objects = {
+        override_object,
+        {},
+        {},
+    };
+    const auto diagnostic_file =
+        std::unique_ptr<std::FILE, FileCloser>{std::tmpfile()};
+    ASSERT_NE(diagnostic_file, nullptr);
+
+    LunaStringBuilder executable{};
+    luna_string_builder_init(&executable);
+    EXPECT_FALSE(Link(objects, 1U, &executable, diagnostic_file.get()));
+    EXPECT_EQ(executable.length, 0U);
+    const std::string diagnostics = ReadStream(diagnostic_file.get());
+    EXPECT_NE(diagnostics.find("duplicate strong definition of "
+                               "'luna_linux_syscall0'"),
+              std::string::npos);
+    EXPECT_NE(diagnostics.find("<luna-linux-syscall-abi>"), std::string::npos);
     luna_string_builder_destroy(&executable);
 }
 

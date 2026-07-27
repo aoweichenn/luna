@@ -17,6 +17,7 @@ extern "C" {
 #include "luna/middleend/module/metadata.h"
 #include "luna/middleend/module/module.h"
 #include "luna/middleend/sema/sema.h"
+#include "luna/runtime/x86_64/linux_syscall.h"
 #include "luna/target/target.h"
 }
 

@@ -39,7 +39,8 @@ static void luna_linker_print_usage(FILE *stream) {
         "  --help              print this help\n"
         "\n"
         "The output is always a static x86-64 Linux ELF executable and has no\n"
-        "dynamic interpreter or implicit C runtime.\n",
+        "dynamic interpreter or implicit C runtime. The project-owned direct\n"
+        "Linux syscall ABI object is included automatically.\n",
         stream);
 }
 

@@ -1,5 +1,7 @@
 #include "elf_linker_internal.h"
 
+#include "luna/runtime/x86_64/linux_syscall.h"
+
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -195,6 +197,8 @@ bool luna_x86_64_link_elf_executable(const LunaX8664ElfLinkInput *inputs,
                                      LunaStringBuilder *output) {
     LunaElfLinkContext context;
     luna_elf_link_context_init(&context, diagnostic_stream);
+    LunaStringBuilder syscall_abi_object;
+    luna_string_builder_init(&syscall_abi_object);
 
     bool success = true;
     if (inputs == NULL || input_count == 0U ||
@@ -210,6 +214,7 @@ bool luna_x86_64_link_elf_executable(const LunaX8664ElfLinkInput *inputs,
                 output->data[0] = '\0';
             }
         }
+        luna_string_builder_destroy(&syscall_abi_object);
         luna_elf_link_context_destroy(&context);
         return false;
     }
@@ -226,6 +231,40 @@ bool luna_x86_64_link_elf_executable(const LunaX8664ElfLinkInput *inputs,
         } else {
             success = luna_elf_link_parse_object(&context, &inputs[index]);
         }
+    }
+
+    static const char syscall_abi_object_name[] = "<luna-linux-syscall-abi>";
+    if (success && !luna_x86_64_linux_syscall_abi_emit_object(
+                       diagnostic_stream, &syscall_abi_object)) {
+        success = luna_elf_link_error(
+            &context, NULL,
+            "failed to construct the project Linux syscall ABI object");
+    }
+    if (success &&
+        !luna_x86_64_linux_syscall_abi_verify_object(
+            (LunaStringView){
+                .data = luna_string_builder_data(&syscall_abi_object),
+                .length = syscall_abi_object.length,
+            },
+            diagnostic_stream)) {
+        success = luna_elf_link_error(
+            &context, NULL,
+            "project Linux syscall ABI object failed contract verification");
+    }
+    if (success) {
+        const LunaX8664ElfLinkInput syscall_abi_input = {
+            .name =
+                {
+                    .data = syscall_abi_object_name,
+                    .length = sizeof(syscall_abi_object_name) - 1U,
+                },
+            .object =
+                {
+                    .data = luna_string_builder_data(&syscall_abi_object),
+                    .length = syscall_abi_object.length,
+                },
+        };
+        success = luna_elf_link_parse_object(&context, &syscall_abi_input);
     }
 
     if (success) {
@@ -252,5 +291,6 @@ bool luna_x86_64_link_elf_executable(const LunaX8664ElfLinkInput *inputs,
         }
     }
     luna_elf_link_context_destroy(&context);
+    luna_string_builder_destroy(&syscall_abi_object);
     return success;
 }

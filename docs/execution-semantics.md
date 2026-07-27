@@ -324,10 +324,14 @@ symbols use the same interface identity consumed by dependents.
 ## Runtime boundary
 
 Generated programs enter through project-owned `_start` code and use no libc.
-The runtime and standard library will call the x86-64 Linux kernel through a
-project-owned direct system-call layer. This target-side restriction does not
-apply to the hosted C23 bootstrap compiler and does not prohibit an application
-from explicitly linking a caller-supplied object through `extern fn`.
+The `luna.linux.syscall` module exposes raw zero-to-six-argument wrappers.
+`lunalink` supplies their verified implementation, which converts System V
+registers to the x86-64 Linux kernel ABI and executes `syscall` directly.
+Negative kernel error results are preserved without `errno` translation. The
+future runtime and standard library must build their typed policies only on
+this layer. This target-side restriction does not apply to the hosted C23
+bootstrap compiler and does not prohibit an application from explicitly
+linking a caller-supplied object through `extern fn`.
 
 ## Optimization boundary
 

@@ -5025,6 +5025,59 @@ static bool luna_sema_validate_unique_functions(LunaSemaContext *context,
     return success;
 }
 
+static bool luna_sema_linux_syscall_abi_arity(LunaStringView name,
+                                              uint32_t *argument_count) {
+    static const char prefix[] = "luna_linux_syscall";
+    const size_t prefix_length = sizeof(prefix) - 1U;
+    if (argument_count == NULL || name.data == NULL ||
+        name.length != prefix_length + 1U ||
+        memcmp(name.data, prefix, prefix_length) != 0 ||
+        name.data[prefix_length] < '0' || name.data[prefix_length] > '6') {
+        return false;
+    }
+    *argument_count = (uint32_t)(name.data[prefix_length] - '0');
+    return true;
+}
+
+static bool
+luna_sema_validate_linux_syscall_abi_signature(LunaSemaContext *context,
+                                               const LunaFunction *syntax,
+                                               LunaSemaTypeId return_type) {
+    uint32_t argument_count = 0U;
+    if (!syntax->is_external ||
+        !luna_sema_linux_syscall_abi_arity(syntax->name, &argument_count)) {
+        return true;
+    }
+
+    uint32_t parameter_count = 0U;
+    bool parameters_are_words = true;
+    for (const LunaParameter *parameter = syntax->first_parameter;
+         parameter != NULL; parameter = parameter->next) {
+        if (parameter_count == UINT32_MAX) {
+            parameters_are_words = false;
+            break;
+        }
+        parameter_count += 1U;
+        if (luna_sema_resolve_type(context, &parameter->type) !=
+            LUNA_TYPE_USIZE) {
+            parameters_are_words = false;
+        }
+    }
+
+    const uint32_t expected_parameter_count = argument_count + 1U;
+    if (return_type == LUNA_TYPE_ISIZE && parameters_are_words &&
+        parameter_count == expected_parameter_count) {
+        return true;
+    }
+    luna_diagnostic_error(
+        context->diagnostics, syntax->span,
+        "project syscall ABI function '%.*s' requires %" PRIu32
+        " usize parameter%s and an isize result",
+        (int)syntax->name.length, syntax->name.data, expected_parameter_count,
+        expected_parameter_count == 1U ? "" : "s");
+    return false;
+}
+
 static bool luna_sema_validate_function_signature(LunaSemaContext *context,
                                                   const LunaFunction *syntax) {
     bool success = true;
@@ -5116,6 +5169,11 @@ static bool luna_sema_validate_function_signature(LunaSemaContext *context,
                 success = false;
             }
         }
+    }
+    if (return_type != LUNA_TYPE_INVALID &&
+        !luna_sema_validate_linux_syscall_abi_signature(context, syntax,
+                                                        return_type)) {
+        success = false;
     }
     return success;
 }

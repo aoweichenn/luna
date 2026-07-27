@@ -8,10 +8,11 @@ System V calling convention and ELF64 objects or executables.
 
 Generated target programs are freestanding and never depend on libc. The
 bootstrap compiler is a hosted C23 tool, but host-library use is confined to
-the compiler process. The Luna runtime and standard library will use a
-project-owned x86-64 Linux system-call ABI layer that invokes `syscall`
-directly. Optional caller-supplied external objects are an explicit FFI
-boundary, not a runtime dependency.
+the compiler process. The project-owned x86-64 Linux system-call ABI layer
+converts System V calls with zero to six arguments to the kernel register ABI
+and invokes `syscall` directly. The Luna runtime and standard library must be
+built only on that layer. Optional caller-supplied external objects are an
+explicit FFI boundary, not a runtime dependency.
 
 The compiler owns the language semantics. Luna now encodes its x86-64
 instructions and writes ELF64 relocatable objects directly. LLVM MC remains
@@ -77,7 +78,8 @@ lexer -> parser -> syntax tree
                   verified ELF64 relocatable object
                               |
                               v
-                   project-owned static linker
+            project-owned static linker
+            + verified syscall ABI object
                               |
                               v
                   verified static ELF64 executable
@@ -407,10 +409,12 @@ The current machine-IR consumer is correctness-first:
   omitted entirely for separately compiled library modules;
 - no dependency on a target C runtime.
 
-The `_start` shim is the first instance of the project-owned system-call
-boundary. M4 extends that boundary into a typed runtime layer for process,
-memory and I/O services. It must preserve raw Linux error results internally,
-define Luna-facing error semantics explicitly and remain independent of libc.
+The `_start` shim and the canonical zero-to-six-argument wrapper object form
+the project-owned system-call boundary. The generated
+`luna.linux.syscall` metadata exposes only `usize` argument bits and a raw
+`isize` result. The next M4 stage builds typed process, memory and I/O services
+on this layer, defines their Luna-facing error semantics and remains
+independent of libc.
 
 This backend is intentionally not the performance endpoint. Planned stages are:
 

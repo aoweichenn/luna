@@ -10,13 +10,16 @@ lunalink -o app app.o
 
 The default entry symbol is `_start`; `-e name` selects another symbol. The
 output is always static and has no ELF interpreter, dynamic section, startup
-object or implicit library. `--static` and `-static` are accepted only for
-driver compatibility.
+object or external implicit library. The linker does append its canonical
+project-owned Linux system-call ABI object; that object contains only direct
+`syscall` wrappers and has no further dependencies. `--static` and `-static`
+are accepted only for driver compatibility.
 
 The bootstrap `lunalink` process is a hosted C23 tool and may use its host
 library for file I/O and allocation. Those host dependencies do not appear in
 the generated executable. Target code still enters project-owned `_start` and
-uses direct Linux system calls without libc.
+uses the verified zero-to-six-argument direct Linux system-call layer without
+libc.
 
 ## Input contract
 
@@ -62,7 +65,9 @@ input allocations into four logical output sections:
 
 Each input contribution retains its alignment. Load segments begin on a
 4096-byte boundary, use a fixed `0x400000` image base and never combine write
-and execute permission. The output also contains `.shstrtab` so ordinary ELF
+and execute permission. The canonical syscall ABI object is appended after
+caller inputs, and its seven symbols cannot be overridden by another strong
+definition. The output also contains `.shstrtab` so ordinary ELF
 inspection tools can report its sections. When an input carries project Debug
 IR, non-allocatable `.debug_abbrev`, `.debug_info`, `.debug_line`,
 `.debug_str` and `.debug_line_str` sections follow the allocated payload. They

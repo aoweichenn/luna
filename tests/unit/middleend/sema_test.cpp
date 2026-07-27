@@ -940,6 +940,36 @@ TEST(SemaTest, AcceptsIndependentScalarRegisterAndStackArguments) {
     EXPECT_TRUE(integer_stack.Verify()) << integer_stack.Diagnostics();
 }
 
+TEST(SemaTest, EnforcesProjectOwnedLinuxSyscallAbiSignatures) {
+    FrontendHarness valid{
+        "module test.valid_syscall_abi;\n"
+        "extern fn luna_linux_syscall2(number: usize, argument0: usize,\n"
+        "                               argument1: usize) -> isize;\n"
+        "fn main() -> i32 {\n"
+        " return luna_linux_syscall2(62, 1, 0) as i32;\n"
+        "}\n"};
+    EXPECT_TRUE(valid.ParseAndLower()) << valid.Diagnostics();
+
+    FrontendHarness wrong_arity{
+        "module test.wrong_syscall_arity;\n"
+        "extern fn luna_linux_syscall2(number: usize,\n"
+        "                               argument0: usize) -> isize;\n"
+        "fn main() -> i32 { return 0; }\n"};
+    EXPECT_FALSE(wrong_arity.ParseAndLower());
+    EXPECT_NE(wrong_arity.Diagnostics().find(
+                  "requires 3 usize parameters and an isize result"),
+              std::string::npos);
+
+    FrontendHarness wrong_types{
+        "module test.wrong_syscall_types;\n"
+        "extern fn luna_linux_syscall0(number: u64) -> u64;\n"
+        "fn main() -> i32 { return 0; }\n"};
+    EXPECT_FALSE(wrong_types.ParseAndLower());
+    EXPECT_NE(wrong_types.Diagnostics().find(
+                  "requires 1 usize parameter and an isize result"),
+              std::string::npos);
+}
+
 TEST(SemaTest, LowersConditionalAndStructuredControlFlowToValidIr) {
     FrontendHarness harness{
         "module test.structured_lowering;\n"

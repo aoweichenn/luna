@@ -43,6 +43,9 @@ The project is deliberately narrow at this stage:
   native x86-64 encoding, symbols and explicit PC-relative relocations;
 - static linker: deterministic, self-verified x86-64 ELF64 executables with
   project-owned section layout, symbol resolution and relocation application;
+- runtime boundary: canonical zero-to-six-argument Linux x86-64 system-call
+  wrappers generated and verified by the project assembler, with raw kernel
+  error results and no target libc;
 - bootstrap host: conforming C23 with IEC 60559 binary32 and binary64;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests,
   typed-IR, machine-IR, ABI, liveness, register-allocation and
@@ -236,11 +239,20 @@ C function types do not have by-value array parameters or results.
 ## Runtime boundary
 
 Luna target programs are freestanding. Generated executables enter at
-project-owned `_start` code and do not link libc. The future Luna runtime and
-standard library must be built on a project-owned x86-64 Linux system-call
-layer that invokes the kernel ABI directly; adding libc as an implementation
-dependency is outside the accepted design. Optional user-supplied `extern fn`
-objects remain an explicit FFI choice and are not part of the Luna runtime.
+project-owned `_start` code and do not link libc. `lunalink` supplies the
+project-owned `luna_linux_syscall0` through `luna_linux_syscall6` wrappers,
+which convert System V calls to the Linux kernel register ABI and execute
+`syscall` directly. The corresponding strongly typed module metadata is
+generated at `build/<preset>/sysroot/luna/linux/syscall.lmi` with:
+
+```sh
+cmake --build --preset debug --target luna_sysroot
+```
+
+The wrappers preserve raw negative Linux error results. Higher-level retry,
+error and resource-ownership policies belong to the next freestanding-runtime
+stage. Optional user-supplied `extern fn` objects remain an explicit FFI choice
+and are not part of the Luna runtime.
 
 The bootstrap compiler itself remains a hosted C23 development tool. Its host
 library use does not become a dependency of generated target programs.
@@ -255,6 +267,7 @@ See [the language draft](docs/language.md),
 [instruction-level differential testing](docs/instruction-differential-testing.md),
 [native ELF64 objects](docs/elf-object.md),
 [project-owned static ELF64 linking](docs/elf-linker.md),
+[Linux x86-64 system-call ABI](docs/linux-syscall-abi.md),
 [compiled module metadata format](docs/module-metadata.md),
 [bootstrap execution semantics](docs/execution-semantics.md), and the
 [implementation roadmap](docs/roadmap.md).

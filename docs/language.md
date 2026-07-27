@@ -260,6 +260,13 @@ For `x86_64-unknown-linux-gnu`, the interoperable C23 spellings are:
 The names `_start` and every name beginning with `_L` are reserved at this
 boundary for the bootstrap runtime and Luna's internal symbol encoding.
 
+The target sysroot provides the `luna.linux.syscall` module. Its seven
+external declarations accept a system-call number plus zero to six `usize`
+argument bit patterns and return the raw `isize` Linux result. `lunalink`
+provides their project-owned direct-`syscall` definitions; caller objects may
+not override those symbols. This is a target ABI boundary rather than a
+general language intrinsic or high-level I/O interface.
+
 ## Statements
 
 Conditions require `bool`; control-flow bodies require braces.

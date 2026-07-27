@@ -28,6 +28,9 @@ constexpr std::uint64_t LUNA_TEST_METADATA_MUTATION_CASES = 500U;
 constexpr std::uint64_t LUNA_TEST_ELF_MUTATION_SEED =
     UINT64_C(0x454c4636344f424a);
 constexpr std::uint64_t LUNA_TEST_ELF_MUTATION_CASES = 1000U;
+constexpr std::uint64_t LUNA_TEST_SYSCALL_MUTATION_SEED =
+    UINT64_C(0x53595343414c4c);
+constexpr std::uint64_t LUNA_TEST_SYSCALL_MUTATION_CASES = 500U;
 constexpr std::size_t LUNA_TEST_MAX_INPUT_SIZE = 4096U;
 constexpr std::size_t LUNA_TEST_METADATA_HEADER_SIZE = 32U;
 constexpr std::size_t LUNA_TEST_METADATA_ARENA_BLOCK_SIZE =
@@ -550,6 +553,36 @@ TEST(MutationFuzzTest, ElfVerifierHandlesDeterministicObjectMutations) {
         const bool second_verify =
             luna_x86_64_elf_executable_verify(executable_view, nullptr);
         EXPECT_EQ(first_verify, second_verify) << "case " << case_index;
+    }
+}
+
+TEST(MutationFuzzTest, SyscallAbiVerifierAcceptsOnlyCanonicalObject) {
+    LunaStringBuilder canonical_builder{};
+    luna_string_builder_init(&canonical_builder);
+    ASSERT_TRUE(
+        luna_x86_64_linux_syscall_abi_emit_object(nullptr, &canonical_builder));
+    const std::string canonical{
+        luna_string_builder_data(&canonical_builder),
+        canonical_builder.length,
+    };
+    luna_string_builder_destroy(&canonical_builder);
+    ASSERT_FALSE(canonical.empty());
+
+    std::mt19937_64 random_engine{LUNA_TEST_SYSCALL_MUTATION_SEED};
+    for (std::uint64_t case_index = 0U;
+         case_index < LUNA_TEST_SYSCALL_MUTATION_CASES; case_index += 1U) {
+        std::string mutated = canonical;
+        Mutate(mutated, random_engine);
+        const LunaStringView view = {
+            .data = mutated.data(),
+            .length = mutated.size(),
+        };
+        const bool first =
+            luna_x86_64_linux_syscall_abi_verify_object(view, nullptr);
+        const bool second =
+            luna_x86_64_linux_syscall_abi_verify_object(view, nullptr);
+        EXPECT_EQ(first, second) << "case " << case_index;
+        EXPECT_EQ(first, mutated == canonical) << "case " << case_index;
     }
 }
 

@@ -71,6 +71,7 @@ add_library(luna_compiler STATIC
     src/backend/x86_64/register_allocation_print.c
     src/backend/x86_64/register_allocation_verify.c
     src/backend/x86_64/x86_64.c
+    src/runtime/x86_64/linux_syscall.c
 )
 
 target_include_directories(luna_compiler PUBLIC include)
@@ -141,6 +142,30 @@ target_link_libraries(lunac PRIVATE luna_compiler)
 add_executable(lunalink src/backend/x86_64/linker/main.c)
 target_link_libraries(lunalink PRIVATE luna_compiler)
 
+set(LUNA_SYSCALL_METADATA
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/linux/syscall.lmi"
+)
+add_custom_command(
+    OUTPUT "${LUNA_SYSCALL_METADATA}"
+    COMMAND
+        "${CMAKE_COMMAND}" -E make_directory
+        "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/linux"
+    COMMAND
+        "$<TARGET_FILE:lunac>"
+        --compile-module luna.linux.syscall
+        --emit metadata
+        -o "${LUNA_SYSCALL_METADATA}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/luna/linux/syscall.interface.luna"
+        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/luna/linux/syscall.luna"
+    DEPENDS
+        lunac
+        runtime/luna/linux/syscall.interface.luna
+        runtime/luna/linux/syscall.luna
+    COMMENT "Generating the Luna Linux syscall ABI module metadata"
+    VERBATIM
+)
+add_custom_target(luna_sysroot DEPENDS "${LUNA_SYSCALL_METADATA}")
+
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(lunac PRIVATE
         -Wall
@@ -203,6 +228,7 @@ if(BUILD_TESTING)
 
     add_executable(luna_unit_tests
         tests/unit/backend/debug_ir_test.cpp
+        tests/unit/runtime/linux_syscall_test.cpp
         tests/unit/support/arena_test.cpp
         tests/unit/support/buffer_test.cpp
         tests/unit/frontend/diagnostic/diagnostic_test.cpp
@@ -324,6 +350,25 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME integration.linux_syscall_abi
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/run_linux_syscall.py"
+            --compiler "$<TARGET_FILE:lunac>"
+            --linker "$<TARGET_FILE:lunalink>"
+            --metadata "${LUNA_SYSCALL_METADATA}"
+            --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --work-dir "${CMAKE_CURRENT_BINARY_DIR}/linux-syscall-abi"
+    )
+    set_tests_properties(
+        integration.linux_syscall_abi
+        PROPERTIES
+            LABELS "integration"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 60
+    )
+
+    add_test(
         NAME unit.machine_ir_reference
         COMMAND
             "${Python3_EXECUTABLE}"
@@ -423,6 +468,7 @@ if(LUNA_BUILD_FUZZERS)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/aggregate_by_value.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/module_pair.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/module_import.luna"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/linux_syscall.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/object_assembly.s"
             DESTINATION "${LUNA_FUZZ_CORPUS_DIR}"
         )
