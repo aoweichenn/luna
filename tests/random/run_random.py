@@ -908,21 +908,93 @@ def generate_aggregate_case(
     return source, 42
 
 
+def generate_module_pair_case(
+    engine: random.Random,
+    case_index: int,
+) -> tuple[tuple[str, str], int]:
+    scalar_type = engine.choice(
+        (
+            "i8",
+            "i16",
+            "i32",
+            "i64",
+            "isize",
+            "u8",
+            "u16",
+            "u32",
+            "u64",
+            "usize",
+        )
+    )
+    first_value = engine.randrange(0, 43)
+    delta = 42 - first_value
+    module_name = f"random.module_pair_case{case_index}"
+    interface_source = (
+        f"export module {module_name};\n"
+        "\n"
+        "export struct Input {\n"
+        f"    value: {scalar_type};\n"
+        "}\n"
+        "\n"
+        f"export fn combine(input: *const Input, delta: {scalar_type}) "
+        f"-> {scalar_type};\n"
+        "export fn main() -> i32;\n"
+    )
+    implementation_source = (
+        f"module {module_name};\n"
+        "\n"
+        f"fn combine(data: *const Input, amount: {scalar_type}) "
+        f"-> {scalar_type} {{\n"
+        "    return data->value + amount;\n"
+        "}\n"
+        "\n"
+        "fn main() -> i32 {\n"
+        f"    var input: Input = {{ value = {first_value}, }};\n"
+        f"    let result: {scalar_type} = "
+        f"combine((&input) as *const Input, {delta});\n"
+        "    return result == 42 ? 42 : 1;\n"
+        "}\n"
+    )
+    return (interface_source, implementation_source), 42
+
+
 def compile_and_run(
     compiler: pathlib.Path,
     llvm_mc: str,
     linker: str,
     target_runner: list[str],
-    source_text: str,
+    source_text: str | tuple[str, str],
     expected_code: int,
     case_index: int,
     work_dir: pathlib.Path,
 ) -> None:
-    source = work_dir / f"case_{case_index}.luna"
     assembly = work_dir / f"case_{case_index}.s"
     object_file = work_dir / f"case_{case_index}.o"
     executable = work_dir / f"case_{case_index}"
-    source.write_text(source_text, encoding="utf-8")
+    if isinstance(source_text, str):
+        source = work_dir / f"case_{case_index}.luna"
+        source.write_text(source_text, encoding="utf-8")
+        source_units = (source,)
+        rendered_source = source_text
+    else:
+        interface_text, implementation_text = source_text
+        interface_source = work_dir / f"case_{case_index}_interface.luna"
+        implementation_source = (
+            work_dir / f"case_{case_index}_implementation.luna"
+        )
+        interface_source.write_text(interface_text, encoding="utf-8")
+        implementation_source.write_text(
+            implementation_text, encoding="utf-8"
+        )
+        source_units = (
+            (interface_source, implementation_source)
+            if case_index % 2 == 0
+            else (implementation_source, interface_source)
+        )
+        rendered_source = (
+            f"interface:\n{interface_text}\n"
+            f"implementation:\n{implementation_text}"
+        )
 
     try:
         run(
@@ -932,7 +1004,7 @@ def compile_and_run(
                 "asm",
                 "-o",
                 str(assembly),
-                str(source),
+                *(str(source) for source in source_units),
             ]
         )
         run(
@@ -960,7 +1032,7 @@ def compile_and_run(
     except (AssertionError, subprocess.TimeoutExpired) as error:
         raise AssertionError(
             f"random case {case_index} failed; expected exit "
-            f"{expected_code}\nsource:\n{source_text}\n{error}"
+            f"{expected_code}\nsource:\n{rendered_source}\n{error}"
         ) from error
 
 
@@ -986,7 +1058,7 @@ def main() -> int:
 
     engine = random.Random(arguments.seed)
     for case_index in range(arguments.cases):
-        case_kind = case_index % 20
+        case_kind = case_index % 21
         if case_kind == 0:
             source, expected_code = generate_case(engine, case_index)
         elif case_kind == 1:
@@ -1064,8 +1136,12 @@ def main() -> int:
             )
         elif case_kind == 18:
             source, expected_code = generate_memory_case(engine, case_index)
-        else:
+        elif case_kind == 19:
             source, expected_code = generate_aggregate_case(
+                engine, case_index
+            )
+        else:
+            source, expected_code = generate_module_pair_case(
                 engine, case_index
             )
         compile_and_run(

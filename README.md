@@ -14,9 +14,10 @@ The project is deliberately narrow at this stage:
   pointers, local fixed arrays, immutable string literals, functions,
   exact-layout structures and unions, scoped enums, typed external C function
   declarations, context-directed named aggregate initialization, exact
-  whole-object copies, type-only `sizeof`, `alignof` and `offsetof` queries,
-  expressions, the short-circuit conditional operator, local variables,
-  `if`, `while`, `do`, `for` and non-fallthrough `switch` control flow;
+  whole-object copies, matched module interface/implementation pairs,
+  type-only `sizeof`, `alignof` and `offsetof` queries, expressions, the
+  short-circuit conditional operator, local variables, `if`, `while`, `do`,
+  `for` and non-fallthrough `switch` control flow;
 - middle end: typed, non-SSA control-flow IR with explicit object layouts,
   static data, member addresses, typed memory operations and sized,
   overlap-safe object copies;
@@ -86,6 +87,18 @@ llvm-mc --triple=x86_64-unknown-linux-gnu --filetype=obj \
 ld.lld -static -e _start -o hello hello.o
 qemu-x86_64-static ./hello
 ```
+
+For a module with a separate interface, pass both source units in either
+order:
+
+```sh
+build/debug/lunac --emit asm -o app.s app.luna app.interface.luna
+```
+
+The interface begins with `export module`, contains complete type definitions
+and bodyless function declarations, and is matched exactly against definitions
+in the implementation unit. Cross-module imports remain disabled until the
+next M2 stage.
 
 `--target` defaults to `x86_64-unknown-linux-gnu`, currently the only
 supported target. On an x86-64 Linux host, the integration and differential

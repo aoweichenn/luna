@@ -45,6 +45,139 @@ TEST(SemaTest, LowersExternalDeclarationsAndCallsToTypedIr) {
     EXPECT_EQ(call->type, LUNA_IR_TYPE_I64);
 }
 
+TEST(SemaTest, MatchesInterfaceDeclarationsWithImplementationDefinitions) {
+    FrontendHarness harness{
+        "export module test.module_pair;\n"
+        "export enum Bias: i32 { answer = 40, }\n"
+        "export struct Input { value: i32; bias: Bias; }\n"
+        "export extern fn c_i32_identity(value: i32) -> i32;\n"
+        "fn compute(input: *const Input, delta: i32) -> i32;\n"
+        "export fn main() -> i32;\n",
+        "module test.module_pair;\n"
+        "fn compute(data: *const Input, amount: i32) -> i32 {\n"
+        "    return c_i32_identity(data->value + amount);\n"
+        "}\n"
+        "fn main() -> i32 {\n"
+        "    var input: Input = { value = 20, bias = Bias.answer, };\n"
+        "    return compute((&input) as *const Input, 22);\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    ASSERT_NE(harness.InterfaceProgram(), nullptr);
+    ASSERT_EQ(harness.Module()->functions.length, 3U);
+
+    const LunaIrFunction *external =
+        luna_ir_module_function_const(harness.Module(), 0U);
+    const LunaIrFunction *compute =
+        luna_ir_module_function_const(harness.Module(), 1U);
+    const LunaIrFunction *main_function =
+        luna_ir_module_function_const(harness.Module(), 2U);
+    ASSERT_NE(external, nullptr);
+    ASSERT_NE(compute, nullptr);
+    ASSERT_NE(main_function, nullptr);
+    EXPECT_EQ(external->linkage, LUNA_IR_LINKAGE_EXTERNAL_C);
+    EXPECT_EQ(compute->linkage, LUNA_IR_LINKAGE_INTERNAL);
+    EXPECT_EQ(main_function->linkage, LUNA_IR_LINKAGE_INTERNAL);
+    EXPECT_EQ(harness.Module()->entry_function, 2U);
+}
+
+TEST(SemaTest, RejectsInvalidModuleInterfaceImplementationPairs) {
+    struct InvalidModule {
+        std::string_view interface_source;
+        std::string_view implementation_source;
+        std::string_view diagnostic;
+    };
+    constexpr std::array<InvalidModule, 12U> LUNA_TEST_INVALID_MODULES = {{
+        {"export module test.left;\nexport fn value() -> i32;\n",
+         "module test.right;\n"
+         "fn value() -> i32 { return 42; }\n"
+         "fn main() -> i32 { return value(); }\n",
+         "does not match interface module"},
+        {"export module test.interface_body;\n"
+         "export fn value() -> i32 { return 42; }\n",
+         "module test.interface_body;\n"
+         "fn value() -> i32 { return 42; }\n"
+         "fn main() -> i32 { return value(); }\n",
+         "must be a declaration without a body"},
+        {"export module test.implementation_export;\n"
+         "export fn value() -> i32;\n",
+         "module test.implementation_export;\n"
+         "export fn value() -> i32 { return 42; }\n"
+         "fn main() -> i32 { return value(); }\n",
+         "'export' is only allowed"},
+        {"export module test.missing_definition;\n"
+         "export fn value() -> i32;\n",
+         "module test.missing_definition;\n"
+         "fn main() -> i32 { return 42; }\n",
+         "has no implementation definition"},
+        {"export module test.parameter_count;\n"
+         "export fn value(input: i32) -> i32;\n",
+         "module test.parameter_count;\n"
+         "fn value(first: i32, second: i32) -> i32 { return first + second; }\n"
+         "fn main() -> i32 { return value(20, 22); }\n",
+         "has 2 parameters, but its interface declaration has 1"},
+        {"export module test.parameter_type;\n"
+         "export fn value(input: *const i32) -> i32;\n",
+         "module test.parameter_type;\n"
+         "fn value(input: *i32) -> i32 { return *input; }\n"
+         "fn main() -> i32 { var value: i32 = 42; return value(&value); }\n",
+         "parameter 1 of implementation function 'value' does not match"},
+        {"export module test.return_type;\n"
+         "export fn value() -> i64;\n",
+         "module test.return_type;\n"
+         "fn value() -> i32 { return 42; }\n"
+         "fn main() -> i32 { return value(); }\n",
+         "return type of implementation function 'value' does not match"},
+        {"export module test.external_conflict;\n"
+         "export extern fn c_value() -> i32;\n",
+         "module test.external_conflict;\n"
+         "fn c_value() -> i32 { return 42; }\n"
+         "fn main() -> i32 { return c_value(); }\n",
+         "is external in the interface"},
+        {"export module test.duplicate_type;\n"
+         "export struct Item { value: i32; }\n",
+         "module test.duplicate_type;\n"
+         "struct Item { value: i32; }\n"
+         "fn main() -> i32 { return 42; }\n",
+         "duplicate type declaration 'Item'"},
+        {"export module test.private_type_dependency;\n"
+         "export fn read(input: *const Hidden) -> i32;\n",
+         "module test.private_type_dependency;\n"
+         "struct Hidden { value: i32; }\n"
+         "fn read(input: *const Hidden) -> i32 { return input->value; }\n"
+         "fn main() -> i32 { return 42; }\n",
+         "unknown type 'Hidden'"},
+        {"export module test.implementation_declaration;\n",
+         "module test.implementation_declaration;\n"
+         "fn pending() -> i32;\n"
+         "fn main() -> i32 { return 42; }\n",
+         "implementation function 'pending' must have a body"},
+        {"export module test.duplicate_interface_function;\n"
+         "export fn value() -> i32;\n"
+         "fn value() -> i32;\n",
+         "module test.duplicate_interface_function;\n"
+         "fn value() -> i32 { return 42; }\n"
+         "fn main() -> i32 { return value(); }\n",
+         "duplicate function 'value'"},
+    }};
+
+    for (const InvalidModule &module : LUNA_TEST_INVALID_MODULES) {
+        FrontendHarness harness{module.interface_source,
+                                module.implementation_source};
+        EXPECT_FALSE(harness.ParseAndLower()) << module.interface_source;
+        EXPECT_NE(harness.Diagnostics().find(module.diagnostic),
+                  std::string::npos)
+            << harness.Diagnostics();
+    }
+
+    FrontendHarness interface_only{"export module test.interface_only;\n"
+                                   "export fn main() -> i32;\n"};
+    EXPECT_FALSE(interface_only.ParseAndLower());
+    EXPECT_NE(interface_only.Diagnostics().find(
+                  "requires a matching implementation unit"),
+              std::string::npos);
+}
+
 TEST(SemaTest, LowersNestedCallsWithoutOverlappingArguments) {
     FrontendHarness harness{
         "module test.nested;\n"

@@ -63,6 +63,7 @@ def compile_and_run(
     work_dir: pathlib.Path,
     expected_code: int,
     additional_objects: tuple[pathlib.Path, ...] = (),
+    additional_source_units: tuple[pathlib.Path, ...] = (),
 ) -> None:
     stem = source.stem
     assembly = work_dir / f"{stem}.s"
@@ -77,6 +78,7 @@ def compile_and_run(
             "-o",
             str(assembly),
             str(source),
+            *(str(path) for path in additional_source_units),
         ]
     )
     run(
@@ -458,6 +460,8 @@ def main() -> int:
         raise AssertionError("--help did not print the compiler usage")
     if "x86_64-unknown-linux-gnu" not in help_result.stdout:
         raise AssertionError("--help did not list the supported target")
+    if "interface/implementation" not in help_result.stdout:
+        raise AssertionError("--help did not describe paired module units")
     version_result = run([str(arguments.compiler), "--version"])
     if "lunac 0.1.0-dev" not in version_result.stdout:
         raise AssertionError("--version did not print the compiler version")
@@ -497,6 +501,41 @@ def main() -> int:
         ],
         expected_code=1,
     )
+    too_many_units = run(
+        [
+            str(arguments.compiler),
+            str(case_dir / "return_42.luna"),
+            str(case_dir / "return_42.luna"),
+            str(case_dir / "return_42.luna"),
+        ],
+        expected_code=2,
+    )
+    if "one interface/implementation pair" not in too_many_units.stderr:
+        raise AssertionError("too-many-source-units diagnostic is missing")
+    duplicate_implementation = run(
+        [
+            str(arguments.compiler),
+            "--emit",
+            "check",
+            str(case_dir / "return_42.luna"),
+            str(case_dir / "return_42.luna"),
+        ],
+        expected_code=1,
+    )
+    if "more than one implementation unit" not in duplicate_implementation.stderr:
+        raise AssertionError("duplicate implementation diagnostic is missing")
+    duplicate_interface = run(
+        [
+            str(arguments.compiler),
+            "--emit",
+            "check",
+            str(case_dir / "module_pair_interface.luna"),
+            str(case_dir / "module_pair_interface.luna"),
+        ],
+        expected_code=1,
+    )
+    if "more than one interface unit" not in duplicate_interface.stderr:
+        raise AssertionError("duplicate interface diagnostic is missing")
     print("PASS compiler command-line contract")
 
     executable_cases = {
@@ -607,6 +646,19 @@ def main() -> int:
     )
     print("PASS executable: aggregate_c_abi.luna with C23 layout assertions")
 
+    compile_and_run(
+        arguments.compiler,
+        llvm_mc,
+        linker,
+        target_runner,
+        case_dir / "module_pair_implementation.luna",
+        arguments.work_dir,
+        42,
+        additional_objects=(external_support,),
+        additional_source_units=(case_dir / "module_pair_interface.luna",),
+    )
+    print("PASS executable: matched module interface and implementation")
+
     conversion_matrix = generate_integer_conversion_matrix(arguments.work_dir)
     compile_and_run(
         arguments.compiler,
@@ -669,8 +721,12 @@ def main() -> int:
             "break is only valid inside a loop or switch"
         ),
         "integer_overflow.luna": "integer literal does not fit in i32",
-        "module_interface_pending.luna": "module interface compilation",
-        "import_pending.luna": "cross-module import resolution",
+        "module_interface_pending.luna": (
+            "requires a matching implementation source unit"
+        ),
+        "import_pending.luna": (
+            "import visibility and dependency validation"
+        ),
         "duplicate_function.luna": "duplicate function 'main'",
         "unreachable_type_error.luna": "expected bool, found i32",
         "void_local.luna": "local variables cannot have type void",
@@ -785,7 +841,7 @@ def main() -> int:
             "external function declaration must end with ';'"
         ),
         "plain_function_declaration.luna": (
-            "separate module interface implementations"
+            "implementation function 'pending' must have a body"
         ),
         "external_array_parameter.luna": (
             "fixed arrays cannot be passed by value"
@@ -911,6 +967,68 @@ def main() -> int:
             )
         print(f"PASS negative: {case_name}")
 
+    module_pair_negative_cases = (
+        (
+            "module_pair_name_mismatch_interface.luna",
+            "module_pair_name_mismatch_implementation.luna",
+            "does not match interface module",
+        ),
+        (
+            "module_pair_missing_interface.luna",
+            "module_pair_missing_implementation.luna",
+            "has no implementation definition",
+        ),
+        (
+            "module_pair_signature_interface.luna",
+            "module_pair_signature_implementation.luna",
+            "does not match the interface declaration",
+        ),
+        (
+            "module_pair_interface_body_interface.luna",
+            "module_pair_interface_body_implementation.luna",
+            "must be a declaration without a body",
+        ),
+        (
+            "module_pair_export_interface.luna",
+            "module_pair_export_implementation.luna",
+            "'export' is only allowed",
+        ),
+        (
+            "module_pair_duplicate_type_interface.luna",
+            "module_pair_duplicate_type_implementation.luna",
+            "duplicate type declaration 'Item'",
+        ),
+        (
+            "module_pair_external_interface.luna",
+            "module_pair_external_implementation.luna",
+            "is external in the interface",
+        ),
+        (
+            "module_pair_private_type_interface.luna",
+            "module_pair_private_type_implementation.luna",
+            "unknown type 'Hidden'",
+        ),
+    )
+    for interface_name, implementation_name, expected_diagnostic in (
+        module_pair_negative_cases
+    ):
+        result = run(
+            [
+                str(arguments.compiler),
+                "--emit",
+                "check",
+                str(case_dir / implementation_name),
+                str(case_dir / interface_name),
+            ],
+            expected_code=1,
+        )
+        if expected_diagnostic not in result.stderr:
+            raise AssertionError(
+                f"{interface_name} + {implementation_name}: expected "
+                f"{expected_diagnostic!r}\nstderr:\n{result.stderr}"
+            )
+        print(f"PASS module-pair negative: {interface_name}")
+
     for snapshot_name in (
         "function_call",
         "i64_six_arguments",
@@ -952,6 +1070,36 @@ def main() -> int:
             )
         print(f"PASS IR snapshot: {snapshot_name}.luna")
 
+    module_pair_ir = arguments.work_dir / "module_pair.lir"
+    run(
+        [
+            str(arguments.compiler),
+            "--emit",
+            "ir",
+            "-o",
+            str(module_pair_ir),
+            str(case_dir / "module_pair_interface.luna"),
+            str(case_dir / "module_pair_implementation.luna"),
+        ]
+    )
+    expected_module_pair_ir = (
+        arguments.source_root
+        / "tests"
+        / "integration"
+        / "golden"
+        / "module_pair.lir"
+    ).read_text(encoding="utf-8")
+    actual_module_pair_ir = module_pair_ir.read_text(encoding="utf-8")
+    if actual_module_pair_ir.rstrip("\n") != expected_module_pair_ir.rstrip(
+        "\n"
+    ):
+        raise AssertionError(
+            "IR snapshot mismatch for paired module\n"
+            f"expected:\n{expected_module_pair_ir}\n"
+            f"actual:\n{actual_module_pair_ir}"
+        )
+    print("PASS IR snapshot: matched module interface and implementation")
+
     for deterministic_name in (
         "recursive_factorial",
         "i64_operations",
@@ -988,6 +1136,40 @@ def main() -> int:
                 f"assembly output is not deterministic: {deterministic_name}"
             )
         print(f"PASS deterministic assembly: {deterministic_name}.luna")
+
+    module_pair_first = arguments.work_dir / "module_pair_first.s"
+    module_pair_second = arguments.work_dir / "module_pair_second.s"
+    for output, source_units in (
+        (
+            module_pair_first,
+            (
+                case_dir / "module_pair_interface.luna",
+                case_dir / "module_pair_implementation.luna",
+            ),
+        ),
+        (
+            module_pair_second,
+            (
+                case_dir / "module_pair_implementation.luna",
+                case_dir / "module_pair_interface.luna",
+            ),
+        ),
+    ):
+        run(
+            [
+                str(arguments.compiler),
+                "--emit",
+                "asm",
+                "-o",
+                str(output),
+                *(str(path) for path in source_units),
+            ]
+        )
+    if module_pair_first.read_bytes() != module_pair_second.read_bytes():
+        raise AssertionError(
+            "paired-module assembly depends on source-unit argument order"
+        )
+    print("PASS deterministic assembly: paired module in either CLI order")
 
     print("all integration tests passed")
     return 0

@@ -19,6 +19,9 @@ void luna_diagnostic_error(LunaDiagnosticEngine *diagnostics,
 void luna_diagnostic_error_plain(LunaDiagnosticEngine *diagnostics,
                                  const char *format, ...)
     LUNA_PRINTF_LIKE(2, 3);
+void luna_diagnostic_note(LunaDiagnosticEngine *diagnostics,
+                          LunaSourceSpan span, const char *format, ...)
+    LUNA_PRINTF_LIKE(3, 4);
 size_t luna_diagnostic_error_count(const LunaDiagnosticEngine *diagnostics);
 
 #endif

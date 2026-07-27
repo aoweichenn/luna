@@ -30,6 +30,26 @@ declarations marked `export` in the interface are visible to importers. Module
 names organize visibility and dependencies but do not create a qualification
 syntax. Imported names are used directly.
 
+An interface contains complete structure, union and enum definitions plus
+function declarations without bodies. Its type definitions are directly
+available in the matching implementation and are not repeated there. Every
+non-`extern` interface function must have exactly one definition in the
+implementation. The function name, parameter count and order, every parameter
+type and pointer qualifier, and the return type must match exactly. Parameter
+names do not form part of the contract. An `extern fn` in the interface names
+an external C symbol and therefore has no Luna definition.
+
+An implementation unit cannot contain `export`. Functions omitted from the
+interface are module-private and need no prior declaration. Interface types
+and function signatures must resolve using the interface itself; they cannot
+depend on a type declared only in the implementation.
+
+The bootstrap compiler accepts either one implementation unit or one
+interface/implementation pair, in either command-line order. A pair must use
+the same exact module name, and the implementation must define the bootstrap
+`main`. Interface-only compilation and cross-module imports are deferred until
+compiled module metadata is available.
+
 There are no module partitions, header units, re-exports, aliases, selective
 imports, wildcard imports or cyclic dependencies in Luna 0.
 

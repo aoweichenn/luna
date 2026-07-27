@@ -14,6 +14,9 @@ namespace {
 
 constexpr std::uint64_t LUNA_TEST_MUTATION_SEED = UINT64_C(0x4c554e41);
 constexpr std::uint64_t LUNA_TEST_MUTATION_CASES = 1000U;
+constexpr std::uint64_t LUNA_TEST_MODULE_MUTATION_SEED =
+    UINT64_C(0x4d4f44554c45);
+constexpr std::uint64_t LUNA_TEST_MODULE_MUTATION_CASES = 500U;
 constexpr std::size_t LUNA_TEST_MAX_INPUT_SIZE = 4096U;
 
 [[nodiscard]] std::size_t RandomIndex(std::mt19937_64 &random_engine,
@@ -169,6 +172,52 @@ TEST(MutationFuzzTest, CleanFrontendResultsAlwaysProduceValidTypedIr) {
         EXPECT_TRUE(harness.EmitAssembly())
             << "case " << case_index << ", seed " << seed_index << '\n'
             << harness.Diagnostics();
+    }
+}
+
+TEST(MutationFuzzTest, CleanModulePairResultsAlwaysProduceValidTypedIr) {
+    constexpr std::string_view LUNA_TEST_INTERFACE =
+        "export module fuzz.module_pair;\n"
+        "export struct Input { value: i32; }\n"
+        "export fn calculate(input: *const Input, delta: i32) -> i32;\n"
+        "export fn main() -> i32;\n";
+    constexpr std::string_view LUNA_TEST_IMPLEMENTATION =
+        "module fuzz.module_pair;\n"
+        "fn calculate(data: *const Input, amount: i32) -> i32 {\n"
+        " return data->value + amount;\n"
+        "}\n"
+        "fn main() -> i32 {\n"
+        " var input: Input = { value = 20, };\n"
+        " return calculate((&input) as *const Input, 22);\n"
+        "}\n";
+
+    FrontendHarness clean{LUNA_TEST_INTERFACE, LUNA_TEST_IMPLEMENTATION};
+    ASSERT_TRUE(clean.Verify()) << clean.Diagnostics();
+    ASSERT_TRUE(clean.EmitAssembly()) << clean.Diagnostics();
+
+    std::mt19937_64 random_engine{LUNA_TEST_MODULE_MUTATION_SEED};
+    for (std::uint64_t case_index = 0U;
+         case_index < LUNA_TEST_MODULE_MUTATION_CASES; case_index += 1U) {
+        std::string interface_source{LUNA_TEST_INTERFACE};
+        std::string implementation_source{LUNA_TEST_IMPLEMENTATION};
+        if ((random_engine() & UINT64_C(1)) == 0U) {
+            Mutate(interface_source, random_engine);
+        } else {
+            Mutate(implementation_source, random_engine);
+        }
+
+        FrontendHarness harness{
+            std::string_view(interface_source.data(), interface_source.size()),
+            std::string_view(implementation_source.data(),
+                             implementation_source.size())};
+        ASSERT_TRUE(harness.IsReady()) << "case " << case_index;
+        if (!harness.ParseAndLower()) {
+            continue;
+        }
+        EXPECT_TRUE(harness.Verify()) << "case " << case_index << '\n'
+                                      << harness.Diagnostics();
+        EXPECT_TRUE(harness.EmitAssembly()) << "case " << case_index << '\n'
+                                            << harness.Diagnostics();
     }
 }
 

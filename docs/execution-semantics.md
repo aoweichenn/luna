@@ -235,6 +235,27 @@ read-only qualification. Conversion between a pointer and `usize` also
 preserves the target-width bit pattern. These conversions do not validate
 that the resulting address refers to a live object.
 
+## Module contracts
+
+An interface and implementation form one compilation module only when their
+module names are identical. Interface function declarations are matched before
+any body is lowered. Matching is exact for function kind, parameter count and
+order, semantic parameter types including every pointer read-only qualifier,
+and return type; parameter names may differ. Every ordinary interface function
+has one implementation body. An interface `extern fn` remains an external
+symbol declaration and cannot also have an implementation declaration.
+
+Interface type definitions are canonical definitions shared with the
+implementation. Repeating one in the implementation is a duplicate
+declaration. The interface type graph and function signatures are checked
+before implementation-private types enter scope, so an interface cannot
+silently depend on implementation details. Command-line source order has no
+semantic effect.
+
+This contract is compile-time only and adds no run-time initialization or
+dispatch. `import` remains rejected until dependency validation and compiled
+module metadata are implemented.
+
 ## Optimization boundary
 
 The bootstrap compiler performs no optimization. Its stack-homed x86-64

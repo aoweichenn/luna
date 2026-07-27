@@ -10,9 +10,7 @@ TEST(ParserTest, BuildsModuleImportsAndFunctionShape) {
     FrontendHarness harness{"export module compiler.frontend;\n"
                             "import core.text;\n"
                             "import core.io;\n"
-                            "export fn add(left: i32, right: i32) -> i32 {\n"
-                            "    return left + right;\n"
-                            "}\n"};
+                            "export fn add(left: i32, right: i32) -> i32;\n"};
 
     ASSERT_TRUE(harness.Parse()) << harness.Diagnostics();
     LunaProgram *program = harness.Program();

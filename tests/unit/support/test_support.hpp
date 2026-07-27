@@ -15,6 +15,9 @@ class FrontendHarness final {
     explicit FrontendHarness(
         std::string_view source_text,
         const LunaTargetInfo *target = luna_target_info_default());
+    FrontendHarness(std::string_view interface_text,
+                    std::string_view implementation_text,
+                    const LunaTargetInfo *target = luna_target_info_default());
     ~FrontendHarness();
 
     FrontendHarness(const FrontendHarness &) = delete;
@@ -35,17 +38,21 @@ class FrontendHarness final {
     [[nodiscard]] const LunaSourceFile *Source() const noexcept;
     [[nodiscard]] LunaDiagnosticEngine *DiagnosticEngine() noexcept;
     [[nodiscard]] LunaProgram *Program() noexcept;
+    [[nodiscard]] LunaProgram *InterfaceProgram() noexcept;
     [[nodiscard]] LunaIrModule *Module() noexcept;
 
   private:
     LunaSourceFile source_{};
+    LunaSourceFile interface_source_{};
     LunaArena arena_{};
     std::FILE *diagnostic_file_{nullptr};
     LunaDiagnosticEngine diagnostics_{};
     LunaProgram *program_{nullptr};
+    LunaProgram *interface_program_{nullptr};
     LunaIrModule module_{};
     LunaStringBuilder assembly_{};
     bool ready_{false};
+    bool has_interface_{false};
     bool parse_attempted_{false};
     bool parse_succeeded_{false};
     bool lower_attempted_{false};

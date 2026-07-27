@@ -311,6 +311,7 @@ if(LUNA_BUILD_FUZZERS)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/memory.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/external.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/aggregate.luna"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/module_pair.luna"
             DESTINATION "${LUNA_FUZZ_CORPUS_DIR}"
         )
 

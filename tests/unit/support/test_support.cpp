@@ -52,10 +52,22 @@ FrontendHarness::FrontendHarness(std::string_view source_text,
                                           source_text.size(), &this->source_);
 }
 
+FrontendHarness::FrontendHarness(std::string_view interface_text,
+                                 std::string_view implementation_text,
+                                 const LunaTargetInfo *target)
+    : FrontendHarness(implementation_text, target) {
+    this->has_interface_ = true;
+    this->ready_ =
+        this->ready_ &&
+        luna_source_from_bytes("<interface>", interface_text.data(),
+                               interface_text.size(), &this->interface_source_);
+}
+
 FrontendHarness::~FrontendHarness() {
     luna_string_builder_destroy(&this->assembly_);
     luna_ir_module_destroy(&this->module_);
     luna_arena_destroy(&this->arena_);
+    luna_source_destroy(&this->interface_source_);
     luna_source_destroy(&this->source_);
     if (this->diagnostic_file_ != nullptr) {
         static_cast<void>(std::fclose(this->diagnostic_file_));
@@ -76,12 +88,20 @@ bool FrontendHarness::Parse() {
         return false;
     }
 
-    LunaParser parser{};
-    luna_parser_init(&parser, &this->source_, &this->diagnostics_,
-                     &this->arena_);
-    this->program_ = luna_parser_parse_program(&parser);
+    if (this->has_interface_) {
+        LunaParser interface_parser{};
+        luna_parser_init(&interface_parser, &this->interface_source_,
+                         &this->diagnostics_, &this->arena_);
+        this->interface_program_ = luna_parser_parse_program(&interface_parser);
+    }
+
+    LunaParser implementation_parser{};
+    luna_parser_init(&implementation_parser, &this->source_,
+                     &this->diagnostics_, &this->arena_);
+    this->program_ = luna_parser_parse_program(&implementation_parser);
     this->parse_succeeded_ =
         this->program_ != nullptr &&
+        (!this->has_interface_ || this->interface_program_ != nullptr) &&
         luna_diagnostic_error_count(&this->diagnostics_) == 0U;
     return this->parse_succeeded_;
 }
@@ -97,7 +117,11 @@ bool FrontendHarness::Lower() {
     }
 
     this->lower_succeeded_ =
-        luna_sema_lower(this->program_, &this->diagnostics_, &this->module_) &&
+        (this->has_interface_
+             ? luna_sema_lower_module(this->interface_program_, this->program_,
+                                      &this->diagnostics_, &this->module_)
+             : luna_sema_lower(this->program_, &this->diagnostics_,
+                               &this->module_)) &&
         luna_diagnostic_error_count(&this->diagnostics_) == 0U;
     return this->lower_succeeded_;
 }
@@ -143,6 +167,10 @@ LunaDiagnosticEngine *FrontendHarness::DiagnosticEngine() noexcept {
 
 LunaProgram *FrontendHarness::Program() noexcept {
     return this->program_;
+}
+
+LunaProgram *FrontendHarness::InterfaceProgram() noexcept {
+    return this->interface_program_;
 }
 
 LunaIrModule *FrontendHarness::Module() noexcept {

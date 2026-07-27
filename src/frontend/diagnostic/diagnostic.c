@@ -2,6 +2,11 @@
 
 #include <stdarg.h>
 
+static void luna_diagnostic_message(LunaDiagnosticEngine *diagnostics,
+                                    LunaSourceSpan span, const char *severity,
+                                    const char *format, va_list arguments)
+    LUNA_PRINTF_LIKE(4, 0);
+
 static void luna_diagnostic_print_source_line(FILE *stream,
                                               LunaSourceSpan span) {
     if (span.source == NULL || span.offset > span.source->length) {
@@ -53,16 +58,22 @@ void luna_diagnostic_error(LunaDiagnosticEngine *diagnostics,
                            LunaSourceSpan span, const char *format, ...) {
     diagnostics->error_count += 1U;
 
+    va_list arguments;
+    va_start(arguments, format);
+    luna_diagnostic_message(diagnostics, span, "error", format, arguments);
+    va_end(arguments);
+}
+
+static void luna_diagnostic_message(LunaDiagnosticEngine *diagnostics,
+                                    LunaSourceSpan span, const char *severity,
+                                    const char *format, va_list arguments) {
     const char *path = span.source == NULL || span.source->path == NULL
                            ? "<unknown>"
                            : span.source->path;
-    (void)fprintf(diagnostics->stream, "%s:%u:%u: error: ", path, span.line,
-                  span.column);
+    (void)fprintf(diagnostics->stream, "%s:%u:%u: %s: ", path, span.line,
+                  span.column, severity);
 
-    va_list arguments;
-    va_start(arguments, format);
     (void)vfprintf(diagnostics->stream, format, arguments);
-    va_end(arguments);
     (void)fputc('\n', diagnostics->stream);
 
     luna_diagnostic_print_source_line(diagnostics->stream, span);
@@ -78,6 +89,14 @@ void luna_diagnostic_error_plain(LunaDiagnosticEngine *diagnostics,
     (void)vfprintf(diagnostics->stream, format, arguments);
     va_end(arguments);
     (void)fputc('\n', diagnostics->stream);
+}
+
+void luna_diagnostic_note(LunaDiagnosticEngine *diagnostics,
+                          LunaSourceSpan span, const char *format, ...) {
+    va_list arguments;
+    va_start(arguments, format);
+    luna_diagnostic_message(diagnostics, span, "note", format, arguments);
+    va_end(arguments);
 }
 
 size_t luna_diagnostic_error_count(const LunaDiagnosticEngine *diagnostics) {

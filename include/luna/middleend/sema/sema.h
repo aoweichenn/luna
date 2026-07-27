@@ -9,5 +9,9 @@
 
 bool luna_sema_lower(const LunaProgram *program,
                      LunaDiagnosticEngine *diagnostics, LunaIrModule *module);
+bool luna_sema_lower_module(const LunaProgram *interface_unit,
+                            const LunaProgram *implementation_unit,
+                            LunaDiagnosticEngine *diagnostics,
+                            LunaIrModule *module);
 
 #endif

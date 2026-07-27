@@ -125,7 +125,8 @@ typedef struct LunaCheckedLvalue {
 } LunaCheckedLvalue;
 
 typedef struct LunaSemaContext {
-    const LunaProgram *program;
+    const LunaProgram *interface_unit;
+    const LunaProgram *implementation_unit;
     LunaDiagnosticEngine *diagnostics;
     LunaIrModule *module;
     LunaVector functions;
@@ -645,15 +646,22 @@ static LunaSemaTypeId luna_sema_pointer_type(LunaSemaContext *context,
     return result;
 }
 
-static bool luna_sema_collect_named_types(LunaSemaContext *context) {
+static bool luna_sema_collect_named_types(LunaSemaContext *context,
+                                          const LunaProgram *program) {
     for (const LunaTypeDeclaration *declaration =
-             context->program->first_type_declaration;
+             program->first_type_declaration;
          declaration != NULL; declaration = declaration->next) {
-        if (luna_sema_find_named_type(context, declaration->name) != NULL) {
+        const LunaSemaNamedType *existing =
+            luna_sema_find_named_type(context, declaration->name);
+        if (existing != NULL) {
             luna_diagnostic_error(context->diagnostics, declaration->span,
                                   "duplicate type declaration '%.*s'",
                                   (int)declaration->name.length,
                                   declaration->name.data);
+            luna_diagnostic_note(context->diagnostics, existing->syntax->span,
+                                 "the first declaration of '%.*s' is here",
+                                 (int)declaration->name.length,
+                                 declaration->name.data);
             continue;
         }
         if (context->types.length > (size_t)INT_MAX) {
@@ -876,9 +884,11 @@ luna_sema_collect_enum_members(LunaSemaContext *context,
     return success;
 }
 
-static bool luna_sema_resolve_type_declarations(LunaSemaContext *context) {
+static bool luna_sema_resolve_type_declarations(LunaSemaContext *context,
+                                                size_t first_named_type) {
     bool success = true;
-    for (size_t index = 0U; index < context->named_types.length; index += 1U) {
+    for (size_t index = first_named_type; index < context->named_types.length;
+         index += 1U) {
         const LunaSemaNamedType *named_type =
             luna_vector_at_const(&context->named_types, index);
         if (named_type->syntax->kind == LUNA_TYPE_ENUM) {
@@ -890,7 +900,8 @@ static bool luna_sema_resolve_type_declarations(LunaSemaContext *context) {
         }
     }
 
-    for (size_t index = 0U; index < context->named_types.length; index += 1U) {
+    for (size_t index = first_named_type; index < context->named_types.length;
+         index += 1U) {
         const LunaSemaNamedType *named_type =
             luna_vector_at_const(&context->named_types, index);
         if (named_type->syntax->kind == LUNA_TYPE_ENUM) {
@@ -4536,141 +4547,421 @@ static bool luna_sema_lower_statement(LunaSemaContext *context,
     return false;
 }
 
-static bool luna_sema_collect_functions(LunaSemaContext *context) {
-    for (const LunaFunction *syntax = context->program->first_function;
-         syntax != NULL; syntax = syntax->next) {
-        if (syntax->is_external && !syntax->is_declaration) {
-            luna_diagnostic_error(
-                context->diagnostics, syntax->span,
-                "external function '%.*s' must be a declaration",
-                (int)syntax->name.length, syntax->name.data);
-            continue;
+static const LunaFunction *
+luna_sema_find_syntax_function(const LunaProgram *program,
+                               LunaStringView name) {
+    if (program == NULL) {
+        return NULL;
+    }
+    for (const LunaFunction *function = program->first_function;
+         function != NULL; function = function->next) {
+        if (luna_string_view_equal(function->name, name)) {
+            return function;
         }
-        if (!syntax->is_external && syntax->is_declaration) {
-            luna_diagnostic_error(
-                context->diagnostics, syntax->span,
-                "separate module interface implementations are scheduled "
-                "for milestone M2");
-            continue;
-        }
-        if (syntax->is_external &&
-            (luna_string_view_equal_c_string(syntax->name, "_start") ||
-             (syntax->name.length >= 2U && syntax->name.data[0] == '_' &&
-              syntax->name.data[1] == 'L'))) {
-            luna_diagnostic_error(
-                context->diagnostics, syntax->span,
-                "external function name '%.*s' is reserved by the bootstrap "
-                "ABI",
-                (int)syntax->name.length, syntax->name.data);
-            continue;
-        }
+    }
+    return NULL;
+}
 
-        if (luna_sema_find_function(context, syntax->name) != NULL) {
-            luna_diagnostic_error(context->diagnostics, syntax->span,
+static bool luna_sema_validate_unique_functions(LunaSemaContext *context,
+                                                const LunaProgram *program) {
+    bool success = true;
+    for (const LunaFunction *function = program->first_function;
+         function != NULL; function = function->next) {
+        for (const LunaFunction *previous = program->first_function;
+             previous != function; previous = previous->next) {
+            if (!luna_string_view_equal(previous->name, function->name)) {
+                continue;
+            }
+            luna_diagnostic_error(context->diagnostics, function->span,
                                   "duplicate function '%.*s'",
-                                  (int)syntax->name.length, syntax->name.data);
-            continue;
+                                  (int)function->name.length,
+                                  function->name.data);
+            luna_diagnostic_note(context->diagnostics, previous->span,
+                                 "the first declaration of '%.*s' is here",
+                                 (int)function->name.length,
+                                 function->name.data);
+            success = false;
+            break;
+        }
+    }
+    return success;
+}
+
+static bool luna_sema_validate_function_signature(LunaSemaContext *context,
+                                                  const LunaFunction *syntax) {
+    bool success = true;
+    if (syntax->is_external &&
+        (luna_string_view_equal_c_string(syntax->name, "_start") ||
+         (syntax->name.length >= 2U && syntax->name.data[0] == '_' &&
+          syntax->name.data[1] == 'L'))) {
+        luna_diagnostic_error(
+            context->diagnostics, syntax->span,
+            "external function name '%.*s' is reserved by the bootstrap ABI",
+            (int)syntax->name.length, syntax->name.data);
+        success = false;
+    }
+
+    const LunaSemaTypeId return_type =
+        luna_sema_resolve_type(context, &syntax->return_type);
+    if (return_type == LUNA_TYPE_INVALID) {
+        success = false;
+    } else if (luna_sema_is_memory_type(context, return_type)) {
+        luna_diagnostic_error(
+            context->diagnostics, syntax->return_type.span, "%s",
+            luna_sema_is_array_type(context, return_type)
+                ? "fixed arrays cannot be returned by value in this milestone"
+                : "aggregate types cannot be returned by value in this "
+                  "milestone");
+        success = false;
+    }
+
+    uint32_t integer_parameter_count = 0U;
+    uint32_t float_parameter_count = 0U;
+    for (const LunaParameter *parameter = syntax->first_parameter;
+         parameter != NULL; parameter = parameter->next) {
+        for (const LunaParameter *previous = syntax->first_parameter;
+             previous != parameter; previous = previous->next) {
+            if (!luna_string_view_equal(previous->name, parameter->name)) {
+                continue;
+            }
+            luna_diagnostic_error(context->diagnostics, parameter->span,
+                                  "duplicate parameter '%.*s'",
+                                  (int)parameter->name.length,
+                                  parameter->name.data);
+            luna_diagnostic_note(context->diagnostics, previous->span,
+                                 "the first parameter named '%.*s' is here",
+                                 (int)parameter->name.length,
+                                 parameter->name.data);
+            success = false;
+            break;
         }
 
-        const LunaSemaTypeId return_type =
-            luna_sema_resolve_type(context, &syntax->return_type);
-        if (return_type == LUNA_TYPE_INVALID) {
+        const LunaSemaTypeId parameter_type =
+            luna_sema_resolve_type(context, &parameter->type);
+        if (parameter_type == LUNA_TYPE_INVALID) {
+            success = false;
             continue;
         }
-        if (luna_sema_is_memory_type(context, return_type)) {
+        if (parameter_type == LUNA_TYPE_VOID) {
+            luna_diagnostic_error(context->diagnostics, parameter->span,
+                                  "parameter '%.*s' has an invalid type",
+                                  (int)parameter->name.length,
+                                  parameter->name.data);
+            success = false;
+            continue;
+        }
+        if (luna_sema_is_memory_type(context, parameter_type)) {
             luna_diagnostic_error(
-                context->diagnostics, syntax->return_type.span, "%s",
-                luna_sema_is_array_type(context, return_type)
-                    ? "fixed arrays cannot be returned by value in this "
-                      "milestone"
-                    : "aggregate types cannot be returned by value in this "
+                context->diagnostics, parameter->type.span, "%s",
+                luna_sema_is_array_type(context, parameter_type)
+                    ? "fixed arrays cannot be passed by value in this milestone"
+                    : "aggregate types cannot be passed by value in this "
                       "milestone");
+            success = false;
             continue;
         }
+        if (luna_sema_is_float_type(parameter_type)) {
+            float_parameter_count += 1U;
+        } else {
+            integer_parameter_count += 1U;
+        }
+    }
 
-        bool parameters_are_valid = true;
-        uint32_t integer_parameter_count = 0U;
-        uint32_t float_parameter_count = 0U;
-        for (const LunaParameter *parameter = syntax->first_parameter;
-             parameter != NULL; parameter = parameter->next) {
-            const LunaSemaTypeId parameter_type =
-                luna_sema_resolve_type(context, &parameter->type);
-            if (parameter_type == LUNA_TYPE_INVALID ||
-                parameter_type == LUNA_TYPE_VOID) {
-                luna_diagnostic_error(context->diagnostics, parameter->span,
-                                      "parameter '%.*s' has an invalid type",
-                                      (int)parameter->name.length,
-                                      parameter->name.data);
-                parameters_are_valid = false;
-                continue;
-            }
-            if (luna_sema_is_memory_type(context, parameter_type)) {
-                luna_diagnostic_error(
-                    context->diagnostics, parameter->type.span, "%s",
-                    luna_sema_is_array_type(context, parameter_type)
-                        ? "fixed arrays cannot be passed by value in this "
-                          "milestone"
-                        : "aggregate types cannot be passed by value in this "
-                          "milestone");
-                parameters_are_valid = false;
-                continue;
-            }
-            if (luna_sema_is_float_type(parameter_type)) {
-                float_parameter_count += 1U;
-            } else {
-                integer_parameter_count += 1U;
-            }
-        }
-        if (!parameters_are_valid) {
-            continue;
-        }
-        if (integer_parameter_count > 6U || float_parameter_count > 8U) {
+    if (integer_parameter_count > 6U || float_parameter_count > 8U) {
+        luna_diagnostic_error(
+            context->diagnostics, syntax->span,
+            "the bootstrap ABI supports at most six integer-class and eight "
+            "floating-point arguments");
+        success = false;
+    }
+    return success;
+}
+
+static bool luna_sema_validate_interface_functions(LunaSemaContext *context) {
+    if (context->interface_unit == NULL) {
+        return true;
+    }
+
+    bool success =
+        luna_sema_validate_unique_functions(context, context->interface_unit);
+    for (const LunaFunction *function = context->interface_unit->first_function;
+         function != NULL; function = function->next) {
+        if (!function->is_declaration) {
             luna_diagnostic_error(
-                context->diagnostics, syntax->span,
-                "the bootstrap ABI supports at most six integer-class and "
-                "eight floating-point arguments");
+                context->diagnostics, function->span,
+                "module interface function '%.*s' must be a declaration "
+                "without a body",
+                (int)function->name.length, function->name.data);
+            success = false;
+        }
+        if (!luna_sema_validate_function_signature(context, function)) {
+            success = false;
+        }
+    }
+    return success;
+}
+
+static bool
+luna_sema_validate_implementation_declarations(LunaSemaContext *context) {
+    bool success = luna_sema_validate_unique_functions(
+        context, context->implementation_unit);
+    for (const LunaTypeDeclaration *declaration =
+             context->implementation_unit->first_type_declaration;
+         declaration != NULL; declaration = declaration->next) {
+        if (!declaration->is_exported) {
             continue;
         }
+        luna_diagnostic_error(
+            context->diagnostics, declaration->span,
+            "'export' is only allowed on declarations in a module interface");
+        success = false;
+    }
 
-        const LunaIrFunctionId ir_id = luna_ir_module_add_function(
-            context->module, context->program->module_name, syntax->name,
-            luna_sema_ir_type(context, return_type),
-            syntax->is_external ? LUNA_IR_LINKAGE_EXTERNAL_C
-                                : LUNA_IR_LINKAGE_INTERNAL);
-        if (ir_id == LUNA_IR_INVALID_ID) {
+    for (const LunaFunction *function =
+             context->implementation_unit->first_function;
+         function != NULL; function = function->next) {
+        if (function->is_exported) {
+            luna_diagnostic_error(
+                context->diagnostics, function->span,
+                "'export' is only allowed on declarations in a module "
+                "interface");
+            success = false;
+        }
+        if (function->is_external && !function->is_declaration) {
+            luna_diagnostic_error(
+                context->diagnostics, function->span,
+                "external function '%.*s' must be a declaration",
+                (int)function->name.length, function->name.data);
+            success = false;
+        } else if (!function->is_external && function->is_declaration) {
+            luna_diagnostic_error(
+                context->diagnostics, function->span,
+                "implementation function '%.*s' must have a body",
+                (int)function->name.length, function->name.data);
+            success = false;
+        }
+        if (!luna_sema_validate_function_signature(context, function)) {
+            success = false;
+        }
+    }
+    return success;
+}
+
+static void luna_sema_report_function_type_mismatch(
+    LunaSemaContext *context, const LunaFunction *declaration,
+    const LunaFunction *definition, const char *component, uint32_t index,
+    LunaSourceSpan span, LunaSemaTypeId expected, LunaSemaTypeId actual) {
+    LunaStringBuilder expected_name;
+    LunaStringBuilder actual_name;
+    luna_string_builder_init(&expected_name);
+    luna_string_builder_init(&actual_name);
+    const bool formatted =
+        luna_sema_append_type_name(context, expected, &expected_name) &&
+        luna_sema_append_type_name(context, actual, &actual_name);
+    if (!formatted) {
+        luna_sema_report_allocation_failure(context);
+    } else if (index == 0U) {
+        luna_diagnostic_error(
+            context->diagnostics, span,
+            "%s of implementation function '%.*s' does not match the "
+            "interface declaration: expected %s, found %s",
+            component, (int)definition->name.length, definition->name.data,
+            luna_string_builder_data(&expected_name),
+            luna_string_builder_data(&actual_name));
+    } else {
+        luna_diagnostic_error(
+            context->diagnostics, span,
+            "%s %" PRIu32 " of implementation function '%.*s' does not match "
+            "the interface declaration: expected %s, found %s",
+            component, index, (int)definition->name.length,
+            definition->name.data, luna_string_builder_data(&expected_name),
+            luna_string_builder_data(&actual_name));
+    }
+    if (formatted) {
+        luna_diagnostic_note(context->diagnostics, declaration->span,
+                             "the interface declaration is here");
+    }
+    luna_string_builder_destroy(&actual_name);
+    luna_string_builder_destroy(&expected_name);
+}
+
+static bool
+luna_sema_function_signatures_match(LunaSemaContext *context,
+                                    const LunaFunction *declaration,
+                                    const LunaFunction *definition) {
+    if (declaration->parameter_count != definition->parameter_count) {
+        luna_diagnostic_error(
+            context->diagnostics, definition->span,
+            "implementation function '%.*s' has %" PRIu32
+            " parameters, but its interface declaration has %" PRIu32,
+            (int)definition->name.length, definition->name.data,
+            definition->parameter_count, declaration->parameter_count);
+        luna_diagnostic_note(context->diagnostics, declaration->span,
+                             "the interface declaration is here");
+        return false;
+    }
+
+    bool success = true;
+    const LunaSemaTypeId expected_return =
+        luna_sema_resolve_type(context, &declaration->return_type);
+    const LunaSemaTypeId actual_return =
+        luna_sema_resolve_type(context, &definition->return_type);
+    if (expected_return != actual_return) {
+        luna_sema_report_function_type_mismatch(
+            context, declaration, definition, "return type", 0U,
+            definition->return_type.span, expected_return, actual_return);
+        success = false;
+    }
+
+    const LunaParameter *expected_parameter = declaration->first_parameter;
+    const LunaParameter *actual_parameter = definition->first_parameter;
+    uint32_t parameter_index = 1U;
+    while (expected_parameter != NULL && actual_parameter != NULL) {
+        const LunaSemaTypeId expected_type =
+            luna_sema_resolve_type(context, &expected_parameter->type);
+        const LunaSemaTypeId actual_type =
+            luna_sema_resolve_type(context, &actual_parameter->type);
+        if (expected_type != actual_type) {
+            luna_sema_report_function_type_mismatch(
+                context, declaration, definition, "parameter", parameter_index,
+                actual_parameter->type.span, expected_type, actual_type);
+            success = false;
+        }
+        expected_parameter = expected_parameter->next;
+        actual_parameter = actual_parameter->next;
+        parameter_index += 1U;
+    }
+    return success;
+}
+
+static bool luna_sema_add_ir_function(LunaSemaContext *context,
+                                      const LunaFunction *syntax) {
+    LunaSemaFunction *existing = luna_sema_find_function(context, syntax->name);
+    if (existing != NULL) {
+        luna_diagnostic_error(context->diagnostics, syntax->span,
+                              "duplicate function '%.*s'",
+                              (int)syntax->name.length, syntax->name.data);
+        luna_diagnostic_note(context->diagnostics, existing->syntax->span,
+                             "the first declaration of '%.*s' is here",
+                             (int)syntax->name.length, syntax->name.data);
+        return false;
+    }
+
+    const LunaSemaTypeId return_type =
+        luna_sema_resolve_type(context, &syntax->return_type);
+    const LunaIrFunctionId ir_id = luna_ir_module_add_function(
+        context->module, context->implementation_unit->module_name,
+        syntax->name, luna_sema_ir_type(context, return_type),
+        syntax->is_external ? LUNA_IR_LINKAGE_EXTERNAL_C
+                            : LUNA_IR_LINKAGE_INTERNAL);
+    if (ir_id == LUNA_IR_INVALID_ID) {
+        luna_sema_report_allocation_failure(context);
+        return false;
+    }
+
+    LunaIrFunction *ir_function =
+        luna_ir_module_function(context->module, ir_id);
+    for (const LunaParameter *parameter = syntax->first_parameter;
+         parameter != NULL; parameter = parameter->next) {
+        const LunaSemaTypeId parameter_type =
+            luna_sema_resolve_type(context, &parameter->type);
+        const LunaIrType type = luna_sema_ir_type(context, parameter_type);
+        if (!luna_vector_push(&ir_function->parameter_types, &type)) {
             luna_sema_report_allocation_failure(context);
             return false;
         }
-
-        LunaIrFunction *ir_function =
-            luna_ir_module_function(context->module, ir_id);
-        for (const LunaParameter *parameter = syntax->first_parameter;
-             parameter != NULL; parameter = parameter->next) {
-            const LunaSemaTypeId parameter_type =
-                luna_sema_resolve_type(context, &parameter->type);
-            const LunaIrType type = luna_sema_ir_type(context, parameter_type);
-            if (!luna_vector_push(&ir_function->parameter_types, &type)) {
-                luna_sema_report_allocation_failure(context);
-                return false;
-            }
-            if (!syntax->is_external &&
-                luna_ir_function_add_slot(ir_function, type) ==
-                    LUNA_IR_INVALID_ID) {
-                luna_sema_report_allocation_failure(context);
-                return false;
-            }
-        }
-
-        const LunaSemaFunction function = {
-            .syntax = syntax,
-            .ir_id = ir_id,
-        };
-        if (!luna_vector_push(&context->functions, &function)) {
+        if (!syntax->is_external &&
+            luna_ir_function_add_slot(ir_function, type) ==
+                LUNA_IR_INVALID_ID) {
             luna_sema_report_allocation_failure(context);
             return false;
         }
     }
 
+    const LunaSemaFunction function = {
+        .syntax = syntax,
+        .ir_id = ir_id,
+    };
+    if (!luna_vector_push(&context->functions, &function)) {
+        luna_sema_report_allocation_failure(context);
+        return false;
+    }
+    return true;
+}
+
+static bool luna_sema_collect_functions(LunaSemaContext *context) {
+    bool success = true;
+    if (context->interface_unit != NULL) {
+        for (const LunaFunction *declaration =
+                 context->interface_unit->first_function;
+             declaration != NULL; declaration = declaration->next) {
+            const LunaFunction *definition = luna_sema_find_syntax_function(
+                context->implementation_unit, declaration->name);
+            if (declaration->is_external) {
+                if (definition != NULL) {
+                    luna_diagnostic_error(
+                        context->diagnostics, definition->span,
+                        "function '%.*s' is external in the interface and "
+                        "cannot have an implementation declaration",
+                        (int)definition->name.length, definition->name.data);
+                    luna_diagnostic_note(context->diagnostics,
+                                         declaration->span,
+                                         "the external interface declaration "
+                                         "is here");
+                    success = false;
+                }
+                continue;
+            }
+
+            if (definition == NULL) {
+                luna_diagnostic_error(
+                    context->diagnostics, declaration->span,
+                    "interface function '%.*s' has no implementation "
+                    "definition",
+                    (int)declaration->name.length, declaration->name.data);
+                success = false;
+                continue;
+            }
+            if (definition->is_external || definition->is_declaration) {
+                luna_diagnostic_error(
+                    context->diagnostics, definition->span,
+                    "implementation of interface function '%.*s' must be a "
+                    "Luna definition with a body",
+                    (int)definition->name.length, definition->name.data);
+                luna_diagnostic_note(context->diagnostics, declaration->span,
+                                     "the interface declaration is here");
+                success = false;
+                continue;
+            }
+            if (!luna_sema_function_signatures_match(context, declaration,
+                                                     definition)) {
+                success = false;
+            }
+        }
+    }
+
+    if (!success) {
+        return false;
+    }
+
+    if (context->interface_unit != NULL) {
+        for (const LunaFunction *declaration =
+                 context->interface_unit->first_function;
+             declaration != NULL; declaration = declaration->next) {
+            if (declaration->is_external &&
+                !luna_sema_add_ir_function(context, declaration)) {
+                return false;
+            }
+        }
+    }
+
+    for (const LunaFunction *definition =
+             context->implementation_unit->first_function;
+         definition != NULL; definition = definition->next) {
+        if (!luna_sema_add_ir_function(context, definition)) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -4759,17 +5050,79 @@ static void luna_sema_lower_function(LunaSemaContext *context,
     }
 }
 
-bool luna_sema_lower(const LunaProgram *program,
-                     LunaDiagnosticEngine *diagnostics, LunaIrModule *module) {
+static bool
+luna_sema_validate_module_units(const LunaProgram *interface_unit,
+                                const LunaProgram *implementation_unit,
+                                LunaDiagnosticEngine *diagnostics) {
+    if (implementation_unit == NULL) {
+        if (interface_unit != NULL) {
+            luna_diagnostic_error(
+                diagnostics, interface_unit->module_span,
+                "module interface requires a matching implementation unit");
+        } else {
+            luna_diagnostic_error_plain(
+                diagnostics, "semantic lowering requires an implementation "
+                             "module unit");
+        }
+        return false;
+    }
+    if (implementation_unit->is_interface) {
+        luna_diagnostic_error(
+            diagnostics, implementation_unit->module_span,
+            "implementation unit must start with 'module', not 'export "
+            "module'");
+    }
+    if (interface_unit != NULL && !interface_unit->is_interface) {
+        luna_diagnostic_error(diagnostics, interface_unit->module_span,
+                              "interface unit must start with 'export module'");
+    }
+    if (interface_unit != NULL &&
+        !luna_string_view_equal(interface_unit->module_name,
+                                implementation_unit->module_name)) {
+        luna_diagnostic_error(
+            diagnostics, implementation_unit->module_span,
+            "implementation module '%.*s' does not match interface module "
+            "'%.*s'",
+            (int)implementation_unit->module_name.length,
+            implementation_unit->module_name.data,
+            (int)interface_unit->module_name.length,
+            interface_unit->module_name.data);
+        luna_diagnostic_note(diagnostics, interface_unit->module_span,
+                             "the interface module declaration is here");
+    }
+    if (interface_unit != NULL && interface_unit->first_import != NULL) {
+        luna_diagnostic_error(
+            diagnostics, interface_unit->first_import->span,
+            "import visibility and dependency validation is scheduled for "
+            "the next M2 stage");
+    }
+    if (implementation_unit->first_import != NULL) {
+        luna_diagnostic_error(
+            diagnostics, implementation_unit->first_import->span,
+            "import visibility and dependency validation is scheduled for "
+            "the next M2 stage");
+    }
+    return luna_diagnostic_error_count(diagnostics) == 0U;
+}
+
+bool luna_sema_lower_module(const LunaProgram *interface_unit,
+                            const LunaProgram *implementation_unit,
+                            LunaDiagnosticEngine *diagnostics,
+                            LunaIrModule *module) {
     if (module == NULL || module->target == NULL ||
         !luna_data_layout_is_valid(&module->target->data_layout)) {
         luna_diagnostic_error_plain(
             diagnostics, "semantic lowering requires a valid target layout");
         return false;
     }
+    if (!luna_sema_validate_module_units(interface_unit, implementation_unit,
+                                         diagnostics)) {
+        return false;
+    }
 
     LunaSemaContext context = {
-        .program = program,
+        .interface_unit = interface_unit,
+        .implementation_unit = implementation_unit,
         .diagnostics = diagnostics,
         .module = module,
     };
@@ -4784,22 +5137,27 @@ bool luna_sema_lower(const LunaProgram *program,
         luna_sema_report_allocation_failure(&context);
     }
 
-    if (program->is_interface) {
-        luna_diagnostic_error(
-            diagnostics, program->module_span,
-            "module interface compilation is scheduled for milestone M2");
+    if (interface_unit != NULL &&
+        luna_diagnostic_error_count(diagnostics) == 0U) {
+        (void)luna_sema_collect_named_types(&context, interface_unit);
+        (void)luna_sema_resolve_type_declarations(&context, 0U);
+        (void)luna_sema_validate_interface_functions(&context);
     }
 
-    if (program->first_import != NULL) {
-        luna_diagnostic_error(
-            diagnostics, program->first_import->span,
-            "cross-module import resolution is scheduled for milestone M2");
+    if (luna_diagnostic_error_count(diagnostics) == 0U) {
+        const size_t first_implementation_type = context.named_types.length;
+        (void)luna_sema_collect_named_types(&context, implementation_unit);
+        (void)luna_sema_resolve_type_declarations(&context,
+                                                  first_implementation_type);
+        (void)luna_sema_validate_implementation_declarations(&context);
     }
 
-    (void)luna_sema_collect_named_types(&context);
-    (void)luna_sema_resolve_type_declarations(&context);
-    (void)luna_sema_collect_functions(&context);
-    (void)luna_sema_find_entry(&context);
+    if (luna_diagnostic_error_count(diagnostics) == 0U) {
+        if (luna_sema_collect_functions(&context) &&
+            luna_diagnostic_error_count(diagnostics) == 0U) {
+            (void)luna_sema_find_entry(&context);
+        }
+    }
 
     if (luna_diagnostic_error_count(diagnostics) == 0U) {
         for (size_t index = 0U; index < context.functions.length; index += 1U) {
@@ -4822,4 +5180,16 @@ bool luna_sema_lower(const LunaProgram *program,
     luna_vector_destroy(&context.locals);
     luna_vector_destroy(&context.control_frames);
     return success;
+}
+
+bool luna_sema_lower(const LunaProgram *program,
+                     LunaDiagnosticEngine *diagnostics, LunaIrModule *module) {
+    if (program == NULL) {
+        luna_diagnostic_error_plain(diagnostics,
+                                    "semantic lowering requires a source unit");
+        return false;
+    }
+    return program->is_interface
+               ? luna_sema_lower_module(program, NULL, diagnostics, module)
+               : luna_sema_lower_module(NULL, program, diagnostics, module);
 }

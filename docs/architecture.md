@@ -78,13 +78,21 @@ layout-query instruction.
 Compilation is split into global and local phases:
 
 1. parse every source unit;
-2. validate module units and imports;
+2. classify and validate module units;
 3. collect exported and module-private declarations;
 4. match interface declarations with implementation definitions;
 5. type-check function bodies;
 6. lower checked bodies to IR.
 
 This order removes source-order dependencies and ordinary forward declarations.
+The current module-contract stage accepts one implementation or one
+interface/implementation pair. Source order on the command line is irrelevant.
+The interface type graph is resolved before implementation-private types are
+collected, making the interface independently valid. Function matching uses
+canonical semantic types, so nested arrays, named-type identity and pointer
+read-only qualifiers cannot match accidentally by spelling or layout.
+Cross-module import lookup, dependency validation and serialized module
+metadata remain separate later stages.
 
 ## Luna IR
 
@@ -215,6 +223,9 @@ The quality gate contains:
 - GoogleTest unit tests for utilities, source handling, lexing, parsing,
   semantic lowering, IR invariants and x86-64 emission;
 - parser, type and module-error negative tests;
+- paired module execution and IR snapshots, argument-order determinism,
+  interface self-containment, exact signature matching and cross-source
+  diagnostic-note tests;
 - textual IR snapshots;
 - x86-64 assembly validation through LLVM MC;
 - static ELF64 linking through LLD;

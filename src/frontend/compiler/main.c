@@ -6,7 +6,7 @@
 
 static void luna_print_usage(FILE *stream) {
     (void)fputs("usage: lunac [--target triple] [--emit check|ir|asm] "
-                "[-o path] input.luna\n"
+                "[-o path] implementation.luna [interface.luna]\n"
                 "\n"
                 "targets:\n"
                 "  x86_64-unknown-linux-gnu (default)\n"
@@ -17,6 +17,8 @@ static void luna_print_usage(FILE *stream) {
                 "  --emit ir      write textual Luna IR\n"
                 "  --emit asm     write x86-64 GNU assembly (default)\n"
                 "  -o path        output path; '-' writes to stdout\n"
+                "  source units   one implementation, or one "
+                "interface/implementation pair in either order\n"
                 "  --version      print compiler version\n"
                 "  --help         print this help\n",
                 stream);
@@ -40,7 +42,8 @@ static bool luna_parse_emit_kind(const char *name, LunaEmitKind *emit_kind) {
 
 int main(int argument_count, char **arguments) {
     LunaCompilerOptions options = {
-        .input_path = NULL,
+        .input_paths = {NULL, NULL},
+        .input_count = 0U,
         .output_path = NULL,
         .emit_kind = LUNA_EMIT_ASSEMBLY,
         .target = luna_target_info_default(),
@@ -102,17 +105,18 @@ int main(int argument_count, char **arguments) {
             return 2;
         }
 
-        if (options.input_path != NULL) {
+        if (options.input_count >= LUNA_COMPILER_MAX_SOURCE_UNITS) {
             (void)fputs(
-                "error: the bootstrap compiler accepts exactly one source "
-                "unit\n",
+                "error: the bootstrap compiler accepts one implementation "
+                "unit or one interface/implementation pair\n",
                 stderr);
             return 2;
         }
-        options.input_path = argument;
+        options.input_paths[options.input_count] = argument;
+        options.input_count += 1U;
     }
 
-    if (options.input_path == NULL) {
+    if (options.input_count == 0U) {
         luna_print_usage(stderr);
         return 2;
     }
