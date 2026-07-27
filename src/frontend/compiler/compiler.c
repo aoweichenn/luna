@@ -273,6 +273,7 @@ int luna_compile(const LunaCompilerOptions *options, FILE *diagnostic_stream) {
                 options->separate_module_name != NULL &&
                 (options->emit_kind == LUNA_EMIT_IR ||
                  options->emit_kind == LUNA_EMIT_MACHINE_IR ||
+                 options->emit_kind == LUNA_EMIT_LIVENESS ||
                  options->emit_kind == LUNA_EMIT_ASSEMBLY),
         };
         success = luna_module_lower_inputs(
@@ -297,6 +298,8 @@ int luna_compile(const LunaCompilerOptions *options, FILE *diagnostic_stream) {
         }
     } else if (success && options->emit_kind == LUNA_EMIT_MACHINE_IR) {
         success = luna_x86_64_emit_machine_ir(&module, &diagnostics, &output);
+    } else if (success && options->emit_kind == LUNA_EMIT_LIVENESS) {
+        success = luna_x86_64_emit_liveness(&module, &diagnostics, &output);
     } else if (success && options->emit_kind == LUNA_EMIT_ASSEMBLY) {
         success = luna_x86_64_emit_assembly(&module, &diagnostics, &output);
     } else if (success && options->emit_kind == LUNA_EMIT_METADATA) {

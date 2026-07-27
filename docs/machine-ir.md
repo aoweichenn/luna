@@ -89,7 +89,7 @@ argument and result placement while expanding them.
 Every instruction exposes a uniform def/use interface. A value-producing
 instruction defines exactly one virtual register. Operand virtual registers
 are returned in evaluation order, and every explicit call argument is a use.
-This interface is the input contract for the next liveness stage.
+This interface is the input contract for the liveness stage.
 
 ## Verification
 
@@ -140,13 +140,15 @@ serialization format.
 
 ## Current boundary and next stage
 
-The current assembly emitter consumes only verified machine IR. For
-correctness, it still assigns stack homes to virtual registers and emits
-direct assembly without optimization. Generated executables remain
+The current assembly boundary analyzes verified machine IR and independently
+verifies the resulting block and instruction live sets before emission. For
+correctness, the emitter still assigns stack homes to virtual registers and
+emits direct assembly without optimization. Generated executables remain
 freestanding: `_start` exits through the Linux x86-64 `syscall` instruction
 and no target libc is linked.
 
-The next stage is liveness analysis over the explicit def/use and
-control-flow contracts. Linear-scan register allocation follows it. Those
-stages must preserve the current stack-homed emitter as a correctness
-reference and must not change Luna language semantics.
+The next stage is linear-scan register allocation over verified liveness and
+the existing register classes. It must preserve the current stack-homed
+emitter as a correctness reference and must not change Luna language
+semantics. The analysis representation and invariants are documented in
+[x86-64 liveness analysis](liveness.md).

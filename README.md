@@ -26,17 +26,17 @@ The project is deliberately narrow at this stage:
 - target model: explicit `x86_64-unknown-linux-gnu` data layout, with
   target-sized `isize` and `usize`;
 - backend: verified, pre-allocation x86-64 machine IR with fixed target widths,
-  explicit virtual-register definitions/uses and deterministic textual output,
-  followed by direct, unoptimized x86-64 instruction selection, including
+  explicit virtual-register definitions/uses, verified block and instruction
+  liveness, and deterministic textual output, followed by direct, unoptimized
+  x86-64 instruction selection, including
   IEEE-754 scalar SSE floating-point operations and checked numeric
   conversions, exact-width indirect memory access, checked fixed-array
   indexing, read-only static data, inline overlap-safe object copies and direct
   System V calls to unmangled external C symbols;
 - bootstrap host: conforming C23 with IEC 60559 binary32 and binary64;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests,
-  typed-IR and machine-IR snapshots, differential random programs, libFuzzer
-  and executable
-  cross-target tests.
+  typed-IR, machine-IR and liveness snapshots, differential random programs,
+  libFuzzer and executable cross-target tests.
 
 The language and compiler are under active construction. Implemented syntax is
 tracked separately from accepted language design so that documentation never
@@ -101,6 +101,12 @@ build/debug/lunac --emit mir -o hello.mir examples/hello.luna
 
 This is the x86-64 pre-register-allocation boundary, not a portable interchange
 format. Its `isize` and `usize` values have already become `i64` and `u64`.
+
+Verified block and instruction live sets can be inspected independently:
+
+```sh
+build/debug/lunac --emit liveness -o hello.live examples/hello.luna
+```
 
 An executable build may pass every transitive module source unit in one
 invocation. Source order has no semantic effect:
@@ -188,6 +194,7 @@ library use does not become a dependency of generated target programs.
 See [the language draft](docs/language.md),
 [compiler architecture](docs/architecture.md),
 [x86-64 machine IR](docs/machine-ir.md),
+[x86-64 liveness analysis](docs/liveness.md),
 [compiled module metadata format](docs/module-metadata.md),
 [bootstrap execution semantics](docs/execution-semantics.md), and the
 [implementation roadmap](docs/roadmap.md).

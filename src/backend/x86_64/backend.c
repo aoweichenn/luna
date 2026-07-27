@@ -48,10 +48,46 @@ bool luna_x86_64_emit_machine_ir(const LunaIrModule *module,
     return success;
 }
 
+bool luna_x86_64_emit_liveness(const LunaIrModule *module,
+                               LunaDiagnosticEngine *diagnostics,
+                               LunaStringBuilder *output) {
+    if (module == NULL || diagnostics == NULL || output == NULL ||
+        output->length != 0U) {
+        if (diagnostics != NULL) {
+            luna_diagnostic_error_plain(
+                diagnostics, "x86-64 liveness emission received invalid state");
+        }
+        return false;
+    }
+
+    LunaX8664MachineModule machine_module;
+    LunaX8664ModuleLiveness liveness;
+    luna_x86_64_liveness_init(&liveness);
+    const bool prepared = luna_x86_64_prepare_machine_module(
+        module, diagnostics, &machine_module);
+    const bool analyzed =
+        prepared && luna_x86_64_liveness_analyze(&machine_module, &liveness,
+                                                 diagnostics->stream);
+    if (prepared && !analyzed) {
+        luna_diagnostic_error_plain(diagnostics,
+                                    "x86-64 liveness analysis failed");
+    }
+    const bool success = analyzed && luna_x86_64_liveness_print(
+                                         &machine_module, &liveness, output);
+    if (analyzed && !success) {
+        luna_diagnostic_error_plain(
+            diagnostics, "out of memory while printing x86-64 liveness");
+    }
+    luna_x86_64_liveness_destroy(&liveness);
+    luna_x86_64_machine_module_destroy(&machine_module);
+    return success;
+}
+
 bool luna_x86_64_emit_assembly(const LunaIrModule *module,
                                LunaDiagnosticEngine *diagnostics,
                                LunaStringBuilder *output) {
-    if (module == NULL || diagnostics == NULL || output == NULL) {
+    if (module == NULL || diagnostics == NULL || output == NULL ||
+        output->length != 0U) {
         if (diagnostics != NULL) {
             luna_diagnostic_error_plain(
                 diagnostics, "x86-64 assembly emission received invalid state");
@@ -60,10 +96,20 @@ bool luna_x86_64_emit_assembly(const LunaIrModule *module,
     }
 
     LunaX8664MachineModule machine_module;
+    LunaX8664ModuleLiveness liveness;
+    luna_x86_64_liveness_init(&liveness);
     const bool prepared = luna_x86_64_prepare_machine_module(
         module, diagnostics, &machine_module);
-    const bool success = prepared && luna_x86_64_machine_emit_assembly(
+    const bool analyzed =
+        prepared && luna_x86_64_liveness_analyze(&machine_module, &liveness,
+                                                 diagnostics->stream);
+    if (prepared && !analyzed) {
+        luna_diagnostic_error_plain(diagnostics,
+                                    "x86-64 liveness analysis failed");
+    }
+    const bool success = analyzed && luna_x86_64_machine_emit_assembly(
                                          &machine_module, diagnostics, output);
+    luna_x86_64_liveness_destroy(&liveness);
     luna_x86_64_machine_module_destroy(&machine_module);
     return success;
 }

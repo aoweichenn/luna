@@ -153,6 +153,7 @@ def compile_separate_module_graph(
     math_assembly = work_dir / "metadata_math.s"
     math_ir = work_dir / "metadata_math.lir"
     math_mir = work_dir / "metadata_math.mir"
+    math_liveness = work_dir / "metadata_math.live"
     math_object = work_dir / "metadata_math.o"
     application_assembly = work_dir / "metadata_app.s"
     application_object = work_dir / "metadata_app.o"
@@ -249,6 +250,20 @@ def compile_separate_module_graph(
             "--compile-module",
             "tests.metadata.math",
             "--emit",
+            "liveness",
+            "-o",
+            str(math_liveness),
+            str(math_metadata),
+            str(math_implementation),
+            str(core_metadata),
+        ]
+    )
+    run(
+        [
+            str(compiler),
+            "--compile-module",
+            "tests.metadata.math",
+            "--emit",
             "asm",
             "-o",
             str(math_assembly),
@@ -300,6 +315,14 @@ def compile_separate_module_graph(
         or math_mir_text.count("metadata=0x") != 2
     ):
         raise AssertionError("separate module machine IR linkage is missing")
+    math_liveness_text = math_liveness.read_text(encoding="utf-8")
+    if (
+        "declare @f0 tests.metadata.core::add_bias values=0 iterations=0"
+        not in math_liveness_text
+        or "define @f1 tests.metadata.math::calculate"
+        not in math_liveness_text
+    ):
+        raise AssertionError("separate module liveness linkage is missing")
     math_text = math_assembly.read_text(encoding="utf-8")
     if (
         "_start:" in math_text
@@ -877,6 +900,8 @@ def main() -> int:
         raise AssertionError("--help did not describe separate compilation")
     if "--emit mir" not in help_result.stdout:
         raise AssertionError("--help did not describe machine IR emission")
+    if "--emit liveness" not in help_result.stdout:
+        raise AssertionError("--help did not describe liveness emission")
     version_result = run([str(arguments.compiler), "--version"])
     if "lunac 0.1.0-dev" not in version_result.stdout:
         raise AssertionError("--version did not print the compiler version")
@@ -1659,6 +1684,36 @@ def main() -> int:
     if machine_ir_first.read_bytes() != machine_ir_second.read_bytes():
         raise AssertionError("machine IR output is not deterministic")
     print("PASS machine IR snapshot and determinism: function_call.luna")
+
+    liveness_first = arguments.work_dir / "function_call_first.live"
+    liveness_second = arguments.work_dir / "function_call_second.live"
+    for output in (liveness_first, liveness_second):
+        run(
+            [
+                str(arguments.compiler),
+                "--emit",
+                "liveness",
+                "-o",
+                str(output),
+                str(case_dir / "function_call.luna"),
+            ]
+        )
+    expected_liveness = (
+        arguments.source_root
+        / "tests"
+        / "integration"
+        / "golden"
+        / "function_call.live"
+    ).read_text(encoding="utf-8")
+    actual_liveness = liveness_first.read_text(encoding="utf-8")
+    if actual_liveness.rstrip("\n") != expected_liveness.rstrip("\n"):
+        raise AssertionError(
+            "liveness snapshot mismatch for function_call.luna\n"
+            f"expected:\n{expected_liveness}\nactual:\n{actual_liveness}"
+        )
+    if liveness_first.read_bytes() != liveness_second.read_bytes():
+        raise AssertionError("liveness output is not deterministic")
+    print("PASS liveness snapshot and determinism: function_call.luna")
 
     for deterministic_name in (
         "recursive_factorial",

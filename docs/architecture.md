@@ -51,6 +51,9 @@ lexer -> parser -> syntax tree
        verified x86-64 machine IR
                     |
                     v
+         verified liveness analysis
+                    |
+                    v
           x86-64 instruction emission
                     |
                     v
@@ -252,10 +255,25 @@ instruction-specific operands. It is a debugging and test contract for the
 current x86-64 backend, not a stable cross-version object format.
 
 The current emitter still gives virtual registers stack homes and expands
-machine pseudos directly into correct assembly. Liveness, physical-register
-assignment and optimization are deliberately absent from this stage. The
-complete representation and invariants are documented in
+machine pseudos directly into correct assembly. Physical-register assignment
+and optimization are deliberately absent from this stage. The complete
+representation and invariants are documented in
 [x86-64 machine IR](machine-ir.md).
+
+## x86-64 liveness
+
+The backend computes liveness over the verified machine def/use and CFG
+contracts before assembly emission. Each block owns `use`, `def`, `live-in`
+and `live-out` bit vectors; every instruction owns exact `live-before` and
+`live-after` vectors. A reverse-order fixed-point solver implements the
+standard successor-union transfer equations.
+
+The result has an independent verifier that recomputes block def/use, checks
+every fixed-point equation, replays every instruction transfer and rejects
+malformed bit-vector storage or padding. `lunac --emit liveness` prints the
+same verified result deterministically. The analysis changes no instruction
+and assigns no physical register; its full contract is documented in
+[x86-64 liveness analysis](liveness.md).
 
 ## x86-64 backend
 
@@ -308,7 +326,8 @@ This backend is intentionally not the performance endpoint. Planned stages are:
 5. peephole and local instruction selection improvements;
 6. ELF64 relocatable-object emission.
 
-The first two stages are complete. Liveness is the next backend stage.
+The first three stages are complete. Linear-scan register allocation is the
+next backend stage.
 
 The simple backend remains available as a reference backend for differential
 testing after optimization is introduced.
