@@ -28,6 +28,7 @@ endif()
 
 add_library(luna_compiler STATIC
     src/target/target.c
+    src/backend/debug/debug_ir.c
     src/frontend/support/arena.c
     src/frontend/ast/ast.c
     src/frontend/support/buffer.c
@@ -51,6 +52,7 @@ add_library(luna_compiler STATIC
     src/backend/x86_64/elf_object.c
     src/backend/x86_64/instruction_encoder.c
     src/backend/x86_64/linker/elf_executable.c
+    src/backend/x86_64/linker/dwarf.c
     src/backend/x86_64/linker/elf_layout.c
     src/backend/x86_64/linker/elf_linker.c
     src/backend/x86_64/linker/elf_reader.c
@@ -200,6 +202,7 @@ if(BUILD_TESTING)
     endif()
 
     add_executable(luna_unit_tests
+        tests/unit/backend/debug_ir_test.cpp
         tests/unit/support/arena_test.cpp
         tests/unit/support/buffer_test.cpp
         tests/unit/frontend/diagnostic/diagnostic_test.cpp
@@ -300,6 +303,24 @@ if(BUILD_TESTING)
         PROPERTIES
             LABELS "integration"
             SKIP_RETURN_CODE 77
+    )
+
+    add_test(
+        NAME integration.debug_information
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/run_debug_info.py"
+            --compiler "$<TARGET_FILE:lunac>"
+            --linker "$<TARGET_FILE:lunalink>"
+            --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --work-dir "${CMAKE_CURRENT_BINARY_DIR}/debug-information"
+    )
+    set_tests_properties(
+        integration.debug_information
+        PROPERTIES
+            LABELS "integration"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 60
     )
 
     add_test(

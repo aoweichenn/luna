@@ -2,6 +2,7 @@
 #define LUNA_TEST_LUNA_C_API_HPP
 
 extern "C" {
+#include "luna/backend/debug/debug_ir.h"
 #include "luna/backend/x86_64/x86_64.h"
 #include "luna/frontend/ast/ast.h"
 #include "luna/frontend/diagnostic/diagnostic.h"

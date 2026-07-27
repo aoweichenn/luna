@@ -1,6 +1,7 @@
 #ifndef LUNA_X86_64_ELF_LINKER_INTERNAL_H
 #define LUNA_X86_64_ELF_LINKER_INTERNAL_H
 
+#include "luna/backend/debug/debug_ir.h"
 #include "luna/backend/x86_64/elf_linker.h"
 
 #include <stdbool.h>
@@ -81,7 +82,9 @@ typedef struct LunaElfLinkObject {
     LunaStringView name;
     LunaStringView bytes;
     LunaVector sections;
+    LunaDebugIr debug_ir;
     uint16_t symbol_table_index;
+    bool has_debug_ir;
 } LunaElfLinkObject;
 
 typedef struct LunaElfLinkSymbol {
@@ -109,6 +112,11 @@ typedef struct LunaElfLinkContext {
     LunaStringBuilder text;
     LunaStringBuilder rodata;
     LunaStringBuilder data;
+    LunaStringBuilder debug_abbrev;
+    LunaStringBuilder debug_info;
+    LunaStringBuilder debug_line;
+    LunaStringBuilder debug_str;
+    LunaStringBuilder debug_line_str;
     uint64_t bss_size;
     uint64_t text_alignment;
     uint64_t rodata_alignment;
@@ -168,6 +176,7 @@ bool luna_elf_link_resolve_symbol(LunaElfLinkContext *context,
 bool luna_elf_link_apply_relocations(LunaElfLinkContext *context);
 bool luna_elf_link_resolve_entry(LunaElfLinkContext *context,
                                  LunaStringView entry_symbol);
+bool luna_elf_link_build_debug(LunaElfLinkContext *context);
 bool luna_elf_link_serialize_executable(LunaElfLinkContext *context,
                                         LunaStringBuilder *output);
 

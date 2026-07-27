@@ -1,6 +1,7 @@
 #ifndef LUNA_X86_64_ELF_OBJECT_INTERNAL_H
 #define LUNA_X86_64_ELF_OBJECT_INTERNAL_H
 
+#include "luna/backend/debug/debug_ir.h"
 #include "luna/backend/x86_64/elf_object.h"
 
 #include <stdbool.h>
@@ -48,6 +49,7 @@ typedef struct LunaX8664ObjectImage {
     LunaStringBuilder text;
     LunaStringBuilder rodata;
     LunaStringBuilder data;
+    LunaDebugIr debug_ir;
     LunaVector symbols;
     LunaVector relocations;
     uint64_t text_alignment;

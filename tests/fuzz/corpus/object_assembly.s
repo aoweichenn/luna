@@ -10,6 +10,7 @@
     .globl _start
     .type _start, @function
 _start:
+    .loc 1 1 1
     xorl %ebp, %ebp
     leaq .Ldata(%rip), %r12
     movzbl (%r12), %edi
@@ -27,3 +28,4 @@ _start:
     ret
     .size _start, .-_start
     .section .note.GNU-stack,"",@progbits
+    .file 1 "<fuzz-assembly>"

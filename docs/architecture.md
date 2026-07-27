@@ -424,12 +424,14 @@ This backend is intentionally not the performance endpoint. Planned stages are:
 8. instruction-level differential tests;
 9. ELF64 relocatable-object emission;
 10. minimal project-owned ELF64 static linking;
-11. debug information design.
+11. versioned Debug IR and final-address DWARF 5 information.
 
-The first ten stages are complete. The native writer produces deterministic,
+All eleven stages are complete. The native writer produces deterministic,
 self-verified objects with direct x86-64 encoding and explicit relocations.
 The static linker consumes Luna and supported freestanding C23 objects without
-invoking another linker. Debug information remains separately deferred.
+invoking another linker. The debug pipeline preserves source spans through
+Machine IR, encodes relative source-to-code mappings in `.luna.debug`, and
+creates standard DWARF 5 after final code layout.
 
 The current direct pseudo expansions remain unoptimized and serve as the
 semantic reference for future local instruction-selection work.

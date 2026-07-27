@@ -14,6 +14,11 @@ void luna_elf_link_context_init(LunaElfLinkContext *context,
     luna_string_builder_init(&context->text);
     luna_string_builder_init(&context->rodata);
     luna_string_builder_init(&context->data);
+    luna_string_builder_init(&context->debug_abbrev);
+    luna_string_builder_init(&context->debug_info);
+    luna_string_builder_init(&context->debug_line);
+    luna_string_builder_init(&context->debug_str);
+    luna_string_builder_init(&context->debug_line_str);
     context->bss_size = 0U;
     context->text_alignment = 1U;
     context->rodata_alignment = 1U;
@@ -36,9 +41,15 @@ void luna_elf_link_context_destroy(LunaElfLinkContext *context) {
     for (size_t index = 0U; index < context->objects.length; index += 1U) {
         LunaElfLinkObject *object = luna_vector_at(&context->objects, index);
         if (object != NULL) {
+            luna_debug_ir_destroy(&object->debug_ir);
             luna_vector_destroy(&object->sections);
         }
     }
+    luna_string_builder_destroy(&context->debug_line_str);
+    luna_string_builder_destroy(&context->debug_str);
+    luna_string_builder_destroy(&context->debug_line);
+    luna_string_builder_destroy(&context->debug_info);
+    luna_string_builder_destroy(&context->debug_abbrev);
     luna_string_builder_destroy(&context->data);
     luna_string_builder_destroy(&context->rodata);
     luna_string_builder_destroy(&context->text);
@@ -221,6 +232,7 @@ bool luna_x86_64_link_elf_executable(const LunaX8664ElfLinkInput *inputs,
         success = luna_elf_link_collect_globals(&context) &&
                   luna_elf_link_layout_regions(&context) &&
                   luna_elf_link_layout_executable(&context) &&
+                  luna_elf_link_build_debug(&context) &&
                   luna_elf_link_apply_relocations(&context) &&
                   luna_elf_link_resolve_entry(&context, entry_symbol) &&
                   luna_elf_link_serialize_executable(&context, output);

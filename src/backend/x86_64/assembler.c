@@ -99,6 +99,61 @@ static bool luna_assembly_parse_i64(LunaStringView view, int64_t *value) {
     return true;
 }
 
+static bool luna_assembly_unescape_string(LunaStringView encoded,
+                                          LunaStringBuilder *decoded) {
+    encoded = luna_assembly_trim(encoded);
+    if (decoded == NULL || encoded.length < 2U || encoded.data[0] != '"' ||
+        encoded.data[encoded.length - 1U] != '"') {
+        return false;
+    }
+    for (size_t index = 1U; index + 1U < encoded.length; index += 1U) {
+        unsigned char value = (unsigned char)encoded.data[index];
+        if (value != '\\') {
+            const char byte = (char)value;
+            if (value == 0U ||
+                !luna_string_builder_append(decoded, &byte, 1U)) {
+                return false;
+            }
+            continue;
+        }
+        index += 1U;
+        if (index + 1U >= encoded.length) {
+            return false;
+        }
+        const char escape = encoded.data[index];
+        if (escape == '\\' || escape == '"') {
+            value = (unsigned char)escape;
+        } else if (escape == 'n') {
+            value = '\n';
+        } else if (escape == 'r') {
+            value = '\r';
+        } else if (escape == 't') {
+            value = '\t';
+        } else if (escape >= '0' && escape <= '7') {
+            uint32_t octal = (uint32_t)(escape - '0');
+            uint32_t digit_count = 1U;
+            while (digit_count < 3U && index + 2U < encoded.length &&
+                   encoded.data[index + 1U] >= '0' &&
+                   encoded.data[index + 1U] <= '7') {
+                index += 1U;
+                octal = octal * 8U + (uint32_t)(encoded.data[index] - '0');
+                digit_count += 1U;
+            }
+            if (octal == 0U || octal > UINT8_MAX) {
+                return false;
+            }
+            value = (unsigned char)octal;
+        } else {
+            return false;
+        }
+        const char byte = (char)value;
+        if (!luna_string_builder_append(decoded, &byte, 1U)) {
+            return false;
+        }
+    }
+    return decoded->length > 0U;
+}
+
 bool luna_x86_64_assembler_error(LunaX8664Assembler *assembler,
                                  const char *format, ...) {
     if (assembler == NULL || assembler->diagnostics == NULL) {
@@ -490,6 +545,84 @@ static bool luna_assembly_emit_alignment(LunaX8664Assembler *assembler,
     return true;
 }
 
+static bool luna_assembly_define_debug_file(LunaX8664Assembler *assembler,
+                                            LunaStringView arguments) {
+    size_t split = 0U;
+    while (split < arguments.length &&
+           !luna_assembly_is_space(arguments.data[split])) {
+        split += 1U;
+    }
+    const LunaStringView id_text = {
+        .data = arguments.data,
+        .length = split,
+    };
+    LunaStringView encoded_path = {
+        .data = arguments.data + split,
+        .length = arguments.length - split,
+    };
+    encoded_path = luna_assembly_trim(encoded_path);
+    uint32_t requested_id = 0U;
+    LunaStringBuilder path;
+    luna_string_builder_init(&path);
+    uint32_t actual_id = 0U;
+    const bool success =
+        luna_assembly_parse_u32(id_text, &requested_id) && requested_id != 0U &&
+        luna_assembly_unescape_string(encoded_path, &path) &&
+        luna_debug_ir_add_file(&assembler->image->debug_ir,
+                               (LunaStringView){
+                                   .data = luna_string_builder_data(&path),
+                                   .length = path.length,
+                               },
+                               &actual_id) &&
+        actual_id == requested_id;
+    luna_string_builder_destroy(&path);
+    return success || luna_x86_64_assembler_error(
+                          assembler, "malformed or inconsistent .file");
+}
+
+static bool luna_assembly_next_u32(LunaStringView arguments, size_t *cursor,
+                                   uint32_t *value) {
+    while (*cursor < arguments.length &&
+           luna_assembly_is_space(arguments.data[*cursor])) {
+        *cursor += 1U;
+    }
+    const size_t start = *cursor;
+    while (*cursor < arguments.length &&
+           !luna_assembly_is_space(arguments.data[*cursor])) {
+        *cursor += 1U;
+    }
+    return start < *cursor && luna_assembly_parse_u32(
+                                  (LunaStringView){
+                                      .data = arguments.data + start,
+                                      .length = *cursor - start,
+                                  },
+                                  value);
+}
+
+static bool luna_assembly_define_debug_location(LunaX8664Assembler *assembler,
+                                                LunaStringView arguments) {
+    LunaStringBuilder *text = luna_x86_64_object_section_builder(
+        assembler->image, LUNA_X86_64_OBJECT_SECTION_TEXT);
+    size_t cursor = 0U;
+    uint32_t file_id = 0U;
+    uint32_t line = 0U;
+    uint32_t column = 0U;
+    const bool parsed = assembler->section == LUNA_X86_64_OBJECT_SECTION_TEXT &&
+                        text != NULL &&
+                        luna_assembly_next_u32(arguments, &cursor, &file_id) &&
+                        luna_assembly_next_u32(arguments, &cursor, &line) &&
+                        luna_assembly_next_u32(arguments, &cursor, &column);
+    while (cursor < arguments.length &&
+           luna_assembly_is_space(arguments.data[cursor])) {
+        cursor += 1U;
+    }
+    return (parsed && cursor == arguments.length &&
+            luna_debug_ir_add_location(&assembler->image->debug_ir,
+                                       (uint64_t)text->length, file_id, line,
+                                       column, true)) ||
+           luna_x86_64_assembler_error(assembler, "malformed .loc");
+}
+
 static bool luna_assembly_handle_directive(LunaX8664Assembler *assembler,
                                            LunaStringView line) {
     size_t split = 0U;
@@ -528,6 +661,12 @@ static bool luna_assembly_handle_directive(LunaX8664Assembler *assembler,
     }
     if (luna_string_view_equal_c_string(directive, ".size")) {
         return luna_assembly_set_symbol_size(assembler, arguments);
+    }
+    if (luna_string_view_equal_c_string(directive, ".file")) {
+        return luna_assembly_define_debug_file(assembler, arguments);
+    }
+    if (luna_string_view_equal_c_string(directive, ".loc")) {
+        return luna_assembly_define_debug_location(assembler, arguments);
     }
     if (luna_string_view_equal_c_string(directive, ".byte")) {
         return luna_assembly_emit_byte(assembler, arguments);
@@ -758,6 +897,104 @@ static bool luna_assembly_validate_symbols(LunaX8664Assembler *assembler) {
     return true;
 }
 
+static bool luna_assembly_function_has_location(const LunaDebugIr *debug_ir,
+                                                uint64_t begin, uint64_t end) {
+    for (size_t index = 0U; index < debug_ir->locations.length; index += 1U) {
+        const LunaDebugIrLocation *location =
+            luna_vector_at_const(&debug_ir->locations, index);
+        if (location != NULL && location->code_offset >= begin &&
+            location->code_offset < end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static uint8_t luna_assembly_hex_value(char character) {
+    if (character >= '0' && character <= '9') {
+        return (uint8_t)(character - '0');
+    }
+    if (character >= 'a' && character <= 'f') {
+        return (uint8_t)(character - 'a' + 10);
+    }
+    if (character >= 'A' && character <= 'F') {
+        return (uint8_t)(character - 'A' + 10);
+    }
+    return UINT8_MAX;
+}
+
+static bool luna_assembly_decode_function_name(LunaStringView linkage_name,
+                                               LunaStringBuilder *name) {
+    if (linkage_name.length < 4U || linkage_name.data[0] != '_' ||
+        linkage_name.data[1] != 'L') {
+        return luna_string_builder_append_view(name, linkage_name);
+    }
+    size_t separator = SIZE_MAX;
+    for (size_t index = 2U; index < linkage_name.length; index += 1U) {
+        if (linkage_name.data[index] == '_') {
+            separator = index;
+        }
+    }
+    if (separator == SIZE_MAX ||
+        (linkage_name.length - separator - 1U) % 2U != 0U) {
+        return false;
+    }
+    for (size_t index = separator + 1U; index < linkage_name.length;
+         index += 2U) {
+        const uint8_t high = luna_assembly_hex_value(linkage_name.data[index]);
+        const uint8_t low =
+            luna_assembly_hex_value(linkage_name.data[index + 1U]);
+        if (high == UINT8_MAX || low == UINT8_MAX) {
+            return false;
+        }
+        const char byte = (char)((uint8_t)(high << 4U) | low);
+        if (byte == '\0' || !luna_string_builder_append(name, &byte, 1U)) {
+            return false;
+        }
+    }
+    return name->length > 0U;
+}
+
+static bool luna_assembly_finalize_debug(LunaX8664Assembler *assembler) {
+    LunaDebugIr *debug_ir = &assembler->image->debug_ir;
+    if (debug_ir->locations.length == 0U) {
+        return debug_ir->files.length == 0U;
+    }
+    for (size_t index = 0U; index < assembler->image->symbols.length;
+         index += 1U) {
+        const LunaX8664ObjectSymbol *symbol =
+            luna_vector_at_const(&assembler->image->symbols, index);
+        if (symbol == NULL || !symbol->defined ||
+            symbol->section != LUNA_X86_64_OBJECT_SECTION_TEXT ||
+            symbol->type != LUNA_X86_64_OBJECT_SYMBOL_FUNCTION ||
+            symbol->size == 0U ||
+            !luna_assembly_function_has_location(
+                debug_ir, symbol->value, symbol->value + symbol->size)) {
+            continue;
+        }
+        LunaStringBuilder display_name;
+        luna_string_builder_init(&display_name);
+        const bool success =
+            luna_assembly_decode_function_name(symbol->name, &display_name) &&
+            luna_debug_ir_add_function(
+                debug_ir, symbol->value, symbol->value + symbol->size,
+                (LunaStringView){
+                    .data = luna_string_builder_data(&display_name),
+                    .length = display_name.length,
+                },
+                symbol->name, symbol->global);
+        luna_string_builder_destroy(&display_name);
+        if (!success) {
+            return luna_x86_64_assembler_error(
+                assembler, "failed to finalize function debug records");
+        }
+    }
+    return debug_ir->functions.length > 0U &&
+           luna_debug_ir_verify(debug_ir,
+                                (uint64_t)assembler->image->text.length,
+                                assembler->diagnostics->stream);
+}
+
 bool luna_x86_64_assemble_elf_object(LunaStringView assembly,
                                      LunaDiagnosticEngine *diagnostics,
                                      LunaStringBuilder *output) {
@@ -788,6 +1025,7 @@ bool luna_x86_64_assemble_elf_object(LunaStringView assembly,
         luna_assembly_parse(&assembler, assembly) &&
         luna_assembly_resolve_fixups(&assembler) &&
         luna_assembly_validate_symbols(&assembler) &&
+        luna_assembly_finalize_debug(&assembler) &&
         luna_x86_64_elf_object_serialize(&image, diagnostics, output);
     if (success) {
         const LunaStringView object = {

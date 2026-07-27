@@ -25,6 +25,7 @@ GNU assembly:
 
 - only directives and instruction forms produced by the Luna backend are
   accepted;
+- standard `.file` and `.loc` directives preserve Machine IR source spans;
 - unknown directives, operands, instructions, duplicate labels and unresolved
   branches are hard errors;
 - there is no external-assembler fallback;
@@ -44,6 +45,7 @@ Objects contain the smallest deterministic subset required by the module:
 | `.text` | executable x86-64 bytes, aligned to at least 16 bytes |
 | `.rodata` | immutable static bytes when present |
 | `.data` | writable static bytes when present |
+| `.luna.debug` | versioned relative Debug IR for files, locations and functions |
 | `.rela.text` | explicit-addend relocations when present |
 | `.symtab` | section, local, exported and undefined symbols |
 | `.strtab` | symbol names |
@@ -78,6 +80,7 @@ verifier treats the serialized bytes as untrusted and checks:
 - overflow-safe section ranges, alignment and section-name termination;
 - symbol-table ordering, names, bindings, types and section bounds;
 - relocation entry sizes, symbol indices, target offsets and supported types;
+- complete Debug IR decoding, ordering, strings and `.text` code ranges;
 - all linked-section cross references.
 
 The same verifier is public to unit and mutation tests. Deterministic byte

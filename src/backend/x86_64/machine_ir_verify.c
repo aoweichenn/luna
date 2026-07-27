@@ -713,6 +713,22 @@ luna_x86_64_machine_verify_function(const LunaX8664MachineModule *module,
                 success = false;
                 break;
             }
+            if (instruction->span.source == NULL ||
+                instruction->span.source->path == NULL ||
+                instruction->span.source->text == NULL ||
+                instruction->span.line == 0U ||
+                instruction->span.column == 0U ||
+                instruction->span.offset > instruction->span.source->length ||
+                instruction->span.length > instruction->span.source->length -
+                                               instruction->span.offset) {
+                (void)fprintf(
+                    stream,
+                    "machine IR verification: instruction %zu:%zu:%zu has an "
+                    "invalid source span\n",
+                    function_index, block_index, instruction_index);
+                success = false;
+                break;
+            }
 
             const bool is_last =
                 instruction_index + 1U == block->instructions.length;

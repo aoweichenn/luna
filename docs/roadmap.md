@@ -56,7 +56,7 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] instruction-level differential tests
 - [x] native ELF64 relocatable-object writer
 - [x] minimal project-owned ELF64 static linker
-- [ ] debug information design
+- [x] versioned Debug IR and final-address DWARF 5 information
 
 ## M4: self-hosting
 
@@ -74,4 +74,6 @@ Optimization beyond local x86-64 improvements, general metaprogramming,
 parallel compilation, incremental compilation, package management, language
 server work and non-x86-64 backends are outside the bootstrap path.
 Using libc to implement the target runtime or standard library is also outside
-the accepted design; optional explicit FFI remains supported.
+the accepted design; optional explicit FFI remains supported. Debug
+presentation for local variables and types, optimized location lists, macro
+information and unwind tables are separate post-bootstrap contracts.

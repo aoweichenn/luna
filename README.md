@@ -107,6 +107,19 @@ qemu-x86_64-static ./hello
 not invoke LLVM MC or another external assembler. `lunalink` performs the
 static link itself and does not invoke LLD, GNU ld or a host compiler.
 
+The native object contains versioned project Debug IR, and `lunalink` emits
+final-address DWARF 5 without invoking a host linker:
+
+```sh
+llvm-dwarfdump --verify hello
+gdb hello
+```
+
+The current source-level contract covers files, functions, lines, columns,
+breakpoints and statement stepping. The exact format and deliberate bootstrap
+limits are documented in
+[`docs/debug-information.md`](docs/debug-information.md).
+
 The verified target machine IR can be inspected without producing assembly:
 
 ```sh

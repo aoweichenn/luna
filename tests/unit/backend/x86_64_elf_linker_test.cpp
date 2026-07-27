@@ -107,6 +107,30 @@ FindSectionHeader(std::string_view object, std::uint32_t section_type) {
     return std::nullopt;
 }
 
+[[nodiscard]] std::optional<std::size_t>
+FindSectionHeaderByName(std::string_view object, std::string_view name) {
+    const std::uint64_t section_headers = ReadU64(object, 40U);
+    const std::uint16_t section_count = ReadU16(object, 60U);
+    const std::uint16_t names_index = ReadU16(object, 62U);
+    const std::size_t names_header = static_cast<std::size_t>(section_headers) +
+                                     static_cast<std::size_t>(names_index) *
+                                         LUNA_TEST_ELF_SECTION_HEADER_SIZE;
+    const std::uint64_t names_offset = ReadU64(object, names_header + 24U);
+    const std::uint64_t names_size = ReadU64(object, names_header + 32U);
+    for (std::uint16_t index = 1U; index < section_count; index += 1U) {
+        const std::size_t header =
+            static_cast<std::size_t>(section_headers) +
+            static_cast<std::size_t>(index) * LUNA_TEST_ELF_SECTION_HEADER_SIZE;
+        const std::uint32_t name_offset = ReadU32(object, header);
+        if (ReadString(
+                object, static_cast<std::size_t>(names_offset) + name_offset,
+                static_cast<std::size_t>(names_offset + names_size)) == name) {
+            return header;
+        }
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] std::optional<std::size_t> FindSymbol(std::string_view object,
                                                     std::string_view name) {
     const std::optional<std::size_t> symbol_header =
@@ -288,6 +312,17 @@ TEST(X8664ElfLinkerTest, EmitsDeterministicVerifiedStaticExecutable) {
               LUNA_TEST_ELF_READ_EXECUTE_FLAGS);
     EXPECT_TRUE(VerifyExecutable(first_bytes));
     EXPECT_EQ(first_bytes, second_bytes);
+
+    const std::optional<std::size_t> debug_info =
+        FindSectionHeaderByName(first_bytes, ".debug_info");
+    ASSERT_TRUE(debug_info.has_value());
+    const std::uint64_t debug_info_offset =
+        ReadU64(first_bytes, debug_info.value() + 24U);
+    std::string corrupted_dwarf = first_bytes;
+    corrupted_dwarf[static_cast<std::size_t>(debug_info_offset) + 4U] =
+        static_cast<char>(UINT8_C(4));
+    EXPECT_FALSE(VerifyExecutable(corrupted_dwarf));
+
     luna_string_builder_destroy(&second);
     luna_string_builder_destroy(&first);
 }
@@ -382,6 +417,22 @@ TEST(X8664ElfLinkerTest, RejectsMalformedInputAndCorruptedExecutable) {
                  LUNA_TEST_ELF_PROGRAM_MEMORY_SIZE_OFFSET,
              text_size + 1U);
     EXPECT_FALSE(VerifyExecutable(entry_outside_text));
+
+    std::string foreign_debug = object;
+    const std::size_t debug_name = foreign_debug.find(".luna.debug");
+    ASSERT_NE(debug_name, std::string::npos);
+    foreign_debug.replace(debug_name, std::string_view{".luna.debug"}.size(),
+                          ".debug_info");
+    const std::array<std::string_view, 3U> foreign_objects = {
+        foreign_debug,
+        {},
+        {},
+    };
+    LunaStringBuilder rejected{};
+    luna_string_builder_init(&rejected);
+    EXPECT_FALSE(Link(foreign_objects, 1U, &rejected, nullptr));
+    EXPECT_EQ(rejected.length, 0U);
+    luna_string_builder_destroy(&rejected);
     luna_string_builder_destroy(&executable);
 }
 

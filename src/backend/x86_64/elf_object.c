@@ -158,6 +158,7 @@ void luna_x86_64_object_image_init(LunaX8664ObjectImage *image) {
     luna_string_builder_init(&image->text);
     luna_string_builder_init(&image->rodata);
     luna_string_builder_init(&image->data);
+    luna_debug_ir_init(&image->debug_ir);
     luna_vector_init(&image->symbols, sizeof(LunaX8664ObjectSymbol));
     luna_vector_init(&image->relocations, sizeof(LunaX8664ObjectRelocation));
     image->text_alignment = 16U;
@@ -171,6 +172,7 @@ void luna_x86_64_object_image_destroy(LunaX8664ObjectImage *image) {
     }
     luna_vector_destroy(&image->relocations);
     luna_vector_destroy(&image->symbols);
+    luna_debug_ir_destroy(&image->debug_ir);
     luna_string_builder_destroy(&image->data);
     luna_string_builder_destroy(&image->rodata);
     luna_string_builder_destroy(&image->text);
@@ -270,7 +272,9 @@ static bool luna_elf_validate_image(const LunaX8664ObjectImage *image,
     if (image == NULL || diagnostics == NULL ||
         !luna_elf_is_power_of_two(image->text_alignment) ||
         !luna_elf_is_power_of_two(image->rodata_alignment) ||
-        !luna_elf_is_power_of_two(image->data_alignment)) {
+        !luna_elf_is_power_of_two(image->data_alignment) ||
+        !luna_debug_ir_verify(&image->debug_ir, (uint64_t)image->text.length,
+                              diagnostics->stream)) {
         return luna_elf_report(diagnostics,
                                "invalid x86-64 object image state");
     }
@@ -530,11 +534,13 @@ bool luna_x86_64_elf_object_serialize(const LunaX8664ObjectImage *image,
     LunaStringBuilder strtab;
     LunaStringBuilder symtab;
     LunaStringBuilder rela_text;
+    LunaStringBuilder debug_ir;
     LunaStringBuilder shstrtab;
     LunaVector symbol_map;
     luna_string_builder_init(&strtab);
     luna_string_builder_init(&symtab);
     luna_string_builder_init(&rela_text);
+    luna_string_builder_init(&debug_ir);
     luna_string_builder_init(&shstrtab);
     luna_vector_init(&symbol_map, sizeof(uint32_t));
 
@@ -575,6 +581,12 @@ bool luna_x86_64_elf_object_serialize(const LunaX8664ObjectImage *image,
     }
     if (success) {
         success = luna_elf_build_relocations(image, &symbol_map, &rela_text);
+    }
+    if (success && image->debug_ir.functions.length > 0U) {
+        success = luna_debug_ir_encode(&image->debug_ir, &debug_ir) &&
+                  luna_elf_add_section(sections, &section_count, ".luna.debug",
+                                       LUNA_ELF_SECTION_PROGBITS, 0U, 1U, 0U,
+                                       &debug_ir, NULL);
     }
     if (success && rela_text.length > 0U) {
         success = luna_elf_add_section(
@@ -649,6 +661,7 @@ bool luna_x86_64_elf_object_serialize(const LunaX8664ObjectImage *image,
 
     luna_vector_destroy(&symbol_map);
     luna_string_builder_destroy(&shstrtab);
+    luna_string_builder_destroy(&debug_ir);
     luna_string_builder_destroy(&rela_text);
     luna_string_builder_destroy(&symtab);
     luna_string_builder_destroy(&strtab);
@@ -723,6 +736,29 @@ static bool luna_elf_string_valid(LunaStringView object, uint64_t table_offset,
         }
     }
     return false;
+}
+
+static bool luna_elf_string_view(LunaStringView object, uint64_t table_offset,
+                                 uint64_t table_size, uint32_t name_offset,
+                                 LunaStringView *result) {
+    if (result == NULL || (uint64_t)name_offset >= table_size ||
+        !luna_elf_range_valid(table_offset, table_size, object.length)) {
+        return false;
+    }
+    const uint64_t start = table_offset + (uint64_t)name_offset;
+    const uint64_t end = table_offset + table_size;
+    uint64_t cursor = start;
+    while (cursor < end && object.data[(size_t)cursor] != '\0') {
+        cursor += 1U;
+    }
+    if (cursor == end) {
+        return false;
+    }
+    *result = (LunaStringView){
+        .data = object.data + (size_t)start,
+        .length = (size_t)(cursor - start),
+    };
+    return true;
 }
 
 static bool luna_elf_read_section_field(LunaStringView object,
@@ -968,6 +1004,8 @@ bool luna_x86_64_elf_object_verify(LunaStringView object,
     }
 
     uint16_t symtab_index = 0U;
+    bool saw_debug_ir = false;
+    uint64_t text_size = 0U;
     uint64_t previous_section_end = LUNA_ELF_HEADER_SIZE;
     for (uint16_t index = 0U; index < section_count; index += 1U) {
         uint32_t name_offset = 0U;
@@ -980,6 +1018,7 @@ bool luna_x86_64_elf_object_verify(LunaStringView object,
         uint64_t entry_size = 0U;
         uint32_t link = 0U;
         uint32_t info = 0U;
+        LunaStringView section_name = {0};
         if (!luna_elf_read_section_u32(object, section_headers, index, 0U,
                                        &name_offset) ||
             !luna_elf_read_section_u32(object, section_headers, index, 4U,
@@ -1002,6 +1041,8 @@ bool luna_x86_64_elf_object_verify(LunaStringView object,
                                          &entry_size) ||
             !luna_elf_string_valid(object, shstrtab_offset, shstrtab_size,
                                    name_offset) ||
+            !luna_elf_string_view(object, shstrtab_offset, shstrtab_size,
+                                  name_offset, &section_name) ||
             section_type > LUNA_ELF_SECTION_RELA ||
             (index != 0U && section_type == LUNA_ELF_SECTION_NULL) ||
             address != 0U ||
@@ -1033,6 +1074,32 @@ bool luna_x86_64_elf_object_verify(LunaStringView object,
         }
         if (index != 0U) {
             previous_section_end = offset + size;
+        }
+        if (luna_string_view_equal_c_string(section_name, ".text")) {
+            text_size = size;
+        } else if (luna_string_view_equal_c_string(section_name,
+                                                   ".luna.debug")) {
+            LunaDebugIr debug_ir;
+            if (saw_debug_ir || section_type != LUNA_ELF_SECTION_PROGBITS ||
+                section_flags != 0U || alignment != 1U ||
+                !luna_debug_ir_decode(
+                    (LunaStringView){
+                        .data = object.data + (size_t)offset,
+                        .length = (size_t)size,
+                    },
+                    &debug_ir, diagnostic_stream)) {
+                return luna_elf_verify_error(diagnostic_stream,
+                                             "invalid .luna.debug section");
+            }
+            const bool valid =
+                text_size > 0U &&
+                luna_debug_ir_verify(&debug_ir, text_size, diagnostic_stream);
+            luna_debug_ir_destroy(&debug_ir);
+            if (!valid) {
+                return luna_elf_verify_error(
+                    diagnostic_stream, "out-of-range .luna.debug section");
+            }
+            saw_debug_ir = true;
         }
         if (section_type == LUNA_ELF_SECTION_SYMTAB) {
             if (symtab_index != 0U || entry_size != LUNA_ELF_SYMBOL_SIZE ||

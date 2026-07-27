@@ -9,7 +9,7 @@ enum {
     LUNA_ELF_EXECUTABLE_PROGRAM_READ = 4,
     LUNA_ELF_EXECUTABLE_PROGRAM_WRITE = 2,
     LUNA_ELF_EXECUTABLE_PROGRAM_EXECUTE = 1,
-    LUNA_ELF_EXECUTABLE_SECTION_LIMIT = 6
+    LUNA_ELF_EXECUTABLE_SECTION_LIMIT = 11
 };
 
 typedef struct LunaElfExecutableSection {
@@ -229,6 +229,35 @@ bool luna_elf_link_serialize_executable(LunaElfLinkContext *context,
         payload_end =
             context->data_file_offset + (uint64_t)context->data.length;
     }
+    const bool has_debug = context->debug_info.length > 0U;
+    if (success && has_debug) {
+        const struct {
+            const char *name;
+            const LunaStringBuilder *content;
+        } debug_sections[] = {
+            {".debug_abbrev", &context->debug_abbrev},
+            {".debug_info", &context->debug_info},
+            {".debug_line", &context->debug_line},
+            {".debug_str", &context->debug_str},
+            {".debug_line_str", &context->debug_line_str},
+        };
+        for (size_t index = 0U;
+             success &&
+             index < sizeof(debug_sections) / sizeof(debug_sections[0]);
+             index += 1U) {
+            const LunaStringBuilder *content = debug_sections[index].content;
+            if (content->length == 0U ||
+                (uint64_t)content->length > UINT64_MAX - payload_end) {
+                success = false;
+                break;
+            }
+            success = luna_elf_executable_add_section(
+                sections, &section_count, debug_sections[index].name,
+                LUNA_ELF_LINK_SECTION_PROGBITS, 0U, 0U, payload_end,
+                (uint64_t)content->length, 1U, content, NULL);
+            payload_end += (uint64_t)content->length;
+        }
+    }
     const uint64_t string_table_offset = payload_end;
     if (success) {
         success = luna_elf_executable_add_section(
@@ -444,6 +473,79 @@ static bool luna_elf_executable_section_mapped(
     return false;
 }
 
+static bool luna_elf_executable_verify_dwarf_units(LunaStringView section,
+                                                   bool line_units) {
+    uint64_t offset = 0U;
+    while (offset < (uint64_t)section.length) {
+        uint32_t unit_length = 0U;
+        uint16_t version = 0U;
+        if (!luna_elf_link_read_u32(section, offset, &unit_length) ||
+            unit_length < 8U ||
+            !luna_elf_link_range_valid(offset + 4U, unit_length,
+                                       (uint64_t)section.length) ||
+            !luna_elf_link_read_u16(section, offset + 4U, &version) ||
+            version != 5U) {
+            return false;
+        }
+        const uint64_t unit_end = offset + 4U + unit_length;
+        if (line_units) {
+            uint8_t address_size = 0U;
+            uint8_t segment_size = 0U;
+            uint32_t header_length = 0U;
+            if (!luna_elf_link_read_u8(section, offset + 6U, &address_size) ||
+                !luna_elf_link_read_u8(section, offset + 7U, &segment_size) ||
+                !luna_elf_link_read_u32(section, offset + 8U, &header_length) ||
+                address_size != 8U || segment_size != 0U ||
+                header_length > unit_length - 8U ||
+                offset + 12U + header_length >= unit_end || unit_end < 3U ||
+                (uint8_t)(unsigned char)section.data[(size_t)unit_end - 3U] !=
+                    0U ||
+                (uint8_t)(unsigned char)section.data[(size_t)unit_end - 2U] !=
+                    1U ||
+                (uint8_t)(unsigned char)section.data[(size_t)unit_end - 1U] !=
+                    1U) {
+                return false;
+            }
+        } else {
+            uint8_t unit_type = 0U;
+            uint8_t address_size = 0U;
+            uint32_t abbreviation_offset = 0U;
+            uint8_t root_abbreviation = 0U;
+            if (!luna_elf_link_read_u8(section, offset + 6U, &unit_type) ||
+                !luna_elf_link_read_u8(section, offset + 7U, &address_size) ||
+                !luna_elf_link_read_u32(section, offset + 8U,
+                                        &abbreviation_offset) ||
+                !luna_elf_link_read_u8(section, offset + 12U,
+                                       &root_abbreviation) ||
+                unit_type != 1U || address_size != 8U ||
+                abbreviation_offset != 0U || root_abbreviation != 1U ||
+                section.data[(size_t)unit_end - 1U] != '\0') {
+                return false;
+            }
+        }
+        offset = unit_end;
+    }
+    return offset == (uint64_t)section.length;
+}
+
+static bool
+luna_elf_executable_verify_dwarf(const LunaStringView debug_sections[5]) {
+    const LunaStringView abbreviations = debug_sections[0];
+    const LunaStringView info = debug_sections[1];
+    const LunaStringView line = debug_sections[2];
+    const LunaStringView strings = debug_sections[3];
+    const LunaStringView line_strings = debug_sections[4];
+    return abbreviations.data != NULL && abbreviations.length >= 3U &&
+           (uint8_t)(unsigned char)abbreviations.data[0] == 1U &&
+           abbreviations.data[abbreviations.length - 1U] == '\0' &&
+           strings.data != NULL && strings.length > 0U &&
+           strings.data[strings.length - 1U] == '\0' &&
+           line_strings.data != NULL && line_strings.length > 0U &&
+           line_strings.data[line_strings.length - 1U] == '\0' &&
+           luna_elf_executable_verify_dwarf_units(info, false) &&
+           luna_elf_executable_verify_dwarf_units(line, true);
+}
+
 bool luna_x86_64_elf_executable_verify(LunaStringView executable,
                                        FILE *diagnostic_stream) {
     static const char identity[16] = {
@@ -549,6 +651,8 @@ bool luna_x86_64_elf_executable_verify(LunaStringView executable,
     bool saw_rodata = false;
     bool saw_data = false;
     bool saw_bss = false;
+    uint8_t debug_stage = 0U;
+    LunaStringView debug_sections[5] = {{0}};
     for (uint16_t index = 1U; index < section_count; index += 1U) {
         const uint64_t offset =
             section_headers +
@@ -603,27 +707,54 @@ bool luna_x86_64_elf_executable_verify(LunaStringView executable,
         const bool is_bss = luna_string_view_equal_c_string(name, ".bss");
         const bool is_string_table =
             luna_string_view_equal_c_string(name, ".shstrtab");
+        const bool is_debug_abbrev =
+            luna_string_view_equal_c_string(name, ".debug_abbrev");
+        const bool is_debug_info =
+            luna_string_view_equal_c_string(name, ".debug_info");
+        const bool is_debug_line =
+            luna_string_view_equal_c_string(name, ".debug_line");
+        const bool is_debug_str =
+            luna_string_view_equal_c_string(name, ".debug_str");
+        const bool is_debug_line_str =
+            luna_string_view_equal_c_string(name, ".debug_line_str");
+        uint8_t expected_debug_stage = 0U;
+        if (is_debug_abbrev) {
+            expected_debug_stage = 1U;
+        } else if (is_debug_info) {
+            expected_debug_stage = 2U;
+        } else if (is_debug_line) {
+            expected_debug_stage = 3U;
+        } else if (is_debug_str) {
+            expected_debug_stage = 4U;
+        } else if (is_debug_line_str) {
+            expected_debug_stage = 5U;
+        }
+        const bool is_debug = expected_debug_stage != 0U;
         const bool known_contract =
             (is_text && index == 1U &&
              section_type == LUNA_ELF_LINK_SECTION_PROGBITS &&
              section_flags ==
                  (LUNA_ELF_LINK_FLAG_ALLOC | LUNA_ELF_LINK_FLAG_EXECUTE) &&
              entry >= section_address && entry - section_address < size) ||
-            (is_rodata && !saw_rodata && !saw_data && !saw_bss &&
-             section_type == LUNA_ELF_LINK_SECTION_PROGBITS &&
+            (is_rodata && debug_stage == 0U && !saw_rodata && !saw_data &&
+             !saw_bss && section_type == LUNA_ELF_LINK_SECTION_PROGBITS &&
              section_flags == LUNA_ELF_LINK_FLAG_ALLOC && size != 0U) ||
-            (is_data && !saw_data && !saw_bss &&
+            (is_data && debug_stage == 0U && !saw_data && !saw_bss &&
              section_type == LUNA_ELF_LINK_SECTION_PROGBITS &&
              section_flags ==
                  (LUNA_ELF_LINK_FLAG_ALLOC | LUNA_ELF_LINK_FLAG_WRITE) &&
              size != 0U) ||
-            (is_bss && !saw_bss &&
+            (is_bss && debug_stage == 0U && !saw_bss &&
              section_type == LUNA_ELF_LINK_SECTION_NOBITS &&
              section_flags ==
                  (LUNA_ELF_LINK_FLAG_ALLOC | LUNA_ELF_LINK_FLAG_WRITE) &&
              size != 0U) ||
-            (is_string_table && index == string_table_index &&
-             index + 1U == section_count &&
+            (is_debug && expected_debug_stage == debug_stage + 1U &&
+             section_type == LUNA_ELF_LINK_SECTION_PROGBITS &&
+             section_flags == 0U && section_address == 0U && size != 0U &&
+             alignment == 1U) ||
+            (is_string_table && (debug_stage == 0U || debug_stage == 5U) &&
+             index == string_table_index && index + 1U == section_count &&
              section_type == LUNA_ELF_LINK_SECTION_STRTAB &&
              section_flags == 0U);
         if (!known_contract ||
@@ -638,6 +769,20 @@ bool luna_x86_64_elf_executable_verify(LunaStringView executable,
         saw_rodata = saw_rodata || is_rodata;
         saw_data = saw_data || is_data;
         saw_bss = saw_bss || is_bss;
+        if (is_debug) {
+            debug_stage = expected_debug_stage;
+            debug_sections[(size_t)expected_debug_stage - 1U] =
+                (LunaStringView){
+                    .data = executable.data + (size_t)file_offset,
+                    .length = (size_t)size,
+                };
+        }
+    }
+    if ((debug_stage != 0U && debug_stage != 5U) ||
+        (debug_stage == 5U &&
+         !luna_elf_executable_verify_dwarf(debug_sections))) {
+        return luna_elf_link_verify_error(diagnostic_stream,
+                                          "invalid or incomplete DWARF set");
     }
     const uint16_t expected_program_count =
         (uint16_t)(1U + (saw_rodata ? 1U : 0U) +

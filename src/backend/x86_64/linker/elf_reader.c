@@ -224,6 +224,72 @@ static bool luna_elf_reader_read_sections(LunaElfLinkContext *context,
     return true;
 }
 
+static bool luna_elf_reader_read_debug_ir(LunaElfLinkContext *context,
+                                          LunaElfLinkObject *object) {
+    const LunaElfLinkSection *text = NULL;
+    const LunaElfLinkSection *encoded_debug = NULL;
+    for (size_t index = 1U; index < object->sections.length; index += 1U) {
+        const LunaElfLinkSection *section =
+            luna_vector_at_const(&object->sections, index);
+        if (section == NULL) {
+            return luna_elf_link_error(context, object,
+                                       "invalid debug section state");
+        }
+        if (luna_string_view_equal_c_string(section->name, ".text")) {
+            if (text != NULL) {
+                return luna_elf_link_error(context, object,
+                                           "duplicate .text section");
+            }
+            text = section;
+        } else if ((section->name.length >= 7U &&
+                    memcmp(section->name.data, ".debug_", 7U) == 0) ||
+                   (section->name.length >= 8U &&
+                    memcmp(section->name.data, ".zdebug_", 8U) == 0)) {
+            return luna_elf_link_error(
+                context, object,
+                "foreign DWARF section '%.*s' is unsupported; use Luna "
+                "Debug IR or remove host debug information",
+                (int)section->name.length, section->name.data);
+        } else if (luna_string_view_equal_c_string(section->name,
+                                                   ".luna.debug")) {
+            if (encoded_debug != NULL) {
+                return luna_elf_link_error(context, object,
+                                           "duplicate .luna.debug section");
+            }
+            encoded_debug = section;
+        }
+    }
+    if (encoded_debug == NULL) {
+        return true;
+    }
+    if (text == NULL || text->region != LUNA_ELF_LINK_REGION_TEXT ||
+        encoded_debug->type != LUNA_ELF_LINK_SECTION_PROGBITS ||
+        encoded_debug->flags != 0U || encoded_debug->alignment != 1U) {
+        return luna_elf_link_error(context, object,
+                                   "invalid .luna.debug section contract");
+    }
+    LunaDebugIr decoded;
+    if (!luna_debug_ir_decode(
+            (LunaStringView){
+                .data = object->bytes.data + encoded_debug->file_offset,
+                .length = (size_t)encoded_debug->size,
+            },
+            &decoded, context->diagnostic_stream)) {
+        return luna_elf_link_error(context, object,
+                                   "malformed .luna.debug payload");
+    }
+    if (!luna_debug_ir_verify(&decoded, text->size,
+                              context->diagnostic_stream)) {
+        luna_debug_ir_destroy(&decoded);
+        return luna_elf_link_error(context, object,
+                                   "out-of-range .luna.debug payload");
+    }
+    luna_debug_ir_destroy(&object->debug_ir);
+    object->debug_ir = decoded;
+    object->has_debug_ir = true;
+    return true;
+}
+
 bool luna_elf_link_parse_object(LunaElfLinkContext *context,
                                 const LunaX8664ElfLinkInput *input) {
     LunaElfLinkObject object = {
@@ -231,6 +297,7 @@ bool luna_elf_link_parse_object(LunaElfLinkContext *context,
         .bytes = input->object,
     };
     luna_vector_init(&object.sections, sizeof(LunaElfLinkSection));
+    luna_debug_ir_init(&object.debug_ir);
 
     static const uint8_t identity[LUNA_ELF_READER_IDENTITY_SIZE] = {
         0x7fU, 'E', 'L', 'F', 2U, 1U, 1U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U,
@@ -277,6 +344,7 @@ bool luna_elf_link_parse_object(LunaElfLinkContext *context,
                                    (uint64_t)section_count *
                                        LUNA_ELF_LINK_SECTION_HEADER_SIZE,
                                    (uint64_t)object.bytes.length)) {
+        luna_debug_ir_destroy(&object.debug_ir);
         luna_vector_destroy(&object.sections);
         return luna_elf_link_error(context, &object,
                                    "unsupported or malformed ELF64 object");
@@ -284,12 +352,14 @@ bool luna_elf_link_parse_object(LunaElfLinkContext *context,
 
     if (!luna_elf_reader_read_sections(context, &object, section_headers,
                                        section_count, string_table_index) ||
+        !luna_elf_reader_read_debug_ir(context, &object) ||
         object.symbol_table_index == 0U) {
         if (object.symbol_table_index == 0U &&
             object.sections.length == (size_t)section_count) {
             (void)luna_elf_link_error(context, &object,
                                       "object has no symbol table");
         }
+        luna_debug_ir_destroy(&object.debug_ir);
         luna_vector_destroy(&object.sections);
         return false;
     }
@@ -304,12 +374,14 @@ bool luna_elf_link_parse_object(LunaElfLinkContext *context,
         symbol_strings->type != LUNA_ELF_LINK_SECTION_STRTAB ||
         symbol_table->info == 0U ||
         symbol_table->info > symbol_table->size / LUNA_ELF_LINK_SYMBOL_SIZE) {
+        luna_debug_ir_destroy(&object.debug_ir);
         luna_vector_destroy(&object.sections);
         return luna_elf_link_error(context, &object,
                                    "invalid symbol table references");
     }
 
     if (!luna_vector_push(&context->objects, &object)) {
+        luna_debug_ir_destroy(&object.debug_ir);
         luna_vector_destroy(&object.sections);
         return luna_elf_link_error(
             context, NULL, "out of memory while recording input objects");

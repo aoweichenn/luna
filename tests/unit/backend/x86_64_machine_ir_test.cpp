@@ -137,6 +137,9 @@ TEST(X8664MachineIrTest, ResolvesTargetSizedTypesAndExposesDefUse) {
     ASSERT_NE(addition, nullptr);
     EXPECT_EQ(shift->type, LUNA_X86_64_MACHINE_TYPE_U64);
     EXPECT_EQ(addition->type, LUNA_X86_64_MACHINE_TYPE_I64);
+    EXPECT_EQ(shift->span.source, harness.Source());
+    EXPECT_EQ(shift->span.line, 3U);
+    EXPECT_GT(shift->span.column, 0U);
     EXPECT_EQ(luna_x86_64_machine_instruction_use_count(addition), 2U);
     EXPECT_EQ(luna_x86_64_machine_instruction_use(transform, addition, 0U),
               addition->left);
@@ -146,6 +149,9 @@ TEST(X8664MachineIrTest, ResolvesTargetSizedTypesAndExposesDefUse) {
     EXPECT_TRUE(
         luna_x86_64_machine_instruction_definition(addition, &definition));
     EXPECT_EQ(definition, addition->result);
+
+    shift->span.source = nullptr;
+    EXPECT_FALSE(luna_x86_64_machine_verify(machine.Get(), nullptr));
 }
 
 TEST(X8664MachineIrTest, PrintsAStableTargetSpecificBoundary) {

@@ -16,6 +16,8 @@ TEST(X8664BackendTest, EmitsDirectAssemblyForTypedIr) {
     ASSERT_TRUE(harness.EmitAssembly()) << harness.Diagnostics();
     const std::string assembly = harness.Assembly();
     EXPECT_NE(assembly.find(".globl _start"), std::string::npos);
+    EXPECT_NE(assembly.find(".file 1 \"<test>\""), std::string::npos);
+    EXPECT_NE(assembly.find(".loc 1 "), std::string::npos);
     EXPECT_NE(assembly.find("imull"), std::string::npos);
     EXPECT_NE(assembly.find("sarl %cl, %eax"), std::string::npos);
     EXPECT_NE(assembly.find("call _L"), std::string::npos);

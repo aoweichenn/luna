@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 static uint32_t luna_x86_64_type_bit_width(LunaX8664MachineType type) {
     return luna_x86_64_machine_type_bit_width(type);
@@ -61,6 +62,136 @@ luna_x86_64_append_linkage_symbol(LunaStringBuilder *output,
         return luna_string_builder_append_view(output, function->name);
     }
     return luna_x86_64_append_symbol(output, function);
+}
+
+static bool luna_x86_64_append_quoted_string(LunaStringBuilder *output,
+                                             const char *text) {
+    if (output == NULL || text == NULL ||
+        !luna_string_builder_append_c_string(output, "\"")) {
+        return false;
+    }
+    for (size_t index = 0U; text[index] != '\0'; index += 1U) {
+        const unsigned char byte = (unsigned char)text[index];
+        if (byte == '\\' || byte == '"') {
+            const char escaped[2] = {'\\', (char)byte};
+            if (!luna_string_builder_append(output, escaped, sizeof(escaped))) {
+                return false;
+            }
+        } else if (byte == '\n' || byte == '\r' || byte == '\t') {
+            const char escape = byte == '\n' ? 'n' : (byte == '\r' ? 'r' : 't');
+            const char escaped[2] = {'\\', escape};
+            if (!luna_string_builder_append(output, escaped, sizeof(escaped))) {
+                return false;
+            }
+        } else if (byte >= 0x20U && byte <= 0x7eU) {
+            const char character = (char)byte;
+            if (!luna_string_builder_append(output, &character, 1U)) {
+                return false;
+            }
+        } else {
+            const char escaped[4] = {
+                '\\',
+                (char)('0' + ((byte >> 6U) & 7U)),
+                (char)('0' + ((byte >> 3U) & 7U)),
+                (char)('0' + (byte & 7U)),
+            };
+            if (!luna_string_builder_append(output, escaped, sizeof(escaped))) {
+                return false;
+            }
+        }
+    }
+    return luna_string_builder_append_c_string(output, "\"");
+}
+
+static bool luna_x86_64_debug_source_valid(LunaSourceSpan span) {
+    return span.source != NULL && span.source->path != NULL && span.line > 0U &&
+           span.column > 0U;
+}
+
+static uint32_t luna_x86_64_debug_file_id(const LunaVector *files,
+                                          const LunaSourceFile *source) {
+    if (files == NULL || source == NULL || source->path == NULL) {
+        return 0U;
+    }
+    for (size_t index = 0U; index < files->length; index += 1U) {
+        const LunaSourceFile *const *file = luna_vector_at_const(files, index);
+        if (file != NULL && *file != NULL && (*file)->path != NULL &&
+            strcmp((*file)->path, source->path) == 0) {
+            return (uint32_t)index + 1U;
+        }
+    }
+    return 0U;
+}
+
+static bool
+luna_x86_64_collect_debug_files(const LunaX8664MachineModule *module,
+                                LunaVector *files) {
+    luna_vector_init(files, sizeof(const LunaSourceFile *));
+    for (size_t function_index = 0U; function_index < module->functions.length;
+         function_index += 1U) {
+        const LunaX8664MachineFunction *function =
+            luna_vector_at_const(&module->functions, function_index);
+        if (function == NULL) {
+            return false;
+        }
+        for (size_t block_index = 0U; block_index < function->blocks.length;
+             block_index += 1U) {
+            const LunaX8664MachineBlock *block =
+                luna_vector_at_const(&function->blocks, block_index);
+            if (block == NULL) {
+                return false;
+            }
+            for (size_t instruction_index = 0U;
+                 instruction_index < block->instructions.length;
+                 instruction_index += 1U) {
+                const LunaX8664MachineInstruction *instruction =
+                    luna_vector_at_const(&block->instructions,
+                                         instruction_index);
+                if (instruction == NULL ||
+                    !luna_x86_64_debug_source_valid(instruction->span) ||
+                    luna_x86_64_debug_file_id(files,
+                                              instruction->span.source) != 0U) {
+                    continue;
+                }
+                const LunaSourceFile *source = instruction->span.source;
+                if (files->length >= UINT32_MAX ||
+                    !luna_vector_push(files, &source)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static bool luna_x86_64_emit_debug_files(LunaStringBuilder *output,
+                                         const LunaVector *files) {
+    for (size_t index = 0U; index < files->length; index += 1U) {
+        const LunaSourceFile *const *file = luna_vector_at_const(files, index);
+        if (file == NULL || *file == NULL || (*file)->path == NULL ||
+            !luna_string_builder_append_format(output, "    .file %zu ",
+                                               index + 1U) ||
+            !luna_x86_64_append_quoted_string(output, (*file)->path) ||
+            !luna_string_builder_append_c_string(output, "\n")) {
+            return false;
+        }
+    }
+    return files->length == 0U ||
+           luna_string_builder_append_c_string(output, "\n");
+}
+
+static bool luna_x86_64_emit_debug_location(
+    LunaStringBuilder *output, const LunaVector *files,
+    const LunaX8664MachineInstruction *instruction) {
+    if (!luna_x86_64_debug_source_valid(instruction->span)) {
+        return true;
+    }
+    const uint32_t file_id =
+        luna_x86_64_debug_file_id(files, instruction->span.source);
+    return file_id != 0U &&
+           luna_string_builder_append_format(
+               output, "    .loc %" PRIu32 " %" PRIu32 " %" PRIu32 "\n",
+               file_id, instruction->span.line, instruction->span.column);
 }
 
 static bool luna_x86_64_align_up(uint64_t value, uint32_t alignment,
@@ -2287,7 +2418,8 @@ static bool luna_x86_64_emit_function(
     LunaStringBuilder *output, const LunaX8664MachineModule *module,
     const LunaX8664ModuleAbi *abi, const LunaX8664MachineFunction *function,
     const LunaX8664FunctionAbi *function_abi,
-    const LunaX8664FunctionInstructionRewrite *rewrite, size_t function_index) {
+    const LunaX8664FunctionInstructionRewrite *rewrite,
+    const LunaVector *debug_files, size_t function_index) {
     static const char *argument_registers_32_bit[] = {
         "%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d",
     };
@@ -2516,7 +2648,10 @@ static bool luna_x86_64_emit_function(
              instruction_index += 1U) {
             const LunaX8664MachineInstruction *instruction =
                 luna_vector_at_const(&block->instructions, instruction_index);
-            if (!luna_x86_64_emit_instruction(output, module, abi, function,
+            if (instruction == NULL ||
+                !luna_x86_64_emit_debug_location(output, debug_files,
+                                                 instruction) ||
+                !luna_x86_64_emit_instruction(output, module, abi, function,
                                               rewrite, function_index,
                                               instruction)) {
                 return false;
@@ -2646,9 +2781,19 @@ bool luna_x86_64_machine_emit_assembly(
         return false;
     }
 
+    LunaVector debug_files;
+    if (!luna_x86_64_collect_debug_files(module, &debug_files) ||
+        !luna_x86_64_emit_debug_files(output, &debug_files)) {
+        luna_vector_destroy(&debug_files);
+        luna_diagnostic_error_plain(
+            diagnostics, "out of memory while emitting source file records");
+        return false;
+    }
+
     if (!luna_x86_64_emit_globals(output, module) ||
         !luna_x86_64_emit_external_declarations(output, module) ||
         !luna_string_builder_append_c_string(output, "    .text\n")) {
+        luna_vector_destroy(&debug_files);
         luna_diagnostic_error_plain(
             diagnostics, "out of memory while emitting x86-64 assembly");
         return false;
@@ -2672,6 +2817,7 @@ bool luna_x86_64_machine_emit_assembly(
                                       "    movl $60, %eax\n"
                                       "    syscall\n"
                                       "    .size _start, .-_start\n\n"))) {
+        luna_vector_destroy(&debug_files);
         luna_diagnostic_error_plain(
             diagnostics, "out of memory while emitting x86-64 entry point");
         return false;
@@ -2691,7 +2837,8 @@ bool luna_x86_64_machine_emit_assembly(
             luna_vector_at_const(&rewrite->functions, function_index);
         if (!luna_x86_64_emit_function(output, module, abi, function,
                                        function_abi, function_rewrite,
-                                       function_index)) {
+                                       &debug_files, function_index)) {
+            luna_vector_destroy(&debug_files);
             luna_diagnostic_error_plain(
                 diagnostics,
                 "x86-64 code generation failed for function '%.*s'",
@@ -2702,10 +2849,12 @@ bool luna_x86_64_machine_emit_assembly(
 
     if (!luna_string_builder_append_c_string(
             output, "    .section .note.GNU-stack,\"\",@progbits\n")) {
+        luna_vector_destroy(&debug_files);
         luna_diagnostic_error_plain(
             diagnostics, "out of memory while finalizing x86-64 assembly");
         return false;
     }
 
+    luna_vector_destroy(&debug_files);
     return true;
 }

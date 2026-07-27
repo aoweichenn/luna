@@ -163,6 +163,10 @@ TEST(X8664ElfObjectTest, EmitsVerifiedSectionsSymbolsAndRelocations) {
     EXPECT_TRUE(FindSection(sections, ".symtab").has_value());
     EXPECT_TRUE(FindSection(sections, ".strtab").has_value());
     EXPECT_TRUE(FindSection(sections, ".note.GNU-stack").has_value());
+    const std::optional<ElfSection> debug_ir =
+        FindSection(sections, ".luna.debug");
+    ASSERT_TRUE(debug_ir.has_value());
+    ASSERT_GT(debug_ir->size, 52U);
     const std::optional<ElfSection> relocations =
         FindSection(sections, ".rela.text");
     ASSERT_TRUE(relocations.has_value());
@@ -188,6 +192,10 @@ TEST(X8664ElfObjectTest, EmitsVerifiedSectionsSymbolsAndRelocations) {
     corrupted_addend[static_cast<std::size_t>(relocations->offset) + 16U] ^=
         static_cast<char>(UINT8_C(1));
     EXPECT_FALSE(VerifyObject(corrupted_addend));
+
+    std::string corrupted_debug = object;
+    corrupted_debug[static_cast<std::size_t>(debug_ir->offset)] = 'X';
+    EXPECT_FALSE(VerifyObject(corrupted_debug));
 }
 
 TEST(X8664ElfObjectTest, ResolvesNamedAndNumericTextLabelsWithoutRelocations) {

@@ -43,9 +43,10 @@ compressed or writable-executable sections are rejected. `COMMON` symbols
 must be compiled with `-fno-common`.
 
 Archives, shared objects, dynamic linking, PLT/GOT synthesis, TLS, COMDAT,
-linker scripts, symbol versioning, section garbage collection and debug
-information are not silently approximated. They remain outside this minimal
-bootstrap contract.
+linker scripts, symbol versioning and section garbage collection are not
+silently approximated. Debug input is limited to Luna's versioned
+`.luna.debug`; foreign `.debug_*` and `.zdebug_*` sections are rejected rather
+than partially merged.
 
 ## Layout
 
@@ -62,8 +63,10 @@ input allocations into four logical output sections:
 Each input contribution retains its alignment. Load segments begin on a
 4096-byte boundary, use a fixed `0x400000` image base and never combine write
 and execute permission. The output also contains `.shstrtab` so ordinary ELF
-inspection tools can report its sections. It intentionally omits a copied
-symbol table until the debug-information stage defines that contract.
+inspection tools can report its sections. When an input carries project Debug
+IR, non-allocatable `.debug_abbrev`, `.debug_info`, `.debug_line`,
+`.debug_str` and `.debug_line_str` sections follow the allocated payload. They
+never enter a load segment.
 
 ## Symbol resolution
 
