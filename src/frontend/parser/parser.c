@@ -152,6 +152,13 @@ static LunaTypeRef luna_parser_parse_type(LunaParser *parser) {
     }
 
     switch (token.kind) {
+    case LUNA_TOKEN_IDENTIFIER:
+        luna_parser_advance(parser);
+        return (LunaTypeRef){
+            .kind = LUNA_TYPE_NAMED,
+            .span = token.span,
+            .as.name = luna_parser_token_text(token),
+        };
     case LUNA_TOKEN_BOOL:
         kind = LUNA_TYPE_BOOL;
         break;
@@ -417,6 +424,45 @@ static LunaExpression *luna_parser_parse_call(LunaParser *parser,
 static LunaExpression *luna_parser_parse_primary(LunaParser *parser) {
     const LunaToken token = parser->current;
 
+    if (luna_parser_match(parser, LUNA_TOKEN_SIZEOF) ||
+        luna_parser_match(parser, LUNA_TOKEN_ALIGNOF) ||
+        luna_parser_match(parser, LUNA_TOKEN_OFFSETOF)) {
+        if (!luna_parser_enter_nesting(parser, token.span)) {
+            return NULL;
+        }
+        (void)luna_parser_expect(parser, LUNA_TOKEN_LEFT_PAREN,
+                                 "after layout query");
+        const LunaTypeRef type = luna_parser_parse_type(parser);
+        LunaStringView member_name = {0};
+        if (token.kind == LUNA_TOKEN_OFFSETOF) {
+            (void)luna_parser_expect(parser, LUNA_TOKEN_COMMA,
+                                     "after offsetof type");
+            const LunaToken member_token = parser->current;
+            if (luna_parser_expect(parser, LUNA_TOKEN_IDENTIFIER,
+                                   "as offsetof field name")) {
+                member_name = luna_parser_token_text(member_token);
+            }
+        }
+        (void)luna_parser_expect(parser, LUNA_TOKEN_RIGHT_PAREN,
+                                 "after layout query");
+        luna_parser_leave_nesting(parser);
+
+        LunaExpressionKind kind = LUNA_EXPRESSION_SIZEOF;
+        if (token.kind == LUNA_TOKEN_ALIGNOF) {
+            kind = LUNA_EXPRESSION_ALIGNOF;
+        } else if (token.kind == LUNA_TOKEN_OFFSETOF) {
+            kind = LUNA_EXPRESSION_OFFSETOF;
+        }
+        LunaExpression *expression = luna_parser_new_expression(
+            parser, kind,
+            luna_parser_join_spans(token.span, parser->previous.span));
+        if (expression != NULL) {
+            expression->as.type_query.type = type;
+            expression->as.type_query.member_name = member_name;
+        }
+        return expression;
+    }
+
     if (luna_parser_match(parser, LUNA_TOKEN_INTEGER)) {
         LunaExpression *expression = luna_parser_new_expression(
             parser, LUNA_EXPRESSION_INTEGER, token.span);
@@ -507,29 +553,56 @@ static LunaExpression *luna_parser_parse_primary(LunaParser *parser) {
 
 static LunaExpression *luna_parser_parse_postfix(LunaParser *parser) {
     LunaExpression *expression = luna_parser_parse_primary(parser);
-    while (expression != NULL &&
-           luna_parser_match(parser, LUNA_TOKEN_LEFT_BRACKET)) {
-        const LunaToken left_bracket = parser->previous;
-        if (!luna_parser_enter_nesting(parser, left_bracket.span)) {
-            return expression;
-        }
-        LunaExpression *index = luna_parser_parse_expression(parser);
-        (void)luna_parser_expect(parser, LUNA_TOKEN_RIGHT_BRACKET,
-                                 "after index expression");
-        luna_parser_leave_nesting(parser);
-        if (index == NULL) {
-            return expression;
+    while (expression != NULL) {
+        if (luna_parser_match(parser, LUNA_TOKEN_LEFT_BRACKET)) {
+            const LunaToken left_bracket = parser->previous;
+            if (!luna_parser_enter_nesting(parser, left_bracket.span)) {
+                return expression;
+            }
+            LunaExpression *index = luna_parser_parse_expression(parser);
+            (void)luna_parser_expect(parser, LUNA_TOKEN_RIGHT_BRACKET,
+                                     "after index expression");
+            luna_parser_leave_nesting(parser);
+            if (index == NULL) {
+                return expression;
+            }
+
+            LunaExpression *indexed = luna_parser_new_expression(
+                parser, LUNA_EXPRESSION_INDEX,
+                luna_parser_join_spans(expression->span,
+                                       parser->previous.span));
+            if (indexed == NULL) {
+                return expression;
+            }
+            indexed->as.index.base = expression;
+            indexed->as.index.index = index;
+            expression = indexed;
+            continue;
         }
 
-        LunaExpression *indexed = luna_parser_new_expression(
-            parser, LUNA_EXPRESSION_INDEX,
-            luna_parser_join_spans(expression->span, parser->previous.span));
-        if (indexed == NULL) {
-            return expression;
+        if (luna_parser_check(parser, LUNA_TOKEN_DOT) ||
+            luna_parser_check(parser, LUNA_TOKEN_ARROW)) {
+            const LunaToken operator_token = parser->current;
+            luna_parser_advance(parser);
+            const LunaToken name_token = parser->current;
+            if (!luna_parser_expect(parser, LUNA_TOKEN_IDENTIFIER,
+                                    "as member name")) {
+                return expression;
+            }
+
+            LunaExpression *member = luna_parser_new_expression(
+                parser, LUNA_EXPRESSION_MEMBER,
+                luna_parser_join_spans(expression->span, name_token.span));
+            if (member == NULL) {
+                return expression;
+            }
+            member->as.member.base = expression;
+            member->as.member.name = luna_parser_token_text(name_token);
+            member->as.member.operator_kind = operator_token.kind;
+            expression = member;
+            continue;
         }
-        indexed->as.index.base = expression;
-        indexed->as.index.index = index;
-        expression = indexed;
+        break;
     }
     return expression;
 }
@@ -939,6 +1012,10 @@ static LunaStatement *luna_parser_parse_for_statement(LunaParser *parser) {
 }
 
 static LunaExpression *luna_parser_parse_switch_label(LunaParser *parser) {
+    if (luna_parser_check(parser, LUNA_TOKEN_IDENTIFIER)) {
+        return luna_parser_parse_postfix(parser);
+    }
+
     LunaToken sign_token = {
         .kind = LUNA_TOKEN_INVALID,
     };
@@ -1279,6 +1356,142 @@ static LunaFunction *luna_parser_parse_function(LunaParser *parser,
     return function;
 }
 
+static LunaTypeDeclaration *
+luna_parser_parse_aggregate_declaration(LunaParser *parser, LunaTypeKind kind,
+                                        bool is_exported,
+                                        LunaSourceSpan start_span) {
+    const LunaToken name_token = parser->current;
+    if (!luna_parser_expect(parser, LUNA_TOKEN_IDENTIFIER,
+                            "as aggregate type name")) {
+        return NULL;
+    }
+    (void)luna_parser_expect(parser, LUNA_TOKEN_LEFT_BRACE,
+                             "to begin aggregate declaration");
+
+    LunaField *first_field = NULL;
+    LunaField **next_field = &first_field;
+    uint32_t field_count = 0U;
+    while (!luna_parser_check(parser, LUNA_TOKEN_RIGHT_BRACE) &&
+           !luna_parser_check(parser, LUNA_TOKEN_END)) {
+        const LunaToken field_name = parser->current;
+        if (!luna_parser_expect(parser, LUNA_TOKEN_IDENTIFIER,
+                                "as field name")) {
+            luna_parser_advance(parser);
+            continue;
+        }
+        (void)luna_parser_expect(parser, LUNA_TOKEN_COLON, "after field name");
+        const LunaTypeRef field_type = luna_parser_parse_type(parser);
+        (void)luna_parser_expect(parser, LUNA_TOKEN_SEMICOLON, "after field");
+
+        LunaField *field = luna_parser_allocate(parser, sizeof(LunaField),
+                                                _Alignof(LunaField));
+        if (field == NULL) {
+            return NULL;
+        }
+        field->name = luna_parser_token_text(field_name);
+        field->type = field_type;
+        field->span = luna_parser_join_spans(field_name.span, field_type.span);
+        *next_field = field;
+        next_field = &field->next;
+        if (field_count == UINT32_MAX) {
+            luna_diagnostic_error(parser->diagnostics, field->span,
+                                  "too many aggregate fields");
+        } else {
+            field_count += 1U;
+        }
+    }
+    (void)luna_parser_expect(parser, LUNA_TOKEN_RIGHT_BRACE,
+                             "to end aggregate declaration");
+
+    LunaTypeDeclaration *declaration = luna_parser_allocate(
+        parser, sizeof(LunaTypeDeclaration), _Alignof(LunaTypeDeclaration));
+    if (declaration == NULL) {
+        return NULL;
+    }
+    declaration->kind = kind;
+    declaration->name = luna_parser_token_text(name_token);
+    declaration->span =
+        luna_parser_join_spans(start_span, parser->previous.span);
+    declaration->is_exported = is_exported;
+    declaration->as.aggregate.first_field = first_field;
+    declaration->as.aggregate.field_count = field_count;
+    return declaration;
+}
+
+static LunaTypeDeclaration *
+luna_parser_parse_enum_declaration(LunaParser *parser, bool is_exported,
+                                   LunaSourceSpan start_span) {
+    const LunaToken name_token = parser->current;
+    if (!luna_parser_expect(parser, LUNA_TOKEN_IDENTIFIER,
+                            "as enum type name")) {
+        return NULL;
+    }
+    (void)luna_parser_expect(parser, LUNA_TOKEN_COLON,
+                             "before enum underlying type");
+    const LunaTypeRef underlying_type = luna_parser_parse_type(parser);
+    (void)luna_parser_expect(parser, LUNA_TOKEN_LEFT_BRACE,
+                             "to begin enum declaration");
+
+    LunaEnumMember *first_member = NULL;
+    LunaEnumMember **next_member = &first_member;
+    uint32_t member_count = 0U;
+    while (!luna_parser_check(parser, LUNA_TOKEN_RIGHT_BRACE) &&
+           !luna_parser_check(parser, LUNA_TOKEN_END)) {
+        const LunaToken member_name = parser->current;
+        if (!luna_parser_expect(parser, LUNA_TOKEN_IDENTIFIER,
+                                "as enum member name")) {
+            luna_parser_advance(parser);
+            continue;
+        }
+
+        LunaExpression *initializer = NULL;
+        if (luna_parser_match(parser, LUNA_TOKEN_EQUAL)) {
+            initializer = luna_parser_parse_expression(parser);
+        }
+
+        LunaEnumMember *member = luna_parser_allocate(
+            parser, sizeof(LunaEnumMember), _Alignof(LunaEnumMember));
+        if (member == NULL) {
+            return NULL;
+        }
+        member->name = luna_parser_token_text(member_name);
+        member->initializer = initializer;
+        member->span =
+            initializer == NULL
+                ? member_name.span
+                : luna_parser_join_spans(member_name.span, initializer->span);
+        *next_member = member;
+        next_member = &member->next;
+        if (member_count == UINT32_MAX) {
+            luna_diagnostic_error(parser->diagnostics, member->span,
+                                  "too many enum members");
+        } else {
+            member_count += 1U;
+        }
+
+        if (!luna_parser_match(parser, LUNA_TOKEN_COMMA)) {
+            break;
+        }
+    }
+    (void)luna_parser_expect(parser, LUNA_TOKEN_RIGHT_BRACE,
+                             "to end enum declaration");
+
+    LunaTypeDeclaration *declaration = luna_parser_allocate(
+        parser, sizeof(LunaTypeDeclaration), _Alignof(LunaTypeDeclaration));
+    if (declaration == NULL) {
+        return NULL;
+    }
+    declaration->kind = LUNA_TYPE_ENUM;
+    declaration->name = luna_parser_token_text(name_token);
+    declaration->span =
+        luna_parser_join_spans(start_span, parser->previous.span);
+    declaration->is_exported = is_exported;
+    declaration->as.enumeration.underlying_type = underlying_type;
+    declaration->as.enumeration.first_member = first_member;
+    declaration->as.enumeration.member_count = member_count;
+    return declaration;
+}
+
 static bool luna_parser_parse_module_name(LunaParser *parser,
                                           LunaStringView *name,
                                           LunaSourceSpan *span) {
@@ -1354,17 +1567,55 @@ LunaProgram *luna_parser_parse_program(LunaParser *parser) {
         next_import = &import->next;
     }
 
+    LunaTypeDeclaration **next_type = &program->first_type_declaration;
     LunaFunction **next_function = &program->first_function;
     while (!luna_parser_check(parser, LUNA_TOKEN_END)) {
         const LunaSourceSpan start_span = parser->current.span;
         const bool is_exported = luna_parser_match(parser, LUNA_TOKEN_EXPORT);
         const bool is_external = luna_parser_match(parser, LUNA_TOKEN_EXTERN);
 
+        LunaTypeKind declaration_kind = LUNA_TYPE_INVALID;
+        if (luna_parser_match(parser, LUNA_TOKEN_STRUCT)) {
+            declaration_kind = LUNA_TYPE_STRUCT;
+        } else if (luna_parser_match(parser, LUNA_TOKEN_UNION)) {
+            declaration_kind = LUNA_TYPE_UNION;
+        }
+        if (declaration_kind != LUNA_TYPE_INVALID) {
+            if (is_external) {
+                luna_diagnostic_error(
+                    parser->diagnostics, start_span,
+                    "aggregate type declarations cannot be external");
+            }
+            LunaTypeDeclaration *declaration =
+                luna_parser_parse_aggregate_declaration(
+                    parser, declaration_kind, is_exported, start_span);
+            if (declaration != NULL) {
+                *next_type = declaration;
+                next_type = &declaration->next;
+            }
+            continue;
+        }
+
+        if (luna_parser_match(parser, LUNA_TOKEN_ENUM)) {
+            if (is_external) {
+                luna_diagnostic_error(
+                    parser->diagnostics, start_span,
+                    "enum type declarations cannot be external");
+            }
+            LunaTypeDeclaration *declaration =
+                luna_parser_parse_enum_declaration(parser, is_exported,
+                                                   start_span);
+            if (declaration != NULL) {
+                *next_type = declaration;
+                next_type = &declaration->next;
+            }
+            continue;
+        }
+
         if (!luna_parser_match(parser, LUNA_TOKEN_FN)) {
             luna_diagnostic_error(
                 parser->diagnostics, parser->current.span,
-                "the bootstrap compiler expects a function declaration, "
-                "found %s",
+                "expected a type or function declaration, found %s",
                 luna_token_kind_name(parser->current.kind));
             luna_parser_advance(parser);
             continue;

@@ -25,6 +25,8 @@ struct LunaTypeRef {
             LunaTypeRef *element;
             uint64_t count;
         } array;
+
+        LunaStringView name;
     } as;
 };
 
@@ -40,6 +42,10 @@ typedef enum LunaExpressionKind {
     LUNA_EXPRESSION_BINARY,
     LUNA_EXPRESSION_CONDITIONAL,
     LUNA_EXPRESSION_INDEX,
+    LUNA_EXPRESSION_MEMBER,
+    LUNA_EXPRESSION_SIZEOF,
+    LUNA_EXPRESSION_ALIGNOF,
+    LUNA_EXPRESSION_OFFSETOF,
     LUNA_EXPRESSION_CALL,
     LUNA_EXPRESSION_CAST
 } LunaExpressionKind;
@@ -80,6 +86,17 @@ struct LunaExpression {
             LunaExpression *base;
             LunaExpression *index;
         } index;
+
+        struct {
+            LunaExpression *base;
+            LunaStringView name;
+            LunaTokenKind operator_kind;
+        } member;
+
+        struct {
+            LunaTypeRef type;
+            LunaStringView member_name;
+        } type_query;
 
         struct {
             LunaStringView name;
@@ -204,6 +221,42 @@ typedef struct LunaFunction {
     struct LunaFunction *next;
 } LunaFunction;
 
+typedef struct LunaField {
+    LunaStringView name;
+    LunaTypeRef type;
+    LunaSourceSpan span;
+    struct LunaField *next;
+} LunaField;
+
+typedef struct LunaEnumMember {
+    LunaStringView name;
+    LunaExpression *initializer;
+    LunaSourceSpan span;
+    struct LunaEnumMember *next;
+} LunaEnumMember;
+
+typedef struct LunaTypeDeclaration {
+    LunaTypeKind kind;
+    LunaStringView name;
+    LunaSourceSpan span;
+    bool is_exported;
+
+    union {
+        struct {
+            LunaField *first_field;
+            uint32_t field_count;
+        } aggregate;
+
+        struct {
+            LunaTypeRef underlying_type;
+            LunaEnumMember *first_member;
+            uint32_t member_count;
+        } enumeration;
+    } as;
+
+    struct LunaTypeDeclaration *next;
+} LunaTypeDeclaration;
+
 typedef struct LunaImport {
     LunaStringView module_name;
     LunaSourceSpan span;
@@ -216,6 +269,7 @@ typedef struct LunaProgram {
     LunaSourceSpan module_span;
     bool is_interface;
     LunaImport *first_import;
+    LunaTypeDeclaration *first_type_declaration;
     LunaFunction *first_function;
 } LunaProgram;
 

@@ -552,6 +552,7 @@ def main() -> int:
         "memory_control_flow.luna": 42,
         "memory_scalar_matrix.luna": 42,
         "zero_initializer_scalars.luna": 42,
+        "aggregate_types.luna": 42,
         "null_dereference.luna": -4,
         "null_pointer_index.luna": -4,
         "null_pointer_write.luna": -4,
@@ -589,6 +590,18 @@ def main() -> int:
         (external_support,),
     )
     print("PASS executable: external_c_abi.luna with a real C23 object")
+
+    compile_and_run(
+        arguments.compiler,
+        llvm_mc,
+        linker,
+        target_runner,
+        case_dir / "aggregate_c_abi.luna",
+        arguments.work_dir,
+        42,
+        (external_support,),
+    )
+    print("PASS executable: aggregate_c_abi.luna with C23 layout assertions")
 
     conversion_matrix = generate_integer_conversion_matrix(arguments.work_dir)
     compile_and_run(
@@ -800,6 +813,60 @@ def main() -> int:
         "external_too_many_float_arguments.luna": (
             "at most six integer-class and eight floating-point arguments"
         ),
+        "duplicate_type_declaration.luna": (
+            "duplicate type declaration 'Item'"
+        ),
+        "duplicate_aggregate_field.luna": "duplicate field 'value'",
+        "unknown_named_type.luna": "unknown type 'Missing'",
+        "recursive_aggregate.luna": "contains itself by value",
+        "aggregate_layout_overflow.luna": (
+            "field 'bytes' has no valid target layout"
+        ),
+        "invalid_enum_underlying.luna": (
+            "enum underlying type must be a built-in integer type"
+        ),
+        "enum_value_overflow.luna": (
+            "enum member value does not fit in u8"
+        ),
+        "enum_implicit_integer.luna": "expected Kind, found i32",
+        "enum_switch_label_type.luna": (
+            "enum switch case label must be a member"
+        ),
+        "unknown_aggregate_field.luna": "has no field named 'missing'",
+        "readonly_aggregate_field.luna": (
+            "cannot assign through an immutable lvalue"
+        ),
+        "aggregate_parameter.luna": (
+            "aggregate types cannot be passed by value"
+        ),
+        "aggregate_return.luna": (
+            "aggregate types cannot be returned by value"
+        ),
+        "aggregate_initializer.luna": (
+            "aggregate objects currently require the '{}' initializer"
+        ),
+        "aggregate_assignment.luna": (
+            "aggregate objects cannot be assigned as a whole"
+        ),
+        "enum_type_mismatch.luna": "expected Left, found Right",
+        "invalid_sizeof_type.luna": (
+            "layout query requires a type with a valid target layout"
+        ),
+        "invalid_offsetof_type.luna": (
+            "offsetof requires a struct or union type"
+        ),
+        "unknown_offsetof_field.luna": (
+            "offsetof names an unknown field 'missing'"
+        ),
+        "enum_arithmetic.luna": (
+            "arithmetic and bitwise operators require numeric operands"
+        ),
+        "enum_conversion_underlying.luna": (
+            "enum conversion requires the enum's exact underlying integer type"
+        ),
+        "enum_duplicate_switch_value.luna": (
+            "duplicate switch case value"
+        ),
     }
 
     for case_name, expected_diagnostic in negative_cases.items():
@@ -831,6 +898,7 @@ def main() -> int:
         "structured_control_flow_ir",
         "memory_ir",
         "external_ir",
+        "aggregate_ir",
     ):
         ir_output = arguments.work_dir / f"{snapshot_name}.lir"
         run(

@@ -32,9 +32,10 @@ order. An omitted condition behaves as `true`; omitted initializer and update
 clauses perform no work. The scope introduced by `for` includes all three
 clauses and the body.
 
-A switch evaluates its integer controlling expression once and compares it
-against case values in source order. It executes exactly one matching case,
-the default case when no value matches, or no body when neither exists. Cases
+A switch evaluates its integer or scoped-enum controlling expression once and
+compares it against case values in source order. Enum cases must name a member
+of the exact controlling enum. It executes exactly one matching case, the
+default case when no value matches, or no body when neither exists. Cases
 never fall through. `break` exits the innermost loop or switch; `continue`
 always targets the innermost loop. In a `for` loop that target runs the update
 before testing the condition again.
@@ -107,6 +108,35 @@ change preserves the bit pattern. These conversions never trap.
 `isize` remains distinct from a fixed-width signed type, and `usize` remains
 distinct from a fixed-width unsigned type, even when their widths match.
 Values do not mix implicitly.
+
+## Aggregates and scoped enums
+
+Structures place each field at the first offset satisfying that field's
+target ABI alignment and round the final size to the maximum field alignment.
+Union fields all have offset zero; the union size is the aligned maximum field
+size. Local aggregate `{}` initialization writes zero to every byte, including
+padding. Reading a union member interprets the current overlapping bytes and
+does not depend on an active-member tag.
+
+Member selection computes the base lvalue address once. Pointer-member access
+checks for null before deriving the field address. Mutability follows the base
+lvalue for `.` and the pointer qualification for `->`. Whole aggregates are
+not scalar values in this milestone and cannot be copied, compared, passed or
+returned by value.
+
+A scoped enum has the storage width, alignment and signedness of its explicit
+underlying integer type but remains a distinct language type. Enum members are
+compile-time values. Equality is defined only for the same enum type; numeric
+operators and ordering are rejected. Explicit conversion is permitted only
+between an enum and its exact underlying type and preserves the stored bit
+pattern.
+
+`sizeof(Type)`, `alignof(Type)` and `offsetof(Type, field)` are compile-time
+`usize` values derived from the selected target data layout. They do not
+evaluate a run-time expression, access an object or emit a memory operation.
+`offsetof` reports the byte offset of an immediate structure field; every
+union field has offset zero. Types without a complete object layout, including
+`void`, are rejected.
 
 Conversions involving `bool` or `void` are rejected. A conversion to the same
 integer type is permitted and has no effect.

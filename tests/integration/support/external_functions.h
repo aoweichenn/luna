@@ -1,6 +1,24 @@
 #ifndef LUNA_TEST_EXTERNAL_FUNCTIONS_H
 #define LUNA_TEST_EXTERNAL_FUNCTIONS_H
 
+struct LunaTestPayload {
+    unsigned char small;
+    unsigned long long wide;
+};
+
+union LunaTestNumberBits {
+    unsigned long long whole;
+    unsigned char low;
+};
+
+struct LunaTestState {
+    unsigned char kind;
+    struct LunaTestPayload payload;
+    union LunaTestNumberBits bits;
+    unsigned short values[2];
+    struct LunaTestState *next;
+};
+
 _Bool c_bool_flip(_Bool value);
 signed char c_i8_identity(signed char value);
 short c_i16_identity(short value);
@@ -22,5 +40,6 @@ void c_store_i32(int *pointer, int value);
 _Bool c_mixed_register_banks(signed char first, unsigned short second,
                              int third, unsigned long long fourth, void *fifth,
                              long sixth, float seventh, double eighth);
+_Bool c_validate_aggregate_layout(const struct LunaTestState *state);
 
 #endif

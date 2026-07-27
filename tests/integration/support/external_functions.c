@@ -11,6 +11,30 @@ _Static_assert(sizeof(long long) == 8,
 _Static_assert(sizeof(float) == 4, "x86-64 C ABI requires binary32 float");
 _Static_assert(sizeof(double) == 8, "x86-64 C ABI requires binary64 double");
 _Static_assert(sizeof(void *) == 8, "x86-64 C ABI requires 64-bit pointers");
+_Static_assert(sizeof(struct LunaTestPayload) == 16,
+               "C payload layout must match Luna");
+_Static_assert(_Alignof(struct LunaTestPayload) == 8,
+               "C payload alignment must match Luna");
+_Static_assert(__builtin_offsetof(struct LunaTestPayload, wide) == 8,
+               "C payload field offset must match Luna");
+_Static_assert(sizeof(union LunaTestNumberBits) == 8,
+               "C union layout must match Luna");
+_Static_assert(__builtin_offsetof(union LunaTestNumberBits, low) == 0,
+               "C union field offset must match Luna");
+_Static_assert(sizeof(struct LunaTestState) == 48,
+               "C state layout must match Luna");
+_Static_assert(_Alignof(struct LunaTestState) == 8,
+               "C state alignment must match Luna");
+_Static_assert(__builtin_offsetof(struct LunaTestState, kind) == 0,
+               "C state kind offset must match Luna");
+_Static_assert(__builtin_offsetof(struct LunaTestState, payload) == 8,
+               "C state payload offset must match Luna");
+_Static_assert(__builtin_offsetof(struct LunaTestState, bits) == 24,
+               "C state union offset must match Luna");
+_Static_assert(__builtin_offsetof(struct LunaTestState, values) == 32,
+               "C state array offset must match Luna");
+_Static_assert(__builtin_offsetof(struct LunaTestState, next) == 40,
+               "C state pointer offset must match Luna");
 
 _Bool c_bool_flip(_Bool value) {
     return !value;
@@ -90,4 +114,32 @@ _Bool c_mixed_register_banks(signed char first, unsigned short second,
     return first == -7 && second == 60000U && third == -1234567 &&
            fourth == 18000000000000000000ULL && fifth != (void *)0 &&
            sixth == -4096L && seventh == 1.25F && eighth == -2.5;
+}
+
+_Bool c_validate_aggregate_layout(const struct LunaTestState *state) {
+    if (state == (const struct LunaTestState *)0 || state->kind != 7U ||
+        state->payload.small != 3U || state->payload.wide != 34ULL ||
+        state->bits.whole != 42ULL || state->bits.low != 42U ||
+        state->values[0] != 0U || state->values[1] != 8U ||
+        state->next != state) {
+        return 0;
+    }
+
+    const unsigned char *bytes = (const unsigned char *)state;
+    for (unsigned int index = 1U; index < 8U; index += 1U) {
+        if (bytes[index] != 0U) {
+            return 0;
+        }
+    }
+    for (unsigned int index = 9U; index < 16U; index += 1U) {
+        if (bytes[index] != 0U) {
+            return 0;
+        }
+    }
+    for (unsigned int index = 36U; index < 40U; index += 1U) {
+        if (bytes[index] != 0U) {
+            return 0;
+        }
+    }
+    return 1;
 }

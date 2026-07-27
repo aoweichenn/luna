@@ -12,11 +12,12 @@ The project is deliberately narrow at this stage:
   `u16`, `u32`, `u64`, `usize`, `f32` and `f64` types, explicit numeric
   and raw-pointer conversions with checked floating-to-integer bounds, raw
   pointers, local fixed arrays, immutable string literals, functions,
-  typed external C function declarations,
+  exact-layout structures and unions, scoped enums, typed external C function
+  declarations, type-only `sizeof`, `alignof` and `offsetof` queries,
   expressions, the short-circuit conditional operator, local variables, `if`,
   `while`, `do`, `for` and non-fallthrough `switch` control flow;
 - middle end: typed, non-SSA control-flow IR with explicit object layouts,
-  static data and typed memory operations;
+  static data, member addresses and typed memory operations;
 - target model: explicit `x86_64-unknown-linux-gnu` data layout, with
   target-sized `isize` and `usize`;
 - backend: direct, unoptimized x86-64 instruction selection, including

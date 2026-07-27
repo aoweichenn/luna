@@ -69,4 +69,13 @@ TEST(TypeTest, ReportsCanonicalProperties) {
     EXPECT_EQ(luna_type_kind_bit_width(LUNA_TYPE_VOID, &layout), 0U);
     EXPECT_EQ(luna_type_kind_bit_width(LUNA_TYPE_ISIZE, nullptr), 0U);
     EXPECT_EQ(luna_type_kind_bit_width(LUNA_TYPE_USIZE, nullptr), 0U);
+    EXPECT_STREQ(luna_type_kind_name(LUNA_TYPE_NAMED), "named type");
+    EXPECT_STREQ(luna_type_kind_name(LUNA_TYPE_STRUCT), "struct");
+    EXPECT_STREQ(luna_type_kind_name(LUNA_TYPE_UNION), "union");
+    EXPECT_STREQ(luna_type_kind_name(LUNA_TYPE_ENUM), "enum");
+    EXPECT_FALSE(luna_type_kind_is_integer(LUNA_TYPE_ENUM));
+    EXPECT_FALSE(luna_type_kind_is_float(LUNA_TYPE_ENUM));
+    EXPECT_EQ(luna_type_kind_bit_width(LUNA_TYPE_STRUCT, &layout), 0U);
+    EXPECT_EQ(luna_type_kind_bit_width(LUNA_TYPE_UNION, &layout), 0U);
+    EXPECT_EQ(luna_type_kind_bit_width(LUNA_TYPE_ENUM, &layout), 0U);
 }

@@ -815,6 +815,91 @@ def generate_memory_case(
     return source, 42
 
 
+def generate_aggregate_case(
+    engine: random.Random,
+    case_index: int,
+) -> tuple[str, int]:
+    enum_value = engine.randrange(1, 250)
+    byte_value = engine.randrange(0, 256)
+    signed_value = engine.randrange(-(2**15), 2**15)
+    wide_value = engine.randrange(-(2**55), 2**55)
+    low_byte = engine.randrange(0, 256)
+    high_bits = engine.randrange(0, 2**40)
+    union_word = high_bits * 256 + low_byte
+    array_length = engine.randrange(2, 9)
+    array_index = engine.randrange(array_length)
+    array_value = engine.randrange(0, 2**32)
+    next_offset = ((32 + 4 * array_length + 7) // 8) * 8
+    state_size = next_offset + 8
+
+    source = (
+        f"module random.aggregate_case{case_index};\n"
+        "\n"
+        "enum Mode: u8 {\n"
+        "    cold,\n"
+        f"    hot = {enum_value},\n"
+        "    done,\n"
+        "}\n"
+        "\n"
+        "struct Inner {\n"
+        "    byte: u8;\n"
+        "    signed: i16;\n"
+        "    wide: i64;\n"
+        "}\n"
+        "\n"
+        "union Overlay {\n"
+        "    word: u64;\n"
+        "    low: u8;\n"
+        "}\n"
+        "\n"
+        "struct State {\n"
+        "    prefix: u8;\n"
+        "    mode: Mode;\n"
+        "    inner: Inner;\n"
+        "    overlay: Overlay;\n"
+        f"    values: [{array_length}]u32;\n"
+        "    next: *State;\n"
+        "}\n"
+        "\n"
+        "fn main() -> i32 {\n"
+        "    var state: State = {};\n"
+        f"    state.prefix = {byte_value};\n"
+        "    state.mode = Mode.hot;\n"
+        f"    state.inner.byte = {byte_value};\n"
+        f"    state.inner.signed = {signed_value};\n"
+        f"    state.inner.wide = {wide_value};\n"
+        f"    state.overlay.word = {union_word};\n"
+        f"    state.values[{array_index}] = {array_value};\n"
+        "    let pointer: *State = &state;\n"
+        "    pointer->next = pointer;\n"
+        f"    if (pointer->prefix != {byte_value} ||\n"
+        f"        pointer->inner.byte != {byte_value} ||\n"
+        f"        pointer->inner.signed != {signed_value} ||\n"
+        f"        pointer->inner.wide != {wide_value} ||\n"
+        f"        pointer->overlay.low != {low_byte} ||\n"
+        f"        pointer->values[{array_index}] != {array_value} ||\n"
+        "        pointer->next->mode != Mode.hot ||\n"
+        f"        sizeof(State) != {state_size} ||\n"
+        "        alignof(State) != 8 ||\n"
+        "        offsetof(State, inner) != 8 ||\n"
+        "        offsetof(State, overlay) != 24 ||\n"
+        "        offsetof(State, values) != 32 ||\n"
+        f"        offsetof(State, next) != {next_offset} ||\n"
+        "        sizeof(Mode) != 1 ||\n"
+        "        alignof(Inner) != 8 ||\n"
+        "        offsetof(Inner, wide) != 8 ||\n"
+        "        offsetof(Overlay, low) != 0) {\n"
+        "        return 1;\n"
+        "    }\n"
+        "    switch (state.mode) {\n"
+        "        case Mode.hot { return 42; }\n"
+        "        default { return 2; }\n"
+        "    }\n"
+        "}\n"
+    )
+    return source, 42
+
+
 def compile_and_run(
     compiler: pathlib.Path,
     llvm_mc: str,
@@ -893,7 +978,7 @@ def main() -> int:
 
     engine = random.Random(arguments.seed)
     for case_index in range(arguments.cases):
-        case_kind = case_index % 19
+        case_kind = case_index % 20
         if case_kind == 0:
             source, expected_code = generate_case(engine, case_index)
         elif case_kind == 1:
@@ -969,8 +1054,12 @@ def main() -> int:
             source, expected_code = generate_structured_control_flow_case(
                 engine, case_index
             )
-        else:
+        elif case_kind == 18:
             source, expected_code = generate_memory_case(engine, case_index)
+        else:
+            source, expected_code = generate_aggregate_case(
+                engine, case_index
+            )
         compile_and_run(
             arguments.compiler,
             llvm_mc,

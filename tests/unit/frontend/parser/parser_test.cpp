@@ -51,6 +51,120 @@ TEST(ParserTest, BuildsExternalFunctionDeclarations) {
     EXPECT_EQ(function->first_parameter->next->type.kind, LUNA_TYPE_POINTER);
 }
 
+TEST(ParserTest, BuildsAggregateEnumAndMemberAccessNodes) {
+    FrontendHarness harness{"module test.aggregate_syntax;\n"
+                            "export enum Kind: u8 { empty, ready = 7, }\n"
+                            "struct Payload { byte: u8; kind: Kind; }\n"
+                            "union Storage { payload: Payload; bits: u64; }\n"
+                            "fn main() -> i32 {\n"
+                            "    var storage: Storage = {};\n"
+                            "    let pointer: *Storage = &storage;\n"
+                            "    pointer->payload.kind = Kind.ready;\n"
+                            "    return 0;\n"
+                            "}\n"};
+
+    ASSERT_TRUE(harness.Parse()) << harness.Diagnostics();
+    const LunaTypeDeclaration *enumeration =
+        harness.Program()->first_type_declaration;
+    ASSERT_NE(enumeration, nullptr);
+    EXPECT_EQ(enumeration->kind, LUNA_TYPE_ENUM);
+    EXPECT_TRUE(enumeration->is_exported);
+    EXPECT_EQ(enumeration->as.enumeration.underlying_type.kind, LUNA_TYPE_U8);
+    EXPECT_EQ(enumeration->as.enumeration.member_count, 2U);
+    ASSERT_NE(enumeration->as.enumeration.first_member, nullptr);
+    ASSERT_NE(enumeration->as.enumeration.first_member->next, nullptr);
+    ASSERT_NE(enumeration->as.enumeration.first_member->next->initializer,
+              nullptr);
+
+    const LunaTypeDeclaration *structure = enumeration->next;
+    ASSERT_NE(structure, nullptr);
+    EXPECT_EQ(structure->kind, LUNA_TYPE_STRUCT);
+    EXPECT_EQ(structure->as.aggregate.field_count, 2U);
+    ASSERT_NE(structure->as.aggregate.first_field, nullptr);
+    EXPECT_EQ(structure->as.aggregate.first_field->type.kind, LUNA_TYPE_U8);
+    ASSERT_NE(structure->as.aggregate.first_field->next, nullptr);
+    EXPECT_EQ(structure->as.aggregate.first_field->next->type.kind,
+              LUNA_TYPE_NAMED);
+
+    const LunaTypeDeclaration *union_declaration = structure->next;
+    ASSERT_NE(union_declaration, nullptr);
+    EXPECT_EQ(union_declaration->kind, LUNA_TYPE_UNION);
+    EXPECT_EQ(union_declaration->next, nullptr);
+
+    const LunaFunction *function = harness.Program()->first_function;
+    ASSERT_NE(function, nullptr);
+    ASSERT_NE(function->body, nullptr);
+    const LunaStatement *assignment = function->body->first;
+    ASSERT_NE(assignment, nullptr);
+    assignment = assignment->next;
+    ASSERT_NE(assignment, nullptr);
+    assignment = assignment->next;
+    ASSERT_NE(assignment, nullptr);
+    ASSERT_EQ(assignment->kind, LUNA_STATEMENT_ASSIGNMENT);
+    const LunaExpression *target = assignment->as.assignment.target;
+    ASSERT_NE(target, nullptr);
+    ASSERT_EQ(target->kind, LUNA_EXPRESSION_MEMBER);
+    EXPECT_EQ(target->as.member.operator_kind, LUNA_TOKEN_DOT);
+    ASSERT_NE(target->as.member.base, nullptr);
+    ASSERT_EQ(target->as.member.base->kind, LUNA_EXPRESSION_MEMBER);
+    EXPECT_EQ(target->as.member.base->as.member.operator_kind,
+              LUNA_TOKEN_ARROW);
+    const LunaExpression *value = assignment->as.assignment.value;
+    ASSERT_NE(value, nullptr);
+    ASSERT_EQ(value->kind, LUNA_EXPRESSION_MEMBER);
+    EXPECT_EQ(value->as.member.operator_kind, LUNA_TOKEN_DOT);
+}
+
+TEST(ParserTest, BuildsTypeOnlyLayoutQueryNodes) {
+    FrontendHarness harness{"module test.layout_queries;\n"
+                            "struct Record { tag: u8; value: u64; }\n"
+                            "fn main() -> i32 {\n"
+                            "    let size: usize = sizeof(Record);\n"
+                            "    let alignment: usize = alignof([4]u16);\n"
+                            "    let offset: usize = offsetof(Record, value);\n"
+                            "    return 0;\n"
+                            "}\n"};
+
+    ASSERT_TRUE(harness.Parse()) << harness.Diagnostics();
+    const LunaFunction *function = harness.Program()->first_function;
+    ASSERT_NE(function, nullptr);
+    ASSERT_NE(function->body, nullptr);
+
+    const LunaStatement *size_declaration = function->body->first;
+    ASSERT_NE(size_declaration, nullptr);
+    ASSERT_EQ(size_declaration->kind, LUNA_STATEMENT_DECLARATION);
+    const LunaExpression *size = size_declaration->as.declaration.initializer;
+    ASSERT_NE(size, nullptr);
+    ASSERT_EQ(size->kind, LUNA_EXPRESSION_SIZEOF);
+    EXPECT_EQ(size->as.type_query.type.kind, LUNA_TYPE_NAMED);
+    EXPECT_EQ(std::string(size->as.type_query.type.as.name.data,
+                          size->as.type_query.type.as.name.length),
+              "Record");
+
+    const LunaStatement *alignment_declaration = size_declaration->next;
+    ASSERT_NE(alignment_declaration, nullptr);
+    const LunaExpression *alignment =
+        alignment_declaration->as.declaration.initializer;
+    ASSERT_NE(alignment, nullptr);
+    ASSERT_EQ(alignment->kind, LUNA_EXPRESSION_ALIGNOF);
+    ASSERT_EQ(alignment->as.type_query.type.kind, LUNA_TYPE_ARRAY);
+    EXPECT_EQ(alignment->as.type_query.type.as.array.count, 4U);
+    ASSERT_NE(alignment->as.type_query.type.as.array.element, nullptr);
+    EXPECT_EQ(alignment->as.type_query.type.as.array.element->kind,
+              LUNA_TYPE_U16);
+
+    const LunaStatement *offset_declaration = alignment_declaration->next;
+    ASSERT_NE(offset_declaration, nullptr);
+    const LunaExpression *offset =
+        offset_declaration->as.declaration.initializer;
+    ASSERT_NE(offset, nullptr);
+    ASSERT_EQ(offset->kind, LUNA_EXPRESSION_OFFSETOF);
+    EXPECT_EQ(offset->as.type_query.type.kind, LUNA_TYPE_NAMED);
+    EXPECT_EQ(std::string(offset->as.type_query.member_name.data,
+                          offset->as.type_query.member_name.length),
+              "value");
+}
+
 TEST(ParserTest, RejectsAnExternalFunctionBody) {
     FrontendHarness harness{"module test.external_body;\n"
                             "extern fn c_value() -> i32 { return 42; }\n"

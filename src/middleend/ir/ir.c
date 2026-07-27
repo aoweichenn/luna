@@ -530,6 +530,17 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
         return luna_ir_verify_result(function, instruction,
                                      LUNA_IR_TYPE_POINTER, reason);
 
+    case LUNA_IR_MEMBER_ADDRESS:
+        if (instruction->immediate > (uint64_t)INT32_MAX) {
+            return luna_ir_reject(
+                reason, "member address offset exceeds backend displacement");
+        }
+        return luna_ir_verify_value(function, instruction->left,
+                                    LUNA_IR_TYPE_POINTER, defined_in_block,
+                                    reason) &&
+               luna_ir_verify_result(function, instruction,
+                                     LUNA_IR_TYPE_POINTER, reason);
+
     case LUNA_IR_GLOBAL_ADDRESS:
         if ((size_t)instruction->global >= module->globals.length) {
             return luna_ir_reject(reason, "global id is out of range");
@@ -1388,6 +1399,15 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
     case LUNA_IR_ADDRESS_OF_SLOT:
         return luna_string_builder_append_format(output, "address $%u\n",
                                                  instruction->slot);
+
+    case LUNA_IR_MEMBER_ADDRESS:
+        if (!luna_string_builder_append_format(output,
+                                               "member_address %" PRIu64 ", ",
+                                               instruction->immediate) ||
+            !luna_ir_print_value(output, instruction->left)) {
+            return false;
+        }
+        return luna_string_builder_append_c_string(output, "\n");
 
     case LUNA_IR_GLOBAL_ADDRESS:
         return luna_string_builder_append_format(

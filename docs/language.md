@@ -65,7 +65,21 @@ enum TokenKind: u8 {
 ```
 
 Enums have an explicit underlying integer type, are scoped by their type name
-and never convert implicitly to integers.
+and never convert implicitly to integers. Members start at zero and increase
+by one unless an integer literal with an optional sign is written explicitly:
+
+```luna
+enum Status: i8 {
+    unavailable = -1,
+    idle,
+    running = 7,
+}
+```
+
+The explicit value and every implicit successor must fit the underlying type.
+An enum converts explicitly only to and from its exact underlying integer
+type. Distinct enum types remain incompatible even when their underlying
+types and values match.
 
 ## Types
 
@@ -109,6 +123,34 @@ range. They are local storage objects in this milestone: arrays cannot be
 passed or returned by value, assigned as a whole or used as scalar
 expressions. Those operations wait for aggregate ABI support. Elements remain
 ordinary lvalues and may be read, written or addressed.
+
+Structures use target ABI alignment with padding before fields and at the end
+of the object. Union fields all start at offset zero; the union size is the
+aligned size of its largest field. A type may contain a pointer to itself or
+participate in mutually recursive pointer graphs, but a recursive by-value
+field is rejected because it has no finite layout.
+
+The target layout can be queried with type-only compile-time expressions:
+
+```luna
+let bytes: usize = sizeof(Packet);
+let alignment: usize = alignof(Packet);
+let payload_offset: usize = offsetof(Packet, payload);
+```
+
+All three expressions have type `usize` and are replaced by constants during
+semantic lowering. `sizeof` and `alignof` accept any type with a complete
+target layout. `offsetof` accepts a structure or union type and the name of
+one of its immediate fields. These forms take a type, never a run-time
+expression; `sizeof(value)` is intentionally not supported.
+
+During this milestone, local structures, unions and arrays are storage
+objects initialized only with `{}`, which zeroes their complete object
+representation. Their scalar fields can then be read, written and addressed.
+Whole-object assignment, nonzero aggregate initializers, aggregate parameters
+and aggregate returns are deferred to the aggregate-initialization and ABI
+milestones. Reading a union field interprets the bytes currently in the
+overlapping storage; Luna does not track an active union member.
 
 ## Functions
 
@@ -205,14 +247,13 @@ switch (token.kind) {
 }
 ```
 
-The controlling expression is evaluated exactly once. In the scalar
-bootstrap, it must have an integer type and each `case` label is an integer
-literal with an optional unary `+` or `-`. A label is contextually interpreted
-as the controlling integer type. Duplicate values after that interpretation
-are rejected, including spellings such as `-1` and `255` in a `u8` switch.
-There may be at most one `default`, and it may appear anywhere among the
-cases. Typed constants and scoped enum values extend the label syntax in the
-aggregate milestone.
+The controlling expression is evaluated exactly once. It must have an integer
+or scoped enum type. An integer `case` label is an integer literal with an
+optional unary `+` or `-` and is contextually interpreted as the controlling
+integer type. An enum `case` label must be a member of that exact controlling
+enum. Duplicate values after interpretation are rejected, including spellings
+such as `-1` and `255` in a `u8` switch. There may be at most one `default`,
+and it may appear anywhere among the cases.
 
 The jump statements are `break`, `continue`, `return` and `return value`.
 `break` exits the innermost loop or switch. `continue` targets the innermost
@@ -230,6 +271,12 @@ array[index]
 value.field
 pointer->field
 ```
+
+`.` requires a structure or union lvalue. `->` requires a pointer to a
+structure or union, checks that the pointer is non-null, and preserves the
+pointer's read-only qualification for the selected field. Member operations
+may be chained with indexing. `Enum.member` is the separate scoped-enum
+constant form and never denotes an assignable lvalue.
 
 Unary operators are `+ - ! ~ * &`.
 
@@ -367,7 +414,7 @@ let first: *i32 = &values[0];
 
 ## Compile-time surface
 
-The only compile-time declarations in Luna 0 are typed constants and enum
-values. There is no preprocessor, textual macro system, conditional
-compilation, generic selection, type reflection or user-defined attribute
-syntax.
+The compile-time surface in Luna 0 consists of typed constants, enum values
+and the type-only `sizeof`, `alignof` and `offsetof` layout queries. There is
+no preprocessor, textual macro system, conditional compilation, generic
+selection, general type reflection or user-defined attribute syntax.

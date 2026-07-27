@@ -38,7 +38,8 @@ M0 supports enough language to compile arithmetic functions, local variables,
 
 ## M2: aggregate and module completion
 
-- [ ] structures, unions and scoped enums
+- [x] structures, unions and scoped enums
+- [x] type-only target layout queries
 - [ ] aggregate initialization
 - [ ] module interface and implementation matching
 - [ ] import visibility and dependency validation

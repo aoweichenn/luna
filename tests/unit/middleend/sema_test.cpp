@@ -995,6 +995,292 @@ TEST(SemaTest, LowersPointersArraysAndStringsToTypedMemoryIr) {
     EXPECT_NE(FindInstruction(main_function, LUNA_IR_CONST_NULL), nullptr);
 }
 
+TEST(SemaTest, LowersAggregatesAndScopedEnumsWithExactTargetLayouts) {
+    FrontendHarness harness{
+        "module test.aggregate_ir;\n"
+        "enum Kind: u8 { empty, ready = 7, complete, }\n"
+        "struct Inner { byte: u8; value: u32; }\n"
+        "union Bits { wide: u64; inner: Inner; }\n"
+        "struct Outer { kind: Kind; bits: Bits; tail: u16; next: *Outer; }\n"
+        "fn pass(kind: Kind) -> Kind { return kind; }\n"
+        "fn main() -> i32 {\n"
+        "    var outer: Outer = {};\n"
+        "    outer.kind = pass(Kind.ready);\n"
+        "    outer.bits.inner.value = 42;\n"
+        "    outer.tail = 9;\n"
+        "    let pointer: *Outer = &outer;\n"
+        "    pointer->next = pointer;\n"
+        "    let raw: u8 = pointer->kind as u8;\n"
+        "    let restored: Kind = raw as Kind;\n"
+        "    if (sizeof(Outer) != 32 || alignof(Outer) != 8 ||\n"
+        "        offsetof(Outer, kind) != 0 ||\n"
+        "        offsetof(Outer, bits) != 8 ||\n"
+        "        offsetof(Outer, tail) != 16 ||\n"
+        "        offsetof(Outer, next) != 24 ||\n"
+        "        sizeof(Kind) != 1 || offsetof(Bits, inner) != 0) {\n"
+        "        return 2;\n"
+        "    }\n"
+        "    switch (restored) {\n"
+        "        case Kind.ready { return pointer->bits.inner.value as i32; }\n"
+        "        default { return 1; }\n"
+        "    }\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    LunaIrFunction *main_function = luna_ir_module_function(
+        harness.Module(), harness.Module()->entry_function);
+    ASSERT_NE(main_function, nullptr);
+    ASSERT_GT(main_function->slots.length, 0U);
+    const auto *outer_slot = static_cast<const LunaIrSlot *>(
+        luna_vector_at_const(&main_function->slots, 0U));
+    ASSERT_NE(outer_slot, nullptr);
+    EXPECT_FALSE(outer_slot->is_scalar);
+    EXPECT_EQ(outer_slot->size_bytes, 32U);
+    EXPECT_EQ(outer_slot->alignment_bytes, 8U);
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_ZERO_SLOT), nullptr);
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_MEMBER_ADDRESS), nullptr);
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_NULL_CHECK), nullptr);
+
+    bool saw_inner_value_offset = false;
+    bool saw_tail_offset = false;
+    bool saw_next_offset = false;
+    for (std::size_t block_index = 0U;
+         block_index < main_function->blocks.length; block_index += 1U) {
+        const auto *block = static_cast<const LunaIrBlock *>(
+            luna_vector_at_const(&main_function->blocks, block_index));
+        for (std::size_t instruction_index = 0U;
+             instruction_index < block->instructions.length;
+             instruction_index += 1U) {
+            const auto *instruction = static_cast<const LunaIrInstruction *>(
+                luna_vector_at_const(&block->instructions, instruction_index));
+            if (instruction->opcode != LUNA_IR_MEMBER_ADDRESS) {
+                continue;
+            }
+            saw_inner_value_offset =
+                saw_inner_value_offset || instruction->immediate == 4U;
+            saw_tail_offset = saw_tail_offset || instruction->immediate == 16U;
+            saw_next_offset = saw_next_offset || instruction->immediate == 24U;
+        }
+    }
+    EXPECT_TRUE(saw_inner_value_offset);
+    EXPECT_TRUE(saw_tail_offset);
+    EXPECT_TRUE(saw_next_offset);
+}
+
+TEST(SemaTest, AcceptsSignedEnumBoundariesAndImplicitSuccessors) {
+    FrontendHarness harness{
+        "module test.signed_enum;\n"
+        "enum Signed: i8 { minimum = -128, next, maximum = 127, }\n"
+        "fn identity(value: Signed) -> Signed { return value; }\n"
+        "fn main() -> i32 {\n"
+        "    let value: Signed = identity(Signed.next);\n"
+        "    if ((value as i8) != -127) { return 1; }\n"
+        "    return value == Signed.next ? 42 : 2;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+}
+
+TEST(SemaTest, SupportsForwardAggregateGraphsAndEnumLayoutExpressions) {
+    FrontendHarness harness{
+        "module test.forward_aggregate_graph;\n"
+        "struct First { second: Second; }\n"
+        "struct Second { value: i32; owner: *First; }\n"
+        "enum ByteCount: usize { zero, }\n"
+        "fn main() -> i32 {\n"
+        "    var first: First = {};\n"
+        "    first.second.value = 42;\n"
+        "    first.second.owner = &first;\n"
+        "    var values: [2]First = {};\n"
+        "    values[1].second.value = first.second.value;\n"
+        "    let count: ByteCount = sizeof([2][3][4]First) as ByteCount;\n"
+        "    let empty: ByteCount = true ? {} : {};\n"
+        "    if ((count as usize) != 384 || empty != ByteCount.zero) {\n"
+        "        return 1;\n"
+        "    }\n"
+        "    return values[1].second.value;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+}
+
+TEST(SemaTest, RejectsInvalidAggregateAndScopedEnumPrograms) {
+    struct InvalidProgram {
+        std::string_view source;
+        std::string_view diagnostic;
+    };
+    constexpr std::array<InvalidProgram, 33U> LUNA_TEST_INVALID_PROGRAMS = {{
+        {"module test.duplicate_type;\n"
+         "struct Item { value: i32; }\n"
+         "union Item { value: i32; }\n"
+         "fn main() -> i32 { return 0; }\n",
+         "duplicate type declaration 'Item'"},
+        {"module test.duplicate_field;\n"
+         "struct Item { value: i32; value: u32; }\n"
+         "fn main() -> i32 { return 0; }\n",
+         "duplicate field 'value'"},
+        {"module test.unknown_type;\n"
+         "fn main() -> i32 { var value: Missing = {}; return 0; }\n",
+         "unknown type 'Missing'"},
+        {"module test.void_field;\n"
+         "struct Item { value: void; }\n"
+         "fn main() -> i32 { return 0; }\n",
+         "aggregate field cannot have type void"},
+        {"module test.empty_struct;\n"
+         "struct Empty {}\n"
+         "fn main() -> i32 { return 0; }\n",
+         "must declare a field"},
+        {"module test.recursive_struct;\n"
+         "struct Node { next: Node; }\n"
+         "fn main() -> i32 { return 0; }\n",
+         "contains itself by value"},
+        {"module test.mutual_recursion;\n"
+         "struct Left { right: Right; }\n"
+         "struct Right { left: Left; }\n"
+         "fn main() -> i32 { return 0; }\n",
+         "contains itself by value"},
+        {"module test.enum_underlying;\n"
+         "enum Kind: f32 { value, }\n"
+         "fn main() -> i32 { return 0; }\n",
+         "enum underlying type must be a built-in integer type"},
+        {"module test.enum_overflow;\n"
+         "enum Kind: u8 { value = 256, }\n"
+         "fn main() -> i32 { return 0; }\n",
+         "enum member value does not fit in u8"},
+        {"module test.enum_nonliteral;\n"
+         "enum Kind: u8 { value = 1 + 2, }\n"
+         "fn main() -> i32 { return 0; }\n",
+         "enum member value must be an integer literal"},
+        {"module test.enum_implicit_overflow;\n"
+         "enum Kind: u8 { maximum = 255, overflow, }\n"
+         "fn main() -> i32 { return 0; }\n",
+         "implicit enum member value overflows u8"},
+        {"module test.duplicate_enum_member;\n"
+         "enum Kind: u8 { value, value, }\n"
+         "fn main() -> i32 { return 0; }\n",
+         "duplicate enum member 'value'"},
+        {"module test.unknown_enum_member;\n"
+         "enum Kind: u8 { value, }\n"
+         "fn main() -> i32 { return Kind.missing as i32; }\n",
+         "enum 'Kind' has no member named 'missing'"},
+        {"module test.type_as_value;\n"
+         "struct Item { value: i32; }\n"
+         "fn main() -> i32 { return Item.value; }\n",
+         "type 'Item' is not a value"},
+        {"module test.empty_enum;\n"
+         "enum Kind: u8 {}\n"
+         "fn main() -> i32 { return 0; }\n",
+         "must declare a member"},
+        {"module test.unknown_field;\n"
+         "struct Item { value: i32; }\n"
+         "fn main() -> i32 {\n"
+         " var item: Item = {}; return item.missing;\n"
+         "}\n",
+         "has no field named 'missing'"},
+        {"module test.dot_scalar;\n"
+         "fn main() -> i32 { var value: i32 = 0; return value.field; }\n",
+         "'.' member access requires a struct or union lvalue"},
+        {"module test.arrow_scalar;\n"
+         "struct Item { value: i32; }\n"
+         "fn main() -> i32 { var item: Item = {}; return item->value; }\n",
+         "'->' member access requires a pointer"},
+        {"module test.immutable_field;\n"
+         "struct Item { value: i32; }\n"
+         "fn main() -> i32 { let item: Item = {}; item.value = 1; return 0; "
+         "}\n",
+         "cannot assign through an immutable lvalue"},
+        {"module test.readonly_field;\n"
+         "struct Item { value: i32; }\n"
+         "fn main() -> i32 {\n"
+         " var item: Item = {};\n"
+         " let pointer: *const Item = (&item) as *const Item;\n"
+         " pointer->value = 1; return 0;\n"
+         "}\n",
+         "cannot assign through an immutable lvalue"},
+        {"module test.enum_integer;\n"
+         "enum Kind: u8 { value, }\n"
+         "fn main() -> i32 { let kind: Kind = 0; return 0; }\n",
+         "expected Kind, found i32"},
+        {"module test.enum_mixing;\n"
+         "enum Left: u8 { value, }\n"
+         "enum Right: u8 { value, }\n"
+         "fn main() -> i32 {\n"
+         " return Left.value == Right.value ? 1 : 0;\n"
+         "}\n",
+         "expected Left, found Right"},
+        {"module test.enum_switch_label;\n"
+         "enum Kind: u8 { value, }\n"
+         "fn main() -> i32 {\n"
+         " let kind: Kind = Kind.value;\n"
+         " switch (kind) { case 0 { return 1; } default { return 0; } }\n"
+         "}\n",
+         "enum switch case label must be a member"},
+        {"module test.aggregate_parameter;\n"
+         "struct Item { value: i32; }\n"
+         "fn take(item: Item) -> i32 { return 0; }\n"
+         "fn main() -> i32 { return 0; }\n",
+         "aggregate types cannot be passed by value"},
+        {"module test.aggregate_return;\n"
+         "struct Item { value: i32; }\n"
+         "fn make() -> Item { var item: Item = {}; return item; }\n"
+         "fn main() -> i32 { return 0; }\n",
+         "aggregate types cannot be returned by value"},
+        {"module test.aggregate_initializer;\n"
+         "struct Item { value: i32; }\n"
+         "fn main() -> i32 { var item: Item = 0; return 0; }\n",
+         "aggregate objects currently require the '{}' initializer"},
+        {"module test.aggregate_assignment;\n"
+         "struct Item { value: i32; }\n"
+         "fn main() -> i32 {\n"
+         " var left: Item = {}; var right: Item = {}; left = right; return 0;\n"
+         "}\n",
+         "aggregate objects cannot be assigned as a whole"},
+        {"module test.sizeof_void;\n"
+         "fn main() -> i32 { let size: usize = sizeof(void); return 0; }\n",
+         "layout query requires a type with a valid target layout"},
+        {"module test.offsetof_scalar;\n"
+         "fn main() -> i32 { let offset: usize = offsetof(i32, value); "
+         "return 0; }\n",
+         "offsetof requires a struct or union type"},
+        {"module test.offsetof_unknown;\n"
+         "struct Item { value: i32; }\n"
+         "fn main() -> i32 {\n"
+         " let offset: usize = offsetof(Item, missing); return 0;\n"
+         "}\n",
+         "offsetof names an unknown field 'missing'"},
+        {"module test.enum_arithmetic;\n"
+         "enum Kind: u8 { first, second, }\n"
+         "fn main() -> i32 {\n"
+         " let value: Kind = Kind.first + Kind.second; return 0;\n"
+         "}\n",
+         "arithmetic and bitwise operators require numeric operands"},
+        {"module test.enum_conversion;\n"
+         "enum Kind: u8 { value, }\n"
+         "fn main() -> i32 { let kind: Kind = (0 as i16) as Kind; return 0; "
+         "}\n",
+         "enum conversion requires the enum's exact underlying integer type"},
+        {"module test.enum_duplicate_switch_value;\n"
+         "enum Kind: u8 { first = 7, second = 7, }\n"
+         "fn main() -> i32 {\n"
+         " let kind: Kind = Kind.first;\n"
+         " switch (kind) {\n"
+         "  case Kind.first { return 1; }\n"
+         "  case Kind.second { return 2; }\n"
+         " }\n"
+         "}\n",
+         "duplicate switch case value"},
+    }};
+
+    for (const InvalidProgram &program : LUNA_TEST_INVALID_PROGRAMS) {
+        FrontendHarness harness{program.source};
+        EXPECT_FALSE(harness.ParseAndLower()) << program.source;
+        EXPECT_NE(harness.Diagnostics().find(program.diagnostic),
+                  std::string::npos)
+            << program.source << '\n'
+            << harness.Diagnostics();
+    }
+}
+
 TEST(SemaTest, PreservesSequencedMemoryValuesAcrossControlFlowExpressions) {
     FrontendHarness harness{
         "module test.memory_control_flow;\n"

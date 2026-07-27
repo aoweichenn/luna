@@ -36,12 +36,41 @@ typedef struct LunaSemaFunction {
 
 typedef int LunaSemaTypeId;
 
+typedef enum LunaSemaLayoutState {
+    LUNA_SEMA_LAYOUT_UNRESOLVED,
+    LUNA_SEMA_LAYOUT_RESOLVING,
+    LUNA_SEMA_LAYOUT_RESOLVED,
+    LUNA_SEMA_LAYOUT_INVALID
+} LunaSemaLayoutState;
+
 typedef struct LunaSemaType {
     LunaTypeKind kind;
     LunaSemaTypeId element_type;
     uint64_t array_count;
     bool is_read_only;
+    const LunaTypeDeclaration *declaration;
+    uint64_t size_bytes;
+    uint32_t alignment_bytes;
+    LunaSemaLayoutState layout_state;
 } LunaSemaType;
+
+typedef struct LunaSemaNamedType {
+    const LunaTypeDeclaration *syntax;
+    LunaSemaTypeId type;
+} LunaSemaNamedType;
+
+typedef struct LunaSemaField {
+    const LunaField *syntax;
+    LunaSemaTypeId owner_type;
+    LunaSemaTypeId type;
+    uint64_t offset;
+} LunaSemaField;
+
+typedef struct LunaSemaEnumMember {
+    const LunaEnumMember *syntax;
+    LunaSemaTypeId owner_type;
+    uint64_t value;
+} LunaSemaEnumMember;
 
 typedef struct LunaSemaLocal {
     LunaStringView name;
@@ -101,6 +130,9 @@ typedef struct LunaSemaContext {
     LunaIrModule *module;
     LunaVector functions;
     LunaVector types;
+    LunaVector named_types;
+    LunaVector fields;
+    LunaVector enum_members;
     LunaVector locals;
     LunaVector control_frames;
     LunaIrFunction *current_function;
@@ -118,6 +150,14 @@ static const LunaSemaType *luna_sema_type(const LunaSemaContext *context,
         return NULL;
     }
     return luna_vector_at_const(&context->types, (size_t)type);
+}
+
+static LunaSemaType *luna_sema_type_mutable(LunaSemaContext *context,
+                                            LunaSemaTypeId type) {
+    if (type < 0) {
+        return NULL;
+    }
+    return luna_vector_at(&context->types, (size_t)type);
 }
 
 static bool luna_sema_initialize_types(LunaSemaContext *context) {
@@ -165,6 +205,59 @@ static LunaSemaTypeId luna_sema_intern_type(LunaSemaContext *context,
     return (LunaSemaTypeId)(context->types.length - 1U);
 }
 
+static const LunaSemaNamedType *
+luna_sema_find_named_type(const LunaSemaContext *context, LunaStringView name) {
+    for (size_t index = 0U; index < context->named_types.length; index += 1U) {
+        const LunaSemaNamedType *named_type =
+            luna_vector_at_const(&context->named_types, index);
+        if (luna_string_view_equal(named_type->syntax->name, name)) {
+            return named_type;
+        }
+    }
+    return NULL;
+}
+
+static LunaSemaField *luna_sema_find_field_mutable(LunaSemaContext *context,
+                                                   LunaSemaTypeId owner_type,
+                                                   LunaStringView name) {
+    for (size_t index = 0U; index < context->fields.length; index += 1U) {
+        LunaSemaField *field = luna_vector_at(&context->fields, index);
+        if (field->owner_type == owner_type &&
+            luna_string_view_equal(field->syntax->name, name)) {
+            return field;
+        }
+    }
+    return NULL;
+}
+
+static const LunaSemaField *luna_sema_find_field(const LunaSemaContext *context,
+                                                 LunaSemaTypeId owner_type,
+                                                 LunaStringView name) {
+    for (size_t index = 0U; index < context->fields.length; index += 1U) {
+        const LunaSemaField *field =
+            luna_vector_at_const(&context->fields, index);
+        if (field->owner_type == owner_type &&
+            luna_string_view_equal(field->syntax->name, name)) {
+            return field;
+        }
+    }
+    return NULL;
+}
+
+static const LunaSemaEnumMember *
+luna_sema_find_enum_member(const LunaSemaContext *context,
+                           LunaSemaTypeId owner_type, LunaStringView name) {
+    for (size_t index = 0U; index < context->enum_members.length; index += 1U) {
+        const LunaSemaEnumMember *member =
+            luna_vector_at_const(&context->enum_members, index);
+        if (member->owner_type == owner_type &&
+            luna_string_view_equal(member->syntax->name, name)) {
+            return member;
+        }
+    }
+    return NULL;
+}
+
 static LunaTypeKind luna_sema_type_kind(const LunaSemaContext *context,
                                         LunaSemaTypeId type) {
     const LunaSemaType *resolved = luna_sema_type(context, type);
@@ -179,6 +272,23 @@ static bool luna_sema_is_pointer_type(const LunaSemaContext *context,
 static bool luna_sema_is_array_type(const LunaSemaContext *context,
                                     LunaSemaTypeId type) {
     return luna_sema_type_kind(context, type) == LUNA_TYPE_ARRAY;
+}
+
+static bool luna_sema_is_record_type(const LunaSemaContext *context,
+                                     LunaSemaTypeId type) {
+    const LunaTypeKind kind = luna_sema_type_kind(context, type);
+    return kind == LUNA_TYPE_STRUCT || kind == LUNA_TYPE_UNION;
+}
+
+static bool luna_sema_is_memory_type(const LunaSemaContext *context,
+                                     LunaSemaTypeId type) {
+    return luna_sema_is_array_type(context, type) ||
+           luna_sema_is_record_type(context, type);
+}
+
+static bool luna_sema_is_enum_type(const LunaSemaContext *context,
+                                   LunaSemaTypeId type) {
+    return luna_sema_type_kind(context, type) == LUNA_TYPE_ENUM;
 }
 
 static LunaIrType luna_sema_ir_type(const LunaSemaContext *context,
@@ -214,8 +324,17 @@ static LunaIrType luna_sema_ir_type(const LunaSemaContext *context,
         return LUNA_IR_TYPE_F64;
     case LUNA_TYPE_POINTER:
         return LUNA_IR_TYPE_POINTER;
+    case LUNA_TYPE_ENUM: {
+        const LunaSemaType *resolved = luna_sema_type(context, type);
+        return resolved == NULL
+                   ? LUNA_IR_TYPE_VOID
+                   : luna_sema_ir_type(context, resolved->element_type);
+    }
     case LUNA_TYPE_INVALID:
     case LUNA_TYPE_ARRAY:
+    case LUNA_TYPE_NAMED:
+    case LUNA_TYPE_STRUCT:
+    case LUNA_TYPE_UNION:
         break;
     }
 
@@ -250,14 +369,36 @@ static bool luna_sema_append_type_name(const LunaSemaContext *context,
                luna_sema_append_type_name(context, resolved->element_type,
                                           output);
     }
+    if ((resolved->kind == LUNA_TYPE_STRUCT ||
+         resolved->kind == LUNA_TYPE_UNION ||
+         resolved->kind == LUNA_TYPE_ENUM) &&
+        resolved->declaration != NULL) {
+        return luna_string_builder_append_view(output,
+                                               resolved->declaration->name);
+    }
     return luna_string_builder_append_c_string(
         output, luna_type_kind_name(resolved->kind));
 }
 
-static bool luna_sema_type_layout(const LunaSemaContext *context,
-                                  LunaSemaTypeId type, uint64_t *size_bytes,
+static bool luna_sema_align_up(uint64_t value, uint32_t alignment,
+                               uint64_t *result) {
+    if (alignment == 0U || result == NULL) {
+        return false;
+    }
+    const uint64_t remainder = value % (uint64_t)alignment;
+    const uint64_t padding =
+        remainder == 0U ? 0U : (uint64_t)alignment - remainder;
+    if (value > UINT64_MAX - padding) {
+        return false;
+    }
+    *result = value + padding;
+    return true;
+}
+
+static bool luna_sema_type_layout(LunaSemaContext *context, LunaSemaTypeId type,
+                                  uint64_t *size_bytes,
                                   uint32_t *alignment_bytes) {
-    const LunaSemaType *resolved = luna_sema_type(context, type);
+    LunaSemaType *resolved = luna_sema_type_mutable(context, type);
     if (resolved == NULL || size_bytes == NULL || alignment_bytes == NULL) {
         return false;
     }
@@ -298,21 +439,125 @@ static bool luna_sema_type_layout(const LunaSemaContext *context,
     case LUNA_TYPE_POINTER:
         scalar = &layout->pointer;
         break;
+    case LUNA_TYPE_ENUM:
+        return luna_sema_type_layout(context, resolved->element_type,
+                                     size_bytes, alignment_bytes);
     case LUNA_TYPE_ARRAY: {
         uint64_t element_size = 0U;
         uint32_t element_alignment = 0U;
         if (!luna_sema_type_layout(context, resolved->element_type,
                                    &element_size, &element_alignment) ||
             resolved->array_count == 0U ||
-            element_size > UINT64_MAX / resolved->array_count) {
+            element_size > UINT64_MAX / resolved->array_count ||
+            element_size * resolved->array_count > (uint64_t)INT32_MAX) {
             return false;
         }
         *size_bytes = element_size * resolved->array_count;
         *alignment_bytes = element_alignment;
         return true;
     }
+    case LUNA_TYPE_STRUCT:
+    case LUNA_TYPE_UNION: {
+        if (resolved->layout_state == LUNA_SEMA_LAYOUT_RESOLVED) {
+            *size_bytes = resolved->size_bytes;
+            *alignment_bytes = resolved->alignment_bytes;
+            return true;
+        }
+        if (resolved->layout_state == LUNA_SEMA_LAYOUT_INVALID) {
+            return false;
+        }
+        if (resolved->layout_state == LUNA_SEMA_LAYOUT_RESOLVING) {
+            if (resolved->declaration != NULL) {
+                luna_diagnostic_error(
+                    context->diagnostics, resolved->declaration->span,
+                    "aggregate type '%.*s' contains itself by value",
+                    (int)resolved->declaration->name.length,
+                    resolved->declaration->name.data);
+            }
+            resolved->layout_state = LUNA_SEMA_LAYOUT_INVALID;
+            return false;
+        }
+
+        resolved->layout_state = LUNA_SEMA_LAYOUT_RESOLVING;
+        const LunaTypeKind aggregate_kind = resolved->kind;
+        uint64_t aggregate_size = 0U;
+        uint32_t aggregate_alignment = 1U;
+        for (size_t index = 0U; index < context->fields.length; index += 1U) {
+            LunaSemaField *field = luna_vector_at(&context->fields, index);
+            if (field->owner_type != type) {
+                continue;
+            }
+
+            uint64_t field_size = 0U;
+            uint32_t field_alignment = 0U;
+            const size_t errors_before =
+                luna_diagnostic_error_count(context->diagnostics);
+            if (!luna_sema_type_layout(context, field->type, &field_size,
+                                       &field_alignment)) {
+                if (luna_diagnostic_error_count(context->diagnostics) ==
+                    errors_before) {
+                    luna_diagnostic_error(
+                        context->diagnostics, field->syntax->type.span,
+                        "field '%.*s' has no valid target layout",
+                        (int)field->syntax->name.length,
+                        field->syntax->name.data);
+                }
+                LunaSemaType *aggregate = luna_sema_type_mutable(context, type);
+                if (aggregate != NULL) {
+                    aggregate->layout_state = LUNA_SEMA_LAYOUT_INVALID;
+                }
+                return false;
+            }
+            if (field_alignment > aggregate_alignment) {
+                aggregate_alignment = field_alignment;
+            }
+
+            if (aggregate_kind == LUNA_TYPE_UNION) {
+                field->offset = 0U;
+                if (field_size > aggregate_size) {
+                    aggregate_size = field_size;
+                }
+                continue;
+            }
+
+            uint64_t field_offset = 0U;
+            if (!luna_sema_align_up(aggregate_size, field_alignment,
+                                    &field_offset) ||
+                field_offset > UINT64_MAX - field_size) {
+                aggregate_size = UINT64_MAX;
+                break;
+            }
+            field->offset = field_offset;
+            aggregate_size = field_offset + field_size;
+        }
+
+        uint64_t final_size = 0U;
+        if (aggregate_size > (uint64_t)INT32_MAX ||
+            !luna_sema_align_up(aggregate_size, aggregate_alignment,
+                                &final_size) ||
+            final_size > (uint64_t)INT32_MAX) {
+            const LunaTypeDeclaration *declaration =
+                luna_sema_type(context, type)->declaration;
+            luna_diagnostic_error(
+                context->diagnostics, declaration->span,
+                "aggregate type '%.*s' exceeds the supported object size",
+                (int)declaration->name.length, declaration->name.data);
+            LunaSemaType *aggregate = luna_sema_type_mutable(context, type);
+            aggregate->layout_state = LUNA_SEMA_LAYOUT_INVALID;
+            return false;
+        }
+
+        LunaSemaType *aggregate = luna_sema_type_mutable(context, type);
+        aggregate->size_bytes = final_size;
+        aggregate->alignment_bytes = aggregate_alignment;
+        aggregate->layout_state = LUNA_SEMA_LAYOUT_RESOLVED;
+        *size_bytes = final_size;
+        *alignment_bytes = aggregate_alignment;
+        return true;
+    }
     case LUNA_TYPE_INVALID:
     case LUNA_TYPE_VOID:
+    case LUNA_TYPE_NAMED:
         return false;
     }
 
@@ -332,6 +577,18 @@ static LunaSemaTypeId luna_sema_resolve_type(LunaSemaContext *context,
     }
     if (type_ref->kind >= LUNA_TYPE_VOID && type_ref->kind <= LUNA_TYPE_F64) {
         return (LunaSemaTypeId)type_ref->kind;
+    }
+
+    if (type_ref->kind == LUNA_TYPE_NAMED) {
+        const LunaSemaNamedType *named_type =
+            luna_sema_find_named_type(context, type_ref->as.name);
+        if (named_type == NULL) {
+            luna_diagnostic_error(
+                context->diagnostics, type_ref->span, "unknown type '%.*s'",
+                (int)type_ref->as.name.length, type_ref->as.name.data);
+            return LUNA_TYPE_INVALID;
+        }
+        return named_type->type;
     }
 
     if (type_ref->kind == LUNA_TYPE_POINTER) {
@@ -371,16 +628,6 @@ static LunaSemaTypeId luna_sema_resolve_type(LunaSemaContext *context,
             return LUNA_TYPE_INVALID;
         }
 
-        uint64_t size_bytes = 0U;
-        uint32_t alignment_bytes = 0U;
-        if (!luna_sema_type_layout(context, result, &size_bytes,
-                                   &alignment_bytes) ||
-            size_bytes > (uint64_t)INT32_MAX) {
-            luna_diagnostic_error(
-                context->diagnostics, type_ref->span,
-                "fixed-array target layout exceeds the supported object size");
-            return LUNA_TYPE_INVALID;
-        }
         return result;
     }
 
@@ -396,6 +643,267 @@ static LunaSemaTypeId luna_sema_pointer_type(LunaSemaContext *context,
         luna_sema_report_allocation_failure(context);
     }
     return result;
+}
+
+static bool luna_sema_collect_named_types(LunaSemaContext *context) {
+    for (const LunaTypeDeclaration *declaration =
+             context->program->first_type_declaration;
+         declaration != NULL; declaration = declaration->next) {
+        if (luna_sema_find_named_type(context, declaration->name) != NULL) {
+            luna_diagnostic_error(context->diagnostics, declaration->span,
+                                  "duplicate type declaration '%.*s'",
+                                  (int)declaration->name.length,
+                                  declaration->name.data);
+            continue;
+        }
+        if (context->types.length > (size_t)INT_MAX) {
+            luna_sema_report_allocation_failure(context);
+            return false;
+        }
+
+        const LunaSemaType type = {
+            .kind = declaration->kind,
+            .element_type = LUNA_TYPE_INVALID,
+            .declaration = declaration,
+        };
+        if (!luna_vector_push(&context->types, &type)) {
+            luna_sema_report_allocation_failure(context);
+            return false;
+        }
+        const LunaSemaNamedType named_type = {
+            .syntax = declaration,
+            .type = (LunaSemaTypeId)(context->types.length - 1U),
+        };
+        if (!luna_vector_push(&context->named_types, &named_type)) {
+            luna_sema_report_allocation_failure(context);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool luna_sema_enum_literal_value(LunaSemaContext *context,
+                                         const LunaExpression *expression,
+                                         LunaSemaTypeId underlying_type,
+                                         uint64_t *value) {
+    if (expression == NULL || value == NULL) {
+        return false;
+    }
+
+    bool is_negative = false;
+    const LunaExpression *literal = expression;
+    if (expression->kind == LUNA_EXPRESSION_UNARY &&
+        (expression->as.unary.operator_kind == LUNA_TOKEN_PLUS ||
+         expression->as.unary.operator_kind == LUNA_TOKEN_MINUS)) {
+        is_negative = expression->as.unary.operator_kind == LUNA_TOKEN_MINUS;
+        literal = expression->as.unary.operand;
+    }
+    if (literal == NULL || literal->kind != LUNA_EXPRESSION_INTEGER) {
+        luna_diagnostic_error(
+            context->diagnostics, expression->span,
+            "enum member value must be an integer literal with an optional "
+            "sign");
+        return false;
+    }
+
+    const LunaTypeKind kind = luna_sema_type_kind(context, underlying_type);
+    const uint32_t width =
+        luna_type_kind_bit_width(kind, &context->module->target->data_layout);
+    if (width == 0U || width > 64U) {
+        return false;
+    }
+    const uint64_t mask =
+        width == 64U ? UINT64_MAX : (UINT64_C(1) << width) - UINT64_C(1);
+    const bool is_signed = luna_type_kind_is_signed_integer(kind);
+    const uint64_t signed_limit = is_signed ? UINT64_C(1) << (width - 1U) : 0U;
+    const uint64_t maximum = is_signed ? signed_limit - UINT64_C(1) : mask;
+    const uint64_t magnitude = literal->as.integer;
+
+    if ((is_negative && (!is_signed || magnitude > signed_limit)) ||
+        (!is_negative && magnitude > maximum)) {
+        luna_diagnostic_error(context->diagnostics, expression->span,
+                              "enum member value does not fit in %s",
+                              luna_type_kind_name(kind));
+        return false;
+    }
+    *value = is_negative ? (UINT64_C(0) - magnitude) & mask : magnitude;
+    return true;
+}
+
+static bool luna_sema_next_enum_value(LunaSemaContext *context,
+                                      LunaSemaTypeId underlying_type,
+                                      uint64_t previous, LunaSourceSpan span,
+                                      uint64_t *value) {
+    const LunaTypeKind kind = luna_sema_type_kind(context, underlying_type);
+    const uint32_t width =
+        luna_type_kind_bit_width(kind, &context->module->target->data_layout);
+    const uint64_t mask =
+        width == 64U ? UINT64_MAX : (UINT64_C(1) << width) - UINT64_C(1);
+    const bool is_signed = luna_type_kind_is_signed_integer(kind);
+    const uint64_t sign_bit = is_signed ? UINT64_C(1) << (width - 1U) : 0U;
+    const uint64_t maximum = is_signed ? sign_bit - UINT64_C(1) : mask;
+    if ((is_signed && (previous & sign_bit) == 0U && previous == maximum) ||
+        (!is_signed && previous == maximum)) {
+        luna_diagnostic_error(context->diagnostics, span,
+                              "implicit enum member value overflows %s",
+                              luna_type_kind_name(kind));
+        return false;
+    }
+    *value = (previous + UINT64_C(1)) & mask;
+    return true;
+}
+
+static bool
+luna_sema_collect_aggregate_fields(LunaSemaContext *context,
+                                   const LunaSemaNamedType *named_type) {
+    const LunaTypeDeclaration *declaration = named_type->syntax;
+    if (declaration->as.aggregate.field_count == 0U) {
+        luna_diagnostic_error(context->diagnostics, declaration->span,
+                              "aggregate type '%.*s' must declare a field",
+                              (int)declaration->name.length,
+                              declaration->name.data);
+        return false;
+    }
+
+    bool success = true;
+    for (const LunaField *syntax = declaration->as.aggregate.first_field;
+         syntax != NULL; syntax = syntax->next) {
+        if (luna_sema_find_field_mutable(context, named_type->type,
+                                         syntax->name) != NULL) {
+            luna_diagnostic_error(context->diagnostics, syntax->span,
+                                  "duplicate field '%.*s' in type '%.*s'",
+                                  (int)syntax->name.length, syntax->name.data,
+                                  (int)declaration->name.length,
+                                  declaration->name.data);
+            success = false;
+            continue;
+        }
+
+        const LunaSemaTypeId field_type =
+            luna_sema_resolve_type(context, &syntax->type);
+        const LunaTypeKind field_kind =
+            luna_sema_type_kind(context, field_type);
+        if (field_kind == LUNA_TYPE_INVALID || field_kind == LUNA_TYPE_VOID) {
+            if (field_kind == LUNA_TYPE_VOID) {
+                luna_diagnostic_error(context->diagnostics, syntax->type.span,
+                                      "aggregate field cannot have type void");
+            }
+            success = false;
+            continue;
+        }
+
+        const LunaSemaField field = {
+            .syntax = syntax,
+            .owner_type = named_type->type,
+            .type = field_type,
+        };
+        if (!luna_vector_push(&context->fields, &field)) {
+            luna_sema_report_allocation_failure(context);
+            return false;
+        }
+    }
+    return success;
+}
+
+static bool
+luna_sema_collect_enum_members(LunaSemaContext *context,
+                               const LunaSemaNamedType *named_type) {
+    const LunaTypeDeclaration *declaration = named_type->syntax;
+    const LunaSemaTypeId underlying_type = luna_sema_resolve_type(
+        context, &declaration->as.enumeration.underlying_type);
+    if (!luna_type_kind_is_integer(
+            luna_sema_type_kind(context, underlying_type))) {
+        luna_diagnostic_error(context->diagnostics,
+                              declaration->as.enumeration.underlying_type.span,
+                              "enum underlying type must be a built-in "
+                              "integer type");
+        return false;
+    }
+    LunaSemaType *enum_type = luna_sema_type_mutable(context, named_type->type);
+    enum_type->element_type = underlying_type;
+
+    if (declaration->as.enumeration.member_count == 0U) {
+        luna_diagnostic_error(context->diagnostics, declaration->span,
+                              "enum type '%.*s' must declare a member",
+                              (int)declaration->name.length,
+                              declaration->name.data);
+        return false;
+    }
+
+    bool success = true;
+    bool has_previous = false;
+    uint64_t previous = 0U;
+    for (const LunaEnumMember *syntax =
+             declaration->as.enumeration.first_member;
+         syntax != NULL; syntax = syntax->next) {
+        if (luna_sema_find_enum_member(context, named_type->type,
+                                       syntax->name) != NULL) {
+            luna_diagnostic_error(context->diagnostics, syntax->span,
+                                  "duplicate enum member '%.*s' in type '%.*s'",
+                                  (int)syntax->name.length, syntax->name.data,
+                                  (int)declaration->name.length,
+                                  declaration->name.data);
+            success = false;
+            continue;
+        }
+
+        uint64_t value = 0U;
+        bool value_is_valid = true;
+        if (syntax->initializer != NULL) {
+            value_is_valid = luna_sema_enum_literal_value(
+                context, syntax->initializer, underlying_type, &value);
+        } else if (has_previous) {
+            value_is_valid = luna_sema_next_enum_value(
+                context, underlying_type, previous, syntax->span, &value);
+        }
+        if (!value_is_valid) {
+            success = false;
+            continue;
+        }
+
+        const LunaSemaEnumMember member = {
+            .syntax = syntax,
+            .owner_type = named_type->type,
+            .value = value,
+        };
+        if (!luna_vector_push(&context->enum_members, &member)) {
+            luna_sema_report_allocation_failure(context);
+            return false;
+        }
+        previous = value;
+        has_previous = true;
+    }
+    return success;
+}
+
+static bool luna_sema_resolve_type_declarations(LunaSemaContext *context) {
+    bool success = true;
+    for (size_t index = 0U; index < context->named_types.length; index += 1U) {
+        const LunaSemaNamedType *named_type =
+            luna_vector_at_const(&context->named_types, index);
+        if (named_type->syntax->kind == LUNA_TYPE_ENUM) {
+            if (!luna_sema_collect_enum_members(context, named_type)) {
+                success = false;
+            }
+        } else if (!luna_sema_collect_aggregate_fields(context, named_type)) {
+            success = false;
+        }
+    }
+
+    for (size_t index = 0U; index < context->named_types.length; index += 1U) {
+        const LunaSemaNamedType *named_type =
+            luna_vector_at_const(&context->named_types, index);
+        if (named_type->syntax->kind == LUNA_TYPE_ENUM) {
+            continue;
+        }
+        uint64_t size_bytes = 0U;
+        uint32_t alignment_bytes = 0U;
+        if (!luna_sema_type_layout(context, named_type->type, &size_bytes,
+                                   &alignment_bytes)) {
+            success = false;
+        }
+    }
+    return success;
 }
 
 static const LunaSemaType *
@@ -1035,7 +1543,7 @@ luna_sema_lower_zero_initializer(LunaSemaContext *context,
         instruction.opcode = LUNA_IR_CONST_BOOL;
     } else if (luna_type_kind_is_float(kind)) {
         instruction.opcode = LUNA_IR_CONST_FLOAT;
-    } else if (!luna_type_kind_is_integer(kind)) {
+    } else if (!luna_type_kind_is_integer(kind) && kind != LUNA_TYPE_ENUM) {
         luna_diagnostic_error(
             context->diagnostics, span,
             "zero initializer requires a scalar or fixed-array context");
@@ -1061,6 +1569,31 @@ luna_sema_lower_expression(LunaSemaContext *context,
 static LunaSemaTypeId
 luna_sema_known_expression_type(LunaSemaContext *context,
                                 const LunaExpression *expression);
+
+static const LunaSemaEnumMember *
+luna_sema_scoped_enum_member(LunaSemaContext *context,
+                             const LunaExpression *expression,
+                             LunaSemaTypeId *enum_type) {
+    if (expression == NULL || expression->kind != LUNA_EXPRESSION_MEMBER ||
+        expression->as.member.operator_kind != LUNA_TOKEN_DOT ||
+        expression->as.member.base == NULL ||
+        expression->as.member.base->kind != LUNA_EXPRESSION_NAME ||
+        luna_sema_find_local(context, expression->as.member.base->as.name) !=
+            NULL) {
+        return NULL;
+    }
+    const LunaSemaNamedType *named_type =
+        luna_sema_find_named_type(context, expression->as.member.base->as.name);
+    if (named_type == NULL ||
+        !luna_sema_is_enum_type(context, named_type->type)) {
+        return NULL;
+    }
+    if (enum_type != NULL) {
+        *enum_type = named_type->type;
+    }
+    return luna_sema_find_enum_member(context, named_type->type,
+                                      expression->as.member.name);
+}
 
 static bool luna_sema_known_lvalue_type(LunaSemaContext *context,
                                         const LunaExpression *expression,
@@ -1124,6 +1657,40 @@ static bool luna_sema_known_lvalue_type(LunaSemaContext *context,
         }
     }
 
+    if (expression->kind == LUNA_EXPRESSION_MEMBER) {
+        LunaSemaTypeId aggregate_type = LUNA_TYPE_INVALID;
+        bool aggregate_is_mutable = false;
+        if (expression->as.member.operator_kind == LUNA_TOKEN_DOT) {
+            if (!luna_sema_known_lvalue_type(
+                    context, expression->as.member.base, &aggregate_type,
+                    &aggregate_is_mutable)) {
+                return false;
+            }
+        } else if (expression->as.member.operator_kind == LUNA_TOKEN_ARROW) {
+            const LunaSemaTypeId pointer_type = luna_sema_known_expression_type(
+                context, expression->as.member.base);
+            const LunaSemaType *pointer = luna_sema_type(context, pointer_type);
+            if (pointer == NULL || pointer->kind != LUNA_TYPE_POINTER) {
+                return false;
+            }
+            aggregate_type = pointer->element_type;
+            aggregate_is_mutable = !pointer->is_read_only;
+        } else {
+            return false;
+        }
+        if (!luna_sema_is_record_type(context, aggregate_type)) {
+            return false;
+        }
+        const LunaSemaField *field = luna_sema_find_field(
+            context, aggregate_type, expression->as.member.name);
+        if (field == NULL) {
+            return false;
+        }
+        *type = field->type;
+        *is_mutable = aggregate_is_mutable;
+        return true;
+    }
+
     return false;
 }
 
@@ -1144,6 +1711,10 @@ luna_sema_known_expression_type(LunaSemaContext *context,
         return LUNA_TYPE_BOOL;
     case LUNA_EXPRESSION_STRING:
         return luna_sema_pointer_type(context, LUNA_TYPE_U8, true);
+    case LUNA_EXPRESSION_SIZEOF:
+    case LUNA_EXPRESSION_ALIGNOF:
+    case LUNA_EXPRESSION_OFFSETOF:
+        return LUNA_TYPE_USIZE;
     case LUNA_EXPRESSION_NAME: {
         const LunaSemaLocal *local =
             luna_sema_find_local(context, expression->as.name);
@@ -1200,6 +1771,19 @@ luna_sema_known_expression_type(LunaSemaContext *context,
         return base != NULL && (base->kind == LUNA_TYPE_POINTER ||
                                 base->kind == LUNA_TYPE_ARRAY)
                    ? base->element_type
+                   : LUNA_TYPE_INVALID;
+    }
+    case LUNA_EXPRESSION_MEMBER: {
+        LunaSemaTypeId enum_type = LUNA_TYPE_INVALID;
+        if (luna_sema_scoped_enum_member(context, expression, &enum_type) !=
+            NULL) {
+            return enum_type;
+        }
+        LunaSemaTypeId member_type = LUNA_TYPE_INVALID;
+        bool is_mutable = false;
+        return luna_sema_known_lvalue_type(context, expression, &member_type,
+                                           &is_mutable)
+                   ? member_type
                    : LUNA_TYPE_INVALID;
     }
     case LUNA_EXPRESSION_BINARY:
@@ -1275,6 +1859,10 @@ luna_sema_default_literal_type(const LunaExpression *expression) {
     case LUNA_EXPRESSION_ZERO_INITIALIZER:
     case LUNA_EXPRESSION_NAME:
     case LUNA_EXPRESSION_INDEX:
+    case LUNA_EXPRESSION_MEMBER:
+    case LUNA_EXPRESSION_SIZEOF:
+    case LUNA_EXPRESSION_ALIGNOF:
+    case LUNA_EXPRESSION_OFFSETOF:
     case LUNA_EXPRESSION_CALL:
     case LUNA_EXPRESSION_CAST:
         return LUNA_TYPE_INVALID;
@@ -1301,6 +1889,8 @@ static bool luna_sema_expression_can_branch(const LunaExpression *expression) {
     case LUNA_EXPRESSION_INDEX:
         return luna_sema_expression_can_branch(expression->as.index.base) ||
                luna_sema_expression_can_branch(expression->as.index.index);
+    case LUNA_EXPRESSION_MEMBER:
+        return luna_sema_expression_can_branch(expression->as.member.base);
     case LUNA_EXPRESSION_CALL:
         for (const LunaExpression *argument =
                  expression->as.call.first_argument;
@@ -1319,6 +1909,9 @@ static bool luna_sema_expression_can_branch(const LunaExpression *expression) {
     case LUNA_EXPRESSION_NULL:
     case LUNA_EXPRESSION_ZERO_INITIALIZER:
     case LUNA_EXPRESSION_NAME:
+    case LUNA_EXPRESSION_SIZEOF:
+    case LUNA_EXPRESSION_ALIGNOF:
+    case LUNA_EXPRESSION_OFFSETOF:
         return false;
     }
 
@@ -1566,6 +2159,97 @@ luna_sema_lower_lvalue(LunaSemaContext *context,
         };
     }
 
+    if (expression->kind == LUNA_EXPRESSION_MEMBER) {
+        LunaSemaTypeId aggregate_type = LUNA_TYPE_INVALID;
+        LunaIrValueId base_address = LUNA_IR_INVALID_ID;
+        bool is_mutable = false;
+
+        if (expression->as.member.operator_kind == LUNA_TOKEN_DOT) {
+            LunaCheckedLvalue base =
+                luna_sema_lower_lvalue(context, expression->as.member.base);
+            if (base.storage == LUNA_SEMA_LVALUE_INVALID) {
+                return luna_sema_invalid_lvalue();
+            }
+            aggregate_type = base.type;
+            if (!luna_sema_is_record_type(context, aggregate_type)) {
+                luna_diagnostic_error(
+                    context->diagnostics, expression->as.member.base->span,
+                    "'.' member access requires a struct or union lvalue");
+                return luna_sema_invalid_lvalue();
+            }
+            base_address =
+                luna_sema_lvalue_address(context, &base, expression->span);
+            if (base.requires_null_check &&
+                !luna_sema_emit_null_check(context, base_address,
+                                           expression->as.member.base->span)) {
+                return luna_sema_invalid_lvalue();
+            }
+            is_mutable = base.is_mutable;
+        } else if (expression->as.member.operator_kind == LUNA_TOKEN_ARROW) {
+            const LunaCheckedValue pointer =
+                luna_sema_lower_expression(context, expression->as.member.base);
+            const LunaSemaType *pointer_type =
+                luna_sema_type(context, pointer.type);
+            if (pointer_type == NULL ||
+                pointer_type->kind != LUNA_TYPE_POINTER) {
+                luna_diagnostic_error(context->diagnostics,
+                                      expression->as.member.base->span,
+                                      "'->' member access requires a pointer");
+                return luna_sema_invalid_lvalue();
+            }
+            aggregate_type = pointer_type->element_type;
+            is_mutable = !pointer_type->is_read_only;
+            if (!luna_sema_is_record_type(context, aggregate_type)) {
+                luna_diagnostic_error(
+                    context->diagnostics, expression->as.member.base->span,
+                    "'->' member access requires a pointer to struct or union");
+                return luna_sema_invalid_lvalue();
+            }
+            base_address = pointer.id;
+            if (!luna_sema_emit_null_check(context, base_address,
+                                           expression->as.member.base->span)) {
+                return luna_sema_invalid_lvalue();
+            }
+        } else {
+            return luna_sema_invalid_lvalue();
+        }
+
+        const LunaSemaField *field = luna_sema_find_field(
+            context, aggregate_type, expression->as.member.name);
+        if (field == NULL) {
+            const LunaSemaType *aggregate =
+                luna_sema_type(context, aggregate_type);
+            const LunaStringView aggregate_name =
+                aggregate != NULL && aggregate->declaration != NULL
+                    ? aggregate->declaration->name
+                    : (LunaStringView){0};
+            luna_diagnostic_error(context->diagnostics, expression->span,
+                                  "type '%.*s' has no field named '%.*s'",
+                                  (int)aggregate_name.length,
+                                  aggregate_name.data,
+                                  (int)expression->as.member.name.length,
+                                  expression->as.member.name.data);
+            return luna_sema_invalid_lvalue();
+        }
+        const LunaSemaTypeId field_type = field->type;
+        const uint64_t field_offset = field->offset;
+        LunaIrInstruction address =
+            luna_sema_instruction(LUNA_IR_MEMBER_ADDRESS, expression->span);
+        address.left = base_address;
+        address.immediate = field_offset;
+        const LunaSemaTypeId pointer_result =
+            luna_sema_pointer_type(context, field_type, !is_mutable);
+        const LunaIrValueId result =
+            luna_sema_emit_value_instruction(context, &address, pointer_result);
+        return (LunaCheckedLvalue){
+            .type = field_type,
+            .storage = LUNA_SEMA_LVALUE_ADDRESS,
+            .slot = LUNA_IR_INVALID_ID,
+            .address = result,
+            .is_mutable = is_mutable,
+        };
+    }
+
     luna_diagnostic_error(context->diagnostics, expression->span,
                           "expression is not an assignable lvalue");
     return luna_sema_invalid_lvalue();
@@ -1577,9 +2261,11 @@ static LunaCheckedValue luna_sema_load_lvalue(LunaSemaContext *context,
     if (lvalue->storage == LUNA_SEMA_LVALUE_INVALID) {
         return luna_sema_invalid_value();
     }
-    if (luna_sema_is_array_type(context, lvalue->type)) {
-        luna_diagnostic_error(context->diagnostics, span,
-                              "fixed arrays are not scalar values");
+    if (luna_sema_is_memory_type(context, lvalue->type)) {
+        luna_diagnostic_error(context->diagnostics, span, "%s",
+                              luna_sema_is_array_type(context, lvalue->type)
+                                  ? "fixed arrays are not scalar values"
+                                  : "aggregate objects are not scalar values");
         return luna_sema_invalid_value();
     }
 
@@ -1616,9 +2302,12 @@ static bool luna_sema_store_lvalue(LunaSemaContext *context,
                               "cannot assign through an immutable lvalue");
         return false;
     }
-    if (luna_sema_is_array_type(context, lvalue->type)) {
-        luna_diagnostic_error(context->diagnostics, span,
-                              "fixed arrays cannot be assigned as a whole");
+    if (luna_sema_is_memory_type(context, lvalue->type)) {
+        luna_diagnostic_error(
+            context->diagnostics, span, "%s",
+            luna_sema_is_array_type(context, lvalue->type)
+                ? "fixed arrays cannot be assigned as a whole"
+                : "aggregate objects cannot be assigned as a whole");
         return false;
     }
     if (lvalue->requires_null_check &&
@@ -1724,6 +2413,7 @@ luna_sema_conditional_result_type(LunaSemaContext *context,
                                   LunaSemaTypeId expected_type) {
     if (expected_type == LUNA_TYPE_BOOL ||
         luna_sema_is_numeric_type(expected_type) ||
+        luna_sema_is_enum_type(context, expected_type) ||
         luna_sema_is_pointer_type(context, expected_type)) {
         return expected_type;
     }
@@ -1764,6 +2454,7 @@ luna_sema_lower_conditional(LunaSemaContext *context,
         luna_sema_conditional_result_type(context, expression, expected_type);
     if (result_type != LUNA_TYPE_BOOL &&
         !luna_sema_is_numeric_type(result_type) &&
+        !luna_sema_is_enum_type(context, result_type) &&
         !luna_sema_is_pointer_type(context, result_type)) {
         luna_diagnostic_error(
             context->diagnostics, expression->span,
@@ -2047,8 +2738,111 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
         return luna_sema_lower_zero_initializer(context, expected_type,
                                                 expression->span);
 
+    case LUNA_EXPRESSION_SIZEOF:
+    case LUNA_EXPRESSION_ALIGNOF:
+    case LUNA_EXPRESSION_OFFSETOF: {
+        const LunaSemaTypeId queried_type =
+            luna_sema_resolve_type(context, &expression->as.type_query.type);
+        if (queried_type == LUNA_TYPE_INVALID) {
+            return luna_sema_invalid_value();
+        }
+
+        uint64_t immediate = 0U;
+        if (expression->kind == LUNA_EXPRESSION_OFFSETOF) {
+            if (!luna_sema_is_record_type(context, queried_type)) {
+                luna_diagnostic_error(
+                    context->diagnostics, expression->span,
+                    "offsetof requires a struct or union type");
+                return luna_sema_invalid_value();
+            }
+            const LunaSemaField *field = luna_sema_find_field(
+                context, queried_type, expression->as.type_query.member_name);
+            if (field == NULL) {
+                luna_diagnostic_error(
+                    context->diagnostics, expression->span,
+                    "offsetof names an unknown field '%.*s'",
+                    (int)expression->as.type_query.member_name.length,
+                    expression->as.type_query.member_name.data);
+                return luna_sema_invalid_value();
+            }
+            immediate = field->offset;
+        } else {
+            uint64_t size_bytes = 0U;
+            uint32_t alignment_bytes = 0U;
+            if (!luna_sema_type_layout(context, queried_type, &size_bytes,
+                                       &alignment_bytes)) {
+                luna_diagnostic_error(
+                    context->diagnostics, expression->span,
+                    "layout query requires a type with a valid target layout");
+                return luna_sema_invalid_value();
+            }
+            immediate = expression->kind == LUNA_EXPRESSION_SIZEOF
+                            ? size_bytes
+                            : (uint64_t)alignment_bytes;
+        }
+
+        LunaIrInstruction constant =
+            luna_sema_instruction(LUNA_IR_CONST_INTEGER, expression->span);
+        constant.immediate = immediate;
+        const LunaIrValueId result = luna_sema_emit_value_instruction(
+            context, &constant, LUNA_TYPE_USIZE);
+        return (LunaCheckedValue){
+            .id = result,
+            .type = LUNA_TYPE_USIZE,
+        };
+    }
+
     case LUNA_EXPRESSION_NAME:
     case LUNA_EXPRESSION_INDEX: {
+        const LunaCheckedLvalue lvalue =
+            luna_sema_lower_lvalue(context, expression);
+        return luna_sema_load_lvalue(context, &lvalue, expression->span);
+    }
+
+    case LUNA_EXPRESSION_MEMBER: {
+        LunaSemaTypeId enum_type = LUNA_TYPE_INVALID;
+        const LunaSemaEnumMember *member =
+            luna_sema_scoped_enum_member(context, expression, &enum_type);
+        if (member != NULL) {
+            LunaIrInstruction constant =
+                luna_sema_instruction(LUNA_IR_CONST_INTEGER, expression->span);
+            constant.immediate = member->value;
+            const LunaIrValueId result =
+                luna_sema_emit_value_instruction(context, &constant, enum_type);
+            return (LunaCheckedValue){
+                .id = result,
+                .type = enum_type,
+            };
+        }
+
+        if (expression->as.member.operator_kind == LUNA_TOKEN_DOT &&
+            expression->as.member.base != NULL &&
+            expression->as.member.base->kind == LUNA_EXPRESSION_NAME &&
+            luna_sema_find_local(context,
+                                 expression->as.member.base->as.name) == NULL) {
+            const LunaSemaNamedType *named_type = luna_sema_find_named_type(
+                context, expression->as.member.base->as.name);
+            if (named_type != NULL) {
+                if (luna_sema_is_enum_type(context, named_type->type)) {
+                    luna_diagnostic_error(
+                        context->diagnostics, expression->span,
+                        "enum '%.*s' has no member named '%.*s'",
+                        (int)named_type->syntax->name.length,
+                        named_type->syntax->name.data,
+                        (int)expression->as.member.name.length,
+                        expression->as.member.name.data);
+                } else {
+                    luna_diagnostic_error(
+                        context->diagnostics, expression->span,
+                        "type '%.*s' is not a value; scoped member access is "
+                        "only valid for enums",
+                        (int)named_type->syntax->name.length,
+                        named_type->syntax->name.data);
+                }
+                return luna_sema_invalid_value();
+            }
+        }
+
         const LunaCheckedLvalue lvalue =
             luna_sema_lower_lvalue(context, expression);
         return luna_sema_load_lvalue(context, &lvalue, expression->span);
@@ -2064,8 +2858,13 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
             context, expression->as.cast.operand);
         const LunaSemaTypeId operand_default =
             luna_sema_default_literal_type(expression->as.cast.operand);
+        const LunaSemaType *target = luna_sema_type(context, target_type);
+        const LunaSemaTypeId target_storage =
+            target != NULL && target->kind == LUNA_TYPE_ENUM
+                ? target->element_type
+                : target_type;
         const bool target_supplies_literal_context =
-            (luna_sema_is_integer_type(target_type) &&
+            (luna_sema_is_integer_type(target_storage) &&
              luna_sema_is_integer_type(operand_default)) ||
             (luna_sema_is_float_type(target_type) &&
              luna_sema_is_float_type(operand_default)) ||
@@ -2074,9 +2873,35 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
         LunaCheckedValue operand =
             operand_hint == LUNA_TYPE_INVALID && target_supplies_literal_context
                 ? luna_sema_lower_expression_expected(
-                      context, expression->as.cast.operand, target_type)
+                      context, expression->as.cast.operand, target_storage)
                 : luna_sema_lower_expression(context,
                                              expression->as.cast.operand);
+        target = luna_sema_type(context, target_type);
+
+        if (luna_sema_is_enum_type(context, operand.type) ||
+            luna_sema_is_enum_type(context, target_type)) {
+            const LunaSemaType *operand_semantic_type =
+                luna_sema_type(context, operand.type);
+            const bool enum_to_underlying =
+                operand_semantic_type != NULL &&
+                operand_semantic_type->kind == LUNA_TYPE_ENUM &&
+                operand_semantic_type->element_type == target_type;
+            const bool underlying_to_enum =
+                target != NULL && target->kind == LUNA_TYPE_ENUM &&
+                target->element_type == operand.type;
+            if (!enum_to_underlying && !underlying_to_enum &&
+                operand.type != target_type) {
+                luna_diagnostic_error(
+                    context->diagnostics, expression->span,
+                    "enum conversion requires the enum's exact underlying "
+                    "integer type");
+                return luna_sema_invalid_value();
+            }
+            return (LunaCheckedValue){
+                .id = operand.id,
+                .type = target_type,
+            };
+        }
 
         const bool operand_is_pointer =
             luna_sema_is_pointer_type(context, operand.type);
@@ -2358,10 +3183,11 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
 
     if (is_equality && operand_type != LUNA_TYPE_BOOL &&
         !luna_sema_is_numeric_type(operand_type) &&
+        !luna_sema_is_enum_type(context, operand_type) &&
         !luna_sema_is_pointer_type(context, operand_type)) {
         luna_diagnostic_error(context->diagnostics, expression->span,
-                              "equality requires bool, numeric, or exact "
-                              "pointer operands");
+                              "equality requires bool, numeric, enum, or "
+                              "exact pointer operands");
         return luna_sema_invalid_value();
     }
     if (is_relational && !luna_sema_is_numeric_type(operand_type)) {
@@ -2756,6 +3582,21 @@ static bool luna_sema_switch_label_value(LunaSemaContext *context,
         return false;
     }
 
+    if (luna_sema_is_enum_type(context, switch_type)) {
+        LunaSemaTypeId label_type = LUNA_TYPE_INVALID;
+        const LunaSemaEnumMember *member =
+            luna_sema_scoped_enum_member(context, expression, &label_type);
+        if (member == NULL || label_type != switch_type) {
+            luna_diagnostic_error(
+                context->diagnostics, expression->span,
+                "enum switch case label must be a member of the controlling "
+                "enum");
+            return false;
+        }
+        *value = member->value;
+        return true;
+    }
+
     bool is_negative = false;
     const LunaExpression *literal = expression;
     if (literal->kind == LUNA_EXPRESSION_UNARY) {
@@ -2763,8 +3604,7 @@ static bool luna_sema_switch_label_value(LunaSemaContext *context,
             literal->as.unary.operator_kind != LUNA_TOKEN_MINUS) {
             luna_diagnostic_error(
                 context->diagnostics, expression->span,
-                "switch case label must be an integer literal with an "
-                "optional sign");
+                "expected integer literal as switch case label");
             return false;
         }
         is_negative = literal->as.unary.operator_kind == LUNA_TOKEN_MINUS;
@@ -2772,10 +3612,8 @@ static bool luna_sema_switch_label_value(LunaSemaContext *context,
     }
 
     if (literal == NULL || literal->kind != LUNA_EXPRESSION_INTEGER) {
-        luna_diagnostic_error(
-            context->diagnostics, expression->span,
-            "switch case label must be an integer literal with an optional "
-            "sign");
+        luna_diagnostic_error(context->diagnostics, expression->span,
+                              "expected integer literal as switch case label");
         return false;
     }
 
@@ -2809,10 +3647,12 @@ static bool luna_sema_lower_switch(LunaSemaContext *context,
                                    const LunaStatement *statement) {
     LunaCheckedValue controlling = luna_sema_lower_expression(
         context, statement->as.switch_statement.expression);
-    if (!luna_sema_is_integer_type(controlling.type)) {
+    if (!luna_sema_is_integer_type(controlling.type) &&
+        !luna_sema_is_enum_type(context, controlling.type)) {
         luna_diagnostic_error(context->diagnostics,
                               statement->as.switch_statement.expression->span,
-                              "switch expression requires an integer type");
+                              "switch expression requires an integer type or "
+                              "scoped enum");
         return false;
     }
 
@@ -3025,13 +3865,18 @@ static bool luna_sema_lower_statement(LunaSemaContext *context,
             return false;
         }
 
-        if (luna_sema_is_array_type(context, declared_type)) {
+        if (luna_sema_is_memory_type(context, declared_type)) {
+            const bool is_array =
+                luna_sema_is_array_type(context, declared_type);
             if (statement->as.declaration.initializer->kind !=
                 LUNA_EXPRESSION_ZERO_INITIALIZER) {
                 luna_diagnostic_error(
                     context->diagnostics,
-                    statement->as.declaration.initializer->span,
-                    "fixed arrays currently require the '{}' initializer");
+                    statement->as.declaration.initializer->span, "%s",
+                    is_array
+                        ? "fixed arrays currently require the '{}' initializer"
+                        : "aggregate objects currently require the '{}' "
+                          "initializer");
                 return false;
             }
 
@@ -3039,9 +3884,11 @@ static bool luna_sema_lower_statement(LunaSemaContext *context,
             uint32_t alignment_bytes = 0U;
             if (!luna_sema_type_layout(context, declared_type, &size_bytes,
                                        &alignment_bytes)) {
-                luna_diagnostic_error(context->diagnostics,
-                                      statement->as.declaration.type.span,
-                                      "fixed array has no valid target layout");
+                luna_diagnostic_error(
+                    context->diagnostics, statement->as.declaration.type.span,
+                    "%s",
+                    is_array ? "fixed array has no valid target layout"
+                             : "aggregate object has no valid target layout");
                 return false;
             }
             const LunaIrSlotId slot = luna_ir_function_add_memory_slot(
@@ -3112,9 +3959,12 @@ static bool luna_sema_lower_statement(LunaSemaContext *context,
             }
             return false;
         }
-        if (luna_sema_is_array_type(context, lvalue.type)) {
-            luna_diagnostic_error(context->diagnostics, statement->span,
-                                  "fixed arrays cannot be assigned as a whole");
+        if (luna_sema_is_memory_type(context, lvalue.type)) {
+            luna_diagnostic_error(
+                context->diagnostics, statement->span, "%s",
+                luna_sema_is_array_type(context, lvalue.type)
+                    ? "fixed arrays cannot be assigned as a whole"
+                    : "aggregate objects cannot be assigned as a whole");
             return false;
         }
 
@@ -3349,10 +4199,14 @@ static bool luna_sema_collect_functions(LunaSemaContext *context) {
         if (return_type == LUNA_TYPE_INVALID) {
             continue;
         }
-        if (luna_sema_is_array_type(context, return_type)) {
+        if (luna_sema_is_memory_type(context, return_type)) {
             luna_diagnostic_error(
-                context->diagnostics, syntax->return_type.span,
-                "fixed arrays cannot be returned by value in this milestone");
+                context->diagnostics, syntax->return_type.span, "%s",
+                luna_sema_is_array_type(context, return_type)
+                    ? "fixed arrays cannot be returned by value in this "
+                      "milestone"
+                    : "aggregate types cannot be returned by value in this "
+                      "milestone");
             continue;
         }
 
@@ -3372,10 +4226,14 @@ static bool luna_sema_collect_functions(LunaSemaContext *context) {
                 parameters_are_valid = false;
                 continue;
             }
-            if (luna_sema_is_array_type(context, parameter_type)) {
+            if (luna_sema_is_memory_type(context, parameter_type)) {
                 luna_diagnostic_error(
-                    context->diagnostics, parameter->type.span,
-                    "fixed arrays cannot be passed by value in this milestone");
+                    context->diagnostics, parameter->type.span, "%s",
+                    luna_sema_is_array_type(context, parameter_type)
+                        ? "fixed arrays cannot be passed by value in this "
+                          "milestone"
+                        : "aggregate types cannot be passed by value in this "
+                          "milestone");
                 parameters_are_valid = false;
                 continue;
             }
@@ -3539,6 +4397,9 @@ bool luna_sema_lower(const LunaProgram *program,
     };
     luna_vector_init(&context.functions, sizeof(LunaSemaFunction));
     luna_vector_init(&context.types, sizeof(LunaSemaType));
+    luna_vector_init(&context.named_types, sizeof(LunaSemaNamedType));
+    luna_vector_init(&context.fields, sizeof(LunaSemaField));
+    luna_vector_init(&context.enum_members, sizeof(LunaSemaEnumMember));
     luna_vector_init(&context.locals, sizeof(LunaSemaLocal));
     luna_vector_init(&context.control_frames, sizeof(LunaSemaControlFrame));
     if (!luna_sema_initialize_types(&context)) {
@@ -3557,6 +4418,8 @@ bool luna_sema_lower(const LunaProgram *program,
             "cross-module import resolution is scheduled for milestone M2");
     }
 
+    (void)luna_sema_collect_named_types(&context);
+    (void)luna_sema_resolve_type_declarations(&context);
     (void)luna_sema_collect_functions(&context);
     (void)luna_sema_find_entry(&context);
 
@@ -3575,6 +4438,9 @@ bool luna_sema_lower(const LunaProgram *program,
 
     luna_vector_destroy(&context.functions);
     luna_vector_destroy(&context.types);
+    luna_vector_destroy(&context.named_types);
+    luna_vector_destroy(&context.fields);
+    luna_vector_destroy(&context.enum_members);
     luna_vector_destroy(&context.locals);
     luna_vector_destroy(&context.control_frames);
     return success;

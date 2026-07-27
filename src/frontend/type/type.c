@@ -38,6 +38,14 @@ const char *luna_type_kind_name(LunaTypeKind kind) {
         return "pointer";
     case LUNA_TYPE_ARRAY:
         return "array";
+    case LUNA_TYPE_NAMED:
+        return "named type";
+    case LUNA_TYPE_STRUCT:
+        return "struct";
+    case LUNA_TYPE_UNION:
+        return "union";
+    case LUNA_TYPE_ENUM:
+        return "enum";
     }
 
     return "<unknown>";
@@ -92,6 +100,10 @@ uint32_t luna_type_kind_bit_width(LunaTypeKind kind,
     case LUNA_TYPE_VOID:
     case LUNA_TYPE_POINTER:
     case LUNA_TYPE_ARRAY:
+    case LUNA_TYPE_NAMED:
+    case LUNA_TYPE_STRUCT:
+    case LUNA_TYPE_UNION:
+    case LUNA_TYPE_ENUM:
         return 0U;
     }
 

@@ -215,6 +215,62 @@ TEST(IrPrinterTest, PrintsExternalSignaturesWithoutBodiesOrSlots) {
     EXPECT_EQ(text.find("fn @c_mix($0:"), std::string::npos);
 }
 
+TEST(IrPrinterTest, PrintsTypedAggregateMemberAddresses) {
+    FrontendHarness harness{
+        "module test.aggregate_ir_print;\n"
+        "struct Pair { byte: u8; value: i32; }\n"
+        "fn main() -> i32 {\n"
+        "    var pair: Pair = {}; pair.value = 42; return pair.value;\n"
+        "}\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaStringBuilder output{};
+    luna_string_builder_init(&output);
+    const bool printed = luna_ir_print(harness.Module(), &output);
+    const std::string text =
+        printed ? std::string{luna_string_builder_data(&output), output.length}
+                : std::string{};
+    luna_string_builder_destroy(&output);
+
+    ASSERT_TRUE(printed);
+    EXPECT_NE(text.find("member_address 4"), std::string::npos);
+    EXPECT_NE(text.find("zero $0"), std::string::npos);
+    EXPECT_NE(text.find("store_indirect.i32"), std::string::npos);
+}
+
+TEST(IrVerifierTest, ValidatesAggregateMemberAddressOperandsAndOffsets) {
+    constexpr std::string_view LUNA_TEST_SOURCE =
+        "module test.aggregate_ir_verify;\n"
+        "struct Pair { byte: u8; value: i32; }\n"
+        "fn main() -> i32 {\n"
+        " let wrong: i32 = 1; var pair: Pair = {};\n"
+        " pair.value = 42; return pair.value + wrong;\n"
+        "}\n";
+
+    FrontendHarness displacement{LUNA_TEST_SOURCE};
+    ASSERT_TRUE(displacement.Verify()) << displacement.Diagnostics();
+    LunaIrInstruction *member =
+        FindInstruction(MainFunction(displacement), LUNA_IR_MEMBER_ADDRESS);
+    ASSERT_NE(member, nullptr);
+    member->immediate = static_cast<std::uint64_t>(INT32_MAX) + 1U;
+    EXPECT_FALSE(displacement.Verify());
+    EXPECT_NE(displacement.Diagnostics().find(
+                  "member address offset exceeds backend displacement"),
+              std::string::npos);
+
+    FrontendHarness operand{LUNA_TEST_SOURCE};
+    ASSERT_TRUE(operand.Verify()) << operand.Diagnostics();
+    member = FindInstruction(MainFunction(operand), LUNA_IR_MEMBER_ADDRESS);
+    LunaIrInstruction *integer =
+        FindInstruction(MainFunction(operand), LUNA_IR_CONST_INTEGER);
+    ASSERT_NE(member, nullptr);
+    ASSERT_NE(integer, nullptr);
+    member->left = integer->result;
+    EXPECT_FALSE(operand.Verify());
+    EXPECT_NE(operand.Diagnostics().find("operand type does not match opcode"),
+              std::string::npos);
+}
+
 TEST(IrVerifierTest, RejectsValueUsedBeforeItsDefinition) {
     FrontendHarness harness{"module test.use_before_definition;\n"
                             "fn main() -> i32 { return 1 + 2; }\n"};

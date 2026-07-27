@@ -53,7 +53,7 @@ void Mutate(std::string &input, std::mt19937_64 &random_engine) {
 }
 
 TEST(MutationFuzzTest, CleanFrontendResultsAlwaysProduceValidTypedIr) {
-    constexpr std::array<std::string_view, 14U> LUNA_TEST_SEEDS = {
+    constexpr std::array<std::string_view, 15U> LUNA_TEST_SEEDS = {
         "module fuzz.empty;\nfn main() -> i32 { return 0; }\n",
         "module fuzz.call;\n"
         "fn id(value: i32) -> i32 { return value; }\n"
@@ -134,6 +134,16 @@ TEST(MutationFuzzTest, CleanFrontendResultsAlwaysProduceValidTypedIr) {
         "extern fn c_mix(value: i16, size: usize, scale: f64) -> bool;\n"
         "fn main() -> i32 {\n"
         " return c_mix(-7, 4096, 1.25) ? 42 : 1;\n"
+        "}\n",
+        "module fuzz.aggregate;\n"
+        "enum Kind: u8 { empty, ready = 7, }\n"
+        "struct Pair { kind: Kind; byte: u8; value: i32; }\n"
+        "fn main() -> i32 {\n"
+        " var pair: Pair = {}; pair.kind = Kind.ready;\n"
+        " let pointer: *Pair = &pair; pointer->value = 42;\n"
+        " if (sizeof(Pair) != 8 || alignof(Pair) != 4 ||\n"
+        "     offsetof(Pair, value) != 4) { return 1; }\n"
+        " return pointer->kind == Kind.ready ? pointer->value : 2;\n"
         "}\n",
         "",
     };

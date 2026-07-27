@@ -277,4 +277,27 @@ TEST(X8664BackendTest, EmitsTypedMemoryAndReadOnlyGlobalData) {
     EXPECT_NE(assembly.find("ud2"), std::string::npos);
 }
 
+TEST(X8664BackendTest, EmitsDirectAggregateMemberAddressing) {
+    FrontendHarness harness{"module test.aggregate_codegen;\n"
+                            "enum Kind: u8 { ready = 7, }\n"
+                            "struct Inner { byte: u8; value: i32; }\n"
+                            "struct Outer { kind: Kind; inner: Inner; }\n"
+                            "fn main() -> i32 {\n"
+                            "    var outer: Outer = {};\n"
+                            "    let pointer: *Outer = &outer;\n"
+                            "    pointer->kind = Kind.ready;\n"
+                            "    pointer->inner.value = 42;\n"
+                            "    return pointer->inner.value;\n"
+                            "}\n"};
+
+    ASSERT_TRUE(harness.EmitAssembly()) << harness.Diagnostics();
+    const std::string assembly = harness.Assembly();
+    EXPECT_NE(assembly.find("rep stosb"), std::string::npos);
+    EXPECT_NE(assembly.find("leaq 0(%rax), %rax"), std::string::npos);
+    EXPECT_NE(assembly.find("leaq 4(%rax), %rax"), std::string::npos);
+    EXPECT_NE(assembly.find("movb %cl, (%rax)"), std::string::npos);
+    EXPECT_NE(assembly.find("movl %ecx, (%rax)"), std::string::npos);
+    EXPECT_NE(assembly.find("testq %rax, %rax"), std::string::npos);
+}
+
 }

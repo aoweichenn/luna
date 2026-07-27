@@ -1136,6 +1136,14 @@ static bool luna_x86_64_emit_instruction(LunaStringBuilder *output,
         return luna_x86_64_emit_store_rax(output, function,
                                           instruction->result);
 
+    case LUNA_IR_MEMBER_ADDRESS:
+        return luna_x86_64_emit_load_rax(output, function, instruction->left) &&
+               luna_string_builder_append_format(
+                   output, "    leaq %" PRIu64 "(%%rax), %%rax\n",
+                   instruction->immediate) &&
+               luna_x86_64_emit_store_rax(output, function,
+                                          instruction->result);
+
     case LUNA_IR_GLOBAL_ADDRESS:
         if (!luna_string_builder_append_format(
                 output, "    leaq .Lglobal%u(%%rip), %%rax\n",

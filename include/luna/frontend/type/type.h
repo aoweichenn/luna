@@ -23,7 +23,11 @@ typedef enum LunaTypeKind {
     LUNA_TYPE_F32,
     LUNA_TYPE_F64,
     LUNA_TYPE_POINTER,
-    LUNA_TYPE_ARRAY
+    LUNA_TYPE_ARRAY,
+    LUNA_TYPE_NAMED,
+    LUNA_TYPE_STRUCT,
+    LUNA_TYPE_UNION,
+    LUNA_TYPE_ENUM
 } LunaTypeKind;
 
 #ifdef __cplusplus
