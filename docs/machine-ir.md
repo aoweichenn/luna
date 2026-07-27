@@ -138,17 +138,19 @@ classes, definitions, ordered uses and instruction-specific operands. It is
 intended for review, tests and backend debugging; it is not a versioned
 serialization format.
 
-## Current boundary and next stage
+## Current boundary
 
-The current assembly boundary analyzes verified machine IR and independently
-verifies the resulting block and instruction live sets before emission. For
-correctness, the emitter still assigns stack homes to virtual registers and
-emits direct assembly without optimization. Generated executables remain
-freestanding: `_start` exits through the Linux x86-64 `syscall` instruction
-and no target libc is linked.
+The current assembly boundary analyzes verified machine IR, allocates physical
+registers and independently verifies both results before emission. For
+correctness, the emitter does not yet consume the allocation: it still assigns
+stack homes to virtual registers and emits direct assembly without
+optimization. Generated executables remain freestanding: `_start` exits
+through the Linux x86-64 `syscall` instruction and no target libc is linked.
 
-The next stage is linear-scan register allocation over verified liveness and
-the existing register classes. It must preserve the current stack-homed
-emitter as a correctness reference and must not change Luna language
-semantics. The analysis representation and invariants are documented in
-[x86-64 liveness analysis](liveness.md).
+The analysis representation and invariants are documented in
+[x86-64 liveness analysis](liveness.md); the physical-location result is
+documented in [x86-64 register allocation](register-allocation.md). The next
+backend stage is stack arguments and aggregate ABI classification. Later
+allocation-aware rewriting must first encode fixed-register instruction
+constraints, call moves and callee-save preservation without changing Luna
+language semantics.

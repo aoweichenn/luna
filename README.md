@@ -27,16 +27,17 @@ The project is deliberately narrow at this stage:
   target-sized `isize` and `usize`;
 - backend: verified, pre-allocation x86-64 machine IR with fixed target widths,
   explicit virtual-register definitions/uses, verified block and instruction
-  liveness, and deterministic textual output, followed by direct, unoptimized
-  x86-64 instruction selection, including
+  liveness, verified deterministic linear-scan register allocation, and
+  deterministic textual output, followed by direct, unoptimized x86-64
+  instruction selection, including
   IEEE-754 scalar SSE floating-point operations and checked numeric
   conversions, exact-width indirect memory access, checked fixed-array
   indexing, read-only static data, inline overlap-safe object copies and direct
   System V calls to unmangled external C symbols;
 - bootstrap host: conforming C23 with IEC 60559 binary32 and binary64;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests,
-  typed-IR, machine-IR and liveness snapshots, differential random programs,
-  libFuzzer and executable cross-target tests.
+  typed-IR, machine-IR, liveness and register-allocation snapshots,
+  differential random programs, libFuzzer and executable cross-target tests.
 
 The language and compiler are under active construction. Implemented syntax is
 tracked separately from accepted language design so that documentation never
@@ -107,6 +108,16 @@ Verified block and instruction live sets can be inspected independently:
 ```sh
 build/debug/lunac --emit liveness -o hello.live examples/hello.luna
 ```
+
+The independently verified physical-location plan can also be inspected:
+
+```sh
+build/debug/lunac --emit allocation -o hello.alloc examples/hello.luna
+```
+
+This allocation is not yet consumed by instruction emission. The stack-homed
+emitter remains the correctness reference until fixed-register constraints,
+call moves and callee-save preservation are implemented and tested.
 
 An executable build may pass every transitive module source unit in one
 invocation. Source order has no semantic effect:
@@ -195,6 +206,7 @@ See [the language draft](docs/language.md),
 [compiler architecture](docs/architecture.md),
 [x86-64 machine IR](docs/machine-ir.md),
 [x86-64 liveness analysis](docs/liveness.md),
+[x86-64 register allocation](docs/register-allocation.md),
 [compiled module metadata format](docs/module-metadata.md),
 [bootstrap execution semantics](docs/execution-semantics.md), and the
 [implementation roadmap](docs/roadmap.md).

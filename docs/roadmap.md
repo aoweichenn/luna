@@ -49,8 +49,9 @@ M0 supports enough language to compile arithmetic functions, local variables,
 
 - [x] target machine IR
 - [x] liveness analysis
-- [ ] linear-scan register allocation
+- [x] verified linear-scan register allocation result
 - [ ] stack arguments and aggregate ABI classification
+- [ ] allocation-aware instruction rewrite with fixed-register constraints
 - [ ] instruction-level differential tests
 - [ ] native ELF64 relocatable-object writer
 - [ ] debug information design

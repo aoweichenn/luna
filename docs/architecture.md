@@ -54,6 +54,9 @@ lexer -> parser -> syntax tree
          verified liveness analysis
                     |
                     v
+      verified register allocation
+                    |
+                    v
           x86-64 instruction emission
                     |
                     v
@@ -255,9 +258,10 @@ instruction-specific operands. It is a debugging and test contract for the
 current x86-64 backend, not a stable cross-version object format.
 
 The current emitter still gives virtual registers stack homes and expands
-machine pseudos directly into correct assembly. Physical-register assignment
-and optimization are deliberately absent from this stage. The complete
-representation and invariants are documented in
+machine pseudos directly into correct assembly. The backend computes and
+verifies a physical-register assignment before this reference emitter runs,
+but instruction rewriting and optimization are deliberately absent. The
+complete representation and invariants are documented in
 [x86-64 machine IR](machine-ir.md).
 
 ## x86-64 liveness
@@ -271,9 +275,27 @@ standard successor-union transfer equations.
 The result has an independent verifier that recomputes block def/use, checks
 every fixed-point equation, replays every instruction transfer and rejects
 malformed bit-vector storage or padding. `lunac --emit liveness` prints the
-same verified result deterministically. The analysis changes no instruction
-and assigns no physical register; its full contract is documented in
+same verified result deterministically. The analysis changes no instruction;
+its full contract is documented in
 [x86-64 liveness analysis](liveness.md).
+
+## x86-64 register allocation
+
+The first allocation stage builds one inclusive interval for every machine
+virtual register and applies deterministic linear scan independently to the
+general-purpose and floating-point banks. Values live on both sides of a call
+may use only System V callee-saved registers; because System V has no
+callee-saved XMM registers, such floating values are explicitly spilled.
+
+The allocation has its own verifier. It reconstructs intervals from verified
+liveness, checks class and call-preservation constraints, rejects overlapping
+assignments, verifies dense unique spill slots and recomputes used-register
+masks. `lunac --emit allocation` exposes the result deterministically. The
+assembly boundary requires this verification to succeed, but continues to use
+the stack-homed emitter until fixed-register instruction constraints,
+parallel moves and prologue/epilogue preservation are represented and tested.
+The full contract is documented in
+[x86-64 register allocation](register-allocation.md).
 
 ## x86-64 backend
 
@@ -323,11 +345,13 @@ This backend is intentionally not the performance endpoint. Planned stages are:
 2. verified x86-64 machine IR;
 3. liveness;
 4. linear-scan register allocation;
-5. peephole and local instruction selection improvements;
-6. ELF64 relocatable-object emission.
+5. stack arguments and aggregate ABI classification;
+6. allocation-aware instruction rewrite;
+7. peephole and local instruction selection improvements;
+8. ELF64 relocatable-object emission.
 
-The first three stages are complete. Linear-scan register allocation is the
-next backend stage.
+The first four stages are complete. Stack arguments and aggregate ABI
+classification are the next backend stage.
 
 The simple backend remains available as a reference backend for differential
 testing after optimization is introduced.
@@ -351,7 +375,7 @@ The quality gate contains:
 - deterministic metadata round trips, re-checksummed binary mutations,
   corrupt/version/stale-dependency negatives and three-object separate-link
   execution tests;
-- textual typed-IR and machine-IR snapshots;
+- textual typed-IR, machine-IR, liveness and register-allocation snapshots;
 - x86-64 assembly validation through LLVM MC;
 - static ELF64 linking through LLD;
 - execution under `qemu-x86_64-static`;
@@ -372,7 +396,8 @@ The quality gate contains:
 - structured-control negative cases, IR snapshots and randomized differential
   programs;
 - deterministic mutation tests and a coverage-guided libFuzzer target that
-  exercise machine lowering, verification, printing and assembly emission;
+  exercise machine lowering, liveness, register allocation, verification,
+  printing and assembly emission;
 - UBSan runs for the host compiler and ASan runs on compatible native hosts;
 - warnings treated as errors.
 

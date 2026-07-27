@@ -10,6 +10,9 @@ verified x86-64 machine IR
 verified liveness
     |
     v
+verified register allocation
+    |
+    v
 stack-homed reference assembly
 ```
 
@@ -92,7 +95,7 @@ failure therefore stops compilation rather than silently using stale backend
 facts. `lunac --emit liveness` exposes the verified result in a deterministic
 text form used by snapshots, review and fuzzing.
 
-## Cost and next consumer
+## Cost and consumer
 
 With `V` virtual registers, sets use `ceil(V / 64)` words. Instruction result
 storage is `O(I * V / 64)`, block storage is `O(B * V / 64)`, and every solver
@@ -100,7 +103,12 @@ sweep is `O((B + E) * V / 64)`. This dense representation is simple,
 deterministic and efficient for the bootstrap compiler's current function
 sizes.
 
-The next stage is correctness-first linear-scan register allocation. It will
-consume these verified sets and register classes while retaining the existing
-stack-homed emitter as a differential reference. Liveness itself performs no
-optimization and introduces no target libc dependency.
+Correctness-first linear-scan register allocation consumes these verified sets
+and machine register classes. The allocator reconstructs exact intervals and
+marks a value as crossing a call from the intersection of that call's
+`live_before` and `live_after` sets. Its independently checked contract is
+documented in [x86-64 register allocation](register-allocation.md).
+
+The existing stack-homed emitter remains the executable reference while
+allocation-aware instruction rewriting is deferred. Liveness itself performs
+no optimization and introduces no target libc dependency.

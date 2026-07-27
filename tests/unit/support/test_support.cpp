@@ -45,6 +45,7 @@ FrontendHarness::FrontendHarness(std::string_view source_text,
     luna_ir_module_init(&this->module_, target);
     luna_string_builder_init(&this->machine_ir_);
     luna_string_builder_init(&this->liveness_);
+    luna_string_builder_init(&this->register_allocation_);
     luna_string_builder_init(&this->assembly_);
 
     this->diagnostic_file_ = std::tmpfile();
@@ -70,6 +71,7 @@ FrontendHarness::FrontendHarness(std::string_view interface_text,
 
 FrontendHarness::~FrontendHarness() {
     luna_string_builder_destroy(&this->assembly_);
+    luna_string_builder_destroy(&this->register_allocation_);
     luna_string_builder_destroy(&this->liveness_);
     luna_string_builder_destroy(&this->machine_ir_);
     luna_ir_module_destroy(&this->module_);
@@ -169,6 +171,15 @@ bool FrontendHarness::EmitLiveness() {
                                      &this->liveness_);
 }
 
+bool FrontendHarness::EmitRegisterAllocation() {
+    if (!this->Verify()) {
+        return false;
+    }
+
+    return luna_x86_64_emit_register_allocation(
+        &this->module_, &this->diagnostics_, &this->register_allocation_);
+}
+
 std::size_t FrontendHarness::ErrorCount() const noexcept {
     return luna_diagnostic_error_count(&this->diagnostics_);
 }
@@ -185,6 +196,11 @@ std::string FrontendHarness::MachineIr() const {
 std::string FrontendHarness::Liveness() const {
     return std::string{luna_string_builder_data(&this->liveness_),
                        this->liveness_.length};
+}
+
+std::string FrontendHarness::RegisterAllocation() const {
+    return std::string{luna_string_builder_data(&this->register_allocation_),
+                       this->register_allocation_.length};
 }
 
 std::string FrontendHarness::Assembly() const {
@@ -220,6 +236,7 @@ CompilationHarness::CompilationHarness(
     luna_ir_module_init(&this->module_, target);
     luna_string_builder_init(&this->machine_ir_);
     luna_string_builder_init(&this->liveness_);
+    luna_string_builder_init(&this->register_allocation_);
     luna_string_builder_init(&this->assembly_);
 
     this->diagnostic_file_ = std::tmpfile();
@@ -244,6 +261,7 @@ CompilationHarness::CompilationHarness(
 
 CompilationHarness::~CompilationHarness() {
     luna_string_builder_destroy(&this->assembly_);
+    luna_string_builder_destroy(&this->register_allocation_);
     luna_string_builder_destroy(&this->liveness_);
     luna_string_builder_destroy(&this->machine_ir_);
     luna_ir_module_destroy(&this->module_);
@@ -337,6 +355,14 @@ bool CompilationHarness::EmitLiveness() {
                                      &this->liveness_);
 }
 
+bool CompilationHarness::EmitRegisterAllocation() {
+    if (!this->Verify()) {
+        return false;
+    }
+    return luna_x86_64_emit_register_allocation(
+        &this->module_, &this->diagnostics_, &this->register_allocation_);
+}
+
 std::size_t CompilationHarness::ErrorCount() const noexcept {
     return luna_diagnostic_error_count(&this->diagnostics_);
 }
@@ -353,6 +379,11 @@ std::string CompilationHarness::MachineIr() const {
 std::string CompilationHarness::Liveness() const {
     return std::string{luna_string_builder_data(&this->liveness_),
                        this->liveness_.length};
+}
+
+std::string CompilationHarness::RegisterAllocation() const {
+    return std::string{luna_string_builder_data(&this->register_allocation_),
+                       this->register_allocation_.length};
 }
 
 std::string CompilationHarness::Assembly() const {

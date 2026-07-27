@@ -154,6 +154,7 @@ def compile_separate_module_graph(
     math_ir = work_dir / "metadata_math.lir"
     math_mir = work_dir / "metadata_math.mir"
     math_liveness = work_dir / "metadata_math.live"
+    math_allocation = work_dir / "metadata_math.alloc"
     math_object = work_dir / "metadata_math.o"
     application_assembly = work_dir / "metadata_app.s"
     application_object = work_dir / "metadata_app.o"
@@ -264,6 +265,20 @@ def compile_separate_module_graph(
             "--compile-module",
             "tests.metadata.math",
             "--emit",
+            "allocation",
+            "-o",
+            str(math_allocation),
+            str(math_metadata),
+            str(math_implementation),
+            str(core_metadata),
+        ]
+    )
+    run(
+        [
+            str(compiler),
+            "--compile-module",
+            "tests.metadata.math",
+            "--emit",
             "asm",
             "-o",
             str(math_assembly),
@@ -323,6 +338,16 @@ def compile_separate_module_graph(
         not in math_liveness_text
     ):
         raise AssertionError("separate module liveness linkage is missing")
+    math_allocation_text = math_allocation.read_text(encoding="utf-8")
+    if (
+        "declare @f0 tests.metadata.core::add_bias values=0 instructions=0"
+        not in math_allocation_text
+        or "define @f1 tests.metadata.math::calculate"
+        not in math_allocation_text
+    ):
+        raise AssertionError(
+            "separate module register allocation linkage is missing"
+        )
     math_text = math_assembly.read_text(encoding="utf-8")
     if (
         "_start:" in math_text
@@ -902,6 +927,10 @@ def main() -> int:
         raise AssertionError("--help did not describe machine IR emission")
     if "--emit liveness" not in help_result.stdout:
         raise AssertionError("--help did not describe liveness emission")
+    if "--emit allocation" not in help_result.stdout:
+        raise AssertionError(
+            "--help did not describe register allocation emission"
+        )
     version_result = run([str(arguments.compiler), "--version"])
     if "lunac 0.1.0-dev" not in version_result.stdout:
         raise AssertionError("--version did not print the compiler version")
@@ -1714,6 +1743,39 @@ def main() -> int:
     if liveness_first.read_bytes() != liveness_second.read_bytes():
         raise AssertionError("liveness output is not deterministic")
     print("PASS liveness snapshot and determinism: function_call.luna")
+
+    allocation_first = arguments.work_dir / "function_call_first.alloc"
+    allocation_second = arguments.work_dir / "function_call_second.alloc"
+    for output in (allocation_first, allocation_second):
+        run(
+            [
+                str(arguments.compiler),
+                "--emit",
+                "allocation",
+                "-o",
+                str(output),
+                str(case_dir / "function_call.luna"),
+            ]
+        )
+    expected_allocation = (
+        arguments.source_root
+        / "tests"
+        / "integration"
+        / "golden"
+        / "function_call.alloc"
+    ).read_text(encoding="utf-8")
+    actual_allocation = allocation_first.read_text(encoding="utf-8")
+    if actual_allocation.rstrip("\n") != expected_allocation.rstrip("\n"):
+        raise AssertionError(
+            "register allocation snapshot mismatch for function_call.luna\n"
+            f"expected:\n{expected_allocation}\nactual:\n{actual_allocation}"
+        )
+    if allocation_first.read_bytes() != allocation_second.read_bytes():
+        raise AssertionError("register allocation output is not deterministic")
+    print(
+        "PASS register allocation snapshot and determinism: "
+        "function_call.luna"
+    )
 
     for deterministic_name in (
         "recursive_factorial",

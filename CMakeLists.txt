@@ -50,6 +50,9 @@ add_library(luna_compiler STATIC
     src/backend/x86_64/machine_ir.c
     src/backend/x86_64/machine_ir_print.c
     src/backend/x86_64/machine_ir_verify.c
+    src/backend/x86_64/register_allocation.c
+    src/backend/x86_64/register_allocation_print.c
+    src/backend/x86_64/register_allocation_verify.c
     src/backend/x86_64/x86_64.c
 )
 
@@ -179,6 +182,7 @@ if(BUILD_TESTING)
         tests/unit/target/target_test.cpp
         tests/unit/backend/x86_64_liveness_test.cpp
         tests/unit/backend/x86_64_machine_ir_test.cpp
+        tests/unit/backend/x86_64_register_allocation_test.cpp
         tests/unit/backend/x86_64_test.cpp
     )
     target_link_libraries(luna_unit_tests

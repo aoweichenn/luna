@@ -34,12 +34,14 @@ class FrontendHarness final {
     [[nodiscard]] bool Verify();
     [[nodiscard]] bool EmitMachineIr();
     [[nodiscard]] bool EmitLiveness();
+    [[nodiscard]] bool EmitRegisterAllocation();
     [[nodiscard]] bool EmitAssembly();
 
     [[nodiscard]] std::size_t ErrorCount() const noexcept;
     [[nodiscard]] std::string Diagnostics() const;
     [[nodiscard]] std::string MachineIr() const;
     [[nodiscard]] std::string Liveness() const;
+    [[nodiscard]] std::string RegisterAllocation() const;
     [[nodiscard]] std::string Assembly() const;
     [[nodiscard]] const LunaSourceFile *Source() const noexcept;
     [[nodiscard]] LunaDiagnosticEngine *DiagnosticEngine() noexcept;
@@ -58,6 +60,7 @@ class FrontendHarness final {
     LunaIrModule module_{};
     LunaStringBuilder machine_ir_{};
     LunaStringBuilder liveness_{};
+    LunaStringBuilder register_allocation_{};
     LunaStringBuilder assembly_{};
     bool ready_{false};
     bool has_interface_{false};
@@ -86,11 +89,13 @@ class CompilationHarness final {
     [[nodiscard]] bool Verify();
     [[nodiscard]] bool EmitMachineIr();
     [[nodiscard]] bool EmitLiveness();
+    [[nodiscard]] bool EmitRegisterAllocation();
     [[nodiscard]] bool EmitAssembly();
     [[nodiscard]] std::size_t ErrorCount() const noexcept;
     [[nodiscard]] std::string Diagnostics() const;
     [[nodiscard]] std::string MachineIr() const;
     [[nodiscard]] std::string Liveness() const;
+    [[nodiscard]] std::string RegisterAllocation() const;
     [[nodiscard]] std::string Assembly() const;
     [[nodiscard]] LunaIrModule *Module() noexcept;
 
@@ -103,6 +108,7 @@ class CompilationHarness final {
     LunaIrModule module_{};
     LunaStringBuilder machine_ir_{};
     LunaStringBuilder liveness_{};
+    LunaStringBuilder register_allocation_{};
     LunaStringBuilder assembly_{};
     bool ready_{false};
     bool parse_attempted_{false};
