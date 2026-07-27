@@ -274,6 +274,18 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME unit.machine_ir_reference
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/differential/test_machine_ir_reference.py"
+    )
+    set_tests_properties(
+        unit.machine_ir_reference
+        PROPERTIES
+            LABELS "unit"
+    )
+
+    add_test(
         NAME random.differential
         COMMAND
             "${Python3_EXECUTABLE}"
@@ -289,6 +301,25 @@ if(BUILD_TESTING)
             LABELS "random"
             SKIP_RETURN_CODE 77
             TIMEOUT 120
+    )
+
+    add_test(
+        NAME random.instruction_differential
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/differential/run_instruction_differential.py"
+            --compiler "$<TARGET_FILE:lunac>"
+            --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --work-dir "${CMAKE_CURRENT_BINARY_DIR}/instruction-differential"
+            --seed 0x4c554e414952
+            --cases 42
+    )
+    set_tests_properties(
+        random.instruction_differential
+        PROPERTIES
+            LABELS "random"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 180
     )
 endif()
 

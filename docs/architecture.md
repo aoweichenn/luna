@@ -412,8 +412,8 @@ This backend is intentionally not the performance endpoint. Planned stages are:
 9. ELF64 relocatable-object emission;
 10. debug information design.
 
-The first seven stages are complete. Instruction-level differential testing is
-the next backend stage.
+The first eight stages are complete. Native ELF64 relocatable-object emission
+is the next backend stage.
 
 The current direct pseudo expansions remain unoptimized and serve as the
 semantic reference for future local instruction-selection work.
@@ -462,6 +462,10 @@ The quality gate contains:
 - deterministic mutation tests and a coverage-guided libFuzzer target that
   exercise machine lowering, ABI analysis, liveness, register allocation,
   instruction rewriting, verification, printing and assembly emission;
+- an independent textual machine-IR parser and reference interpreter,
+  differential execution of all machine opcodes against assembled x86-64,
+  exact trap-signal comparison, deterministic generated instruction programs
+  and mandatory spill, parallel-move and fixed-register coverage;
 - UBSan runs for the host compiler and ASan runs on compatible native hosts;
 - warnings treated as errors.
 

@@ -41,7 +41,8 @@ The project is deliberately narrow at this stage:
 - bootstrap host: conforming C23 with IEC 60559 binary32 and binary64;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests,
   typed-IR, machine-IR, ABI, liveness, register-allocation and
-  instruction-rewrite snapshots, differential random programs, libFuzzer and
+  instruction-rewrite snapshots, full-opcode machine-IR-to-x86-64
+  differential execution, differential random programs, libFuzzer and
   executable cross-target tests.
 
 The language and compiler are under active construction. Implemented syntax is
@@ -234,6 +235,7 @@ See [the language draft](docs/language.md),
 [x86-64 liveness analysis](docs/liveness.md),
 [x86-64 register allocation](docs/register-allocation.md),
 [allocation-aware instruction rewrite](docs/instruction-rewrite.md),
+[instruction-level differential testing](docs/instruction-differential-testing.md),
 [compiled module metadata format](docs/module-metadata.md),
 [bootstrap execution semantics](docs/execution-semantics.md), and the
 [implementation roadmap](docs/roadmap.md).
