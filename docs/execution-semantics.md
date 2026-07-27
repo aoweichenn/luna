@@ -328,10 +328,14 @@ The `luna.linux.syscall` module exposes raw zero-to-six-argument wrappers.
 `lunalink` supplies their verified implementation, which converts System V
 registers to the x86-64 Linux kernel ABI and executes `syscall` directly.
 Negative kernel error results are preserved without `errno` translation. The
-future runtime and standard library must build their typed policies only on
-this layer. This target-side restriction does not apply to the hosted C23
-bootstrap compiler and does not prohibit an application from explicitly
-linking a caller-supplied object through `extern fn`.
+`luna.runtime` module converts them to the scoped `RuntimeError` representation
+and supplies named file and memory resources. Its read and write operations
+perform exactly one system call, expose short counts and do not hide
+`interrupted` or `would_block`. The future standard library must build
+allocation, buffering and retry policies only on this runtime layer. This
+target-side restriction does not apply to the hosted C23 bootstrap compiler
+and does not prohibit an application from explicitly linking a caller-supplied
+object through `extern fn`.
 
 ## Optimization boundary
 

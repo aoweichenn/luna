@@ -45,7 +45,8 @@ The project is deliberately narrow at this stage:
   project-owned section layout, symbol resolution and relocation application;
 - runtime boundary: canonical zero-to-six-argument Linux x86-64 system-call
   wrappers generated and verified by the project assembler, with raw kernel
-  error results and no target libc;
+  error results, plus a Luna-implemented typed process/file/virtual-memory
+  runtime and no target libc;
 - bootstrap host: conforming C23 with IEC 60559 binary32 and binary64;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests,
   typed-IR, machine-IR, ABI, liveness, register-allocation and
@@ -243,16 +244,23 @@ project-owned `_start` code and do not link libc. `lunalink` supplies the
 project-owned `luna_linux_syscall0` through `luna_linux_syscall6` wrappers,
 which convert System V calls to the Linux kernel register ABI and execute
 `syscall` directly. The corresponding strongly typed module metadata is
-generated at `build/<preset>/sysroot/luna/linux/syscall.lmi` with:
+generated at `build/<preset>/sysroot/luna/linux/syscall.lmi`.
+
+The wrappers preserve raw negative Linux error results. The Luna-implemented
+`luna.runtime` module builds typed process, file and virtual-memory services on
+that boundary. Its `RuntimeError`, `RuntimeFile`, `RuntimeMemory` and result
+types make raw descriptors, addresses, byte counts and errors explicit without
+introducing `errno`, hidden retries or target libc. Build its deterministic
+metadata and object together with the syscall metadata:
 
 ```sh
 cmake --build --preset debug --target luna_sysroot
 ```
 
-The wrappers preserve raw negative Linux error results. Higher-level retry,
-error and resource-ownership policies belong to the next freestanding-runtime
-stage. Optional user-supplied `extern fn` objects remain an explicit FFI choice
-and are not part of the Luna runtime.
+Compile applications with `sysroot/luna/runtime.lmi` and link
+`sysroot/luna/runtime.o`; `lunalink` continues to inject the verified raw
+wrapper object. Optional user-supplied `extern fn` objects remain an explicit
+FFI choice and are not part of the Luna runtime.
 
 The bootstrap compiler itself remains a hosted C23 development tool. Its host
 library use does not become a dependency of generated target programs.
@@ -268,6 +276,7 @@ See [the language draft](docs/language.md),
 [native ELF64 objects](docs/elf-object.md),
 [project-owned static ELF64 linking](docs/elf-linker.md),
 [Linux x86-64 system-call ABI](docs/linux-syscall-abi.md),
+[freestanding runtime](docs/freestanding-runtime.md),
 [compiled module metadata format](docs/module-metadata.md),
 [bootstrap execution semantics](docs/execution-semantics.md), and the
 [implementation roadmap](docs/roadmap.md).

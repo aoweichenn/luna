@@ -412,9 +412,11 @@ The current machine-IR consumer is correctness-first:
 The `_start` shim and the canonical zero-to-six-argument wrapper object form
 the project-owned system-call boundary. The generated
 `luna.linux.syscall` metadata exposes only `usize` argument bits and a raw
-`isize` result. The next M4 stage builds typed process, memory and I/O services
-on this layer, defines their Luna-facing error semantics and remains
-independent of libc.
+`isize` result. The separately compiled `luna.runtime` module is implemented
+in Luna on that layer. It provides typed process, file and virtual-memory
+services, preserves explicit Linux errors and remains independent of libc.
+Its deterministic `.lmi` and `.o` files are sysroot artifacts; applications
+compile against the metadata and link the object explicitly.
 
 This backend is intentionally not the performance endpoint. Planned stages are:
 

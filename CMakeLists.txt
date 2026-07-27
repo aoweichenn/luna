@@ -145,6 +145,12 @@ target_link_libraries(lunalink PRIVATE luna_compiler)
 set(LUNA_SYSCALL_METADATA
     "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/linux/syscall.lmi"
 )
+set(LUNA_RUNTIME_METADATA
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/runtime.lmi"
+)
+set(LUNA_RUNTIME_OBJECT
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/runtime.o"
+)
 add_custom_command(
     OUTPUT "${LUNA_SYSCALL_METADATA}"
     COMMAND
@@ -164,7 +170,52 @@ add_custom_command(
     COMMENT "Generating the Luna Linux syscall ABI module metadata"
     VERBATIM
 )
-add_custom_target(luna_sysroot DEPENDS "${LUNA_SYSCALL_METADATA}")
+add_custom_command(
+    OUTPUT "${LUNA_RUNTIME_METADATA}"
+    COMMAND
+        "${CMAKE_COMMAND}" -E make_directory
+        "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna"
+    COMMAND
+        "$<TARGET_FILE:lunac>"
+        --compile-module luna.runtime
+        --emit metadata
+        -o "${LUNA_RUNTIME_METADATA}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/luna/runtime.interface.luna"
+        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/luna/runtime.luna"
+        "${LUNA_SYSCALL_METADATA}"
+    DEPENDS
+        lunac
+        "${LUNA_SYSCALL_METADATA}"
+        runtime/luna/runtime.interface.luna
+        runtime/luna/runtime.luna
+    COMMENT "Generating the freestanding Luna runtime module metadata"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT "${LUNA_RUNTIME_OBJECT}"
+    COMMAND
+        "$<TARGET_FILE:lunac>"
+        --compile-module luna.runtime
+        --emit obj
+        -o "${LUNA_RUNTIME_OBJECT}"
+        "${LUNA_RUNTIME_METADATA}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/luna/runtime.luna"
+        "${LUNA_SYSCALL_METADATA}"
+    DEPENDS
+        lunac
+        "${LUNA_SYSCALL_METADATA}"
+        "${LUNA_RUNTIME_METADATA}"
+        runtime/luna/runtime.luna
+    COMMENT "Generating the freestanding Luna runtime object"
+    VERBATIM
+)
+add_custom_target(
+    luna_sysroot
+    DEPENDS
+        "${LUNA_SYSCALL_METADATA}"
+        "${LUNA_RUNTIME_METADATA}"
+        "${LUNA_RUNTIME_OBJECT}"
+)
 
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(lunac PRIVATE
@@ -229,6 +280,7 @@ if(BUILD_TESTING)
     add_executable(luna_unit_tests
         tests/unit/backend/debug_ir_test.cpp
         tests/unit/runtime/linux_syscall_test.cpp
+        tests/unit/runtime/freestanding_runtime_test.cpp
         tests/unit/support/arena_test.cpp
         tests/unit/support/buffer_test.cpp
         tests/unit/frontend/diagnostic/diagnostic_test.cpp
@@ -254,6 +306,11 @@ if(BUILD_TESTING)
         PRIVATE
             luna_test_support
             GTest::gtest_main
+    )
+    target_compile_definitions(
+        luna_unit_tests
+        PRIVATE
+            LUNA_TEST_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}"
     )
 
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -364,8 +421,31 @@ if(BUILD_TESTING)
         integration.linux_syscall_abi
         PROPERTIES
             LABELS "integration"
+            RESOURCE_LOCK "luna_sysroot"
             SKIP_RETURN_CODE 77
             TIMEOUT 60
+    )
+
+    add_test(
+        NAME integration.freestanding_runtime
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/run_freestanding_runtime.py"
+            --compiler "$<TARGET_FILE:lunac>"
+            --linker "$<TARGET_FILE:lunalink>"
+            --syscall-metadata "${LUNA_SYSCALL_METADATA}"
+            --runtime-metadata "${LUNA_RUNTIME_METADATA}"
+            --runtime-object "${LUNA_RUNTIME_OBJECT}"
+            --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --work-dir "${CMAKE_CURRENT_BINARY_DIR}/freestanding-runtime"
+    )
+    set_tests_properties(
+        integration.freestanding_runtime
+        PROPERTIES
+            LABELS "integration"
+            RESOURCE_LOCK "luna_sysroot"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 90
     )
 
     add_test(
@@ -469,6 +549,7 @@ if(LUNA_BUILD_FUZZERS)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/module_pair.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/module_import.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/linux_syscall.luna"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/freestanding_runtime.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/object_assembly.s"
             DESTINATION "${LUNA_FUZZ_CORPUS_DIR}"
         )

@@ -1,0 +1,135 @@
+module test.freestanding_runtime;
+
+import luna.runtime;
+
+fn main() -> i32 {
+    if (!runtime_error_is_none(RuntimeError.none) ||
+        runtime_error_is_none(RuntimeError.interrupted) ||
+        (RuntimeError.interrupted as isize) != 4) {
+        return 1;
+    }
+
+    let process: RuntimeProcessIdResult = runtime_process_id();
+    if (process.error != RuntimeError.none || process.process_id == 0) {
+        return 2;
+    }
+
+    if (runtime_standard_input().descriptor != 0 ||
+        runtime_standard_output().descriptor != 1 ||
+        runtime_standard_error().descriptor != 2) {
+        return 3;
+    }
+
+    let zero_write: RuntimeIoResult =
+        runtime_file_write(runtime_standard_output(), null, 0);
+    if (zero_write.error != RuntimeError.none || zero_write.count != 0) {
+        return 4;
+    }
+    let null_write: RuntimeIoResult =
+        runtime_file_write(runtime_standard_output(), null, 1);
+    if (null_write.error != RuntimeError.bad_address ||
+        null_write.count != 0) {
+        return 5;
+    }
+
+    let invalid_file: RuntimeFile = { descriptor = -1, };
+    if (runtime_file_close(invalid_file) != RuntimeError.bad_descriptor) {
+        return 6;
+    }
+    let invalid_read: RuntimeIoResult =
+        runtime_file_read(invalid_file, null, 0);
+    if (invalid_read.error != RuntimeError.bad_descriptor) {
+        return 7;
+    }
+
+    let missing: RuntimeFileResult =
+        runtime_file_open_read("luna-runtime-file-does-not-exist");
+    if (missing.error != RuntimeError.not_found ||
+        missing.file.descriptor != -1) {
+        return 8;
+    }
+    let null_open: RuntimeFileResult = runtime_file_open_read(null);
+    if (null_open.error != RuntimeError.bad_address ||
+        null_open.file.descriptor != -1) {
+        return 9;
+    }
+
+    let empty_mapping: RuntimeMemoryResult = runtime_memory_map(0);
+    if (empty_mapping.error != RuntimeError.invalid_argument ||
+        empty_mapping.memory.address != null ||
+        empty_mapping.memory.length != 0) {
+        return 10;
+    }
+    let invalid_memory: RuntimeMemory = {
+        address = null,
+        length = 4096,
+    };
+    if (runtime_memory_unmap(invalid_memory) !=
+        RuntimeError.invalid_argument) {
+        return 11;
+    }
+
+    let mapping: RuntimeMemoryResult = runtime_memory_map(8193);
+    if (mapping.error != RuntimeError.none ||
+        mapping.memory.address == null ||
+        mapping.memory.length != 8193) {
+        return 12;
+    }
+    mapping.memory.address[0] = 42;
+    mapping.memory.address[8192] = 24;
+    if (mapping.memory.address[0] != 42 ||
+        mapping.memory.address[8192] != 24) {
+        return 13;
+    }
+
+    let created: RuntimeFileResult =
+        runtime_file_create("runtime-created.bin");
+    if (created.error != RuntimeError.none ||
+        created.file.descriptor < 0) {
+        return 14;
+    }
+    let file_message: *const u8 = "runtime file\n";
+    let file_write: RuntimeIoResult =
+        runtime_file_write(created.file, file_message, 13);
+    if (file_write.error != RuntimeError.none || file_write.count != 13) {
+        return 15;
+    }
+    if (runtime_file_close(created.file) != RuntimeError.none) {
+        return 16;
+    }
+
+    let opened: RuntimeFileResult =
+        runtime_file_open_read("runtime-created.bin");
+    if (opened.error != RuntimeError.none || opened.file.descriptor < 0) {
+        return 17;
+    }
+    let file_read: RuntimeIoResult =
+        runtime_file_read(opened.file, mapping.memory.address, 13);
+    if (file_read.error != RuntimeError.none ||
+        file_read.count != 13 ||
+        mapping.memory.address[0] != 114 ||
+        mapping.memory.address[12] != 10) {
+        return 18;
+    }
+    let end_of_file: RuntimeIoResult =
+        runtime_file_read(opened.file, mapping.memory.address, 13);
+    if (end_of_file.error != RuntimeError.none ||
+        end_of_file.count != 0) {
+        return 19;
+    }
+    if (runtime_file_close(opened.file) != RuntimeError.none) {
+        return 20;
+    }
+
+    let output_message: *const u8 = "luna runtime\n";
+    let output: RuntimeIoResult =
+        runtime_file_write(runtime_standard_output(), output_message, 13);
+    if (output.error != RuntimeError.none || output.count != 13) {
+        return 21;
+    }
+
+    if (runtime_memory_unmap(mapping.memory) != RuntimeError.none) {
+        return 22;
+    }
+    return 42;
+}

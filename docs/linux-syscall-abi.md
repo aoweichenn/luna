@@ -7,8 +7,9 @@ dependency.
 
 This layer is intentionally narrower than a runtime or standard library. It
 only transports a system-call number, zero to six machine-word arguments and
-the raw signed kernel result. Typed process, file, virtual-memory and I/O
-services belong to the following runtime milestone.
+the raw signed kernel result. The `luna.runtime` module now builds typed
+process, file, virtual-memory and I/O services on this exact boundary;
+allocation, buffering and higher-level policy remain separate.
 
 ## Luna contract
 
