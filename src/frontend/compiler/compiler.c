@@ -272,6 +272,7 @@ int luna_compile(const LunaCompilerOptions *options, FILE *diagnostic_stream) {
             .require_compiled_root_interface =
                 options->separate_module_name != NULL &&
                 (options->emit_kind == LUNA_EMIT_IR ||
+                 options->emit_kind == LUNA_EMIT_MACHINE_IR ||
                  options->emit_kind == LUNA_EMIT_ASSEMBLY),
         };
         success = luna_module_lower_inputs(
@@ -294,6 +295,8 @@ int luna_compile(const LunaCompilerOptions *options, FILE *diagnostic_stream) {
             luna_diagnostic_error_plain(&diagnostics,
                                         "out of memory while printing IR");
         }
+    } else if (success && options->emit_kind == LUNA_EMIT_MACHINE_IR) {
+        success = luna_x86_64_emit_machine_ir(&module, &diagnostics, &output);
     } else if (success && options->emit_kind == LUNA_EMIT_ASSEMBLY) {
         success = luna_x86_64_emit_assembly(&module, &diagnostics, &output);
     } else if (success && options->emit_kind == LUNA_EMIT_METADATA) {

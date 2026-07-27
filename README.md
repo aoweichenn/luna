@@ -2,8 +2,8 @@
 
 Luna is a small, strongly typed systems language derived from the procedural
 core of C23. The bootstrap compiler is written in C23 and lowers Luna directly
-to a typed control-flow IR and an x86-64 backend. It does not transpile through
-C or C++.
+to a typed control-flow IR, an x86-64 machine IR and native x86-64 assembly. It
+does not transpile through C or C++.
 
 The project is deliberately narrow at this stage:
 
@@ -25,14 +25,17 @@ The project is deliberately narrow at this stage:
   overlap-safe object copies;
 - target model: explicit `x86_64-unknown-linux-gnu` data layout, with
   target-sized `isize` and `usize`;
-- backend: direct, unoptimized x86-64 instruction selection, including
+- backend: verified, pre-allocation x86-64 machine IR with fixed target widths,
+  explicit virtual-register definitions/uses and deterministic textual output,
+  followed by direct, unoptimized x86-64 instruction selection, including
   IEEE-754 scalar SSE floating-point operations and checked numeric
   conversions, exact-width indirect memory access, checked fixed-array
   indexing, read-only static data, inline overlap-safe object copies and direct
   System V calls to unmangled external C symbols;
 - bootstrap host: conforming C23 with IEC 60559 binary32 and binary64;
-- quality gate: warnings-as-errors, GoogleTest unit tests, negative tests, IR
-  snapshots, differential random programs, libFuzzer and executable
+- quality gate: warnings-as-errors, GoogleTest unit tests, negative tests,
+  typed-IR and machine-IR snapshots, differential random programs, libFuzzer
+  and executable
   cross-target tests.
 
 The language and compiler are under active construction. Implemented syntax is
@@ -90,6 +93,15 @@ ld.lld -static -e _start -o hello hello.o
 qemu-x86_64-static ./hello
 ```
 
+The verified target machine IR can be inspected without producing assembly:
+
+```sh
+build/debug/lunac --emit mir -o hello.mir examples/hello.luna
+```
+
+This is the x86-64 pre-register-allocation boundary, not a portable interchange
+format. Its `isize` and `usize` values have already become `i64` and `u64`.
+
 An executable build may pass every transitive module source unit in one
 invocation. Source order has no semantic effect:
 
@@ -128,11 +140,12 @@ ld.lld -static -e _start -o app app.o math.o core.o
 ```
 
 `--compile-module` emits no `_start`. Metadata emission validates the selected
-module's source interface and implementation; IR and assembly emission then
-require that module's generated `.lmi` plus its implementation. Every
-dependency must also be a `.lmi`. Exported Luna definitions and metadata
-imports receive global symbols bound to the exact interface fingerprint, so a
-stale or mismatched module object is rejected by the final static link.
+module's source interface and implementation; typed IR, machine IR and
+assembly emission then require that module's generated `.lmi` plus its
+implementation. Every dependency must also be a `.lmi`. Exported Luna
+definitions and metadata imports receive global symbols bound to the exact
+interface fingerprint, so a stale or mismatched module object is rejected by
+the final static link.
 
 The `.lmi` format is deterministic and little-endian. Its fixed header records
 the format version, language ABI version, payload size and content fingerprint;
@@ -174,6 +187,7 @@ library use does not become a dependency of generated target programs.
 
 See [the language draft](docs/language.md),
 [compiler architecture](docs/architecture.md),
+[x86-64 machine IR](docs/machine-ir.md),
 [compiled module metadata format](docs/module-metadata.md),
 [bootstrap execution semantics](docs/execution-semantics.md), and the
 [implementation roadmap](docs/roadmap.md).

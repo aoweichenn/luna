@@ -9,6 +9,7 @@
 typedef enum LunaEmitKind {
     LUNA_EMIT_CHECK,
     LUNA_EMIT_IR,
+    LUNA_EMIT_MACHINE_IR,
     LUNA_EMIT_ASSEMBLY,
     LUNA_EMIT_METADATA
 } LunaEmitKind;

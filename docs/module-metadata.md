@@ -53,12 +53,12 @@ Each imported fingerprint is the header content fingerprint of the exact
 dependency `.lmi` used to build the importing module. Module-graph resolution
 requires the supplied dependency metadata to match it.
 
-Separate IR and assembly generation consumes the root module's own `.lmi`.
-Every non-C module import and export carries that metadata content fingerprint
-through IR, and x86-64 symbol mangling encodes it as 16 hexadecimal digits.
-Consequently, linking an object generated from different root metadata leaves
-the expected symbol unresolved. This link-time identity check complements the
-module graph's compile-time dependency check.
+Separate typed IR, x86-64 machine IR and assembly generation consumes the root
+module's own `.lmi`. Every non-C module import and export carries that metadata
+content fingerprint through both IR layers, and x86-64 symbol mangling encodes
+it as 16 hexadecimal digits. Consequently, linking an object generated from
+different root metadata leaves the expected symbol unresolved. This link-time
+identity check complements the module graph's compile-time dependency check.
 
 ### Type references
 

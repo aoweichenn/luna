@@ -152,6 +152,7 @@ def compile_separate_module_graph(
     math_metadata = work_dir / "metadata_math.lmi"
     math_assembly = work_dir / "metadata_math.s"
     math_ir = work_dir / "metadata_math.lir"
+    math_mir = work_dir / "metadata_math.mir"
     math_object = work_dir / "metadata_math.o"
     application_assembly = work_dir / "metadata_app.s"
     application_object = work_dir / "metadata_app.o"
@@ -270,6 +271,20 @@ def compile_separate_module_graph(
             str(core_metadata),
         ]
     )
+    run(
+        [
+            str(compiler),
+            "--compile-module",
+            "tests.metadata.math",
+            "--emit",
+            "mir",
+            "-o",
+            str(math_mir),
+            str(math_metadata),
+            str(math_implementation),
+            str(core_metadata),
+        ]
+    )
     math_ir_text = math_ir.read_text(encoding="utf-8")
     if (
         "import fn @tests.metadata.core::add_bias" not in math_ir_text
@@ -277,6 +292,14 @@ def compile_separate_module_graph(
         or math_ir_text.count("[metadata 0x") != 2
     ):
         raise AssertionError("separate module IR linkage is missing")
+    math_mir_text = math_mir.read_text(encoding="utf-8")
+    if (
+        "declare @f0 tests.metadata.core::add_bias" not in math_mir_text
+        or "define @f1 tests.metadata.math::calculate" not in math_mir_text
+        or "module-kind library" not in math_mir_text
+        or math_mir_text.count("metadata=0x") != 2
+    ):
+        raise AssertionError("separate module machine IR linkage is missing")
     math_text = math_assembly.read_text(encoding="utf-8")
     if (
         "_start:" in math_text
@@ -852,6 +875,8 @@ def main() -> int:
         help_result.stdout
     ):
         raise AssertionError("--help did not describe separate compilation")
+    if "--emit mir" not in help_result.stdout:
+        raise AssertionError("--help did not describe machine IR emission")
     version_result = run([str(arguments.compiler), "--version"])
     if "lunac 0.1.0-dev" not in version_result.stdout:
         raise AssertionError("--version did not print the compiler version")
@@ -1604,6 +1629,36 @@ def main() -> int:
             f"actual:\n{actual_module_import_ir}"
         )
     print("PASS IR snapshot: imported module graph")
+
+    machine_ir_first = arguments.work_dir / "function_call_first.mir"
+    machine_ir_second = arguments.work_dir / "function_call_second.mir"
+    for output in (machine_ir_first, machine_ir_second):
+        run(
+            [
+                str(arguments.compiler),
+                "--emit",
+                "mir",
+                "-o",
+                str(output),
+                str(case_dir / "function_call.luna"),
+            ]
+        )
+    expected_machine_ir = (
+        arguments.source_root
+        / "tests"
+        / "integration"
+        / "golden"
+        / "function_call.mir"
+    ).read_text(encoding="utf-8")
+    actual_machine_ir = machine_ir_first.read_text(encoding="utf-8")
+    if actual_machine_ir.rstrip("\n") != expected_machine_ir.rstrip("\n"):
+        raise AssertionError(
+            "machine IR snapshot mismatch for function_call.luna\n"
+            f"expected:\n{expected_machine_ir}\nactual:\n{actual_machine_ir}"
+        )
+    if machine_ir_first.read_bytes() != machine_ir_second.read_bytes():
+        raise AssertionError("machine IR output is not deterministic")
+    print("PASS machine IR snapshot and determinism: function_call.luna")
 
     for deterministic_name in (
         "recursive_factorial",

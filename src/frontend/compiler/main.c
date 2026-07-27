@@ -8,7 +8,7 @@
 
 static void luna_print_usage(FILE *stream) {
     (void)fputs("usage: lunac [--target triple] "
-                "[--emit check|ir|asm|metadata] "
+                "[--emit check|ir|mir|asm|metadata] "
                 "[--compile-module name] [-o path] input...\n"
                 "\n"
                 "targets:\n"
@@ -18,6 +18,7 @@ static void luna_print_usage(FILE *stream) {
                 "  --target name  select the compilation target\n"
                 "  --emit check   parse, type-check and verify IR\n"
                 "  --emit ir      write textual Luna IR\n"
+                "  --emit mir     write verified x86-64 machine IR\n"
                 "  --emit asm     write x86-64 GNU assembly (default)\n"
                 "  --emit metadata  write deterministic .lmi metadata\n"
                 "  --compile-module name  compile one module without _start\n"
@@ -36,6 +37,10 @@ static bool luna_parse_emit_kind(const char *name, LunaEmitKind *emit_kind) {
     }
     if (strcmp(name, "ir") == 0) {
         *emit_kind = LUNA_EMIT_IR;
+        return true;
+    }
+    if (strcmp(name, "mir") == 0) {
+        *emit_kind = LUNA_EMIT_MACHINE_IR;
         return true;
     }
     if (strcmp(name, "asm") == 0) {
@@ -82,7 +87,7 @@ int main(int argument_count, char **arguments) {
                 !luna_parse_emit_kind(arguments[index + 1],
                                       &options.emit_kind)) {
                 (void)fputs(
-                    "error: --emit requires check, ir, asm or metadata\n",
+                    "error: --emit requires check, ir, mir, asm or metadata\n",
                     stderr);
                 goto cleanup;
             }
@@ -157,6 +162,8 @@ int main(int argument_count, char **arguments) {
     if (options.emit_kind != LUNA_EMIT_CHECK && options.output_path == NULL) {
         if (options.emit_kind == LUNA_EMIT_IR) {
             options.output_path = "a.lir";
+        } else if (options.emit_kind == LUNA_EMIT_MACHINE_IR) {
+            options.output_path = "a.mir";
         } else if (options.emit_kind == LUNA_EMIT_METADATA) {
             options.output_path = "a.lmi";
         } else {

@@ -45,7 +45,13 @@ lexer -> parser -> syntax tree
              typed Luna IR (CFG)
                     |
                     v
-          x86-64 instruction selection
+          x86-64 machine lowering
+                    |
+                    v
+       verified x86-64 machine IR
+                    |
+                    v
+          x86-64 instruction emission
                     |
                     v
               assembly emission
@@ -208,16 +214,52 @@ metadata imports print as qualified `import fn`; C symbols print as bodyless
 `extern fn`. No declaration may be the module entry point. Library IR has no
 entry function at all.
 
-The IR instruction set is target-neutral. Each module is parameterized by an
+The Luna IR instruction set is target-neutral. Each module is parameterized by an
 explicit target data layout so `isize` and `usize` retain their exact IR types
 while width-dependent verification and conversion printing remain
 deterministic. Textual IR records the target triple. Target-specific
 registers, calling convention, instruction encodings and relocations do not
 appear in IR instructions.
 
+## x86-64 machine IR
+
+The target machine IR is an owned, target-specific boundary between typed Luna
+IR and assembly emission. Lowering resolves `isize` and `usize` to fixed
+`i64` and `u64` machine types, assigns every scalar virtual register to the
+general-purpose or floating-point register class, and preserves target stack
+slot sizes, alignments, control-flow blocks, globals, linkage and module
+metadata identities. The backend no longer reads typed Luna IR directly.
+
+Machine instructions are pre-allocation pseudos. They express target-specific
+integer widths and signedness, scalar register classes, memory widths,
+checks, calls and control flow without prematurely hard-coding physical
+registers. Every instruction exposes its single definition, if any, and its
+complete ordered use list. Call arguments are explicit uses even though they
+are stored in a function-owned flattened argument table.
+
+A separate machine verifier runs after every lowering and again at the
+assembly-emission boundary. It checks the target and module shape, declaration
+and definition ownership, linkage and metadata, parameter homes, stack slot
+layouts, virtual-register types, unique definitions, complete uses, opcode
+contracts, call signatures, terminators, branch targets and predecessor
+metadata. Assembly emission therefore cannot consume an unchecked machine
+module.
+
+`lunac --emit mir` prints this verified boundary deterministically. The text
+includes target and module kind, function IDs and linkage, fixed target types,
+register classes, stack slots, virtual registers, blocks, definitions, uses and
+instruction-specific operands. It is a debugging and test contract for the
+current x86-64 backend, not a stable cross-version object format.
+
+The current emitter still gives virtual registers stack homes and expands
+machine pseudos directly into correct assembly. Liveness, physical-register
+assignment and optimization are deliberately absent from this stage. The
+complete representation and invariants are documented in
+[x86-64 machine IR](machine-ir.md).
+
 ## x86-64 backend
 
-The first backend is correctness-first:
+The current machine-IR consumer is correctness-first:
 
 - System V's first six integer argument-register assignments and integer result
   register for every fixed-width and target-sized integer type;
@@ -260,11 +302,13 @@ define Luna-facing error semantics explicitly and remain independent of libc.
 This backend is intentionally not the performance endpoint. Planned stages are:
 
 1. correct stack-homed code;
-2. x86-64 machine IR;
+2. verified x86-64 machine IR;
 3. liveness;
 4. linear-scan register allocation;
 5. peephole and local instruction selection improvements;
 6. ELF64 relocatable-object emission.
+
+The first two stages are complete. Liveness is the next backend stage.
 
 The simple backend remains available as a reference backend for differential
 testing after optimization is introduced.
@@ -280,7 +324,7 @@ Allocation and I/O failures are propagated explicitly.
 The quality gate contains:
 
 - GoogleTest unit tests for utilities, source handling, lexing, parsing,
-  semantic lowering, IR invariants and x86-64 emission;
+  semantic lowering, typed-IR and machine-IR invariants and x86-64 emission;
 - parser, type and module-error negative tests;
 - transitive module execution and IR snapshots, full source-order determinism,
   interface self-containment, exact signature matching, import visibility,
@@ -288,7 +332,7 @@ The quality gate contains:
 - deterministic metadata round trips, re-checksummed binary mutations,
   corrupt/version/stale-dependency negatives and three-object separate-link
   execution tests;
-- textual IR snapshots;
+- textual typed-IR and machine-IR snapshots;
 - x86-64 assembly validation through LLVM MC;
 - static ELF64 linking through LLD;
 - execution under `qemu-x86_64-static`;
@@ -308,7 +352,8 @@ The quality gate contains:
   and independently classified integer/SSE register banks;
 - structured-control negative cases, IR snapshots and randomized differential
   programs;
-- deterministic mutation tests and a coverage-guided libFuzzer target;
+- deterministic mutation tests and a coverage-guided libFuzzer target that
+  exercise machine lowering, verification, printing and assembly emission;
 - UBSan runs for the host compiler and ASan runs on compatible native hosts;
 - warnings treated as errors.
 

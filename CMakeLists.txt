@@ -43,6 +43,10 @@ add_library(luna_compiler STATIC
     src/frontend/support/string_view.c
     src/frontend/token/token.c
     src/frontend/type/type.c
+    src/backend/x86_64/backend.c
+    src/backend/x86_64/machine_ir.c
+    src/backend/x86_64/machine_ir_print.c
+    src/backend/x86_64/machine_ir_verify.c
     src/backend/x86_64/x86_64.c
 )
 
@@ -170,6 +174,7 @@ if(BUILD_TESTING)
         tests/unit/frontend/source/source_test.cpp
         tests/unit/frontend/type_test.cpp
         tests/unit/target/target_test.cpp
+        tests/unit/backend/x86_64_machine_ir_test.cpp
         tests/unit/backend/x86_64_test.cpp
     )
     target_link_libraries(luna_unit_tests

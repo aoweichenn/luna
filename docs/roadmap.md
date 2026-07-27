@@ -47,7 +47,7 @@ M0 supports enough language to compile arithmetic functions, local variables,
 
 ## M3: production x86-64 backend
 
-- [ ] target machine IR
+- [x] target machine IR
 - [ ] liveness analysis
 - [ ] linear-scan register allocation
 - [ ] stack arguments and aggregate ABI classification

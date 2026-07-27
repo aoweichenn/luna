@@ -229,6 +229,9 @@ TEST(MutationFuzzTest, CleanFrontendResultsAlwaysProduceValidTypedIr) {
         EXPECT_TRUE(harness.Verify())
             << "case " << case_index << ", seed " << seed_index << '\n'
             << harness.Diagnostics();
+        EXPECT_TRUE(harness.EmitMachineIr())
+            << "case " << case_index << ", seed " << seed_index << '\n'
+            << harness.Diagnostics();
         EXPECT_TRUE(harness.EmitAssembly())
             << "case " << case_index << ", seed " << seed_index << '\n'
             << harness.Diagnostics();
@@ -253,6 +256,7 @@ TEST(MutationFuzzTest, CleanModulePairResultsAlwaysProduceValidTypedIr) {
 
     FrontendHarness clean{LUNA_TEST_INTERFACE, LUNA_TEST_IMPLEMENTATION};
     ASSERT_TRUE(clean.Verify()) << clean.Diagnostics();
+    ASSERT_TRUE(clean.EmitMachineIr()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitAssembly()) << clean.Diagnostics();
 
     std::mt19937_64 random_engine{LUNA_TEST_MODULE_MUTATION_SEED};
@@ -276,6 +280,8 @@ TEST(MutationFuzzTest, CleanModulePairResultsAlwaysProduceValidTypedIr) {
         }
         EXPECT_TRUE(harness.Verify()) << "case " << case_index << '\n'
                                       << harness.Diagnostics();
+        EXPECT_TRUE(harness.EmitMachineIr()) << "case " << case_index << '\n'
+                                             << harness.Diagnostics();
         EXPECT_TRUE(harness.EmitAssembly()) << "case " << case_index << '\n'
                                             << harness.Diagnostics();
     }
@@ -311,6 +317,7 @@ TEST(MutationFuzzTest, CleanModuleGraphResultsAlwaysProduceValidTypedIr) {
         LUNA_TEST_MODULE_SOURCES[2], LUNA_TEST_MODULE_SOURCES[3],
         LUNA_TEST_MODULE_SOURCES[4]};
     ASSERT_TRUE(clean.Verify()) << clean.Diagnostics();
+    ASSERT_TRUE(clean.EmitMachineIr()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitAssembly()) << clean.Diagnostics();
 
     std::mt19937_64 random_engine{LUNA_TEST_MODULE_GRAPH_MUTATION_SEED};
@@ -333,6 +340,9 @@ TEST(MutationFuzzTest, CleanModuleGraphResultsAlwaysProduceValidTypedIr) {
             continue;
         }
         EXPECT_TRUE(harness.Verify())
+            << "case " << case_index << ", source " << mutated_source << '\n'
+            << harness.Diagnostics();
+        EXPECT_TRUE(harness.EmitMachineIr())
             << "case " << case_index << ", source " << mutated_source << '\n'
             << harness.Diagnostics();
         EXPECT_TRUE(harness.EmitAssembly())

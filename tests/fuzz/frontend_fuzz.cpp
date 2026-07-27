@@ -58,9 +58,11 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
     LunaSourceFile source{};
     LunaArena arena{};
     LunaIrModule module{};
+    LunaStringBuilder machine_ir{};
     LunaStringBuilder assembly{};
     luna_arena_init(&arena, LUNA_FUZZ_ARENA_BLOCK_SIZE);
     luna_ir_module_init(&module, luna_target_info_default());
+    luna_string_builder_init(&machine_ir);
     luna_string_builder_init(&assembly);
 
     LunaDiagnosticEngine diagnostics{};
@@ -78,11 +80,14 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
             luna_diagnostic_error_count(&diagnostics) == 0U) {
             invariant_holds =
                 luna_ir_verify(&module, diagnostic_file) &&
+                luna_x86_64_emit_machine_ir(&module, &diagnostics,
+                                            &machine_ir) &&
                 luna_x86_64_emit_assembly(&module, &diagnostics, &assembly);
         }
     }
 
     luna_string_builder_destroy(&assembly);
+    luna_string_builder_destroy(&machine_ir);
     luna_ir_module_destroy(&module);
     luna_arena_destroy(&arena);
     luna_source_destroy(&source);
@@ -124,9 +129,11 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
     programs.reserve(source_units.size());
     LunaArena arena{};
     LunaIrModule module{};
+    LunaStringBuilder machine_ir{};
     LunaStringBuilder assembly{};
     luna_arena_init(&arena, LUNA_FUZZ_ARENA_BLOCK_SIZE);
     luna_ir_module_init(&module, luna_target_info_default());
+    luna_string_builder_init(&machine_ir);
     luna_string_builder_init(&assembly);
 
     LunaDiagnosticEngine diagnostics{};
@@ -161,6 +168,8 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
             luna_diagnostic_error_count(&diagnostics) == 0U) {
             invariant_holds =
                 luna_ir_verify(&module, diagnostic_file) &&
+                luna_x86_64_emit_machine_ir(&module, &diagnostics,
+                                            &machine_ir) &&
                 luna_x86_64_emit_assembly(&module, &diagnostics, &assembly);
             for (const LunaProgram *program : programs) {
                 if (invariant_holds && program->is_interface) {
@@ -173,6 +182,7 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
     }
 
     luna_string_builder_destroy(&assembly);
+    luna_string_builder_destroy(&machine_ir);
     luna_ir_module_destroy(&module);
     luna_arena_destroy(&arena);
     for (LunaSourceFile &source : sources) {
