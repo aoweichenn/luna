@@ -120,9 +120,9 @@ are opaque pointer types and cannot be dereferenced or indexed.
 Fixed-array lengths are positive integer literals. Arrays may be nested and
 their total target layout must fit in the compiler's supported object-size
 range. They are local storage objects in this milestone: arrays cannot be
-passed or returned by value, assigned as a whole or used as scalar
-expressions. Those operations wait for aggregate ABI support. Elements remain
-ordinary lvalues and may be read, written or addressed.
+passed or returned by value or used as scalar expressions. A local array may
+be initialized from or assigned from an lvalue of the exact same array type.
+Elements remain ordinary lvalues and may be read, written or addressed.
 
 Structures use target ABI alignment with padding before fields and at the end
 of the object. Union fields all start at offset zero; the union size is the
@@ -144,13 +144,15 @@ target layout. `offsetof` accepts a structure or union type and the name of
 one of its immediate fields. These forms take a type, never a run-time
 expression; `sizeof(value)` is intentionally not supported.
 
-During this milestone, local structures, unions and arrays are storage
-objects initialized only with `{}`, which zeroes their complete object
-representation. Their scalar fields can then be read, written and addressed.
-Whole-object assignment, nonzero aggregate initializers, aggregate parameters
-and aggregate returns are deferred to the aggregate-initialization and ABI
-milestones. Reading a union field interprets the bytes currently in the
-overlapping storage; Luna does not track an active union member.
+Local structures and unions support context-directed named initialization.
+Fields may appear once in any order; omitted fields and all padding bytes are
+zero. A union initializer may name at most one field. Nested records use the
+same syntax, and a memory field may be initialized from an lvalue of its exact
+type. Structures, unions and arrays may be copied between exact same-typed
+local lvalues. They still cannot be compared, passed or returned by value
+until aggregate ABI classification is implemented. Reading a union field
+interprets the bytes currently in the overlapping storage; Luna does not track
+an active union member.
 
 ## Functions
 
@@ -394,21 +396,30 @@ let point: Point = {
     y = 20.0,
 };
 
-return Point {
-    x = 10.0,
-    y = 20.0,
-};
+var copy: Point = point;
+copy = { y = 30.0 };
 ```
 
-`{}` is explicit zero initialization. Local variables are never implicitly
-uninitialized.
+`{}` is explicit zero initialization. A named initializer is interpreted from
+the destination type; it does not repeat the type name. Field expressions are
+evaluated from top to bottom. Every omitted field and every padding byte is
+zero, so initialization never leaves an indeterminate object representation.
+Local variables are never implicitly uninitialized.
+
+The same braces can appear on the right of whole-object assignment. Copy
+initialization and assignment require an lvalue of the exact same structure,
+union or array type; there are no structural conversions. Aggregate
+parameters, returns and the typed `Point { ... }` value form remain deferred
+to the aggregate ABI milestone.
 
 For an array, `{}` initializes every byte of the object to zero. Array
-elements are subsequently assigned through indexing:
+elements may be assigned through indexing, and exact same-typed arrays may be
+copied locally:
 
 ```luna
 var values: [4]i32 = {};
 values[0] = 42;
+var copy: [4]i32 = values;
 let first: *i32 = &values[0];
 ```
 

@@ -115,6 +115,49 @@ TEST(ParserTest, BuildsAggregateEnumAndMemberAccessNodes) {
     EXPECT_EQ(value->as.member.operator_kind, LUNA_TOKEN_DOT);
 }
 
+TEST(ParserTest, BuildsNestedNamedAggregateInitializersInSourceOrder) {
+    FrontendHarness harness{"module test.aggregate_initializer_syntax;\n"
+                            "struct Inner { first: i32; second: i32; }\n"
+                            "struct Outer { inner: Inner; tail: u8; }\n"
+                            "fn main() -> i32 {\n"
+                            "    var value: Outer = {\n"
+                            "        tail = 7,\n"
+                            "        inner = { second = 2, first = 1, },\n"
+                            "    };\n"
+                            "    return 0;\n"
+                            "}\n"};
+
+    ASSERT_TRUE(harness.Parse()) << harness.Diagnostics();
+    const LunaStatement *declaration =
+        harness.Program()->first_function->body->first;
+    ASSERT_NE(declaration, nullptr);
+    ASSERT_EQ(declaration->kind, LUNA_STATEMENT_DECLARATION);
+    const LunaExpression *initializer = declaration->as.declaration.initializer;
+    ASSERT_NE(initializer, nullptr);
+    ASSERT_EQ(initializer->kind, LUNA_EXPRESSION_AGGREGATE_INITIALIZER);
+    EXPECT_EQ(initializer->as.aggregate_initializer.field_count, 2U);
+
+    const LunaInitializerField *tail =
+        initializer->as.aggregate_initializer.first_field;
+    ASSERT_NE(tail, nullptr);
+    EXPECT_EQ(std::string(tail->name.data, tail->name.length), "tail");
+    ASSERT_NE(tail->value, nullptr);
+    EXPECT_EQ(tail->value->kind, LUNA_EXPRESSION_INTEGER);
+
+    const LunaInitializerField *inner = tail->next;
+    ASSERT_NE(inner, nullptr);
+    EXPECT_EQ(std::string(inner->name.data, inner->name.length), "inner");
+    ASSERT_NE(inner->value, nullptr);
+    ASSERT_EQ(inner->value->kind, LUNA_EXPRESSION_AGGREGATE_INITIALIZER);
+    EXPECT_EQ(inner->value->as.aggregate_initializer.field_count, 2U);
+    ASSERT_NE(inner->value->as.aggregate_initializer.first_field, nullptr);
+    const LunaStringView first_inner_name =
+        inner->value->as.aggregate_initializer.first_field->name;
+    EXPECT_EQ(std::string(first_inner_name.data, first_inner_name.length),
+              "second");
+    EXPECT_EQ(inner->next, nullptr);
+}
+
 TEST(ParserTest, BuildsTypeOnlyLayoutQueryNodes) {
     FrontendHarness harness{"module test.layout_queries;\n"
                             "struct Record { tag: u8; value: u64; }\n"
@@ -186,6 +229,31 @@ TEST(ParserTest, ReportsMissingDelimiterWithoutHanging) {
     EXPECT_FALSE(harness.Parse());
     EXPECT_GT(harness.ErrorCount(), 0U);
     EXPECT_NE(harness.Diagnostics().find("expected ';'"), std::string::npos);
+}
+
+TEST(ParserTest, ReportsMalformedNamedAggregateInitializers) {
+    FrontendHarness missing_equal{"module test.missing_initializer_equal;\n"
+                                  "struct Item { value: i32; }\n"
+                                  "fn main() -> i32 {\n"
+                                  "    var item: Item = { value 42, };\n"
+                                  "    return 0;\n"
+                                  "}\n"};
+    EXPECT_FALSE(missing_equal.Parse());
+    EXPECT_NE(missing_equal.Diagnostics().find(
+                  "expected '=' after aggregate initializer field name"),
+              std::string::npos);
+
+    FrontendHarness missing_comma{
+        "module test.missing_initializer_comma;\n"
+        "struct Item { first: i32; second: i32; }\n"
+        "fn main() -> i32 {\n"
+        "    var item: Item = { first = 1 second = 2 };\n"
+        "    return 0;\n"
+        "}\n"};
+    EXPECT_FALSE(missing_comma.Parse());
+    EXPECT_NE(missing_comma.Diagnostics().find(
+                  "expected '}' after aggregate initializer"),
+              std::string::npos);
 }
 
 TEST(ParserTest, RejectsInvalidIntegerSeparators) {

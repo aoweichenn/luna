@@ -300,4 +300,25 @@ TEST(X8664BackendTest, EmitsDirectAggregateMemberAddressing) {
     EXPECT_NE(assembly.find("testq %rax, %rax"), std::string::npos);
 }
 
+TEST(X8664BackendTest, EmitsOverlapSafeInlineMemoryCopies) {
+    FrontendHarness harness{
+        "module test.memory_copy_codegen;\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "fn main() -> i32 {\n"
+        "    var first: Pair = { left = 20, right = 22, };\n"
+        "    var second: Pair = first;\n"
+        "    second = first;\n"
+        "    return second.left + second.right;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.EmitAssembly()) << harness.Diagnostics();
+    const std::string assembly = harness.Assembly();
+    EXPECT_NE(assembly.find("movq $8, %rcx"), std::string::npos);
+    EXPECT_NE(assembly.find("cmpq %rsi, %rdi"), std::string::npos);
+    EXPECT_NE(assembly.find("leaq 8(%rsi), %rax"), std::string::npos);
+    EXPECT_NE(assembly.find("std\n    rep movsb\n    cld"), std::string::npos);
+    EXPECT_NE(assembly.find("cld\n    rep movsb"), std::string::npos);
+    EXPECT_EQ(assembly.find("call memmove"), std::string::npos);
+}
+
 }

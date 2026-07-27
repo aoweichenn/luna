@@ -37,6 +37,7 @@ typedef enum LunaExpressionKind {
     LUNA_EXPRESSION_STRING,
     LUNA_EXPRESSION_NULL,
     LUNA_EXPRESSION_ZERO_INITIALIZER,
+    LUNA_EXPRESSION_AGGREGATE_INITIALIZER,
     LUNA_EXPRESSION_NAME,
     LUNA_EXPRESSION_UNARY,
     LUNA_EXPRESSION_BINARY,
@@ -51,6 +52,14 @@ typedef enum LunaExpressionKind {
 } LunaExpressionKind;
 
 typedef struct LunaExpression LunaExpression;
+typedef struct LunaInitializerField LunaInitializerField;
+
+struct LunaInitializerField {
+    LunaStringView name;
+    LunaExpression *value;
+    LunaSourceSpan span;
+    LunaInitializerField *next;
+};
 
 struct LunaExpression {
     LunaExpressionKind kind;
@@ -64,6 +73,11 @@ struct LunaExpression {
         bool boolean;
         LunaStringView string;
         LunaStringView name;
+
+        struct {
+            LunaInitializerField *first_field;
+            uint32_t field_count;
+        } aggregate_initializer;
 
         struct {
             LunaTokenKind operator_kind;

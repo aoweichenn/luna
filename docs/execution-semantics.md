@@ -22,6 +22,13 @@ and preserves the old target value before evaluating the right-hand
 expression. The target expression and its index expressions are evaluated
 exactly once.
 
+A named aggregate initializer evaluates its field expressions once in source
+order. The binding being declared is not visible in its own initializer.
+When braces are used as the right side of assignment, all fields are
+initialized in separate temporary storage before the destination object is
+changed. Thus a field expression that aliases the destination observes the
+old complete object.
+
 Every statement is name-checked and type-checked, including statements that
 cannot be reached at run time. Unreachable code is lowered into detached IR
 blocks and cannot affect live control flow.
@@ -115,14 +122,18 @@ Structures place each field at the first offset satisfying that field's
 target ABI alignment and round the final size to the maximum field alignment.
 Union fields all have offset zero; the union size is the aligned maximum field
 size. Local aggregate `{}` initialization writes zero to every byte, including
-padding. Reading a union member interprets the current overlapping bytes and
-does not depend on an active-member tag.
+padding. A named structure initializer also begins from an all-zero object,
+then writes each named field in source order. Fields may appear once in any
+order; omitted fields remain zero. A union initializer names zero or one
+field. Nested named initializers follow the same rules.
 
 Member selection computes the base lvalue address once. Pointer-member access
 checks for null before deriving the field address. Mutability follows the base
-lvalue for `.` and the pointer qualification for `->`. Whole aggregates are
-not scalar values in this milestone and cannot be copied, compared, passed or
-returned by value.
+lvalue for `.` and the pointer qualification for `->`. Structures, unions and
+fixed arrays may be initialized from or assigned from an lvalue of the exact
+same type. A whole-object copy transfers every byte, including padding, and
+has `memmove` overlap semantics. Whole memory objects are still not scalar
+values and cannot be compared, passed or returned by value.
 
 A scoped enum has the storage width, alignment and signedness of its explicit
 underlying integer type but remains a distinct language type. Enum members are
@@ -207,7 +218,8 @@ Fixed arrays are laid out contiguously with no padding between equal element
 types. Their alignment is the element alignment. Nested-array size
 calculation is checked for overflow. Whole-array zero initialization writes
 zero to every byte, including padding should a future aggregate element type
-introduce any.
+introduce any. Exact same-typed local arrays use the same overlap-safe
+whole-object copy semantics as structures and unions.
 
 String literals are immutable module data. Escape decoding happens at compile
 time, and one zero byte is appended after the decoded bytes. Repeated equal

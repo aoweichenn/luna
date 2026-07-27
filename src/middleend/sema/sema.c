@@ -1706,6 +1706,7 @@ luna_sema_known_expression_type(LunaSemaContext *context,
     case LUNA_EXPRESSION_FLOAT:
     case LUNA_EXPRESSION_NULL:
     case LUNA_EXPRESSION_ZERO_INITIALIZER:
+    case LUNA_EXPRESSION_AGGREGATE_INITIALIZER:
         return LUNA_TYPE_INVALID;
     case LUNA_EXPRESSION_BOOLEAN:
         return LUNA_TYPE_BOOL;
@@ -1857,6 +1858,7 @@ luna_sema_default_literal_type(const LunaExpression *expression) {
     case LUNA_EXPRESSION_STRING:
     case LUNA_EXPRESSION_NULL:
     case LUNA_EXPRESSION_ZERO_INITIALIZER:
+    case LUNA_EXPRESSION_AGGREGATE_INITIALIZER:
     case LUNA_EXPRESSION_NAME:
     case LUNA_EXPRESSION_INDEX:
     case LUNA_EXPRESSION_MEMBER:
@@ -1902,6 +1904,15 @@ static bool luna_sema_expression_can_branch(const LunaExpression *expression) {
         return false;
     case LUNA_EXPRESSION_CAST:
         return luna_sema_expression_can_branch(expression->as.cast.operand);
+    case LUNA_EXPRESSION_AGGREGATE_INITIALIZER:
+        for (const LunaInitializerField *field =
+                 expression->as.aggregate_initializer.first_field;
+             field != NULL; field = field->next) {
+            if (luna_sema_expression_can_branch(field->value)) {
+                return true;
+            }
+        }
+        return false;
     case LUNA_EXPRESSION_INTEGER:
     case LUNA_EXPRESSION_FLOAT:
     case LUNA_EXPRESSION_BOOLEAN:
@@ -2330,6 +2341,335 @@ static bool luna_sema_store_lvalue(LunaSemaContext *context,
     return luna_sema_append_instruction(context, &store);
 }
 
+static bool luna_sema_is_brace_initializer(const LunaExpression *expression) {
+    return expression != NULL &&
+           (expression->kind == LUNA_EXPRESSION_ZERO_INITIALIZER ||
+            expression->kind == LUNA_EXPRESSION_AGGREGATE_INITIALIZER);
+}
+
+static bool luna_sema_is_lvalue_syntax(const LunaExpression *expression) {
+    if (expression == NULL) {
+        return false;
+    }
+    if (expression->kind == LUNA_EXPRESSION_NAME ||
+        expression->kind == LUNA_EXPRESSION_INDEX ||
+        expression->kind == LUNA_EXPRESSION_MEMBER) {
+        return true;
+    }
+    return expression->kind == LUNA_EXPRESSION_UNARY &&
+           expression->as.unary.operator_kind == LUNA_TOKEN_STAR;
+}
+
+static LunaIrSlotId luna_sema_allocate_memory_slot(LunaSemaContext *context,
+                                                   LunaSemaTypeId type,
+                                                   LunaSourceSpan span) {
+    uint64_t size_bytes = 0U;
+    uint32_t alignment_bytes = 0U;
+    if (!luna_sema_type_layout(context, type, &size_bytes, &alignment_bytes)) {
+        luna_diagnostic_error(
+            context->diagnostics, span, "%s",
+            luna_sema_is_array_type(context, type)
+                ? "fixed array has no valid target layout"
+                : "aggregate object has no valid target layout");
+        return LUNA_IR_INVALID_ID;
+    }
+
+    const LunaIrSlotId slot = luna_ir_function_add_memory_slot(
+        context->current_function, size_bytes, alignment_bytes);
+    if (slot == LUNA_IR_INVALID_ID) {
+        luna_sema_report_allocation_failure(context);
+    }
+    return slot;
+}
+
+static LunaCheckedLvalue
+luna_sema_slot_field_lvalue(LunaSemaContext *context, LunaIrSlotId slot,
+                            LunaSemaTypeId root_type, LunaSemaTypeId field_type,
+                            uint64_t offset, LunaSourceSpan span) {
+    LunaIrInstruction root_address =
+        luna_sema_instruction(LUNA_IR_ADDRESS_OF_SLOT, span);
+    root_address.slot = slot;
+    const LunaSemaTypeId root_pointer_type =
+        luna_sema_pointer_type(context, root_type, false);
+    if (root_pointer_type == LUNA_TYPE_INVALID) {
+        return luna_sema_invalid_lvalue();
+    }
+    const LunaIrValueId root = luna_sema_emit_value_instruction(
+        context, &root_address, root_pointer_type);
+    if (root == LUNA_IR_INVALID_ID) {
+        return luna_sema_invalid_lvalue();
+    }
+
+    LunaIrInstruction field_address =
+        luna_sema_instruction(LUNA_IR_MEMBER_ADDRESS, span);
+    field_address.left = root;
+    field_address.immediate = offset;
+    const LunaSemaTypeId field_pointer_type =
+        luna_sema_pointer_type(context, field_type, false);
+    if (field_pointer_type == LUNA_TYPE_INVALID) {
+        return luna_sema_invalid_lvalue();
+    }
+    const LunaIrValueId field = luna_sema_emit_value_instruction(
+        context, &field_address, field_pointer_type);
+    if (field == LUNA_IR_INVALID_ID) {
+        return luna_sema_invalid_lvalue();
+    }
+
+    return (LunaCheckedLvalue){
+        .type = field_type,
+        .storage = LUNA_SEMA_LVALUE_ADDRESS,
+        .slot = LUNA_IR_INVALID_ID,
+        .address = field,
+        .is_mutable = true,
+    };
+}
+
+static bool luna_sema_emit_memory_copy(LunaSemaContext *context,
+                                       const LunaCheckedLvalue *destination,
+                                       const LunaCheckedLvalue *source,
+                                       LunaSourceSpan span) {
+    if (destination->type != source->type ||
+        !luna_sema_is_memory_type(context, destination->type)) {
+        luna_diagnostic_error(
+            context->diagnostics, span,
+            "memory copy requires lvalues of the exact same memory type");
+        return false;
+    }
+
+    uint64_t size_bytes = 0U;
+    uint32_t alignment_bytes = 0U;
+    if (!luna_sema_type_layout(context, destination->type, &size_bytes,
+                               &alignment_bytes) ||
+        alignment_bytes == 0U) {
+        luna_diagnostic_error(context->diagnostics, span,
+                              "memory copy requires a valid object layout");
+        return false;
+    }
+
+    const LunaIrValueId destination_address =
+        luna_sema_lvalue_address(context, destination, span);
+    const LunaIrValueId source_address =
+        luna_sema_lvalue_address(context, source, span);
+    if (destination_address == LUNA_IR_INVALID_ID ||
+        source_address == LUNA_IR_INVALID_ID) {
+        return false;
+    }
+    if (destination->requires_null_check &&
+        !luna_sema_emit_null_check(context, destination_address, span)) {
+        return false;
+    }
+    if (source->requires_null_check &&
+        !luna_sema_emit_null_check(context, source_address, span)) {
+        return false;
+    }
+
+    LunaIrInstruction copy = luna_sema_instruction(LUNA_IR_MEMORY_COPY, span);
+    copy.left = destination_address;
+    copy.right = source_address;
+    copy.immediate = size_bytes;
+    return luna_sema_append_instruction(context, &copy);
+}
+
+static LunaCheckedLvalue
+luna_sema_lower_memory_source(LunaSemaContext *context,
+                              const LunaExpression *expression,
+                              LunaSemaTypeId expected_type) {
+    if (!luna_sema_is_lvalue_syntax(expression)) {
+        luna_diagnostic_error(
+            context->diagnostics, expression->span, "%s",
+            luna_sema_is_array_type(context, expected_type)
+                ? "fixed-array initialization requires '{}' or an lvalue of "
+                  "the exact same array type"
+                : "aggregate initialization requires braces or an lvalue of "
+                  "the exact same aggregate type");
+        return luna_sema_invalid_lvalue();
+    }
+
+    LunaCheckedLvalue source = luna_sema_lower_lvalue(context, expression);
+    if (source.storage == LUNA_SEMA_LVALUE_INVALID) {
+        return source;
+    }
+    if (!luna_sema_require_type(context,
+                                (LunaCheckedValue){
+                                    .id = LUNA_IR_INVALID_ID,
+                                    .type = source.type,
+                                },
+                                expected_type, expression->span)) {
+        return luna_sema_invalid_lvalue();
+    }
+    return source;
+}
+
+static bool luna_sema_initialize_slot_value(LunaSemaContext *context,
+                                            LunaIrSlotId slot,
+                                            LunaSemaTypeId root_type,
+                                            LunaSemaTypeId value_type,
+                                            uint64_t offset,
+                                            const LunaExpression *initializer);
+
+static bool
+luna_sema_validate_aggregate_initializer(LunaSemaContext *context,
+                                         LunaSemaTypeId type,
+                                         const LunaExpression *initializer) {
+    if (!luna_sema_is_record_type(context, type)) {
+        luna_diagnostic_error(
+            context->diagnostics, initializer->span,
+            "named aggregate initializer requires a struct or union context");
+        return false;
+    }
+
+    const LunaSemaType *aggregate = luna_sema_type(context, type);
+    uint32_t field_index = 0U;
+    for (const LunaInitializerField *field =
+             initializer->as.aggregate_initializer.first_field;
+         field != NULL; field = field->next) {
+        for (const LunaInitializerField *previous =
+                 initializer->as.aggregate_initializer.first_field;
+             previous != field; previous = previous->next) {
+            if (luna_string_view_equal(previous->name, field->name)) {
+                luna_diagnostic_error(context->diagnostics, field->span,
+                                      "duplicate initializer field '%.*s'",
+                                      (int)field->name.length,
+                                      field->name.data);
+                return false;
+            }
+        }
+
+        if (luna_sema_find_field(context, type, field->name) == NULL) {
+            const LunaStringView type_name =
+                aggregate != NULL && aggregate->declaration != NULL
+                    ? aggregate->declaration->name
+                    : (LunaStringView){0};
+            luna_diagnostic_error(context->diagnostics, field->span,
+                                  "type '%.*s' has no field named '%.*s'",
+                                  (int)type_name.length, type_name.data,
+                                  (int)field->name.length, field->name.data);
+            return false;
+        }
+        if (aggregate != NULL && aggregate->kind == LUNA_TYPE_UNION &&
+            field_index != 0U) {
+            luna_diagnostic_error(
+                context->diagnostics, field->span,
+                "union initializer may name at most one field");
+            return false;
+        }
+        field_index += 1U;
+    }
+    return true;
+}
+
+static bool luna_sema_initialize_aggregate_fields(
+    LunaSemaContext *context, LunaIrSlotId slot, LunaSemaTypeId root_type,
+    LunaSemaTypeId aggregate_type, uint64_t aggregate_offset,
+    const LunaExpression *initializer) {
+    if (!luna_sema_validate_aggregate_initializer(context, aggregate_type,
+                                                  initializer)) {
+        return false;
+    }
+
+    for (const LunaInitializerField *field_initializer =
+             initializer->as.aggregate_initializer.first_field;
+         field_initializer != NULL;
+         field_initializer = field_initializer->next) {
+        const LunaSemaField *field = luna_sema_find_field(
+            context, aggregate_type, field_initializer->name);
+        if (field == NULL || field->offset > (uint64_t)INT32_MAX ||
+            aggregate_offset > (uint64_t)INT32_MAX - field->offset) {
+            luna_diagnostic_error(
+                context->diagnostics, field_initializer->span,
+                "aggregate initializer field offset exceeds the supported "
+                "object-size range");
+            return false;
+        }
+        if (!luna_sema_initialize_slot_value(
+                context, slot, root_type, field->type,
+                aggregate_offset + field->offset, field_initializer->value)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool luna_sema_initialize_slot_value(LunaSemaContext *context,
+                                            LunaIrSlotId slot,
+                                            LunaSemaTypeId root_type,
+                                            LunaSemaTypeId value_type,
+                                            uint64_t offset,
+                                            const LunaExpression *initializer) {
+    if (luna_sema_is_memory_type(context, value_type)) {
+        if (initializer->kind == LUNA_EXPRESSION_ZERO_INITIALIZER) {
+            return true;
+        }
+        if (initializer->kind == LUNA_EXPRESSION_AGGREGATE_INITIALIZER) {
+            return luna_sema_initialize_aggregate_fields(
+                context, slot, root_type, value_type, offset, initializer);
+        }
+
+        const LunaCheckedLvalue source =
+            luna_sema_lower_memory_source(context, initializer, value_type);
+        if (source.storage == LUNA_SEMA_LVALUE_INVALID) {
+            return false;
+        }
+        const LunaCheckedLvalue destination = luna_sema_slot_field_lvalue(
+            context, slot, root_type, value_type, offset, initializer->span);
+        return destination.storage != LUNA_SEMA_LVALUE_INVALID &&
+               luna_sema_emit_memory_copy(context, &destination, &source,
+                                          initializer->span);
+    }
+
+    if (initializer->kind == LUNA_EXPRESSION_AGGREGATE_INITIALIZER) {
+        luna_diagnostic_error(
+            context->diagnostics, initializer->span,
+            "named aggregate initializer requires a struct or union context");
+        return false;
+    }
+
+    LunaCheckedValue value =
+        luna_sema_lower_expression_expected(context, initializer, value_type);
+    if (!luna_sema_require_type(context, value, value_type,
+                                initializer->span)) {
+        return false;
+    }
+    const LunaCheckedLvalue destination = luna_sema_slot_field_lvalue(
+        context, slot, root_type, value_type, offset, initializer->span);
+    return destination.storage != LUNA_SEMA_LVALUE_INVALID &&
+           luna_sema_store_lvalue(context, &destination, value,
+                                  initializer->span);
+}
+
+static bool luna_sema_zero_memory_slot(LunaSemaContext *context,
+                                       LunaIrSlotId slot, LunaSourceSpan span) {
+    LunaIrInstruction zero = luna_sema_instruction(LUNA_IR_ZERO_SLOT, span);
+    zero.slot = slot;
+    return luna_sema_append_instruction(context, &zero);
+}
+
+static LunaCheckedLvalue
+luna_sema_lower_memory_assignment_value(LunaSemaContext *context,
+                                        const LunaExpression *initializer,
+                                        LunaSemaTypeId expected_type) {
+    if (!luna_sema_is_brace_initializer(initializer)) {
+        return luna_sema_lower_memory_source(context, initializer,
+                                             expected_type);
+    }
+
+    const LunaIrSlotId slot = luna_sema_allocate_memory_slot(
+        context, expected_type, initializer->span);
+    if (slot == LUNA_IR_INVALID_ID ||
+        !luna_sema_zero_memory_slot(context, slot, initializer->span) ||
+        !luna_sema_initialize_slot_value(context, slot, expected_type,
+                                         expected_type, 0U, initializer)) {
+        return luna_sema_invalid_lvalue();
+    }
+    return (LunaCheckedLvalue){
+        .type = expected_type,
+        .storage = LUNA_SEMA_LVALUE_SLOT,
+        .slot = slot,
+        .address = LUNA_IR_INVALID_ID,
+        .is_mutable = false,
+    };
+}
+
 static LunaCheckedValue
 luna_sema_lower_logical(LunaSemaContext *context,
                         const LunaExpression *expression) {
@@ -2737,6 +3077,12 @@ luna_sema_lower_expression_expected(LunaSemaContext *context,
     case LUNA_EXPRESSION_ZERO_INITIALIZER:
         return luna_sema_lower_zero_initializer(context, expected_type,
                                                 expression->span);
+
+    case LUNA_EXPRESSION_AGGREGATE_INITIALIZER:
+        luna_diagnostic_error(
+            context->diagnostics, expression->span,
+            "named aggregate initializer requires an aggregate destination");
+        return luna_sema_invalid_value();
 
     case LUNA_EXPRESSION_SIZEOF:
     case LUNA_EXPRESSION_ALIGNOF:
@@ -3866,48 +4212,44 @@ static bool luna_sema_lower_statement(LunaSemaContext *context,
         }
 
         if (luna_sema_is_memory_type(context, declared_type)) {
-            const bool is_array =
-                luna_sema_is_array_type(context, declared_type);
-            if (statement->as.declaration.initializer->kind !=
-                LUNA_EXPRESSION_ZERO_INITIALIZER) {
-                luna_diagnostic_error(
-                    context->diagnostics,
-                    statement->as.declaration.initializer->span, "%s",
-                    is_array
-                        ? "fixed arrays currently require the '{}' initializer"
-                        : "aggregate objects currently require the '{}' "
-                          "initializer");
-                return false;
-            }
-
-            uint64_t size_bytes = 0U;
-            uint32_t alignment_bytes = 0U;
-            if (!luna_sema_type_layout(context, declared_type, &size_bytes,
-                                       &alignment_bytes)) {
-                luna_diagnostic_error(
-                    context->diagnostics, statement->as.declaration.type.span,
-                    "%s",
-                    is_array ? "fixed array has no valid target layout"
-                             : "aggregate object has no valid target layout");
-                return false;
-            }
-            const LunaIrSlotId slot = luna_ir_function_add_memory_slot(
-                context->current_function, size_bytes, alignment_bytes);
+            const LunaExpression *initializer =
+                statement->as.declaration.initializer;
+            const LunaIrSlotId slot = luna_sema_allocate_memory_slot(
+                context, declared_type, statement->as.declaration.type.span);
             if (slot == LUNA_IR_INVALID_ID) {
-                luna_sema_report_allocation_failure(context);
                 return false;
             }
 
-            if (!luna_sema_add_local(context, statement->as.declaration.name,
-                                     declared_type, slot,
-                                     statement->as.declaration.is_mutable)) {
-                return false;
+            if (luna_sema_is_brace_initializer(initializer)) {
+                if (!luna_sema_zero_memory_slot(context, slot,
+                                                initializer->span) ||
+                    !luna_sema_initialize_slot_value(
+                        context, slot, declared_type, declared_type, 0U,
+                        initializer)) {
+                    return false;
+                }
+            } else {
+                const LunaCheckedLvalue source = luna_sema_lower_memory_source(
+                    context, initializer, declared_type);
+                if (source.storage == LUNA_SEMA_LVALUE_INVALID) {
+                    return false;
+                }
+                const LunaCheckedLvalue destination = {
+                    .type = declared_type,
+                    .storage = LUNA_SEMA_LVALUE_SLOT,
+                    .slot = slot,
+                    .address = LUNA_IR_INVALID_ID,
+                    .is_mutable = true,
+                };
+                if (!luna_sema_emit_memory_copy(context, &destination, &source,
+                                                initializer->span)) {
+                    return false;
+                }
             }
 
-            LunaIrInstruction zero =
-                luna_sema_instruction(LUNA_IR_ZERO_SLOT, statement->span);
-            zero.slot = slot;
-            return luna_sema_append_instruction(context, &zero);
+            return luna_sema_add_local(context, statement->as.declaration.name,
+                                       declared_type, slot,
+                                       statement->as.declaration.is_mutable);
         }
 
         LunaCheckedValue initializer = luna_sema_lower_expression_expected(
@@ -3960,12 +4302,48 @@ static bool luna_sema_lower_statement(LunaSemaContext *context,
             return false;
         }
         if (luna_sema_is_memory_type(context, lvalue.type)) {
-            luna_diagnostic_error(
-                context->diagnostics, statement->span, "%s",
-                luna_sema_is_array_type(context, lvalue.type)
-                    ? "fixed arrays cannot be assigned as a whole"
-                    : "aggregate objects cannot be assigned as a whole");
-            return false;
+            if (statement->as.assignment.operator_kind != LUNA_TOKEN_EQUAL) {
+                luna_diagnostic_error(
+                    context->diagnostics, statement->span,
+                    "compound assignment requires a scalar numeric type");
+                return false;
+            }
+
+            LunaIrSlotId preserved_address = LUNA_IR_INVALID_ID;
+            if (lvalue.storage == LUNA_SEMA_LVALUE_ADDRESS &&
+                luna_sema_expression_can_branch(
+                    statement->as.assignment.value)) {
+                const LunaSemaTypeId pointer_type = luna_sema_pointer_type(
+                    context, lvalue.type, !lvalue.is_mutable);
+                preserved_address = luna_sema_preserve_value(
+                    context,
+                    (LunaCheckedValue){
+                        .id = lvalue.address,
+                        .type = pointer_type,
+                    },
+                    statement->as.assignment.target->span);
+                if (preserved_address == LUNA_IR_INVALID_ID) {
+                    return false;
+                }
+            }
+
+            const LunaCheckedLvalue source =
+                luna_sema_lower_memory_assignment_value(
+                    context, statement->as.assignment.value, lvalue.type);
+            if (source.storage == LUNA_SEMA_LVALUE_INVALID) {
+                return false;
+            }
+
+            if (preserved_address != LUNA_IR_INVALID_ID) {
+                const LunaSemaTypeId pointer_type = luna_sema_pointer_type(
+                    context, lvalue.type, !lvalue.is_mutable);
+                lvalue.address = luna_sema_reload_value(
+                                     context, preserved_address, pointer_type,
+                                     statement->as.assignment.target->span)
+                                     .id;
+            }
+            return luna_sema_emit_memory_copy(context, &lvalue, &source,
+                                              statement->span);
         }
 
         LunaIrSlotId preserved_address = LUNA_IR_INVALID_ID;

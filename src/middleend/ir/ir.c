@@ -555,6 +555,22 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
         return luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_VOID,
                                      reason);
 
+    case LUNA_IR_MEMORY_COPY:
+        if (instruction->immediate == 0U ||
+            instruction->immediate > (uint64_t)INT32_MAX) {
+            return luna_ir_reject(
+                reason,
+                "memory copy size must fit the positive object-size range");
+        }
+        return luna_ir_verify_value(function, instruction->left,
+                                    LUNA_IR_TYPE_POINTER, defined_in_block,
+                                    reason) &&
+               luna_ir_verify_value(function, instruction->right,
+                                    LUNA_IR_TYPE_POINTER, defined_in_block,
+                                    reason) &&
+               luna_ir_verify_result(function, instruction, LUNA_IR_TYPE_VOID,
+                                     reason);
+
     case LUNA_IR_LOAD_INDIRECT:
         if (!luna_ir_type_is_value(instruction->type)) {
             return luna_ir_reject(reason,
@@ -1416,6 +1432,16 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
     case LUNA_IR_ZERO_SLOT:
         return luna_string_builder_append_format(output, "zero $%u\n",
                                                  instruction->slot);
+
+    case LUNA_IR_MEMORY_COPY:
+        if (!luna_string_builder_append_format(
+                output, "memory_copy %" PRIu64 ", ", instruction->immediate) ||
+            !luna_ir_print_value(output, instruction->left) ||
+            !luna_string_builder_append_c_string(output, ", ") ||
+            !luna_ir_print_value(output, instruction->right)) {
+            return false;
+        }
+        return luna_string_builder_append_c_string(output, "\n");
 
     case LUNA_IR_LOAD_INDIRECT:
         if (!luna_string_builder_append_format(

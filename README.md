@@ -13,18 +13,20 @@ The project is deliberately narrow at this stage:
   and raw-pointer conversions with checked floating-to-integer bounds, raw
   pointers, local fixed arrays, immutable string literals, functions,
   exact-layout structures and unions, scoped enums, typed external C function
-  declarations, type-only `sizeof`, `alignof` and `offsetof` queries,
-  expressions, the short-circuit conditional operator, local variables, `if`,
-  `while`, `do`, `for` and non-fallthrough `switch` control flow;
+  declarations, context-directed named aggregate initialization, exact
+  whole-object copies, type-only `sizeof`, `alignof` and `offsetof` queries,
+  expressions, the short-circuit conditional operator, local variables,
+  `if`, `while`, `do`, `for` and non-fallthrough `switch` control flow;
 - middle end: typed, non-SSA control-flow IR with explicit object layouts,
-  static data, member addresses and typed memory operations;
+  static data, member addresses, typed memory operations and sized,
+  overlap-safe object copies;
 - target model: explicit `x86_64-unknown-linux-gnu` data layout, with
   target-sized `isize` and `usize`;
 - backend: direct, unoptimized x86-64 instruction selection, including
   IEEE-754 scalar SSE floating-point operations and checked numeric
   conversions, exact-width indirect memory access, checked fixed-array
-  indexing, read-only static data and direct System V calls to unmangled
-  external C symbols;
+  indexing, read-only static data, inline overlap-safe object copies and direct
+  System V calls to unmangled external C symbols;
 - bootstrap host: conforming C23 with IEC 60559 binary32 and binary64;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests, IR
   snapshots, differential random programs, libFuzzer and executable

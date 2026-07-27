@@ -1067,6 +1067,72 @@ TEST(SemaTest, LowersAggregatesAndScopedEnumsWithExactTargetLayouts) {
     EXPECT_TRUE(saw_next_offset);
 }
 
+TEST(SemaTest, LowersNamedAggregateInitializationAndExactMemoryCopies) {
+    FrontendHarness harness{
+        "module test.aggregate_initialization;\n"
+        "struct Inner { tag: u8; value: i32; }\n"
+        "union Choice { integer: i64; inner: Inner; }\n"
+        "struct Outer {\n"
+        "    head: u8;\n"
+        "    inner: Inner;\n"
+        "    choice: Choice;\n"
+        "    values: [2]i32;\n"
+        "    tail: u16;\n"
+        "}\n"
+        "fn main() -> i32 {\n"
+        "    var seed: Inner = { value = 40, };\n"
+        "    var first: Outer = {\n"
+        "        tail = 7,\n"
+        "        inner = seed,\n"
+        "        choice = { integer = 99, },\n"
+        "        head = 1,\n"
+        "    };\n"
+        "    var second: Outer = first;\n"
+        "    let pointer: *Outer = &second;\n"
+        "    pointer->inner = {\n"
+        "        value = true ? 42 : 0,\n"
+        "        tag = {},\n"
+        "    };\n"
+        "    var left: [2]i32 = {};\n"
+        "    left[0] = 20;\n"
+        "    left[1] = 22;\n"
+        "    var right: [2]i32 = left;\n"
+        "    right = left;\n"
+        "    if (first.inner.tag != 0 || first.choice.integer != 99 ||\n"
+        "        first.values[0] != 0 || second.inner.tag != 0 ||\n"
+        "        right[0] + right[1] != 42) {\n"
+        "        return 1;\n"
+        "    }\n"
+        "    return pointer->inner.value;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    LunaIrFunction *main_function = luna_ir_module_function(
+        harness.Module(), harness.Module()->entry_function);
+    ASSERT_NE(main_function, nullptr);
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_ZERO_SLOT), nullptr);
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_MEMBER_ADDRESS), nullptr);
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_MEMORY_COPY), nullptr);
+
+    std::size_t copy_count = 0U;
+    for (std::size_t block_index = 0U;
+         block_index < main_function->blocks.length; block_index += 1U) {
+        const auto *block = static_cast<const LunaIrBlock *>(
+            luna_vector_at_const(&main_function->blocks, block_index));
+        for (std::size_t instruction_index = 0U;
+             instruction_index < block->instructions.length;
+             instruction_index += 1U) {
+            const auto *instruction = static_cast<const LunaIrInstruction *>(
+                luna_vector_at_const(&block->instructions, instruction_index));
+            if (instruction->opcode == LUNA_IR_MEMORY_COPY) {
+                copy_count += 1U;
+                EXPECT_GT(instruction->immediate, 0U);
+            }
+        }
+    }
+    EXPECT_GE(copy_count, 5U);
+}
+
 TEST(SemaTest, AcceptsSignedEnumBoundariesAndImplicitSuccessors) {
     FrontendHarness harness{
         "module test.signed_enum;\n"
@@ -1228,13 +1294,14 @@ TEST(SemaTest, RejectsInvalidAggregateAndScopedEnumPrograms) {
         {"module test.aggregate_initializer;\n"
          "struct Item { value: i32; }\n"
          "fn main() -> i32 { var item: Item = 0; return 0; }\n",
-         "aggregate objects currently require the '{}' initializer"},
+         "aggregate initialization requires braces"},
         {"module test.aggregate_assignment;\n"
          "struct Item { value: i32; }\n"
          "fn main() -> i32 {\n"
-         " var left: Item = {}; var right: Item = {}; left = right; return 0;\n"
+         " var left: Item = {}; var right: Item = {}; left += right; return "
+         "0;\n"
          "}\n",
-         "aggregate objects cannot be assigned as a whole"},
+         "compound assignment requires a scalar numeric type"},
         {"module test.sizeof_void;\n"
          "fn main() -> i32 { let size: usize = sizeof(void); return 0; }\n",
          "layout query requires a type with a valid target layout"},
@@ -1269,6 +1336,83 @@ TEST(SemaTest, RejectsInvalidAggregateAndScopedEnumPrograms) {
          " }\n"
          "}\n",
          "duplicate switch case value"},
+    }};
+
+    for (const InvalidProgram &program : LUNA_TEST_INVALID_PROGRAMS) {
+        FrontendHarness harness{program.source};
+        EXPECT_FALSE(harness.ParseAndLower()) << program.source;
+        EXPECT_NE(harness.Diagnostics().find(program.diagnostic),
+                  std::string::npos)
+            << program.source << '\n'
+            << harness.Diagnostics();
+    }
+}
+
+TEST(SemaTest, RejectsInvalidNamedInitializersAndMemoryCopies) {
+    struct InvalidProgram {
+        std::string_view source;
+        std::string_view diagnostic;
+    };
+    constexpr std::array<InvalidProgram, 10U> LUNA_TEST_INVALID_PROGRAMS = {{
+        {"module test.duplicate_initializer;\n"
+         "struct Item { value: i32; }\n"
+         "fn main() -> i32 {\n"
+         " var item: Item = { value = missing(), value = 1, }; return 0;\n"
+         "}\n",
+         "duplicate initializer field 'value'"},
+        {"module test.unknown_initializer_field;\n"
+         "struct Item { value: i32; }\n"
+         "fn main() -> i32 {\n"
+         " var item: Item = { missing = missing(), }; return 0;\n"
+         "}\n",
+         "type 'Item' has no field named 'missing'"},
+        {"module test.union_initializer;\n"
+         "union Number { integer: i64; real: f64; }\n"
+         "fn main() -> i32 {\n"
+         " var number: Number = { integer = 1, real = 2.0, }; return 0;\n"
+         "}\n",
+         "union initializer may name at most one field"},
+        {"module test.scalar_initializer;\n"
+         "fn main() -> i32 {\n"
+         " let value: i32 = { field = 1, }; return value;\n"
+         "}\n",
+         "named aggregate initializer requires an aggregate destination"},
+        {"module test.array_initializer;\n"
+         "fn main() -> i32 {\n"
+         " var values: [2]i32 = { first = 1, }; return 0;\n"
+         "}\n",
+         "named aggregate initializer requires a struct or union context"},
+        {"module test.field_type;\n"
+         "struct Item { value: i32; }\n"
+         "fn main() -> i32 {\n"
+         " var item: Item = { value = true, }; return 0;\n"
+         "}\n",
+         "expected i32, found bool"},
+        {"module test.copy_type;\n"
+         "struct Left { value: i32; }\n"
+         "struct Right { value: i32; }\n"
+         "fn main() -> i32 {\n"
+         " var left: Left = {}; var right: Right = left; return 0;\n"
+         "}\n",
+         "expected Right, found Left"},
+        {"module test.immutable_copy;\n"
+         "struct Item { value: i32; }\n"
+         "fn main() -> i32 {\n"
+         " let left: Item = {}; let right: Item = {}; left = right; return 0;\n"
+         "}\n",
+         "cannot assign to immutable local 'left'"},
+        {"module test.nested_union_initializer;\n"
+         "union Number { integer: i64; real: f64; }\n"
+         "struct Box { number: Number; }\n"
+         "fn main() -> i32 {\n"
+         " var box: Box = { number = { integer = 1, real = 2.0, }, };\n"
+         " return 0;\n"
+         "}\n",
+         "union initializer may name at most one field"},
+        {"module test.self_copy_initializer;\n"
+         "struct Item { value: i32; }\n"
+         "fn main() -> i32 { var item: Item = item; return 0; }\n",
+         "unknown local variable 'item'"},
     }};
 
     for (const InvalidProgram &program : LUNA_TEST_INVALID_PROGRAMS) {

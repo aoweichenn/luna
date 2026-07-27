@@ -66,11 +66,14 @@ type, then resolves fields and enum members, and finally computes layouts with
 a recursion-state check. This permits forward references and pointer
 recursion while rejecting every by-value cycle. Pointer and array references
 are interned into canonical types, and each structure, union and enum retains
-a distinct semantic identity. Composite values are kept out of the scalar ABI
-until aggregate ABI classification is implemented. Type-only `sizeof`,
-`alignof` and `offsetof` expressions are resolved against the same target
-layout records and lowered directly to typed `usize` constants; the IR has no
-host-dependent layout-query instruction.
+a distinct semantic identity. Context-directed aggregate initialization lowers
+directly into exact-layout local storage after validating every field before
+evaluating any initializer expression. Exact same-typed local memory objects
+copy by representation; composite values remain outside the scalar ABI until
+aggregate ABI classification is implemented. Type-only `sizeof`, `alignof`
+and `offsetof` expressions are resolved against the same target layout records
+and lowered directly to typed `usize` constants; the IR has no host-dependent
+layout-query instruction.
 
 Compilation is split into global and local phases:
 
@@ -101,6 +104,7 @@ with virtual values and explicit local slots:
 - comparisons
 - direct calls to internal definitions and typed external C declarations
 - opaque object addresses and explicit constant-offset member addressing
+- whole-slot zeroing and explicit sized, overlap-safe memory copies
 - unconditional and conditional branches
 - return
 
@@ -122,8 +126,10 @@ eight-byte home. Fixed arrays, structures and unions therefore occupy their
 exact target layout while scalar and enum virtual values remain stack-homed.
 The `member_address` instruction derives an opaque pointer from a verified
 base pointer and a bounded byte offset; scalar field loads and stores remain
-ordinary typed indirect memory operations. Immutable string bytes live in a
-module global-data table and are referenced through target-neutral global
+ordinary typed indirect memory operations. `memory_copy` takes destination
+and source pointers plus a verified positive object size; semantic lowering
+emits it only after exact source-type checking. Immutable string bytes live in
+a module global-data table and are referenced through target-neutral global
 address instructions.
 
 Every reachable basic block has exactly one terminator. Detached empty merge
@@ -179,7 +185,8 @@ The first backend is correctness-first:
   the unsigned 64-bit range and explicit traps before invalid
   floating-to-integer operations;
 - exact-width indirect scalar loads and stores, checked fixed-array indexing,
-  raw-pointer scaled addressing and deterministic read-only data emission;
+  raw-pointer scaled addressing, deterministic read-only data emission and
+  inline forward/backward `rep movsb` lowering for overlap-safe object copies;
 - a Linux `_start` shim that exits through syscall 60;
 - no dependency on a target C runtime.
 
@@ -220,8 +227,9 @@ The quality gate contains:
 - exact-width memory matrices, null and bounds traps, read-only qualification
   negatives and typed-memory IR mutation checks;
 - executable nested-aggregate, union-aliasing and scoped-enum cases, exact
-  layout-query assertions, member-address IR mutation checks and generated
-  aggregate differential programs;
+  layout-query assertions, named and nested initialization, padding-preserving
+  and deliberately overlapping copies, member-address and memory-copy IR
+  mutation checks and generated aggregate differential programs;
 - real C23-to-Luna static linking tests covering every scalar type, pointers,
   aggregate layout through pointers, no-result calls, narrow signed promotion
   and independently classified integer/SSE register banks;

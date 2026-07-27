@@ -1085,6 +1085,37 @@ luna_x86_64_emit_pointer_offset(LunaStringBuilder *output,
     return luna_x86_64_emit_store_rax(output, function, instruction->result);
 }
 
+static bool luna_x86_64_emit_memory_copy(LunaStringBuilder *output,
+                                         const LunaIrFunction *function,
+                                         const LunaIrInstruction *instruction) {
+    if (!luna_x86_64_emit_load_rax(output, function, instruction->left) ||
+        !luna_string_builder_append_c_string(output, "    movq %rax, %rdi\n") ||
+        !luna_x86_64_emit_load_rax(output, function, instruction->right) ||
+        !luna_string_builder_append_format(
+            output,
+            "    movq %%rax, %%rsi\n"
+            "    movq $%" PRIu64 ", %%rcx\n"
+            "    cmpq %%rsi, %%rdi\n"
+            "    jbe 1f\n"
+            "    leaq %" PRIu64 "(%%rsi), %%rax\n"
+            "    cmpq %%rax, %%rdi\n"
+            "    jae 1f\n"
+            "    leaq -1(%%rsi,%%rcx), %%rsi\n"
+            "    leaq -1(%%rdi,%%rcx), %%rdi\n"
+            "    std\n"
+            "    rep movsb\n"
+            "    cld\n"
+            "    jmp 2f\n"
+            "1:\n"
+            "    cld\n"
+            "    rep movsb\n"
+            "2:\n",
+            instruction->immediate, instruction->immediate)) {
+        return false;
+    }
+    return true;
+}
+
 static bool luna_x86_64_emit_instruction(LunaStringBuilder *output,
                                          const LunaIrModule *module,
                                          const LunaIrFunction *function,
@@ -1155,6 +1186,9 @@ static bool luna_x86_64_emit_instruction(LunaStringBuilder *output,
 
     case LUNA_IR_ZERO_SLOT:
         return luna_x86_64_emit_zero_slot(output, function, instruction->slot);
+
+    case LUNA_IR_MEMORY_COPY:
+        return luna_x86_64_emit_memory_copy(output, function, instruction);
 
     case LUNA_IR_LOAD_INDIRECT:
         return luna_x86_64_emit_indirect_load(output, function, instruction);

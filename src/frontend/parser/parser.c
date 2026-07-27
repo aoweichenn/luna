@@ -382,6 +382,75 @@ static LunaExpression *luna_parser_new_expression(LunaParser *parser,
     return expression;
 }
 
+static LunaExpression *
+luna_parser_parse_aggregate_initializer(LunaParser *parser,
+                                        LunaToken left_brace) {
+    if (luna_parser_match(parser, LUNA_TOKEN_RIGHT_BRACE)) {
+        return luna_parser_new_expression(
+            parser, LUNA_EXPRESSION_ZERO_INITIALIZER,
+            luna_parser_join_spans(left_brace.span, parser->previous.span));
+    }
+
+    LunaExpression *initializer = luna_parser_new_expression(
+        parser, LUNA_EXPRESSION_AGGREGATE_INITIALIZER, left_brace.span);
+    if (initializer == NULL ||
+        !luna_parser_enter_nesting(parser, left_brace.span)) {
+        return initializer;
+    }
+
+    LunaInitializerField **next_field =
+        &initializer->as.aggregate_initializer.first_field;
+    for (;;) {
+        const LunaToken name_token = parser->current;
+        if (!luna_parser_expect(parser, LUNA_TOKEN_IDENTIFIER,
+                                "as aggregate initializer field name")) {
+            break;
+        }
+        if (!luna_parser_expect(parser, LUNA_TOKEN_EQUAL,
+                                "after aggregate initializer field name")) {
+            break;
+        }
+
+        LunaExpression *value = luna_parser_parse_expression(parser);
+        if (value == NULL) {
+            break;
+        }
+
+        LunaInitializerField *field =
+            luna_parser_allocate(parser, sizeof(LunaInitializerField),
+                                 _Alignof(LunaInitializerField));
+        if (field == NULL) {
+            break;
+        }
+        field->name = luna_parser_token_text(name_token);
+        field->value = value;
+        field->span = luna_parser_join_spans(name_token.span, value->span);
+        *next_field = field;
+        next_field = &field->next;
+
+        if (initializer->as.aggregate_initializer.field_count == UINT32_MAX) {
+            luna_diagnostic_error(parser->diagnostics, field->span,
+                                  "aggregate initializer has too many fields");
+            break;
+        }
+        initializer->as.aggregate_initializer.field_count += 1U;
+
+        if (!luna_parser_match(parser, LUNA_TOKEN_COMMA)) {
+            break;
+        }
+        if (luna_parser_check(parser, LUNA_TOKEN_RIGHT_BRACE)) {
+            break;
+        }
+    }
+
+    (void)luna_parser_expect(parser, LUNA_TOKEN_RIGHT_BRACE,
+                             "after aggregate initializer");
+    luna_parser_leave_nesting(parser);
+    initializer->span =
+        luna_parser_join_spans(left_brace.span, parser->previous.span);
+    return initializer;
+}
+
 static LunaExpression *luna_parser_parse_call(LunaParser *parser,
                                               LunaToken name_token) {
     LunaExpression *call = luna_parser_new_expression(
@@ -509,11 +578,7 @@ static LunaExpression *luna_parser_parse_primary(LunaParser *parser) {
     }
 
     if (luna_parser_match(parser, LUNA_TOKEN_LEFT_BRACE)) {
-        (void)luna_parser_expect(parser, LUNA_TOKEN_RIGHT_BRACE,
-                                 "for zero initializer");
-        return luna_parser_new_expression(
-            parser, LUNA_EXPRESSION_ZERO_INITIALIZER,
-            luna_parser_join_spans(token.span, parser->previous.span));
+        return luna_parser_parse_aggregate_initializer(parser, token);
     }
 
     if (luna_parser_match(parser, LUNA_TOKEN_IDENTIFIER)) {

@@ -553,6 +553,10 @@ def main() -> int:
         "memory_scalar_matrix.luna": 42,
         "zero_initializer_scalars.luna": 42,
         "aggregate_types.luna": 42,
+        "aggregate_initialization.luna": 42,
+        "aggregate_assignment.luna": 42,
+        "array_whole_assignment.luna": 42,
+        "memory_copy_overlap.luna": 42,
         "null_dereference.luna": -4,
         "null_pointer_index.luna": -4,
         "null_pointer_write.luna": -4,
@@ -768,9 +772,6 @@ def main() -> int:
         "array_return.luna": (
             "fixed arrays cannot be returned by value"
         ),
-        "array_whole_assignment.luna": (
-            "fixed arrays cannot be assigned as a whole"
-        ),
         "array_scalar_use.luna": (
             "fixed arrays are not scalar values"
         ),
@@ -843,10 +844,34 @@ def main() -> int:
             "aggregate types cannot be returned by value"
         ),
         "aggregate_initializer.luna": (
-            "aggregate objects currently require the '{}' initializer"
+            "aggregate initialization requires braces"
         ),
-        "aggregate_assignment.luna": (
-            "aggregate objects cannot be assigned as a whole"
+        "aggregate_initializer_duplicate.luna": (
+            "duplicate initializer field 'value'"
+        ),
+        "aggregate_initializer_unknown_field.luna": (
+            "type 'Item' has no field named 'missing'"
+        ),
+        "union_initializer_multiple_fields.luna": (
+            "union initializer may name at most one field"
+        ),
+        "aggregate_initializer_field_type.luna": (
+            "expected i32, found bool"
+        ),
+        "aggregate_copy_type_mismatch.luna": (
+            "expected Right, found Left"
+        ),
+        "aggregate_compound_assignment.luna": (
+            "compound assignment requires a scalar numeric type"
+        ),
+        "array_named_initializer.luna": (
+            "named aggregate initializer requires a struct or union context"
+        ),
+        "array_initializer_scalar.luna": (
+            "fixed-array initialization requires '{}'"
+        ),
+        "immutable_aggregate_assignment.luna": (
+            "cannot assign to immutable local 'left'"
         ),
         "enum_type_mismatch.luna": "expected Left, found Right",
         "invalid_sizeof_type.luna": (
@@ -899,6 +924,7 @@ def main() -> int:
         "memory_ir",
         "external_ir",
         "aggregate_ir",
+        "aggregate_assignment",
     ):
         ir_output = arguments.work_dir / f"{snapshot_name}.lir"
         run(
@@ -937,6 +963,8 @@ def main() -> int:
         "structured_control_flow",
         "memory_operations",
         "external_c_abi",
+        "aggregate_initialization",
+        "memory_copy_overlap",
     ):
         deterministic_first = (
             arguments.work_dir / f"{deterministic_name}_first.s"

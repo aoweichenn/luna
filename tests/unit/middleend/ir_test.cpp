@@ -238,6 +238,31 @@ TEST(IrPrinterTest, PrintsTypedAggregateMemberAddresses) {
     EXPECT_NE(text.find("store_indirect.i32"), std::string::npos);
 }
 
+TEST(IrPrinterTest, PrintsSizedMemoryCopiesWithDestinationFirst) {
+    FrontendHarness harness{
+        "module test.memory_copy_ir_print;\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "fn main() -> i32 {\n"
+        "    var first: Pair = { left = 20, right = 22, };\n"
+        "    var second: Pair = first;\n"
+        "    return second.left + second.right;\n"
+        "}\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaStringBuilder output{};
+    luna_string_builder_init(&output);
+    const bool printed = luna_ir_print(harness.Module(), &output);
+    const std::string text =
+        printed ? std::string{luna_string_builder_data(&output), output.length}
+                : std::string{};
+    luna_string_builder_destroy(&output);
+
+    ASSERT_TRUE(printed);
+    EXPECT_NE(text.find("memory_copy 8, %"), std::string::npos);
+    EXPECT_NE(FindInstruction(MainFunction(harness), LUNA_IR_MEMORY_COPY),
+              nullptr);
+}
+
 TEST(IrVerifierTest, ValidatesAggregateMemberAddressOperandsAndOffsets) {
     constexpr std::string_view LUNA_TEST_SOURCE =
         "module test.aggregate_ir_verify;\n"
@@ -268,6 +293,65 @@ TEST(IrVerifierTest, ValidatesAggregateMemberAddressOperandsAndOffsets) {
     member->left = integer->result;
     EXPECT_FALSE(operand.Verify());
     EXPECT_NE(operand.Diagnostics().find("operand type does not match opcode"),
+              std::string::npos);
+}
+
+TEST(IrVerifierTest, ValidatesMemoryCopySizeAndPointerOperands) {
+    constexpr std::string_view LUNA_TEST_SOURCE =
+        "module test.memory_copy_ir_verify;\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "fn main() -> i32 {\n"
+        " var first: Pair = { left = 20, right = 22, };\n"
+        " var second: Pair = first;\n"
+        " return second.left + second.right;\n"
+        "}\n";
+
+    FrontendHarness zero_size{LUNA_TEST_SOURCE};
+    ASSERT_TRUE(zero_size.Verify()) << zero_size.Diagnostics();
+    LunaIrInstruction *copy =
+        FindInstruction(MainFunction(zero_size), LUNA_IR_MEMORY_COPY);
+    ASSERT_NE(copy, nullptr);
+    copy->immediate = 0U;
+    EXPECT_FALSE(zero_size.Verify());
+    EXPECT_NE(zero_size.Diagnostics().find(
+                  "memory copy size must fit the positive object-size range"),
+              std::string::npos);
+
+    FrontendHarness oversized{LUNA_TEST_SOURCE};
+    ASSERT_TRUE(oversized.Verify()) << oversized.Diagnostics();
+    copy = FindInstruction(MainFunction(oversized), LUNA_IR_MEMORY_COPY);
+    ASSERT_NE(copy, nullptr);
+    copy->immediate = static_cast<std::uint64_t>(INT32_MAX) + 1U;
+    EXPECT_FALSE(oversized.Verify());
+    EXPECT_NE(oversized.Diagnostics().find(
+                  "memory copy size must fit the positive object-size range"),
+              std::string::npos);
+
+    FrontendHarness operand{LUNA_TEST_SOURCE};
+    ASSERT_TRUE(operand.Verify()) << operand.Diagnostics();
+    copy = FindInstruction(MainFunction(operand), LUNA_IR_MEMORY_COPY);
+    LunaIrInstruction *integer =
+        FindInstruction(MainFunction(operand), LUNA_IR_CONST_INTEGER);
+    ASSERT_NE(copy, nullptr);
+    ASSERT_NE(integer, nullptr);
+    copy->right = integer->result;
+    EXPECT_FALSE(operand.Verify());
+    EXPECT_NE(operand.Diagnostics().find("operand type does not match opcode"),
+              std::string::npos);
+
+    FrontendHarness destination_operand{LUNA_TEST_SOURCE};
+    ASSERT_TRUE(destination_operand.Verify())
+        << destination_operand.Diagnostics();
+    copy =
+        FindInstruction(MainFunction(destination_operand), LUNA_IR_MEMORY_COPY);
+    integer = FindInstruction(MainFunction(destination_operand),
+                              LUNA_IR_CONST_INTEGER);
+    ASSERT_NE(copy, nullptr);
+    ASSERT_NE(integer, nullptr);
+    copy->left = integer->result;
+    EXPECT_FALSE(destination_operand.Verify());
+    EXPECT_NE(destination_operand.Diagnostics().find(
+                  "operand type does not match opcode"),
               std::string::npos);
 }
 
