@@ -6,6 +6,38 @@ struct LunaTestPayload {
     unsigned long long wide;
 };
 
+struct LunaTestPair {
+    int left;
+    int right;
+};
+
+struct LunaTestMixed {
+    double weight;
+    int tag;
+};
+
+struct LunaTestFloatPair {
+    double first;
+    double second;
+};
+
+struct LunaTestTaggedWeight {
+    int tag;
+    double weight;
+};
+
+struct LunaTestTriple {
+    int first;
+    int second;
+    int third;
+};
+
+struct LunaTestBig {
+    long long first;
+    long long second;
+    long long third;
+};
+
 union LunaTestNumberBits {
     unsigned long long whole;
     unsigned char low;
@@ -49,5 +81,18 @@ _Bool c_stack_mixed(int i0, float f0, int i1, double f1, int i2, float f2,
                     int i3, double f3, int i4, float f4, int i5, double f5,
                     int i6, float f6, double f7, float f8);
 _Bool c_validate_aggregate_layout(const struct LunaTestState *state);
+int c_sum_pair(struct LunaTestPair value);
+struct LunaTestPair c_make_pair(int left, int right);
+struct LunaTestMixed c_adjust_mixed(struct LunaTestMixed value);
+struct LunaTestFloatPair c_echo_float_pair(struct LunaTestFloatPair value);
+struct LunaTestTaggedWeight
+c_echo_tagged_weight(struct LunaTestTaggedWeight value);
+struct LunaTestTriple c_echo_triple(struct LunaTestTriple value);
+union LunaTestNumberBits c_echo_number_bits(union LunaTestNumberBits value);
+struct LunaTestBig c_echo_big(struct LunaTestBig value);
+struct LunaTestBig c_make_big(long long first, long long second,
+                              long long third);
+int c_rollback_pair(int first, int second, int third, int fourth, int fifth,
+                    int sixth, struct LunaTestPair value);
 
 #endif

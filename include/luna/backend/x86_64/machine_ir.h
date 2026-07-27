@@ -43,6 +43,20 @@ typedef enum LunaX8664MachineRegisterClass {
     LUNA_X86_64_MACHINE_REGISTER_FLOAT
 } LunaX8664MachineRegisterClass;
 
+typedef struct LunaX8664MachineAggregateComponent {
+    uint64_t offset_bytes;
+    uint64_t size_bytes;
+    uint32_t alignment_bytes;
+    LunaX8664MachineType type;
+} LunaX8664MachineAggregateComponent;
+
+typedef struct LunaX8664MachineAggregateLayout {
+    bool is_aggregate;
+    uint64_t size_bytes;
+    uint32_t alignment_bytes;
+    LunaVector components;
+} LunaX8664MachineAggregateLayout;
+
 typedef enum LunaX8664MachineFunctionLinkage {
     LUNA_X86_64_MACHINE_LINKAGE_INTERNAL,
     LUNA_X86_64_MACHINE_LINKAGE_MODULE_EXPORT,
@@ -156,7 +170,9 @@ typedef struct LunaX8664MachineFunction {
     bool has_module_metadata_hash;
     uint64_t module_metadata_hash;
     LunaX8664MachineType return_type;
+    LunaX8664MachineAggregateLayout return_aggregate;
     LunaVector parameter_types;
+    LunaVector parameter_aggregates;
     LunaVector slots;
     LunaVector value_types;
     LunaVector arguments;

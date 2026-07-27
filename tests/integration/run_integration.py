@@ -352,6 +352,10 @@ def compile_separate_module_graph(
         not in math_abi_text
         or "p6 type=i32 class=integer location=stack[0]"
         not in math_abi_text
+        or "p0 type=aggregate[4,4] pieces=[integer:%rdi@0+4]"
+        not in math_abi_text
+        or "return type=aggregate[4,4] pieces=[integer:%rax@0+4]"
+        not in math_abi_text
         or "define @f1 tests.metadata.math::calculate"
         not in math_abi_text
     ):
@@ -1100,6 +1104,11 @@ def main() -> int:
         "aggregate_types.luna": 42,
         "aggregate_initialization.luna": 42,
         "aggregate_assignment.luna": 42,
+        "aggregate_by_value.luna": 42,
+        "aggregate_parameter.luna": 0,
+        "aggregate_return.luna": 0,
+        "array_parameter.luna": 0,
+        "array_return.luna": 0,
         "array_whole_assignment.luna": 42,
         "memory_copy_overlap.luna": 42,
         "null_dereference.luna": -4,
@@ -1351,12 +1360,6 @@ def main() -> int:
         "void_element_array.luna": (
             "fixed-array element type cannot be void"
         ),
-        "array_parameter.luna": (
-            "fixed arrays cannot be passed by value"
-        ),
-        "array_return.luna": (
-            "fixed arrays cannot be returned by value"
-        ),
         "array_scalar_use.luna": (
             "fixed arrays are not scalar values"
         ),
@@ -1373,10 +1376,10 @@ def main() -> int:
             "implementation function 'pending' must have a body"
         ),
         "external_array_parameter.luna": (
-            "fixed arrays cannot be passed by value"
+            "fixed arrays have no by-value external C parameter ABI"
         ),
         "external_array_return.luna": (
-            "fixed arrays cannot be returned by value"
+            "fixed arrays have no by-value external C return ABI"
         ),
         "external_void_parameter.luna": (
             "parameter 'value' has an invalid type"
@@ -1415,12 +1418,6 @@ def main() -> int:
         "unknown_aggregate_field.luna": "has no field named 'missing'",
         "readonly_aggregate_field.luna": (
             "cannot assign through an immutable lvalue"
-        ),
-        "aggregate_parameter.luna": (
-            "aggregate types cannot be passed by value"
-        ),
-        "aggregate_return.luna": (
-            "aggregate types cannot be returned by value"
         ),
         "aggregate_initializer.luna": (
             "aggregate initialization requires braces"

@@ -296,6 +296,162 @@ TEST(IrPrinterTest, PrintsSizedMemoryCopiesWithDestinationFirst) {
               nullptr);
 }
 
+TEST(IrPrinterTest, PrintsAggregateSignaturesAndCallResultStorage) {
+    FrontendHarness harness{
+        "module test.aggregate_signature_print;\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "fn echo(value: Pair) -> Pair { return value; }\n"
+        "fn main() -> i32 {\n"
+        "    let value: Pair = echo({ left = 20, right = 22, });\n"
+        "    return value.left + value.right;\n"
+        "}\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaStringBuilder output{};
+    luna_string_builder_init(&output);
+    const bool printed = luna_ir_print(harness.Module(), &output);
+    const std::string text =
+        printed ? std::string{luna_string_builder_data(&output), output.length}
+                : std::string{};
+    luna_string_builder_destroy(&output);
+
+    ASSERT_TRUE(printed);
+    EXPECT_NE(text.find("echo($0: aggregate[8,4]) -> aggregate[8,4]"),
+              std::string::npos);
+    EXPECT_NE(text.find("call @echo("), std::string::npos);
+    EXPECT_NE(text.find("result=$"), std::string::npos);
+}
+
+TEST(IrVerifierTest, RejectsCorruptedAggregateSignatureAndCallStorage) {
+    constexpr std::string_view LUNA_TEST_SOURCE =
+        "module test.aggregate_signature_verify;\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "fn make() -> Pair { return { left = 20, right = 22, }; }\n"
+        "fn main() -> i32 {\n"
+        "    let value: Pair = make(); return value.left + value.right;\n"
+        "}\n";
+
+    FrontendHarness signature{LUNA_TEST_SOURCE};
+    ASSERT_TRUE(signature.Verify()) << signature.Diagnostics();
+    LunaIrFunction *make = luna_ir_module_function(signature.Module(), 0U);
+    ASSERT_NE(make, nullptr);
+    make->return_aggregate.alignment_bytes = 3U;
+    EXPECT_FALSE(signature.Verify());
+    EXPECT_NE(signature.Diagnostics().find("invalid signature layout"),
+              std::string::npos);
+
+    FrontendHarness call_storage{LUNA_TEST_SOURCE};
+    ASSERT_TRUE(call_storage.Verify()) << call_storage.Diagnostics();
+    LunaIrFunction *main_function =
+        luna_ir_module_function(call_storage.Module(), 1U);
+    ASSERT_NE(main_function, nullptr);
+    LunaIrInstruction *call = FindInstruction(main_function, LUNA_IR_CALL);
+    ASSERT_NE(call, nullptr);
+    call->slot = LUNA_IR_INVALID_ID;
+    EXPECT_FALSE(call_storage.Verify());
+    EXPECT_NE(call_storage.Diagnostics().find(
+                  "aggregate call has an invalid result memory slot"),
+              std::string::npos);
+}
+
+TEST(IrVerifierTest, RejectsCorruptedAggregateArgumentSnapshotStorage) {
+    FrontendHarness harness{
+        "module test.aggregate_argument_verify;\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "fn sum(value: Pair) -> i32 { return value.left + value.right; }\n"
+        "fn main() -> i32 {\n"
+        "    var value: Pair = { left = 20, right = 22, };\n"
+        "    return sum(value);\n"
+        "}\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaIrFunction *main_function =
+        luna_ir_module_function(harness.Module(), 1U);
+    ASSERT_NE(main_function, nullptr);
+    LunaIrInstruction *call = FindInstruction(main_function, LUNA_IR_CALL);
+    ASSERT_NE(call, nullptr);
+    const LunaIrValueId *argument = static_cast<const LunaIrValueId *>(
+        luna_vector_at_const(&main_function->arguments, call->first_argument));
+    ASSERT_NE(argument, nullptr);
+
+    LunaIrInstruction *definition = nullptr;
+    for (std::size_t block_index = 0U;
+         definition == nullptr && block_index < main_function->blocks.length;
+         block_index += 1U) {
+        auto *block = static_cast<LunaIrBlock *>(
+            luna_vector_at(&main_function->blocks, block_index));
+        ASSERT_NE(block, nullptr);
+        for (std::size_t instruction_index = 0U;
+             instruction_index < block->instructions.length;
+             instruction_index += 1U) {
+            auto *candidate = static_cast<LunaIrInstruction *>(
+                luna_vector_at(&block->instructions, instruction_index));
+            if (candidate != nullptr && candidate->result == *argument) {
+                definition = candidate;
+                break;
+            }
+        }
+    }
+    ASSERT_NE(definition, nullptr);
+    ASSERT_EQ(definition->opcode, LUNA_IR_ADDRESS_OF_SLOT);
+    auto *snapshot = static_cast<LunaIrSlot *>(
+        luna_vector_at(&main_function->slots, definition->slot));
+    ASSERT_NE(snapshot, nullptr);
+    snapshot->size_bytes = UINT64_C(4);
+
+    EXPECT_FALSE(harness.Verify());
+    EXPECT_NE(harness.Diagnostics().find(
+                  "aggregate call argument does not address an exact "
+                  "snapshot slot"),
+              std::string::npos);
+}
+
+TEST(IrVerifierTest, RejectsCorruptedAggregateReturnSnapshotStorage) {
+    FrontendHarness harness{
+        "module test.aggregate_return_verify;\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "fn make() -> Pair { return { left = 20, right = 22, }; }\n"
+        "fn main() -> i32 { return make().left + make().right; }\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaIrFunction *make = luna_ir_module_function(harness.Module(), 0U);
+    ASSERT_NE(make, nullptr);
+    LunaIrInstruction *return_instruction =
+        FindInstruction(make, LUNA_IR_RETURN);
+    ASSERT_NE(return_instruction, nullptr);
+
+    LunaIrInstruction *definition = nullptr;
+    for (std::size_t block_index = 0U;
+         definition == nullptr && block_index < make->blocks.length;
+         block_index += 1U) {
+        auto *block = static_cast<LunaIrBlock *>(
+            luna_vector_at(&make->blocks, block_index));
+        ASSERT_NE(block, nullptr);
+        for (std::size_t instruction_index = 0U;
+             instruction_index < block->instructions.length;
+             instruction_index += 1U) {
+            auto *candidate = static_cast<LunaIrInstruction *>(
+                luna_vector_at(&block->instructions, instruction_index));
+            if (candidate != nullptr &&
+                candidate->result == return_instruction->left) {
+                definition = candidate;
+                break;
+            }
+        }
+    }
+    ASSERT_NE(definition, nullptr);
+    ASSERT_EQ(definition->opcode, LUNA_IR_ADDRESS_OF_SLOT);
+    auto *snapshot = static_cast<LunaIrSlot *>(
+        luna_vector_at(&make->slots, definition->slot));
+    ASSERT_NE(snapshot, nullptr);
+    snapshot->alignment_bytes = UINT32_C(8);
+
+    EXPECT_FALSE(harness.Verify());
+    EXPECT_NE(harness.Diagnostics().find(
+                  "aggregate return does not address an exact snapshot slot"),
+              std::string::npos);
+}
+
 TEST(IrVerifierTest, ValidatesAggregateMemberAddressOperandsAndOffsets) {
     constexpr std::string_view LUNA_TEST_SOURCE =
         "module test.aggregate_ir_verify;\n"

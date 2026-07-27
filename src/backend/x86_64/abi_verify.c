@@ -5,6 +5,56 @@
 #include <stdint.h>
 #include <stdio.h>
 
+static bool luna_x86_64_abi_return_locations_equal(
+    const LunaX8664AbiReturnLocation *left,
+    const LunaX8664AbiReturnLocation *right) {
+    if (left->is_aggregate != right->is_aggregate ||
+        left->uses_hidden_pointer != right->uses_hidden_pointer ||
+        left->size_bytes != right->size_bytes ||
+        left->alignment_bytes != right->alignment_bytes ||
+        left->piece_count != right->piece_count) {
+        return false;
+    }
+    for (uint32_t index = 0U; index < left->piece_count; index += 1U) {
+        if (left->pieces[index].abi_class != right->pieces[index].abi_class ||
+            left->pieces[index].register_index !=
+                right->pieces[index].register_index ||
+            left->pieces[index].value_offset_bytes !=
+                right->pieces[index].value_offset_bytes ||
+            left->pieces[index].size_bytes != right->pieces[index].size_bytes) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool luna_x86_64_abi_parameter_locations_equal(
+    const LunaX8664AbiParameterLocation *left,
+    const LunaX8664AbiParameterLocation *right) {
+    if (left->abi_class != right->abi_class || left->kind != right->kind ||
+        left->register_index != right->register_index ||
+        left->stack_offset_bytes != right->stack_offset_bytes ||
+        left->is_aggregate != right->is_aggregate ||
+        left->size_bytes != right->size_bytes ||
+        left->alignment_bytes != right->alignment_bytes ||
+        left->stack_size_bytes != right->stack_size_bytes ||
+        left->piece_count != right->piece_count) {
+        return false;
+    }
+    for (uint32_t index = 0U; index < left->piece_count; index += 1U) {
+        if (left->pieces[index].abi_class != right->pieces[index].abi_class ||
+            left->pieces[index].kind != right->pieces[index].kind ||
+            left->pieces[index].register_index !=
+                right->pieces[index].register_index ||
+            left->pieces[index].value_offset_bytes !=
+                right->pieces[index].value_offset_bytes ||
+            left->pieces[index].size_bytes != right->pieces[index].size_bytes) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool
 luna_x86_64_abi_verify_function(const LunaX8664MachineFunction *function,
                                 const LunaX8664FunctionAbi *actual,
@@ -37,7 +87,9 @@ luna_x86_64_abi_verify_function(const LunaX8664MachineFunction *function,
         actual->vector_register_count == expected.vector_register_count &&
         actual->stack_argument_size_bytes ==
             expected.stack_argument_size_bytes &&
-        actual->call_frame_size_bytes == expected.call_frame_size_bytes;
+        actual->call_frame_size_bytes == expected.call_frame_size_bytes &&
+        luna_x86_64_abi_return_locations_equal(&actual->return_location,
+                                               &expected.return_location);
     for (size_t index = 0U;
          success && index < actual->parameter_locations.length; index += 1U) {
         const LunaX8664AbiParameterLocation *actual_location =
@@ -45,12 +97,8 @@ luna_x86_64_abi_verify_function(const LunaX8664MachineFunction *function,
         const LunaX8664AbiParameterLocation *expected_location =
             luna_vector_at_const(&expected.parameter_locations, index);
         if (actual_location == NULL || expected_location == NULL ||
-            actual_location->abi_class != expected_location->abi_class ||
-            actual_location->kind != expected_location->kind ||
-            actual_location->register_index !=
-                expected_location->register_index ||
-            actual_location->stack_offset_bytes !=
-                expected_location->stack_offset_bytes) {
+            !luna_x86_64_abi_parameter_locations_equal(actual_location,
+                                                       expected_location)) {
             success = false;
         }
     }

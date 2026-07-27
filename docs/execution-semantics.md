@@ -127,13 +127,23 @@ then writes each named field in source order. Fields may appear once in any
 order; omitted fields remain zero. A union initializer names zero or one
 field. Nested named initializers follow the same rules.
 
-Member selection computes the base lvalue address once. Pointer-member access
-checks for null before deriving the field address. Mutability follows the base
-lvalue for `.` and the pointer qualification for `->`. Structures, unions and
-fixed arrays may be initialized from or assigned from an lvalue of the exact
-same type. A whole-object copy transfers every byte, including padding, and
-has `memmove` overlap semantics. Whole memory objects are still not scalar
-values and cannot be compared, passed or returned by value.
+Member selection computes the base address once. Pointer-member access checks
+for null before deriving the field address. Mutability follows the base lvalue
+for `.` and the pointer qualification for `->`; a field or element selected
+from a returned temporary is immutable. Structures, unions and fixed arrays
+may be initialized from or assigned from an lvalue of the exact same type. A
+whole-object copy transfers every byte, including padding, and has `memmove`
+overlap semantics. Whole memory objects cannot be compared or used by scalar
+operators, but exact same-typed objects can be passed and returned by value.
+
+Each aggregate call argument is evaluated from left to right and copied into
+an independent snapshot before the call. Mutating or aliasing the original
+object afterward cannot change the parameter value. An aggregate return
+expression is likewise copied into an exact-layout return snapshot before the
+ABI boundary reads it. Aggregate conditional expressions allocate exact-layout
+result storage, evaluate exactly one branch and copy that branch into the
+result. Returned aggregate temporaries remain valid for the enclosing function
+evaluation and support immutable `.` or fixed-array indexing.
 
 A scoped enum has the storage width, alignment and signedness of its explicit
 underlying integer type but remains a distinct language type. Enum members are
@@ -235,7 +245,7 @@ read-only qualification. Conversion between a pointer and `usize` also
 preserves the target-width bit pattern. These conversions do not validate
 that the resulting address refers to a live object.
 
-## Scalar call ABI
+## Call ABI
 
 On `x86_64-unknown-linux-gnu`, scalar calls use the System V ABI. Integer,
 boolean and pointer parameters use `%rdi`, `%rsi`, `%rdx`, `%rcx`, `%r8` and
@@ -249,9 +259,18 @@ restores it afterward. Internal Luna calls, compiled-module calls and
 non-variadic external C calls share this placement. Integer-like scalar
 results use `%rax`, and floating results use `%xmm0`.
 
-Structures, unions and fixed arrays remain memory objects and cannot yet be
-passed or returned by value. Variadic calls are not part of the bootstrap
-language.
+An aggregate of at most 16 bytes is classified into one or two `INTEGER` or
+`SSE` eightbytes. It uses general-purpose and SSE argument registers only if
+all required registers are available; otherwise the complete value rolls
+back to an aligned stack copy. Small results use `%rax`/`%rdx` and
+`%xmm0`/`%xmm1` with independent class indices. Larger or otherwise
+`MEMORY`-classified results use a hidden destination pointer in `%rdi`.
+
+Internal Luna calls support structures, unions and fixed arrays by value.
+External C calls support structures and unions by value and are checked
+against the same System V classifier. Fixed-array parameters and results are
+rejected at the external boundary because C function types do not pass arrays
+by value. Variadic calls are not part of the bootstrap language.
 
 ## Module contracts
 

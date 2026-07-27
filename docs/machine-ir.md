@@ -52,7 +52,12 @@ assignments.
 ## Functions and storage
 
 Each function retains its module name, source name, linkage, optional compiled
-module fingerprint, parameter types and return type. Linkage is one of:
+module fingerprint, parameter types and return type. Every parameter and
+result also owns a parallel aggregate descriptor. A scalar descriptor is
+empty; an aggregate descriptor records exact size, alignment and flattened
+scalar leaves when register classification needs them. Values larger than two
+eightbytes are unconditionally memory-class and do not duplicate their leaf
+graph. Linkage is one of:
 
 - internal definition;
 - module export definition;
@@ -64,8 +69,11 @@ flattened call-argument table. Declarations own only a signature and identity.
 
 A stack slot records its fixed machine type when scalar, byte size, alignment
 and whether it represents a scalar or an exact-layout memory object. Aggregate
-objects remain memory values. Virtual registers carry only scalar values and
-have one fixed type and register class.
+objects remain in memory. Their by-value IR carrier is an opaque pointer
+virtual register naming verified exact-layout storage; aggregate calls also
+name an explicit result slot. The ABI boundary, rather than ordinary pointer
+semantics, expands those carriers into register pieces, stack copies or a
+hidden result pointer.
 
 ## Instructions
 
@@ -103,6 +111,9 @@ It rejects:
 - invalid stack sizes, alignments, scalar layouts or virtual-register types;
 - missing, duplicate or mistyped virtual-register definitions;
 - invalid or mistyped uses, including every call argument;
+- aggregate arguments that do not address exact-layout snapshot slots and
+  aggregate returns that do not address exact-layout return snapshots;
+- aggregate calls whose result slots do not match the callee descriptor;
 - opcode, immediate, memory-width, slot, global, callee or block mismatches;
 - malformed terminators, branch targets or cached predecessor counts.
 
@@ -150,8 +161,8 @@ through the Linux x86-64 `syscall` instruction and no target libc is linked.
 The analysis representation and invariants are documented in
 [x86-64 liveness analysis](liveness.md); the physical-location result is
 documented in [x86-64 register allocation](register-allocation.md), and scalar
-register/stack placement plus aggregate classification are documented in the
-[x86-64 System V ABI analysis](abi.md). Aggregate by-value IR and ABI lowering
-is the next representation stage. Later allocation-aware rewriting must first
-encode fixed-register instruction constraints, call moves and callee-save
-preservation without changing Luna language semantics.
+register/stack placement plus aggregate lowering are documented in the
+[x86-64 System V ABI analysis](abi.md). Allocation-aware rewriting is the next
+backend stage; it must first encode fixed-register instruction constraints,
+parallel call moves and callee-save preservation without changing Luna
+language semantics.

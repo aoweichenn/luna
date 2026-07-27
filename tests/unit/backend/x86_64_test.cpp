@@ -345,4 +345,44 @@ TEST(X8664BackendTest, EmitsOverlapSafeInlineMemoryCopies) {
     EXPECT_EQ(assembly.find("call memmove"), std::string::npos);
 }
 
+TEST(X8664BackendTest, EmitsAggregateArgumentsReturnsAndRegisterRollback) {
+    FrontendHarness harness{
+        "module test.aggregate_value_codegen;\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "struct Mixed { weight: f64; tag: i32; }\n"
+        "struct Wide { first: i64; second: i64; }\n"
+        "struct Big { first: i64; second: i64; third: i64; }\n"
+        "fn pair(value: Pair) -> Pair { return value; }\n"
+        "fn mixed(value: Mixed) -> Mixed { return value; }\n"
+        "fn wide(value: Wide) -> Wide { return value; }\n"
+        "fn big(value: Big) -> Big { return value; }\n"
+        "fn rollback(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32,\n"
+        "            value: Pair) -> i32 { return value.left; }\n"
+        "fn main() -> i32 {\n"
+        "    var pair_value: Pair = { left = 20, right = 22, };\n"
+        "    let returned_pair: Pair = pair(pair_value);\n"
+        "    var mixed_value: Mixed = { weight = 1.0, tag = 42, };\n"
+        "    let returned_mixed: Mixed = mixed(mixed_value);\n"
+        "    var wide_value: Wide = { first = 0, second = 22, };\n"
+        "    let returned_wide: Wide = wide(wide_value);\n"
+        "    var big_value: Big = { first = 10, second = 11, third = 21, };\n"
+        "    let returned_big: Big = big(big_value);\n"
+        "    return rollback(0, 0, 0, 0, 0, 0, returned_pair) +\n"
+        "           returned_mixed.tag +\n"
+        "           (returned_wide.second as i32) +\n"
+        "           (returned_big.first as i32) - 52;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.EmitAssembly()) << harness.Diagnostics();
+    const std::string assembly = harness.Assembly();
+    EXPECT_NE(assembly.find("movq %rdi, -"), std::string::npos);
+    EXPECT_NE(assembly.find("movq %rax, %r10"), std::string::npos);
+    EXPECT_NE(assembly.find("movq %rdx, %r10"), std::string::npos);
+    EXPECT_NE(assembly.find("movq 0(%r11), %xmm0"), std::string::npos);
+    EXPECT_NE(assembly.find("movq %xmm0, 0(%r11)"), std::string::npos);
+    EXPECT_NE(assembly.find("leaq 16(%rbp), %rsi"), std::string::npos);
+    EXPECT_NE(assembly.find("movq $24, %rcx"), std::string::npos);
+    EXPECT_NE(assembly.find("rep movsb"), std::string::npos);
+}
+
 }

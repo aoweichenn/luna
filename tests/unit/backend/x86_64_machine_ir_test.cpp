@@ -167,6 +167,27 @@ TEST(X8664MachineIrTest, PrintsAStableTargetSpecificBoundary) {
     EXPECT_NE(machine_ir.find("compare.greater.float"), std::string::npos);
 }
 
+TEST(X8664MachineIrTest, PrintsAggregateSignatureAndResultSlotContracts) {
+    FrontendHarness harness{
+        "module test.machine_aggregate_print;\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "fn echo(value: Pair) -> Pair { return value; }\n"
+        "fn main() -> i32 {\n"
+        "    let value: Pair = echo({ left = 20, right = 22, });\n"
+        "    return value.left + value.right;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.EmitMachineIr()) << harness.Diagnostics();
+    const std::string machine_ir = harness.MachineIr();
+    EXPECT_NE(
+        machine_ir.find("(aggregate[8,4]:memory) -> aggregate[8,4]:memory"),
+        std::string::npos);
+    EXPECT_NE(
+        machine_ir.find("stack $s0 type=void size=8 align=4 class=memory"),
+        std::string::npos);
+    EXPECT_NE(machine_ir.find("result-slot=$s"), std::string::npos);
+}
+
 TEST(X8664MachineIrTest, RejectsAMissingVirtualRegisterDefinition) {
     FrontendHarness harness{"module test.machine_verify;\n"
                             "fn main() -> i32 { return 42; }\n"};
@@ -282,6 +303,139 @@ TEST(X8664MachineIrTest, RejectsOverlappingCallArgumentStorage) {
     ASSERT_NE(first_call, nullptr);
     ASSERT_NE(second_call, nullptr);
     second_call->first_argument = first_call->first_argument;
+
+    std::unique_ptr<std::FILE, FileCloser> diagnostic_file{std::tmpfile()};
+    ASSERT_NE(diagnostic_file, nullptr);
+    EXPECT_FALSE(
+        luna_x86_64_machine_verify(machine.Get(), diagnostic_file.get()));
+}
+
+TEST(X8664MachineIrTest, RejectsCorruptedAggregateCallResultStorage) {
+    FrontendHarness harness{
+        "module test.machine_aggregate_result;\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "fn make() -> Pair { return { left = 20, right = 22, }; }\n"
+        "fn main() -> i32 {\n"
+        "    let value: Pair = make(); return value.left + value.right;\n"
+        "}\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    MachineModuleOwner machine{luna_target_info_default()};
+    ASSERT_TRUE(luna_x86_64_machine_lower(
+        harness.Module(), harness.DiagnosticEngine(), machine.Get()))
+        << harness.Diagnostics();
+    LunaX8664MachineFunction *main_function =
+        FindMachineFunction(machine.Get(), "main");
+    ASSERT_NE(main_function, nullptr);
+    LunaX8664MachineInstruction *call =
+        FindMachineInstruction(main_function, LUNA_X86_64_MACHINE_CALL);
+    ASSERT_NE(call, nullptr);
+    call->slot = LUNA_X86_64_MACHINE_INVALID_ID;
+
+    std::unique_ptr<std::FILE, FileCloser> diagnostic_file{std::tmpfile()};
+    ASSERT_NE(diagnostic_file, nullptr);
+    EXPECT_FALSE(
+        luna_x86_64_machine_verify(machine.Get(), diagnostic_file.get()));
+}
+
+TEST(X8664MachineIrTest, RejectsCorruptedAggregateArgumentSnapshotStorage) {
+    FrontendHarness harness{
+        "module test.machine_aggregate_argument;\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "fn sum(value: Pair) -> i32 { return value.left + value.right; }\n"
+        "fn main() -> i32 {\n"
+        "    var value: Pair = { left = 20, right = 22, };\n"
+        "    return sum(value);\n"
+        "}\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    MachineModuleOwner machine{luna_target_info_default()};
+    ASSERT_TRUE(luna_x86_64_machine_lower(
+        harness.Module(), harness.DiagnosticEngine(), machine.Get()))
+        << harness.Diagnostics();
+    LunaX8664MachineFunction *main_function =
+        FindMachineFunction(machine.Get(), "main");
+    ASSERT_NE(main_function, nullptr);
+    LunaX8664MachineInstruction *call =
+        FindMachineInstruction(main_function, LUNA_X86_64_MACHINE_CALL);
+    ASSERT_NE(call, nullptr);
+    const LunaX8664MachineVirtualRegister argument =
+        luna_x86_64_machine_instruction_use(main_function, call, 0U);
+
+    LunaX8664MachineInstruction *definition = nullptr;
+    for (std::size_t block_index = 0U;
+         definition == nullptr && block_index < main_function->blocks.length;
+         block_index += 1U) {
+        auto *block = static_cast<LunaX8664MachineBlock *>(
+            luna_vector_at(&main_function->blocks, block_index));
+        ASSERT_NE(block, nullptr);
+        for (std::size_t instruction_index = 0U;
+             instruction_index < block->instructions.length;
+             instruction_index += 1U) {
+            auto *candidate = static_cast<LunaX8664MachineInstruction *>(
+                luna_vector_at(&block->instructions, instruction_index));
+            if (candidate != nullptr && candidate->result == argument) {
+                definition = candidate;
+                break;
+            }
+        }
+    }
+    ASSERT_NE(definition, nullptr);
+    ASSERT_EQ(definition->opcode, LUNA_X86_64_MACHINE_ADDRESS_OF_SLOT);
+    auto *snapshot = static_cast<LunaX8664MachineStackSlot *>(
+        luna_vector_at(&main_function->slots, definition->slot));
+    ASSERT_NE(snapshot, nullptr);
+    snapshot->size_bytes = UINT64_C(4);
+
+    std::unique_ptr<std::FILE, FileCloser> diagnostic_file{std::tmpfile()};
+    ASSERT_NE(diagnostic_file, nullptr);
+    EXPECT_FALSE(
+        luna_x86_64_machine_verify(machine.Get(), diagnostic_file.get()));
+}
+
+TEST(X8664MachineIrTest, RejectsCorruptedAggregateReturnSnapshotStorage) {
+    FrontendHarness harness{
+        "module test.machine_aggregate_return;\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "fn make() -> Pair { return { left = 20, right = 22, }; }\n"
+        "fn main() -> i32 { return make().left + make().right; }\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    MachineModuleOwner machine{luna_target_info_default()};
+    ASSERT_TRUE(luna_x86_64_machine_lower(
+        harness.Module(), harness.DiagnosticEngine(), machine.Get()))
+        << harness.Diagnostics();
+    LunaX8664MachineFunction *make = FindMachineFunction(machine.Get(), "make");
+    ASSERT_NE(make, nullptr);
+    LunaX8664MachineInstruction *return_instruction =
+        FindMachineInstruction(make, LUNA_X86_64_MACHINE_RETURN);
+    ASSERT_NE(return_instruction, nullptr);
+
+    LunaX8664MachineInstruction *definition = nullptr;
+    for (std::size_t block_index = 0U;
+         definition == nullptr && block_index < make->blocks.length;
+         block_index += 1U) {
+        auto *block = static_cast<LunaX8664MachineBlock *>(
+            luna_vector_at(&make->blocks, block_index));
+        ASSERT_NE(block, nullptr);
+        for (std::size_t instruction_index = 0U;
+             instruction_index < block->instructions.length;
+             instruction_index += 1U) {
+            auto *candidate = static_cast<LunaX8664MachineInstruction *>(
+                luna_vector_at(&block->instructions, instruction_index));
+            if (candidate != nullptr &&
+                candidate->result == return_instruction->left) {
+                definition = candidate;
+                break;
+            }
+        }
+    }
+    ASSERT_NE(definition, nullptr);
+    ASSERT_EQ(definition->opcode, LUNA_X86_64_MACHINE_ADDRESS_OF_SLOT);
+    auto *snapshot = static_cast<LunaX8664MachineStackSlot *>(
+        luna_vector_at(&make->slots, definition->slot));
+    ASSERT_NE(snapshot, nullptr);
+    snapshot->alignment_bytes = UINT32_C(8);
 
     std::unique_ptr<std::FILE, FileCloser> diagnostic_file{std::tmpfile()};
     ASSERT_NE(diagnostic_file, nullptr);

@@ -116,7 +116,7 @@ void MutateMetadataPayload(std::string &metadata,
 }
 
 TEST(MutationFuzzTest, CleanFrontendResultsAlwaysProduceValidTypedIr) {
-    constexpr std::array<std::string_view, 16U> LUNA_TEST_SEEDS = {
+    constexpr std::array<std::string_view, 17U> LUNA_TEST_SEEDS = {
         "module fuzz.empty;\nfn main() -> i32 { return 0; }\n",
         "module fuzz.call;\n"
         "fn id(value: i32) -> i32 { return value; }\n"
@@ -218,6 +218,18 @@ TEST(MutationFuzzTest, CleanFrontendResultsAlwaysProduceValidTypedIr) {
         " if (sizeof(Pair) != 8 || alignof(Pair) != 4 ||\n"
         "     offsetof(Pair, value) != 4) { return 1; }\n"
         " return pointer->kind == Kind.ready ? pointer->value : 2;\n"
+        "}\n",
+        "module fuzz.aggregate_value;\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "struct Big { first: i64; second: i64; third: i64; }\n"
+        "fn choose(flag: bool, value: Pair) -> Pair {\n"
+        " return flag ? value : { left = 1, right = 2, };\n"
+        "}\n"
+        "fn echo(value: Big) -> Big { return value; }\n"
+        "fn main() -> i32 {\n"
+        " let pair: Pair = choose(true, { left = 20, right = 22, });\n"
+        " let big: Big = echo({ first = 20, second = 22, third = 0, });\n"
+        " return pair.left + (big.second as i32);\n"
         "}\n",
         "",
     };

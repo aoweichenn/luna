@@ -158,6 +158,20 @@ static bool luna_x86_64_machine_print_function_name(
     return luna_string_builder_append_view(output, function->name);
 }
 
+static bool luna_x86_64_machine_print_signature_type(
+    LunaStringBuilder *output, LunaX8664MachineType type,
+    const LunaX8664MachineAggregateLayout *aggregate) {
+    if (aggregate != NULL && aggregate->is_aggregate) {
+        return luna_string_builder_append_format(
+            output, "aggregate[%" PRIu64 ",%" PRIu32 "]:memory",
+            aggregate->size_bytes, aggregate->alignment_bytes);
+    }
+    return luna_string_builder_append_format(
+        output, "%s:%s", luna_x86_64_machine_type_name(type),
+        luna_x86_64_machine_register_class_name(
+            luna_x86_64_machine_type_register_class(type)));
+}
+
 static bool
 luna_x86_64_machine_print_signature(LunaStringBuilder *output,
                                     const LunaX8664MachineFunction *function) {
@@ -168,19 +182,25 @@ luna_x86_64_machine_print_signature(LunaStringBuilder *output,
          index += 1U) {
         const LunaX8664MachineType *type =
             luna_vector_at_const(&function->parameter_types, index);
-        if (type == NULL ||
+        const LunaX8664MachineAggregateLayout *aggregate =
+            luna_vector_at_const(&function->parameter_aggregates, index);
+        if (type == NULL || aggregate == NULL ||
             (index > 0U &&
              !luna_string_builder_append_c_string(output, ", ")) ||
-            !luna_string_builder_append_format(
-                output, "%s:%s", luna_x86_64_machine_type_name(*type),
-                luna_x86_64_machine_register_class_name(
-                    luna_x86_64_machine_type_register_class(*type)))) {
+            !luna_x86_64_machine_print_signature_type(output, *type,
+                                                      aggregate)) {
             return false;
         }
     }
-    return luna_string_builder_append_format(
-        output, ") -> %s",
-        luna_x86_64_machine_type_name(function->return_type));
+    if (!luna_string_builder_append_c_string(output, ") -> ")) {
+        return false;
+    }
+    if (function->return_aggregate.is_aggregate) {
+        return luna_x86_64_machine_print_signature_type(
+            output, function->return_type, &function->return_aggregate);
+    }
+    return luna_string_builder_append_c_string(
+        output, luna_x86_64_machine_type_name(function->return_type));
 }
 
 static bool
@@ -262,6 +282,12 @@ static bool luna_x86_64_machine_print_instruction(
     if (instruction->opcode == LUNA_X86_64_MACHINE_CALL &&
         !luna_string_builder_append_format(output, " callee=@f%" PRIu32,
                                            instruction->callee)) {
+        return false;
+    }
+    if (instruction->opcode == LUNA_X86_64_MACHINE_CALL &&
+        instruction->slot != LUNA_X86_64_MACHINE_INVALID_ID &&
+        !luna_string_builder_append_format(output, " result-slot=$s%" PRIu32,
+                                           instruction->slot)) {
         return false;
     }
     if ((instruction->opcode == LUNA_X86_64_MACHINE_JUMP ||

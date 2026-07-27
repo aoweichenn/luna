@@ -170,10 +170,10 @@ are opaque pointer types and cannot be dereferenced or indexed.
 
 Fixed-array lengths are positive integer literals. Arrays may be nested and
 their total target layout must fit in the compiler's supported object-size
-range. They are local storage objects in this milestone: arrays cannot be
-passed or returned by value or used as scalar expressions. A local array may
-be initialized from or assigned from an lvalue of the exact same array type.
-Elements remain ordinary lvalues and may be read, written or addressed.
+range. Arrays remain memory objects rather than scalar expressions, but Luna
+functions may pass and return them by value. A local array may be initialized
+from or assigned from an lvalue of the exact same array type. Elements remain
+ordinary lvalues and may be read, written or addressed.
 
 Structures use target ABI alignment with padding before fields and at the end
 of the object. Union fields all start at offset zero; the union size is the
@@ -200,10 +200,13 @@ Fields may appear once in any order; omitted fields and all padding bytes are
 zero. A union initializer may name at most one field. Nested records use the
 same syntax, and a memory field may be initialized from an lvalue of its exact
 type. Structures, unions and arrays may be copied between exact same-typed
-local lvalues. They still cannot be compared, passed or returned by value
-until aggregate ABI classification is implemented. Reading a union field
-interprets the bytes currently in the overlapping storage; Luna does not track
-an active union member.
+local lvalues and may be passed or returned by value. Aggregate call arguments
+are snapshotted in source order, and returned temporaries support immutable
+member or array-element access. Aggregate conditional expressions require one
+exact result type and evaluate only the selected branch. Aggregates still
+cannot be compared or used with scalar operators. Reading a union field
+interprets the bytes currently in the overlapping storage; Luna does not
+track an active union member.
 
 ## Functions
 
@@ -231,13 +234,14 @@ extern fn hash(bytes: *const u8, length: usize) -> u64;
 ```
 
 The current target uses the x86-64 System V C ABI. External declarations may
-use `void` as the return type and may otherwise pass and return only scalar or
-pointer types. The bootstrap backend assigns the first six integer-class
-arguments and first eight floating-point arguments to their independent
-System V register banks, then passes further scalar arguments on the stack.
-Aggregate arguments, aggregate results and variadic calls remain deferred.
-Luna does not implicitly link a C runtime or any library—the final linker
-invocation must supply an object or library that defines every referenced
+use `void` as the return type and may pass and return scalars, pointers,
+structures or unions. The backend classifies aggregates into System V
+eightbytes, performs whole-value register rollback, stack copies,
+multi-register results and hidden-pointer results. Fixed arrays are rejected
+at this boundary because C function types do not pass arrays by value.
+Variadic calls remain deferred. Luna does not implicitly link a C runtime or
+any library—the final linker invocation must supply an object or library that
+defines every referenced
 external symbol.
 
 For `x86_64-unknown-linux-gnu`, the interoperable C23 spellings are:
@@ -462,8 +466,9 @@ Local variables are never implicitly uninitialized.
 The same braces can appear on the right of whole-object assignment. Copy
 initialization and assignment require an lvalue of the exact same structure,
 union or array type; there are no structural conversions. Aggregate
-parameters, returns and the typed `Point { ... }` value form remain deferred
-to the aggregate ABI milestone.
+parameters and returns use the same context-directed braces, exact lvalues,
+calls or aggregate conditional expressions. Luna intentionally does not add a
+redundant typed `Point { ... }` expression form.
 
 For an array, `{}` initializes every byte of the object to zero. Array
 elements may be assigned through indexing, and exact same-typed arrays may be

@@ -138,6 +138,25 @@ static bool luna_x86_64_stack_offset(const LunaX8664MachineFunction *function,
 }
 
 static bool
+luna_x86_64_hidden_return_offset(const LunaX8664MachineFunction *function,
+                                 int32_t *offset) {
+    uint64_t byte_offset = 0U;
+    if (!luna_x86_64_slot_area_size(function, LUNA_X86_64_MACHINE_INVALID_ID,
+                                    false, &byte_offset) ||
+        !luna_x86_64_align_up(byte_offset, 8U, &byte_offset) ||
+        function->value_types.length > (UINT64_MAX - byte_offset) / 8U) {
+        return false;
+    }
+    byte_offset += (uint64_t)function->value_types.length * 8U;
+    if (byte_offset > (uint64_t)INT32_MAX - 8U) {
+        return false;
+    }
+    byte_offset += 8U;
+    *offset = -(int32_t)byte_offset;
+    return true;
+}
+
+static bool
 luna_x86_64_append_value_operand(LunaStringBuilder *output,
                                  const LunaX8664MachineFunction *function,
                                  LunaX8664MachineVirtualRegister value) {
@@ -525,6 +544,77 @@ luna_x86_64_emit_compare(LunaStringBuilder *output,
     return luna_x86_64_emit_store_eax(output, function, instruction->result);
 }
 
+static bool
+luna_x86_64_emit_load_integer_piece(LunaStringBuilder *output,
+                                    uint64_t offset_bytes, uint64_t size_bytes,
+                                    const char *destination_register) {
+    if (size_bytes == 8U) {
+        return luna_string_builder_append_format(
+            output, "    movq %" PRIu64 "(%%r11), %s\n", offset_bytes,
+            destination_register);
+    }
+    if (size_bytes == 4U) {
+        return luna_string_builder_append_format(
+                   output, "    movl %" PRIu64 "(%%r11), %%eax\n",
+                   offset_bytes) &&
+               luna_string_builder_append_format(output, "    movq %%rax, %s\n",
+                                                 destination_register);
+    }
+    if (size_bytes == 2U) {
+        return luna_string_builder_append_format(
+                   output, "    movzwl %" PRIu64 "(%%r11), %%eax\n",
+                   offset_bytes) &&
+               luna_string_builder_append_format(output, "    movq %%rax, %s\n",
+                                                 destination_register);
+    }
+    if (size_bytes == 1U) {
+        return luna_string_builder_append_format(
+                   output, "    movzbl %" PRIu64 "(%%r11), %%eax\n",
+                   offset_bytes) &&
+               luna_string_builder_append_format(output, "    movq %%rax, %s\n",
+                                                 destination_register);
+    }
+    if (size_bytes == 0U || size_bytes > 8U ||
+        !luna_string_builder_append_c_string(output, "    xorq %rax, %rax\n")) {
+        return false;
+    }
+    for (uint64_t index = 0U; index < size_bytes; index += 1U) {
+        if (!luna_string_builder_append_format(
+                output, "    movzbl %" PRIu64 "(%%r11), %%r10d\n",
+                offset_bytes + index) ||
+            (index != 0U &&
+             !luna_string_builder_append_format(
+                 output, "    shlq $%" PRIu64 ", %%r10\n", index * 8U)) ||
+            !luna_string_builder_append_c_string(output,
+                                                 "    orq %r10, %rax\n")) {
+            return false;
+        }
+    }
+    return luna_string_builder_append_format(output, "    movq %%rax, %s\n",
+                                             destination_register);
+}
+
+static bool luna_x86_64_emit_store_integer_piece(LunaStringBuilder *output,
+                                                 const char *source_register,
+                                                 uint64_t offset_bytes,
+                                                 uint64_t size_bytes) {
+    if (size_bytes == 0U || size_bytes > 8U ||
+        !luna_string_builder_append_format(output, "    movq %s, %%r10\n",
+                                           source_register)) {
+        return false;
+    }
+    for (uint64_t index = 0U; index < size_bytes; index += 1U) {
+        if (!luna_string_builder_append_format(
+                output, "    movb %%r10b, %" PRIu64 "(%%r11)\n",
+                offset_bytes + index) ||
+            (index + 1U != size_bytes && !luna_string_builder_append_c_string(
+                                             output, "    shrq $8, %r10\n"))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool luna_x86_64_emit_call(
     LunaStringBuilder *output, const LunaX8664MachineModule *module,
     const LunaX8664ModuleAbi *abi, const LunaX8664MachineFunction *function,
@@ -538,6 +628,8 @@ static bool luna_x86_64_emit_call(
     static const char *argument_registers_float[] = {
         "%xmm0", "%xmm1", "%xmm2", "%xmm3", "%xmm4", "%xmm5", "%xmm6", "%xmm7",
     };
+    static const char *return_registers_integer[] = {"%rax", "%rdx"};
+    static const char *return_registers_float[] = {"%xmm0", "%xmm1"};
 
     const LunaX8664MachineFunction *callee =
         luna_x86_64_machine_module_function_const(module, instruction->callee);
@@ -566,52 +658,132 @@ static bool luna_x86_64_emit_call(
         if (argument == NULL || parameter_type == NULL || location == NULL) {
             return false;
         }
-
-        if (location->kind == LUNA_X86_64_ABI_LOCATION_STACK) {
-            if (luna_x86_64_machine_type_is_float(*parameter_type)) {
-                const char *move = luna_x86_64_float_move(*parameter_type);
-                if (move == NULL ||
-                    !luna_string_builder_append_format(output, "    %s ",
-                                                       move) ||
-                    !luna_x86_64_append_value_operand(output, function,
-                                                      *argument) ||
-                    !luna_string_builder_append_format(
-                        output,
-                        ", %%xmm15\n"
-                        "    %s %%xmm15, %" PRIu64 "(%%rsp)\n",
-                        move, location->stack_offset_bytes)) {
-                    return false;
-                }
-                continue;
-            }
-
-            const bool is_64_bit = luna_x86_64_type_is_64_bit(*parameter_type);
-            const uint32_t width = luna_x86_64_type_bit_width(*parameter_type);
-            const bool needs_external_sign_extension =
-                callee->linkage == LUNA_X86_64_MACHINE_LINKAGE_EXTERNAL_C &&
-                luna_x86_64_machine_type_is_signed_integer(*parameter_type) &&
-                width < 32U;
-            if (needs_external_sign_extension) {
-                if (!luna_x86_64_emit_signed_load_32(
-                        output, function, *argument, *parameter_type, "%eax")) {
-                    return false;
-                }
-            } else if (!luna_string_builder_append_c_string(
-                           output, is_64_bit ? "    movq " : "    movl ") ||
-                       !luna_x86_64_append_value_operand(output, function,
-                                                         *argument) ||
-                       !luna_string_builder_append_c_string(
-                           output, is_64_bit ? ", %rax\n" : ", %eax\n")) {
+        if (location->kind != LUNA_X86_64_ABI_LOCATION_STACK) {
+            continue;
+        }
+        if (location->is_aggregate) {
+            if (!luna_string_builder_append_c_string(output, "    movq ") ||
+                !luna_x86_64_append_value_operand(output, function,
+                                                  *argument) ||
+                !luna_string_builder_append_format(
+                    output,
+                    ", %%rsi\n"
+                    "    leaq %" PRIu64 "(%%rsp), %%rdi\n"
+                    "    movq $%" PRIu64 ", %%rcx\n"
+                    "    rep movsb\n",
+                    location->stack_offset_bytes, location->size_bytes)) {
                 return false;
             }
-            if (!luna_string_builder_append_format(
-                    output, "    movq %%rax, %" PRIu64 "(%%rsp)\n",
-                    location->stack_offset_bytes)) {
+            continue;
+        }
+        if (luna_x86_64_machine_type_is_float(*parameter_type)) {
+            const char *move = luna_x86_64_float_move(*parameter_type);
+            if (move == NULL ||
+                !luna_string_builder_append_format(output, "    %s ", move) ||
+                !luna_x86_64_append_value_operand(output, function,
+                                                  *argument) ||
+                !luna_string_builder_append_format(
+                    output,
+                    ", %%xmm15\n"
+                    "    %s %%xmm15, %" PRIu64 "(%%rsp)\n",
+                    move, location->stack_offset_bytes)) {
                 return false;
             }
             continue;
         }
 
+        const bool is_64_bit = luna_x86_64_type_is_64_bit(*parameter_type);
+        const uint32_t width = luna_x86_64_type_bit_width(*parameter_type);
+        const bool needs_external_sign_extension =
+            callee->linkage == LUNA_X86_64_MACHINE_LINKAGE_EXTERNAL_C &&
+            luna_x86_64_machine_type_is_signed_integer(*parameter_type) &&
+            width < 32U;
+        if (needs_external_sign_extension) {
+            if (!luna_x86_64_emit_signed_load_32(output, function, *argument,
+                                                 *parameter_type, "%eax")) {
+                return false;
+            }
+        } else if (!luna_string_builder_append_c_string(
+                       output, is_64_bit ? "    movq " : "    movl ") ||
+                   !luna_x86_64_append_value_operand(output, function,
+                                                     *argument) ||
+                   !luna_string_builder_append_c_string(
+                       output, is_64_bit ? ", %rax\n" : ", %eax\n")) {
+            return false;
+        }
+        if (!luna_string_builder_append_format(
+                output, "    movq %%rax, %" PRIu64 "(%%rsp)\n",
+                location->stack_offset_bytes)) {
+            return false;
+        }
+    }
+
+    if (callee_abi->return_location.uses_hidden_pointer) {
+        if (!luna_string_builder_append_c_string(output, "    leaq ") ||
+            !luna_x86_64_append_slot_operand(output, function,
+                                             instruction->slot) ||
+            !luna_string_builder_append_c_string(output, ", %rdi\n")) {
+            return false;
+        }
+    }
+
+    for (uint32_t index = 0U; index < instruction->argument_count;
+         index += 1U) {
+        const LunaX8664MachineVirtualRegister *argument = luna_vector_at_const(
+            &function->arguments, (size_t)instruction->first_argument + index);
+        const LunaX8664MachineType *parameter_type =
+            luna_vector_at_const(&callee->parameter_types, (size_t)index);
+        const LunaX8664AbiParameterLocation *location = luna_vector_at_const(
+            &callee_abi->parameter_locations, (size_t)index);
+        if (argument == NULL || parameter_type == NULL || location == NULL) {
+            return false;
+        }
+        if (location->kind == LUNA_X86_64_ABI_LOCATION_STACK) {
+            continue;
+        }
+        if (location->is_aggregate) {
+            if (!luna_string_builder_append_c_string(output, "    movq ") ||
+                !luna_x86_64_append_value_operand(output, function,
+                                                  *argument) ||
+                !luna_string_builder_append_c_string(output, ", %r11\n")) {
+                return false;
+            }
+            for (uint32_t piece_index = 0U; piece_index < location->piece_count;
+                 piece_index += 1U) {
+                if (location->pieces[piece_index].abi_class ==
+                    LUNA_X86_64_ABI_CLASS_INTEGER) {
+                    if (location->pieces[piece_index].register_index >=
+                            LUNA_X86_64_ABI_GENERAL_REGISTER_COUNT ||
+                        !luna_x86_64_emit_load_integer_piece(
+                            output,
+                            location->pieces[piece_index].value_offset_bytes,
+                            location->pieces[piece_index].size_bytes,
+                            argument_registers_64_bit[location
+                                                          ->pieces[piece_index]
+                                                          .register_index])) {
+                        return false;
+                    }
+                } else {
+                    const uint32_t register_index =
+                        location->pieces[piece_index].register_index;
+                    const uint64_t piece_size =
+                        location->pieces[piece_index].size_bytes;
+                    if (register_index >=
+                            LUNA_X86_64_ABI_VECTOR_REGISTER_COUNT ||
+                        (piece_size != 4U && piece_size != 8U) ||
+                        !luna_string_builder_append_format(
+                            output,
+                            piece_size == 4U
+                                ? "    movss %" PRIu64 "(%%r11), %s\n"
+                                : "    movq %" PRIu64 "(%%r11), %s\n",
+                            location->pieces[piece_index].value_offset_bytes,
+                            argument_registers_float[register_index])) {
+                        return false;
+                    }
+                }
+            }
+            continue;
+        }
         if (location->kind == LUNA_X86_64_ABI_LOCATION_VECTOR_REGISTER) {
             const char *move = luna_x86_64_float_move(*parameter_type);
             if (move == NULL ||
@@ -627,7 +799,6 @@ static bool luna_x86_64_emit_call(
             }
             continue;
         }
-
         if (location->kind != LUNA_X86_64_ABI_LOCATION_GENERAL_REGISTER ||
             location->register_index >=
                 LUNA_X86_64_ABI_GENERAL_REGISTER_COUNT) {
@@ -645,19 +816,17 @@ static bool luna_x86_64_emit_call(
                     argument_registers_32_bit[location->register_index])) {
                 return false;
             }
-        } else {
-            if (!luna_string_builder_append_c_string(
-                    output, is_64_bit ? "    movq " : "    movl ") ||
-                !luna_x86_64_append_value_operand(output, function,
-                                                  *argument) ||
-                !luna_string_builder_append_format(
-                    output, ", %s\n",
-                    is_64_bit
-                        ? argument_registers_64_bit[location->register_index]
-                        : argument_registers_32_bit[location
-                                                        ->register_index])) {
-                return false;
-            }
+        } else if (!luna_string_builder_append_c_string(
+                       output, is_64_bit ? "    movq " : "    movl ") ||
+                   !luna_x86_64_append_value_operand(output, function,
+                                                     *argument) ||
+                   !luna_string_builder_append_format(
+                       output, ", %s\n",
+                       is_64_bit
+                           ? argument_registers_64_bit[location->register_index]
+                           : argument_registers_32_bit[location
+                                                           ->register_index])) {
+            return false;
         }
     }
 
@@ -666,6 +835,46 @@ static bool luna_x86_64_emit_call(
         !luna_string_builder_append_c_string(output, "\n")) {
         return false;
     }
+
+    if (callee_abi->return_location.is_aggregate &&
+        !callee_abi->return_location.uses_hidden_pointer) {
+        if (!luna_string_builder_append_c_string(output, "    leaq ") ||
+            !luna_x86_64_append_slot_operand(output, function,
+                                             instruction->slot) ||
+            !luna_string_builder_append_c_string(output, ", %r11\n")) {
+            return false;
+        }
+        for (uint32_t index = 0U;
+             index < callee_abi->return_location.piece_count; index += 1U) {
+            const uint64_t offset =
+                callee_abi->return_location.pieces[index].value_offset_bytes;
+            const uint64_t size =
+                callee_abi->return_location.pieces[index].size_bytes;
+            if (callee_abi->return_location.pieces[index].abi_class ==
+                LUNA_X86_64_ABI_CLASS_INTEGER) {
+                const uint32_t register_index =
+                    callee_abi->return_location.pieces[index].register_index;
+                if (register_index >= 2U ||
+                    !luna_x86_64_emit_store_integer_piece(
+                        output, return_registers_integer[register_index],
+                        offset, size)) {
+                    return false;
+                }
+            } else {
+                const uint32_t register_index =
+                    callee_abi->return_location.pieces[index].register_index;
+                if (register_index >= 2U || (size != 4U && size != 8U) ||
+                    !luna_string_builder_append_format(
+                        output,
+                        size == 4U ? "    movss %s, %" PRIu64 "(%%r11)\n"
+                                   : "    movq %s, %" PRIu64 "(%%r11)\n",
+                        return_registers_float[register_index], offset)) {
+                    return false;
+                }
+            }
+        }
+    }
+
     if (callee_abi->call_frame_size_bytes != 0U &&
         !luna_string_builder_append_format(output,
                                            "    addq $%" PRIu64 ", %%rsp\n",
@@ -673,6 +882,16 @@ static bool luna_x86_64_emit_call(
         return false;
     }
 
+    if (callee_abi->return_location.is_aggregate) {
+        if (!luna_string_builder_append_c_string(output, "    leaq ") ||
+            !luna_x86_64_append_slot_operand(output, function,
+                                             instruction->slot) ||
+            !luna_string_builder_append_c_string(output, ", %rax\n")) {
+            return false;
+        }
+        return luna_x86_64_emit_store_rax(output, function,
+                                          instruction->result);
+    }
     if (instruction->result != LUNA_X86_64_MACHINE_INVALID_ID) {
         if (callee->linkage == LUNA_X86_64_MACHINE_LINKAGE_EXTERNAL_C &&
             instruction->type == LUNA_X86_64_MACHINE_TYPE_BOOL &&
@@ -694,7 +913,6 @@ static bool luna_x86_64_emit_call(
         return luna_x86_64_emit_store_eax(output, function,
                                           instruction->result);
     }
-
     return true;
 }
 
@@ -1664,7 +1882,75 @@ static bool luna_x86_64_emit_instruction(
         }
         return true;
 
-    case LUNA_X86_64_MACHINE_RETURN:
+    case LUNA_X86_64_MACHINE_RETURN: {
+        const LunaX8664FunctionAbi *function_abi =
+            luna_vector_at_const(&abi->functions, function_index);
+        static const char *return_registers_integer[] = {"%rax", "%rdx"};
+        static const char *return_registers_float[] = {"%xmm0", "%xmm1"};
+        if (function_abi == NULL) {
+            return false;
+        }
+        if (function_abi->return_location.is_aggregate) {
+            if (instruction->left == LUNA_X86_64_MACHINE_INVALID_ID ||
+                !luna_string_builder_append_c_string(output, "    movq ") ||
+                !luna_x86_64_append_value_operand(output, function,
+                                                  instruction->left) ||
+                !luna_string_builder_append_c_string(output, ", %r11\n")) {
+                return false;
+            }
+            if (function_abi->return_location.uses_hidden_pointer) {
+                int32_t hidden_offset = 0;
+                if (!luna_x86_64_hidden_return_offset(function,
+                                                      &hidden_offset) ||
+                    !luna_string_builder_append_format(
+                        output,
+                        "    movq %d(%%rbp), %%rdi\n"
+                        "    movq %%r11, %%rsi\n"
+                        "    movq $%" PRIu64 ", %%rcx\n"
+                        "    rep movsb\n"
+                        "    movq %d(%%rbp), %%rax\n",
+                        hidden_offset, function_abi->return_location.size_bytes,
+                        hidden_offset)) {
+                    return false;
+                }
+            } else {
+                for (uint32_t reverse_index =
+                         function_abi->return_location.piece_count;
+                     reverse_index > 0U; reverse_index -= 1U) {
+                    const uint32_t index = reverse_index - 1U;
+                    const uint64_t offset =
+                        function_abi->return_location.pieces[index]
+                            .value_offset_bytes;
+                    const uint64_t size =
+                        function_abi->return_location.pieces[index].size_bytes;
+                    const uint32_t register_index =
+                        function_abi->return_location.pieces[index]
+                            .register_index;
+                    if (function_abi->return_location.pieces[index].abi_class ==
+                        LUNA_X86_64_ABI_CLASS_INTEGER) {
+                        if (register_index >= 2U ||
+                            !luna_x86_64_emit_load_integer_piece(
+                                output, offset, size,
+                                return_registers_integer[register_index])) {
+                            return false;
+                        }
+                    } else if (register_index >= 2U ||
+                               (size != 4U && size != 8U) ||
+                               !luna_string_builder_append_format(
+                                   output,
+                                   size == 4U
+                                       ? "    movss %" PRIu64 "(%%r11), %s\n"
+                                       : "    movq %" PRIu64 "(%%r11), %s\n",
+                                   offset,
+                                   return_registers_float[register_index])) {
+                        return false;
+                    }
+                }
+            }
+            return luna_string_builder_append_format(
+                output, "    jmp .Lfn%zu_return\n", function_index);
+        }
+    }
         if (instruction->left != LUNA_X86_64_MACHINE_INVALID_ID) {
             if (luna_x86_64_machine_type_is_float(function->return_type)) {
                 if (!luna_x86_64_emit_load_xmm0(output, function,
@@ -1690,6 +1976,7 @@ static bool luna_x86_64_emit_instruction(
 }
 
 static bool luna_x86_64_frame_size(const LunaX8664MachineFunction *function,
+                                   const LunaX8664FunctionAbi *function_abi,
                                    uint32_t *frame_size) {
     uint64_t byte_count = 0U;
     if (!luna_x86_64_slot_area_size(function, LUNA_X86_64_MACHINE_INVALID_ID,
@@ -1699,6 +1986,12 @@ static bool luna_x86_64_frame_size(const LunaX8664MachineFunction *function,
         return false;
     }
     byte_count += (uint64_t)function->value_types.length * 8U;
+    if (function_abi->return_location.uses_hidden_pointer) {
+        if (byte_count > UINT64_MAX - 8U) {
+            return false;
+        }
+        byte_count += 8U;
+    }
 
     uint64_t aligned = 0U;
     if (!luna_x86_64_align_up(byte_count, 16U, &aligned) ||
@@ -1730,7 +2023,7 @@ static bool luna_x86_64_emit_function(LunaStringBuilder *output,
     if (function_abi == NULL ||
         function_abi->parameter_locations.length !=
             function->parameter_types.length ||
-        !luna_x86_64_frame_size(function, &frame_size)) {
+        !luna_x86_64_frame_size(function, function_abi, &frame_size)) {
         return false;
     }
 
@@ -1757,27 +2050,127 @@ static bool luna_x86_64_emit_function(LunaStringBuilder *output,
         return false;
     }
 
-    for (size_t parameter_index = 0U;
-         parameter_index < function->parameter_types.length;
-         parameter_index += 1U) {
-        const LunaX8664MachineType *parameter_type =
-            luna_vector_at_const(&function->parameter_types, parameter_index);
-        const LunaX8664AbiParameterLocation *location = luna_vector_at_const(
-            &function_abi->parameter_locations, parameter_index);
-        if (parameter_type == NULL || location == NULL) {
+    if (function_abi->return_location.uses_hidden_pointer) {
+        int32_t hidden_offset = 0;
+        if (!luna_x86_64_hidden_return_offset(function, &hidden_offset) ||
+            !luna_string_builder_append_format(
+                output, "    movq %%rdi, %d(%%rbp)\n", hidden_offset)) {
             return false;
         }
+    }
 
-        if (location->kind == LUNA_X86_64_ABI_LOCATION_STACK) {
-            const uint64_t source_offset = location->stack_offset_bytes + 16U;
-            if (luna_x86_64_machine_type_is_float(*parameter_type)) {
-                const char *move = luna_x86_64_float_move(*parameter_type);
-                if (move == NULL ||
-                    !luna_string_builder_append_format(
+    for (uint32_t phase = 0U; phase < 2U; phase += 1U) {
+        const bool stack_phase = phase != 0U;
+        for (size_t parameter_index = 0U;
+             parameter_index < function->parameter_types.length;
+             parameter_index += 1U) {
+            const LunaX8664MachineType *parameter_type = luna_vector_at_const(
+                &function->parameter_types, parameter_index);
+            const LunaX8664AbiParameterLocation *location =
+                luna_vector_at_const(&function_abi->parameter_locations,
+                                     parameter_index);
+            if (parameter_type == NULL || location == NULL) {
+                return false;
+            }
+            const bool is_stack =
+                location->kind == LUNA_X86_64_ABI_LOCATION_STACK;
+            if (is_stack != stack_phase) {
+                continue;
+            }
+
+            if (location->is_aggregate) {
+                if (is_stack) {
+                    const uint64_t source_offset =
+                        location->stack_offset_bytes + 16U;
+                    if (!luna_string_builder_append_format(output,
+                                                           "    leaq %" PRIu64
+                                                           "(%%rbp), %%rsi\n"
+                                                           "    leaq ",
+                                                           source_offset) ||
+                        !luna_x86_64_append_slot_operand(
+                            output, function,
+                            (LunaX8664MachineStackSlotId)parameter_index) ||
+                        !luna_string_builder_append_format(
+                            output,
+                            ", %%rdi\n"
+                            "    movq $%" PRIu64 ", %%rcx\n"
+                            "    rep movsb\n",
+                            location->size_bytes)) {
+                        return false;
+                    }
+                    continue;
+                }
+
+                if (!luna_string_builder_append_c_string(output, "    leaq ") ||
+                    !luna_x86_64_append_slot_operand(
+                        output, function,
+                        (LunaX8664MachineStackSlotId)parameter_index) ||
+                    !luna_string_builder_append_c_string(output, ", %r11\n")) {
+                    return false;
+                }
+                for (uint32_t piece_index = 0U;
+                     piece_index < location->piece_count; piece_index += 1U) {
+                    const uint32_t register_index =
+                        location->pieces[piece_index].register_index;
+                    const uint64_t offset =
+                        location->pieces[piece_index].value_offset_bytes;
+                    const uint64_t size =
+                        location->pieces[piece_index].size_bytes;
+                    if (location->pieces[piece_index].abi_class ==
+                        LUNA_X86_64_ABI_CLASS_INTEGER) {
+                        if (register_index >=
+                                LUNA_X86_64_ABI_GENERAL_REGISTER_COUNT ||
+                            !luna_x86_64_emit_store_integer_piece(
+                                output,
+                                argument_registers_64_bit[register_index],
+                                offset, size)) {
+                            return false;
+                        }
+                    } else if (register_index >=
+                                   LUNA_X86_64_ABI_VECTOR_REGISTER_COUNT ||
+                               (size != 4U && size != 8U) ||
+                               !luna_string_builder_append_format(
+                                   output,
+                                   size == 4U
+                                       ? "    movss %s, %" PRIu64 "(%%r11)\n"
+                                       : "    movq %s, %" PRIu64 "(%%r11)\n",
+                                   argument_registers_float[register_index],
+                                   offset)) {
+                        return false;
+                    }
+                }
+                continue;
+            }
+
+            if (is_stack) {
+                const uint64_t source_offset =
+                    location->stack_offset_bytes + 16U;
+                if (luna_x86_64_machine_type_is_float(*parameter_type)) {
+                    const char *move = luna_x86_64_float_move(*parameter_type);
+                    if (move == NULL ||
+                        !luna_string_builder_append_format(
+                            output,
+                            "    %s %" PRIu64 "(%%rbp), %%xmm15\n"
+                            "    %s %%xmm15, ",
+                            move, source_offset, move) ||
+                        !luna_x86_64_append_slot_operand(
+                            output, function,
+                            (LunaX8664MachineStackSlotId)parameter_index) ||
+                        !luna_string_builder_append_c_string(output, "\n")) {
+                        return false;
+                    }
+                    continue;
+                }
+
+                const bool is_64_bit =
+                    luna_x86_64_type_is_64_bit(*parameter_type);
+                if (!luna_string_builder_append_format(
                         output,
-                        "    %s %" PRIu64 "(%%rbp), %%xmm15\n"
-                        "    %s %%xmm15, ",
-                        move, source_offset, move) ||
+                        is_64_bit ? "    movq %" PRIu64 "(%%rbp), %%rax\n"
+                                    "    movq %%rax, "
+                                  : "    movl %" PRIu64 "(%%rbp), %%eax\n"
+                                    "    movl %%eax, ",
+                        source_offset) ||
                     !luna_x86_64_append_slot_operand(
                         output, function,
                         (LunaX8664MachineStackSlotId)parameter_index) ||
@@ -1787,56 +2180,41 @@ static bool luna_x86_64_emit_function(LunaStringBuilder *output,
                 continue;
             }
 
+            if (location->kind == LUNA_X86_64_ABI_LOCATION_VECTOR_REGISTER) {
+                const char *move = luna_x86_64_float_move(*parameter_type);
+                if (move == NULL ||
+                    location->register_index >=
+                        LUNA_X86_64_ABI_VECTOR_REGISTER_COUNT ||
+                    !luna_string_builder_append_format(
+                        output, "    %s %s, ", move,
+                        argument_registers_float[location->register_index]) ||
+                    !luna_x86_64_append_slot_operand(
+                        output, function,
+                        (LunaX8664MachineStackSlotId)parameter_index) ||
+                    !luna_string_builder_append_c_string(output, "\n")) {
+                    return false;
+                }
+                continue;
+            }
+
+            if (location->kind != LUNA_X86_64_ABI_LOCATION_GENERAL_REGISTER ||
+                location->register_index >=
+                    LUNA_X86_64_ABI_GENERAL_REGISTER_COUNT) {
+                return false;
+            }
             const bool is_64_bit = luna_x86_64_type_is_64_bit(*parameter_type);
             if (!luna_string_builder_append_format(
-                    output,
-                    is_64_bit ? "    movq %" PRIu64 "(%%rbp), %%rax\n"
-                                "    movq %%rax, "
-                              : "    movl %" PRIu64 "(%%rbp), %%eax\n"
-                                "    movl %%eax, ",
-                    source_offset) ||
+                    output, is_64_bit ? "    movq %s, " : "    movl %s, ",
+                    is_64_bit
+                        ? argument_registers_64_bit[location->register_index]
+                        : argument_registers_32_bit[location
+                                                        ->register_index]) ||
                 !luna_x86_64_append_slot_operand(
                     output, function,
                     (LunaX8664MachineStackSlotId)parameter_index) ||
                 !luna_string_builder_append_c_string(output, "\n")) {
                 return false;
             }
-            continue;
-        }
-
-        if (location->kind == LUNA_X86_64_ABI_LOCATION_VECTOR_REGISTER) {
-            const char *move = luna_x86_64_float_move(*parameter_type);
-            if (move == NULL ||
-                location->register_index >=
-                    LUNA_X86_64_ABI_VECTOR_REGISTER_COUNT ||
-                !luna_string_builder_append_format(
-                    output, "    %s %s, ", move,
-                    argument_registers_float[location->register_index]) ||
-                !luna_x86_64_append_slot_operand(
-                    output, function,
-                    (LunaX8664MachineStackSlotId)parameter_index) ||
-                !luna_string_builder_append_c_string(output, "\n")) {
-                return false;
-            }
-            continue;
-        }
-
-        if (location->kind != LUNA_X86_64_ABI_LOCATION_GENERAL_REGISTER ||
-            location->register_index >=
-                LUNA_X86_64_ABI_GENERAL_REGISTER_COUNT) {
-            return false;
-        }
-        const bool is_64_bit = luna_x86_64_type_is_64_bit(*parameter_type);
-        if (!luna_string_builder_append_format(
-                output, is_64_bit ? "    movq %s, " : "    movl %s, ",
-                is_64_bit
-                    ? argument_registers_64_bit[location->register_index]
-                    : argument_registers_32_bit[location->register_index]) ||
-            !luna_x86_64_append_slot_operand(
-                output, function,
-                (LunaX8664MachineStackSlotId)parameter_index) ||
-            !luna_string_builder_append_c_string(output, "\n")) {
-            return false;
         }
     }
 

@@ -36,6 +36,20 @@ typedef enum LunaIrType {
     LUNA_IR_TYPE_POINTER
 } LunaIrType;
 
+typedef struct LunaIrAggregateComponent {
+    uint64_t offset_bytes;
+    uint64_t size_bytes;
+    uint32_t alignment_bytes;
+    LunaIrType type;
+} LunaIrAggregateComponent;
+
+typedef struct LunaIrAggregateLayout {
+    bool is_aggregate;
+    uint64_t size_bytes;
+    uint32_t alignment_bytes;
+    LunaVector components;
+} LunaIrAggregateLayout;
+
 typedef enum LunaIrFunctionLinkage {
     LUNA_IR_LINKAGE_INTERNAL,
     LUNA_IR_LINKAGE_MODULE_EXPORT,
@@ -149,7 +163,9 @@ typedef struct LunaIrFunction {
     bool has_module_metadata_hash;
     uint64_t module_metadata_hash;
     LunaIrType return_type;
+    LunaIrAggregateLayout return_aggregate;
     LunaVector parameter_types;
+    LunaVector parameter_aggregates;
     LunaVector slots;
     LunaVector value_types;
     LunaVector arguments;
@@ -183,6 +199,16 @@ LunaIrGlobalId luna_ir_module_add_global(LunaIrModule *module,
                                          bool is_read_only);
 const LunaIrGlobal *luna_ir_module_global(const LunaIrModule *module,
                                           LunaIrGlobalId global_id);
+
+void luna_ir_aggregate_layout_init(LunaIrAggregateLayout *layout,
+                                   bool is_aggregate, uint64_t size_bytes,
+                                   uint32_t alignment_bytes);
+void luna_ir_aggregate_layout_destroy(LunaIrAggregateLayout *layout);
+bool luna_ir_aggregate_layout_add_component(LunaIrAggregateLayout *layout,
+                                            uint64_t offset_bytes,
+                                            uint64_t size_bytes,
+                                            uint32_t alignment_bytes,
+                                            LunaIrType type);
 
 LunaIrSlotId luna_ir_function_add_slot(LunaIrFunction *function,
                                        LunaIrType type);

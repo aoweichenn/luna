@@ -168,10 +168,86 @@ luna_x86_64_machine_lower_linkage(LunaIrFunctionLinkage linkage) {
     return (LunaX8664MachineFunctionLinkage)UINT32_MAX;
 }
 
+static void luna_x86_64_machine_aggregate_layout_init(
+    LunaX8664MachineAggregateLayout *layout) {
+    memset(layout, 0, sizeof(*layout));
+    luna_vector_init(&layout->components,
+                     sizeof(LunaX8664MachineAggregateComponent));
+}
+
+static void luna_x86_64_machine_aggregate_layout_destroy(
+    LunaX8664MachineAggregateLayout *layout) {
+    luna_vector_destroy(&layout->components);
+    layout->is_aggregate = false;
+    layout->size_bytes = 0U;
+    layout->alignment_bytes = 0U;
+}
+
+static bool luna_x86_64_machine_copy_aggregate_layout(
+    const LunaIrAggregateLayout *source,
+    LunaX8664MachineAggregateLayout *destination) {
+    luna_x86_64_machine_aggregate_layout_init(destination);
+    destination->is_aggregate = source->is_aggregate;
+    destination->size_bytes = source->size_bytes;
+    destination->alignment_bytes = source->alignment_bytes;
+    if (source->components.element_size != sizeof(LunaIrAggregateComponent) ||
+        !luna_vector_reserve(&destination->components,
+                             source->components.length)) {
+        luna_x86_64_machine_aggregate_layout_destroy(destination);
+        return false;
+    }
+    for (size_t index = 0U; index < source->components.length; index += 1U) {
+        const LunaIrAggregateComponent *component =
+            luna_vector_at_const(&source->components, index);
+        const LunaX8664MachineAggregateComponent target = {
+            .offset_bytes = component == NULL ? 0U : component->offset_bytes,
+            .size_bytes = component == NULL ? 0U : component->size_bytes,
+            .alignment_bytes =
+                component == NULL ? 0U : component->alignment_bytes,
+            .type = component == NULL
+                        ? LUNA_X86_64_MACHINE_TYPE_INVALID
+                        : luna_x86_64_machine_lower_type(component->type),
+        };
+        if (component == NULL ||
+            target.type == LUNA_X86_64_MACHINE_TYPE_INVALID ||
+            !luna_vector_push(&destination->components, &target)) {
+            luna_x86_64_machine_aggregate_layout_destroy(destination);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool
+luna_x86_64_machine_copy_aggregate_layouts(const LunaVector *source,
+                                           LunaVector *destination) {
+    if (source->element_size != sizeof(LunaIrAggregateLayout) ||
+        !luna_vector_reserve(destination, source->length)) {
+        return false;
+    }
+    for (size_t index = 0U; index < source->length; index += 1U) {
+        const LunaIrAggregateLayout *source_layout =
+            luna_vector_at_const(source, index);
+        LunaX8664MachineAggregateLayout target_layout;
+        if (source_layout == NULL || !luna_x86_64_machine_copy_aggregate_layout(
+                                         source_layout, &target_layout)) {
+            return false;
+        }
+        if (!luna_vector_push(destination, &target_layout)) {
+            luna_x86_64_machine_aggregate_layout_destroy(&target_layout);
+            return false;
+        }
+    }
+    return true;
+}
+
 static void
 luna_x86_64_machine_function_init(LunaX8664MachineFunction *function) {
     memset(function, 0, sizeof(*function));
+    luna_x86_64_machine_aggregate_layout_init(&function->return_aggregate);
     luna_vector_init(&function->parameter_types, sizeof(LunaX8664MachineType));
+    luna_vector_init(&function->parameter_aggregates,
+                     sizeof(LunaX8664MachineAggregateLayout));
     luna_vector_init(&function->slots, sizeof(LunaX8664MachineStackSlot));
     luna_vector_init(&function->value_types, sizeof(LunaX8664MachineType));
     luna_vector_init(&function->arguments,
@@ -189,10 +265,18 @@ luna_x86_64_machine_function_destroy(LunaX8664MachineFunction *function) {
             luna_vector_destroy(&block->instructions);
         }
     }
+    for (size_t index = 0U; index < function->parameter_aggregates.length;
+         index += 1U) {
+        LunaX8664MachineAggregateLayout *layout =
+            luna_vector_at(&function->parameter_aggregates, index);
+        luna_x86_64_machine_aggregate_layout_destroy(layout);
+    }
+    luna_x86_64_machine_aggregate_layout_destroy(&function->return_aggregate);
     luna_vector_destroy(&function->blocks);
     luna_vector_destroy(&function->arguments);
     luna_vector_destroy(&function->value_types);
     luna_vector_destroy(&function->slots);
+    luna_vector_destroy(&function->parameter_aggregates);
     luna_vector_destroy(&function->parameter_types);
 }
 
@@ -645,8 +729,13 @@ luna_x86_64_machine_lower_function(const LunaIrFunction *source,
     const bool success =
         destination->linkage != (LunaX8664MachineFunctionLinkage)UINT32_MAX &&
         destination->return_type != LUNA_X86_64_MACHINE_TYPE_INVALID &&
+        luna_x86_64_machine_copy_aggregate_layout(
+            &source->return_aggregate, &destination->return_aggregate) &&
         luna_x86_64_machine_copy_types(&source->parameter_types,
                                        &destination->parameter_types) &&
+        luna_x86_64_machine_copy_aggregate_layouts(
+            &source->parameter_aggregates,
+            &destination->parameter_aggregates) &&
         luna_x86_64_machine_copy_slots(&source->slots, &destination->slots) &&
         luna_x86_64_machine_copy_types(&source->value_types,
                                        &destination->value_types) &&

@@ -908,6 +908,87 @@ def generate_aggregate_case(
     return source, 42
 
 
+def generate_aggregate_value_case(
+    engine: random.Random,
+    case_index: int,
+) -> tuple[str, int]:
+    pair_left = engine.randrange(-10000, 10001)
+    pair_right = engine.randrange(-10000, 10001)
+    triple_values = [engine.randrange(-10000, 10001) for _ in range(3)]
+    array_values = [engine.randrange(-10000, 10001) for _ in range(3)]
+    mixed_real = engine.randrange(-1000, 1001) / 2.0
+    mixed_tag = engine.randrange(-10000, 10001)
+    big_values = [engine.randrange(-(2**40), 2**40) for _ in range(3)]
+    scalar_values = [engine.randrange(-100, 101) for _ in range(6)]
+    condition = engine.randrange(2) == 0
+    condition_text = "true" if condition else "false"
+    selected_left = pair_left if condition else pair_right
+    selected_right = pair_right if condition else pair_left
+    rollback_result = sum(scalar_values) + selected_left + selected_right
+
+    source = (
+        f"module random.aggregate_value_case{case_index};\n"
+        "\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "struct Triple { first: i32; second: i32; third: i32; }\n"
+        "struct Mixed { real: f64; tag: i32; }\n"
+        "struct Big { first: i64; second: i64; third: i64; }\n"
+        "\n"
+        "fn echo_pair(value: Pair) -> Pair { return value; }\n"
+        "fn echo_triple(value: Triple) -> Triple { return value; }\n"
+        "fn echo_values(value: [3]i32) -> [3]i32 { return value; }\n"
+        "fn echo_mixed(value: Mixed) -> Mixed { return value; }\n"
+        "fn echo_big(value: Big) -> Big { return value; }\n"
+        "fn rollback(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32,\n"
+        "            value: Pair) -> i32 {\n"
+        "    return a + b + c + d + e + f + value.left + value.right;\n"
+        "}\n"
+        "\n"
+        "fn main() -> i32 {\n"
+        f"    let pair: Pair = {condition_text}\n"
+        f"        ? echo_pair({{ left = {pair_left}, right = {pair_right}, }})\n"
+        f"        : {{ left = {pair_right}, right = {pair_left}, }};\n"
+        f"    if (pair.left != {selected_left} || "
+        f"pair.right != {selected_right}) {{ return 1; }}\n"
+        f"    if (echo_pair(pair).left != {selected_left}) {{ return 2; }}\n"
+        "    let triple: Triple = echo_triple({\n"
+        f"        first = {triple_values[0]}, second = {triple_values[1]},\n"
+        f"        third = {triple_values[2]},\n"
+        "    });\n"
+        f"    if (triple.first != {triple_values[0]} ||\n"
+        f"        triple.second != {triple_values[1]} ||\n"
+        f"        triple.third != {triple_values[2]}) {{ return 3; }}\n"
+        "    var values: [3]i32 = {};\n"
+        f"    values[0] = {array_values[0]};\n"
+        f"    values[1] = {array_values[1]};\n"
+        f"    values[2] = {array_values[2]};\n"
+        "    let returned_values: [3]i32 = echo_values(values);\n"
+        f"    if (returned_values[0] != {array_values[0]} ||\n"
+        f"        returned_values[1] != {array_values[1]} ||\n"
+        f"        returned_values[2] != {array_values[2]}) {{ return 4; }}\n"
+        "    let mixed: Mixed = echo_mixed({\n"
+        f"        real = {format_float_literal(mixed_real, 'f64')},\n"
+        f"        tag = {mixed_tag},\n"
+        "    });\n"
+        f"    if (mixed.real != {format_float_literal(mixed_real, 'f64')} ||\n"
+        f"        mixed.tag != {mixed_tag}) {{ return 5; }}\n"
+        "    let big: Big = echo_big({\n"
+        f"        first = {big_values[0]}, second = {big_values[1]},\n"
+        f"        third = {big_values[2]},\n"
+        "    });\n"
+        f"    if (big.first != {big_values[0]} ||\n"
+        f"        big.second != {big_values[1]} ||\n"
+        f"        big.third != {big_values[2]}) {{ return 6; }}\n"
+        f"    if (rollback({scalar_values[0]}, {scalar_values[1]},\n"
+        f"                 {scalar_values[2]}, {scalar_values[3]},\n"
+        f"                 {scalar_values[4]}, {scalar_values[5]}, pair) !=\n"
+        f"        {rollback_result}) {{ return 7; }}\n"
+        "    return 42;\n"
+        "}\n"
+    )
+    return source, 42
+
+
 def generate_module_pair_case(
     engine: random.Random,
     case_index: int,
@@ -1236,7 +1317,7 @@ def main() -> int:
 
     engine = random.Random(arguments.seed)
     for case_index in range(arguments.cases):
-        case_kind = case_index % 22
+        case_kind = case_index % 23
         if case_kind == 0:
             source, expected_code = generate_case(engine, case_index)
         elif case_kind == 1:
@@ -1319,6 +1400,10 @@ def main() -> int:
                 engine, case_index
             )
         elif case_kind == 20:
+            source, expected_code = generate_aggregate_value_case(
+                engine, case_index
+            )
+        elif case_kind == 21:
             source, expected_code = generate_module_pair_case(
                 engine, case_index
             )

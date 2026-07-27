@@ -13,6 +13,45 @@ static bool luna_x86_64_machine_type_is_value(LunaX8664MachineType type) {
            LUNA_X86_64_MACHINE_REGISTER_NONE;
 }
 
+static bool luna_x86_64_machine_aggregate_layout_is_valid(
+    const LunaX8664MachineAggregateLayout *layout) {
+    if (layout == NULL ||
+        layout->components.element_size !=
+            sizeof(LunaX8664MachineAggregateComponent) ||
+        layout->components.capacity < layout->components.length ||
+        (layout->components.length != 0U && layout->components.data == NULL)) {
+        return false;
+    }
+    if (!layout->is_aggregate) {
+        return layout->size_bytes == 0U && layout->alignment_bytes == 0U &&
+               layout->components.length == 0U;
+    }
+    if (layout->size_bytes == 0U || layout->alignment_bytes == 0U ||
+        (layout->alignment_bytes & (layout->alignment_bytes - 1U)) != 0U ||
+        layout->size_bytes % (uint64_t)layout->alignment_bytes != 0U ||
+        (layout->size_bytes <= 16U && layout->components.length == 0U)) {
+        return false;
+    }
+    for (size_t index = 0U; index < layout->components.length; index += 1U) {
+        const LunaX8664MachineAggregateComponent *component =
+            luna_vector_at_const(&layout->components, index);
+        const uint32_t bit_width =
+            component == NULL
+                ? 0U
+                : luna_x86_64_machine_type_bit_width(component->type);
+        const uint64_t expected_size = (uint64_t)bit_width / 8U;
+        if (component == NULL || bit_width == 0U || bit_width % 8U != 0U ||
+            component->size_bytes != expected_size ||
+            component->alignment_bytes != expected_size ||
+            component->offset_bytes > layout->size_bytes ||
+            component->size_bytes >
+                layout->size_bytes - component->offset_bytes) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static uint64_t luna_x86_64_machine_integer_mask(LunaX8664MachineType type) {
     const uint32_t width = luna_x86_64_machine_type_bit_width(type);
     if (width == 64U) {
@@ -61,6 +100,48 @@ luna_x86_64_machine_types_match(const LunaX8664MachineFunction *function,
            *right_type == expected;
 }
 
+static const LunaX8664MachineInstruction *
+luna_x86_64_machine_find_value_definition(
+    const LunaX8664MachineFunction *function,
+    LunaX8664MachineVirtualRegister value) {
+    for (size_t block_index = 0U; block_index < function->blocks.length;
+         block_index += 1U) {
+        const LunaX8664MachineBlock *block =
+            luna_vector_at_const(&function->blocks, block_index);
+        if (block == NULL) {
+            return NULL;
+        }
+        for (size_t instruction_index = 0U;
+             instruction_index < block->instructions.length;
+             instruction_index += 1U) {
+            const LunaX8664MachineInstruction *instruction =
+                luna_vector_at_const(&block->instructions, instruction_index);
+            if (instruction != NULL && instruction->result == value) {
+                return instruction;
+            }
+        }
+    }
+    return NULL;
+}
+
+static bool luna_x86_64_machine_value_addresses_exact_memory_slot(
+    const LunaX8664MachineFunction *function,
+    LunaX8664MachineVirtualRegister value, uint64_t size_bytes,
+    uint32_t alignment_bytes) {
+    const LunaX8664MachineInstruction *definition =
+        luna_x86_64_machine_find_value_definition(function, value);
+    const LunaX8664MachineStackSlot *slot =
+        definition == NULL
+            ? NULL
+            : luna_x86_64_machine_slot(function, definition->slot);
+    return definition != NULL &&
+           definition->opcode == LUNA_X86_64_MACHINE_ADDRESS_OF_SLOT &&
+           slot != NULL && !slot->is_scalar &&
+           slot->type == LUNA_X86_64_MACHINE_TYPE_VOID &&
+           slot->size_bytes == size_bytes &&
+           slot->alignment_bytes == alignment_bytes;
+}
+
 static bool
 luna_x86_64_machine_verify_call(const LunaX8664MachineModule *module,
                                 const LunaX8664MachineFunction *function,
@@ -101,14 +182,30 @@ luna_x86_64_machine_verify_call(const LunaX8664MachineModule *module,
             luna_x86_64_machine_value_type(function, argument);
         const LunaX8664MachineType *parameter_type = luna_vector_at_const(
             &callee->parameter_types, (size_t)argument_index);
+        const LunaX8664MachineAggregateLayout *parameter_aggregate =
+            luna_vector_at_const(&callee->parameter_aggregates,
+                                 (size_t)argument_index);
         if (argument_type == NULL || parameter_type == NULL ||
-            *argument_type != *parameter_type) {
+            parameter_aggregate == NULL || *argument_type != *parameter_type) {
             (void)fprintf(
                 stream,
                 "machine IR verification: call %zu:%zu:%zu argument %" PRIu32
                 " has the wrong target type\n",
                 function_index, block_index, instruction_index, argument_index);
             return false;
+        }
+        if (parameter_aggregate->is_aggregate) {
+            if (!luna_x86_64_machine_value_addresses_exact_memory_slot(
+                    function, argument, parameter_aggregate->size_bytes,
+                    parameter_aggregate->alignment_bytes)) {
+                (void)fprintf(stream,
+                              "machine IR verification: aggregate call "
+                              "%zu:%zu:%zu argument %" PRIu32
+                              " does not address an exact snapshot slot\n",
+                              function_index, block_index, instruction_index,
+                              argument_index);
+                return false;
+            }
         }
         argument_used[storage_index] = true;
     }
@@ -121,6 +218,29 @@ luna_x86_64_machine_verify_call(const LunaX8664MachineModule *module,
             stream,
             "machine IR verification: call %zu:%zu:%zu has an invalid "
             "result contract\n",
+            function_index, block_index, instruction_index);
+        return false;
+    }
+    if (callee->return_aggregate.is_aggregate) {
+        const LunaX8664MachineStackSlot *result_slot =
+            luna_x86_64_machine_slot(function, instruction->slot);
+        if (result_slot == NULL || result_slot->is_scalar ||
+            result_slot->type != LUNA_X86_64_MACHINE_TYPE_VOID ||
+            result_slot->size_bytes != callee->return_aggregate.size_bytes ||
+            result_slot->alignment_bytes !=
+                callee->return_aggregate.alignment_bytes) {
+            (void)fprintf(
+                stream,
+                "machine IR verification: aggregate call %zu:%zu:%zu has an "
+                "invalid result slot\n",
+                function_index, block_index, instruction_index);
+            return false;
+        }
+    } else if (instruction->slot != LUNA_X86_64_MACHINE_INVALID_ID) {
+        (void)fprintf(
+            stream,
+            "machine IR verification: scalar call %zu:%zu:%zu names a result "
+            "slot\n",
             function_index, block_index, instruction_index);
         return false;
     }
@@ -340,6 +460,18 @@ static bool luna_x86_64_machine_verify_instruction_types(
                   instruction->left == LUNA_X86_64_MACHINE_INVALID_ID) ||
                  (function->return_type != LUNA_X86_64_MACHINE_TYPE_VOID &&
                   left_type != NULL && *left_type == function->return_type));
+        if (valid && function->return_aggregate.is_aggregate &&
+            !luna_x86_64_machine_value_addresses_exact_memory_slot(
+                function, instruction->left,
+                function->return_aggregate.size_bytes,
+                function->return_aggregate.alignment_bytes)) {
+            (void)fprintf(
+                stream,
+                "machine IR verification: aggregate return %zu:%zu:%zu does "
+                "not address an exact snapshot slot\n",
+                function_index, block_index, instruction_index);
+            return false;
+        }
         break;
     }
 
@@ -369,7 +501,11 @@ luna_x86_64_machine_verify_function(const LunaX8664MachineModule *module,
         function->name.length == 0U ||
         function->linkage < LUNA_X86_64_MACHINE_LINKAGE_INTERNAL ||
         function->linkage > LUNA_X86_64_MACHINE_LINKAGE_EXTERNAL_C ||
-        function->return_type == LUNA_X86_64_MACHINE_TYPE_INVALID) {
+        function->return_type == LUNA_X86_64_MACHINE_TYPE_INVALID ||
+        !luna_x86_64_machine_aggregate_layout_is_valid(
+            &function->return_aggregate) ||
+        (function->return_aggregate.is_aggregate &&
+         function->return_type != LUNA_X86_64_MACHINE_TYPE_POINTER)) {
         (void)fprintf(stream,
                       "machine IR verification: function %zu has an invalid "
                       "identity or signature\n",
@@ -396,6 +532,14 @@ luna_x86_64_machine_verify_function(const LunaX8664MachineModule *module,
 
     if (function->parameter_types.element_size !=
             sizeof(LunaX8664MachineType) ||
+        function->parameter_aggregates.element_size !=
+            sizeof(LunaX8664MachineAggregateLayout) ||
+        function->parameter_aggregates.length !=
+            function->parameter_types.length ||
+        function->parameter_aggregates.capacity <
+            function->parameter_aggregates.length ||
+        (function->parameter_aggregates.length != 0U &&
+         function->parameter_aggregates.data == NULL) ||
         function->slots.element_size != sizeof(LunaX8664MachineStackSlot) ||
         function->value_types.element_size != sizeof(LunaX8664MachineType) ||
         function->arguments.element_size !=
@@ -412,7 +556,13 @@ luna_x86_64_machine_verify_function(const LunaX8664MachineModule *module,
          index += 1U) {
         const LunaX8664MachineType *type =
             luna_vector_at_const(&function->parameter_types, index);
-        if (type == NULL || !luna_x86_64_machine_type_is_value(*type)) {
+        const LunaX8664MachineAggregateLayout *aggregate =
+            luna_vector_at_const(&function->parameter_aggregates, index);
+        if (type == NULL || aggregate == NULL ||
+            !luna_x86_64_machine_type_is_value(*type) ||
+            !luna_x86_64_machine_aggregate_layout_is_valid(aggregate) ||
+            (aggregate->is_aggregate &&
+             *type != LUNA_X86_64_MACHINE_TYPE_POINTER)) {
             (void)fprintf(
                 stream,
                 "machine IR verification: function %zu parameter %zu has an "
@@ -465,8 +615,22 @@ luna_x86_64_machine_verify_function(const LunaX8664MachineModule *module,
         if (slot_index < function->parameter_types.length) {
             const LunaX8664MachineType *parameter_type =
                 luna_vector_at_const(&function->parameter_types, slot_index);
-            if (!slot->is_scalar || parameter_type == NULL ||
-                slot->type != *parameter_type) {
+            const LunaX8664MachineAggregateLayout *parameter_aggregate =
+                luna_vector_at_const(&function->parameter_aggregates,
+                                     slot_index);
+            const bool valid_scalar =
+                parameter_aggregate != NULL &&
+                !parameter_aggregate->is_aggregate && slot->is_scalar &&
+                parameter_type != NULL && slot->type == *parameter_type;
+            const bool valid_aggregate =
+                parameter_aggregate != NULL &&
+                parameter_aggregate->is_aggregate && !slot->is_scalar &&
+                parameter_type != NULL &&
+                *parameter_type == LUNA_X86_64_MACHINE_TYPE_POINTER &&
+                slot->type == LUNA_X86_64_MACHINE_TYPE_VOID &&
+                slot->size_bytes == parameter_aggregate->size_bytes &&
+                slot->alignment_bytes == parameter_aggregate->alignment_bytes;
+            if (!valid_scalar && !valid_aggregate) {
                 (void)fprintf(
                     stream,
                     "machine IR verification: function %zu parameter home %zu "
@@ -745,6 +909,7 @@ bool luna_x86_64_machine_verify(const LunaX8664MachineModule *module,
         if (entry == NULL ||
             entry->linkage != LUNA_X86_64_MACHINE_LINKAGE_INTERNAL ||
             entry->return_type != LUNA_X86_64_MACHINE_TYPE_I32 ||
+            entry->return_aggregate.is_aggregate ||
             entry->parameter_types.length != 0U) {
             (void)fputs("machine IR verification: executable entry must be an "
                         "internal fn() -> i32\n",

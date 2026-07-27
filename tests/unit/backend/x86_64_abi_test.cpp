@@ -235,6 +235,91 @@ TEST(X8664AbiTest, AssignsIndependentRegisterBanksAndDenseStackSlots) {
                                         harness.DiagnosticEngine()->stream));
 }
 
+TEST(X8664AbiTest, LowersAggregateRegistersRollbackAndHiddenReturns) {
+    FrontendHarness harness{
+        "module test.aggregate_abi;\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "struct Mixed { weight: f64; tag: i32; }\n"
+        "struct Big { first: i64; second: i64; third: i64; }\n"
+        "fn pair(value: Pair) -> Pair { return value; }\n"
+        "fn mixed(value: Mixed) -> Mixed { return value; }\n"
+        "fn big(value: Big) -> Big { return value; }\n"
+        "fn rollback(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32,\n"
+        "            value: Pair) -> i32 { return value.left; }\n"
+        "fn main() -> i32 { return 0; }\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    MachineAbiOwner analysis{luna_target_info_default()};
+    ASSERT_TRUE(analysis.Analyze(harness)) << harness.Diagnostics();
+    const LunaX8664FunctionAbi *pair =
+        static_cast<const LunaX8664FunctionAbi *>(
+            luna_vector_at_const(&analysis.Abi()->functions, 0U));
+    const LunaX8664FunctionAbi *mixed =
+        static_cast<const LunaX8664FunctionAbi *>(
+            luna_vector_at_const(&analysis.Abi()->functions, 1U));
+    const LunaX8664FunctionAbi *big = static_cast<const LunaX8664FunctionAbi *>(
+        luna_vector_at_const(&analysis.Abi()->functions, 2U));
+    const LunaX8664FunctionAbi *rollback =
+        static_cast<const LunaX8664FunctionAbi *>(
+            luna_vector_at_const(&analysis.Abi()->functions, 3U));
+    ASSERT_NE(pair, nullptr);
+    ASSERT_NE(mixed, nullptr);
+    ASSERT_NE(big, nullptr);
+    ASSERT_NE(rollback, nullptr);
+
+    const LunaX8664AbiParameterLocation *pair_parameter =
+        ParameterLocation(pair, 0U);
+    ASSERT_NE(pair_parameter, nullptr);
+    EXPECT_TRUE(pair_parameter->is_aggregate);
+    ASSERT_EQ(pair_parameter->piece_count, 1U);
+    EXPECT_EQ(pair_parameter->pieces[0].abi_class,
+              LUNA_X86_64_ABI_CLASS_INTEGER);
+    EXPECT_EQ(pair_parameter->pieces[0].kind,
+              LUNA_X86_64_ABI_LOCATION_GENERAL_REGISTER);
+    EXPECT_EQ(pair_parameter->pieces[0].register_index, 0U);
+    EXPECT_TRUE(pair->return_location.is_aggregate);
+    EXPECT_FALSE(pair->return_location.uses_hidden_pointer);
+    ASSERT_EQ(pair->return_location.piece_count, 1U);
+    EXPECT_EQ(pair->return_location.pieces[0].register_index, 0U);
+
+    const LunaX8664AbiParameterLocation *mixed_parameter =
+        ParameterLocation(mixed, 0U);
+    ASSERT_NE(mixed_parameter, nullptr);
+    ASSERT_EQ(mixed_parameter->piece_count, 2U);
+    EXPECT_EQ(mixed_parameter->pieces[0].abi_class, LUNA_X86_64_ABI_CLASS_SSE);
+    EXPECT_EQ(mixed_parameter->pieces[0].register_index, 0U);
+    EXPECT_EQ(mixed_parameter->pieces[1].abi_class,
+              LUNA_X86_64_ABI_CLASS_INTEGER);
+    EXPECT_EQ(mixed_parameter->pieces[1].register_index, 0U);
+
+    const LunaX8664AbiParameterLocation *big_parameter =
+        ParameterLocation(big, 0U);
+    ASSERT_NE(big_parameter, nullptr);
+    EXPECT_TRUE(big->return_location.uses_hidden_pointer);
+    EXPECT_EQ(big->general_register_count, 1U);
+    EXPECT_TRUE(big_parameter->is_aggregate);
+    EXPECT_EQ(big_parameter->kind, LUNA_X86_64_ABI_LOCATION_STACK);
+    EXPECT_EQ(big_parameter->stack_offset_bytes, UINT64_C(0));
+    EXPECT_EQ(big_parameter->stack_size_bytes, UINT64_C(24));
+    EXPECT_EQ(big->call_frame_size_bytes, UINT64_C(32));
+
+    const LunaX8664AbiParameterLocation *rollback_parameter =
+        ParameterLocation(rollback, 6U);
+    ASSERT_NE(rollback_parameter, nullptr);
+    EXPECT_TRUE(rollback_parameter->is_aggregate);
+    EXPECT_EQ(rollback_parameter->kind, LUNA_X86_64_ABI_LOCATION_STACK);
+    EXPECT_EQ(rollback_parameter->stack_offset_bytes, UINT64_C(0));
+    EXPECT_EQ(rollback_parameter->stack_size_bytes, UINT64_C(8));
+
+    LunaX8664FunctionAbi *mutable_pair = static_cast<LunaX8664FunctionAbi *>(
+        luna_vector_at(&analysis.Abi()->functions, 0U));
+    ASSERT_NE(mutable_pair, nullptr);
+    mutable_pair->return_location.pieces[0].register_index = 1U;
+    EXPECT_FALSE(luna_x86_64_abi_verify(analysis.MachineModule(),
+                                        analysis.Abi(),
+                                        harness.DiagnosticEngine()->stream));
+}
+
 TEST(X8664AbiTest, PrintsDeterministicAuditableSnapshot) {
     FrontendHarness harness{
         "module test.abi_print;\n"

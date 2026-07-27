@@ -54,13 +54,40 @@ typedef struct LunaX8664AbiParameterLocation {
     LunaX8664AbiLocationKind kind;
     uint32_t register_index;
     uint64_t stack_offset_bytes;
+    bool is_aggregate;
+    uint64_t size_bytes;
+    uint32_t alignment_bytes;
+    uint64_t stack_size_bytes;
+    uint32_t piece_count;
+    struct {
+        LunaX8664AbiClass abi_class;
+        LunaX8664AbiLocationKind kind;
+        uint32_t register_index;
+        uint64_t value_offset_bytes;
+        uint64_t size_bytes;
+    } pieces[LUNA_X86_64_ABI_MAX_REGISTER_EIGHTBYTES];
 } LunaX8664AbiParameterLocation;
+
+typedef struct LunaX8664AbiReturnLocation {
+    bool is_aggregate;
+    bool uses_hidden_pointer;
+    uint64_t size_bytes;
+    uint32_t alignment_bytes;
+    uint32_t piece_count;
+    struct {
+        LunaX8664AbiClass abi_class;
+        uint32_t register_index;
+        uint64_t value_offset_bytes;
+        uint64_t size_bytes;
+    } pieces[LUNA_X86_64_ABI_MAX_REGISTER_EIGHTBYTES];
+} LunaX8664AbiReturnLocation;
 
 typedef struct LunaX8664FunctionAbi {
     uint32_t general_register_count;
     uint32_t vector_register_count;
     uint64_t stack_argument_size_bytes;
     uint64_t call_frame_size_bytes;
+    LunaX8664AbiReturnLocation return_location;
     LunaVector parameter_locations;
 } LunaX8664FunctionAbi;
 

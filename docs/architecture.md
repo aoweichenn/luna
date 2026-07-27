@@ -94,9 +94,9 @@ are interned into canonical types, and each structure, union and enum retains
 a distinct semantic identity. Context-directed aggregate initialization lowers
 directly into exact-layout local storage after validating every field before
 evaluating any initializer expression. Exact same-typed local memory objects
-copy by representation; composite values remain outside function signatures
-until aggregate by-value IR and ABI lowering is implemented. Type-only
-`sizeof`, `alignof`
+copy by representation. Composite parameters and results retain exact semantic
+type identity while lowering through explicit aggregate signature descriptors
+and address-backed snapshots. Type-only `sizeof`, `alignof`
 and `offsetof` expressions are resolved against the same target layout records
 and lowered directly to typed `usize` constants; the IR has no host-dependent
 layout-query instruction.
@@ -231,6 +231,17 @@ deterministic. Textual IR records the target triple. Target-specific
 registers, calling convention, instruction encodings and relocations do not
 appear in IR instructions.
 
+Every IR function signature owns one aggregate descriptor for its result and
+one descriptor parallel to each parameter. Scalar descriptors are empty.
+Aggregate descriptors contain exact size and alignment; register-eligible
+descriptors additionally contain flattened scalar leaves, while larger values
+are already unconditionally `MEMORY` class. The source type remains a
+structure, union or array in semantic checking, while the IR run-time carrier
+is an opaque object address. Aggregate arguments must address exact-layout
+snapshot slots, aggregate returns must address exact-layout return snapshots,
+and aggregate calls name an exact result slot; all three contracts are
+independently verified.
+
 ## x86-64 machine IR
 
 The target machine IR is an owned, target-specific boundary between typed Luna
@@ -276,11 +287,11 @@ dense eight-byte stack slot. The two register banks are counted independently.
 The caller frame is rounded to 16 bytes, and the callee reads the first stack
 parameter at `16(%rbp)` after establishing its frame pointer.
 
-The same owned module result contains an aggregate eightbyte classifier for
-future by-value lowering. It handles flattened integer/SSE leaves, structures,
+The same owned module result classifies aggregate signature descriptors into
+integer/SSE eightbytes. It handles structures, unions, fixed arrays,
 overlapping union fields, unaligned layouts and the two-eightbyte memory
-cutoff. Aggregate values do not yet enter typed or machine function
-signatures, so this stage does not claim aggregate passing or returning.
+cutoff. Small values use complete register assignments or whole-value
+rollback to the stack; larger results use a hidden destination pointer.
 
 The ABI verifier recomputes every function location and every aggregate
 classification. `lunac --emit abi` exposes deterministic parameter locations
@@ -331,6 +342,8 @@ The current machine-IR consumer is correctness-first:
   registers so mixed signatures can use both banks;
 - dense eight-byte stack slots for scalar arguments that exhaust either
   register bank, with a 16-byte-aligned caller argument area;
+- System V aggregate register pieces, whole-value register rollback, exact
+  stack copies, multi-register results and hidden-pointer results;
 - explicit stack frames;
 - virtual values assigned stack homes;
 - canonical zero-extended raw bits in the low 32 bits for 8-bit and 16-bit
@@ -376,7 +389,7 @@ This backend is intentionally not the performance endpoint. Planned stages are:
 8. peephole and local instruction selection improvements;
 9. ELF64 relocatable-object emission.
 
-The first five stages are complete. Aggregate by-value IR and ABI lowering is
+The first six stages are complete. Allocation-aware instruction rewriting is
 the next backend stage.
 
 The simple backend remains available as a reference backend for differential

@@ -11,6 +11,30 @@ _Static_assert(sizeof(long long) == 8,
 _Static_assert(sizeof(float) == 4, "x86-64 C ABI requires binary32 float");
 _Static_assert(sizeof(double) == 8, "x86-64 C ABI requires binary64 double");
 _Static_assert(sizeof(void *) == 8, "x86-64 C ABI requires 64-bit pointers");
+_Static_assert(sizeof(struct LunaTestPair) == 8,
+               "C pair layout must match Luna");
+_Static_assert(sizeof(struct LunaTestMixed) == 16,
+               "C mixed layout must match Luna");
+_Static_assert(_Alignof(struct LunaTestMixed) == 8,
+               "C mixed alignment must match Luna");
+_Static_assert(__builtin_offsetof(struct LunaTestMixed, tag) == 8,
+               "C mixed field offset must match Luna");
+_Static_assert(sizeof(struct LunaTestFloatPair) == 16,
+               "C float pair layout must match Luna");
+_Static_assert(_Alignof(struct LunaTestFloatPair) == 8,
+               "C float pair alignment must match Luna");
+_Static_assert(sizeof(struct LunaTestTaggedWeight) == 16,
+               "C tagged weight layout must match Luna");
+_Static_assert(_Alignof(struct LunaTestTaggedWeight) == 8,
+               "C tagged weight alignment must match Luna");
+_Static_assert(__builtin_offsetof(struct LunaTestTaggedWeight, weight) == 8,
+               "C tagged weight field offset must match Luna");
+_Static_assert(sizeof(struct LunaTestTriple) == 12,
+               "C triple layout must match Luna");
+_Static_assert(_Alignof(struct LunaTestTriple) == 4,
+               "C triple alignment must match Luna");
+_Static_assert(sizeof(struct LunaTestBig) == 24,
+               "C big layout must match Luna");
 _Static_assert(sizeof(struct LunaTestPayload) == 16,
                "C payload layout must match Luna");
 _Static_assert(_Alignof(struct LunaTestPayload) == 8,
@@ -170,4 +194,57 @@ _Bool c_validate_aggregate_layout(const struct LunaTestState *state) {
         }
     }
     return 1;
+}
+
+int c_sum_pair(struct LunaTestPair value) {
+    return value.left + value.right;
+}
+
+struct LunaTestPair c_make_pair(int left, int right) {
+    return (struct LunaTestPair){
+        .left = left,
+        .right = right,
+    };
+}
+
+struct LunaTestMixed c_adjust_mixed(struct LunaTestMixed value) {
+    value.weight += 1.5;
+    value.tag += 2;
+    return value;
+}
+
+struct LunaTestFloatPair c_echo_float_pair(struct LunaTestFloatPair value) {
+    return value;
+}
+
+struct LunaTestTaggedWeight
+c_echo_tagged_weight(struct LunaTestTaggedWeight value) {
+    return value;
+}
+
+struct LunaTestTriple c_echo_triple(struct LunaTestTriple value) {
+    return value;
+}
+
+union LunaTestNumberBits c_echo_number_bits(union LunaTestNumberBits value) {
+    return value;
+}
+
+struct LunaTestBig c_echo_big(struct LunaTestBig value) {
+    return value;
+}
+
+struct LunaTestBig c_make_big(long long first, long long second,
+                              long long third) {
+    return (struct LunaTestBig){
+        .first = first,
+        .second = second,
+        .third = third,
+    };
+}
+
+int c_rollback_pair(int first, int second, int third, int fourth, int fifth,
+                    int sixth, struct LunaTestPair value) {
+    return first + second + third + fourth + fifth + sixth + value.left +
+           value.right;
 }

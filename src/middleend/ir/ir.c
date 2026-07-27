@@ -13,12 +13,61 @@ static bool luna_ir_opcode_is_terminator(LunaIrOpcode opcode) {
            opcode == LUNA_IR_RETURN;
 }
 
+void luna_ir_aggregate_layout_init(LunaIrAggregateLayout *layout,
+                                   bool is_aggregate, uint64_t size_bytes,
+                                   uint32_t alignment_bytes) {
+    if (layout == NULL) {
+        return;
+    }
+    *layout = (LunaIrAggregateLayout){
+        .is_aggregate = is_aggregate,
+        .size_bytes = size_bytes,
+        .alignment_bytes = alignment_bytes,
+    };
+    luna_vector_init(&layout->components, sizeof(LunaIrAggregateComponent));
+}
+
+void luna_ir_aggregate_layout_destroy(LunaIrAggregateLayout *layout) {
+    if (layout == NULL) {
+        return;
+    }
+    luna_vector_destroy(&layout->components);
+    layout->is_aggregate = false;
+    layout->size_bytes = 0U;
+    layout->alignment_bytes = 0U;
+}
+
+bool luna_ir_aggregate_layout_add_component(LunaIrAggregateLayout *layout,
+                                            uint64_t offset_bytes,
+                                            uint64_t size_bytes,
+                                            uint32_t alignment_bytes,
+                                            LunaIrType type) {
+    const LunaIrAggregateComponent component = {
+        .offset_bytes = offset_bytes,
+        .size_bytes = size_bytes,
+        .alignment_bytes = alignment_bytes,
+        .type = type,
+    };
+    return layout != NULL && layout->is_aggregate &&
+           layout->components.element_size ==
+               sizeof(LunaIrAggregateComponent) &&
+           luna_vector_push(&layout->components, &component);
+}
+
 static void luna_ir_function_destroy(LunaIrFunction *function) {
     for (size_t index = 0U; index < function->blocks.length; index += 1U) {
         LunaIrBlock *block = luna_vector_at(&function->blocks, index);
         luna_vector_destroy(&block->instructions);
     }
 
+    for (size_t index = 0U; index < function->parameter_aggregates.length;
+         index += 1U) {
+        LunaIrAggregateLayout *layout =
+            luna_vector_at(&function->parameter_aggregates, index);
+        luna_ir_aggregate_layout_destroy(layout);
+    }
+    luna_ir_aggregate_layout_destroy(&function->return_aggregate);
+    luna_vector_destroy(&function->parameter_aggregates);
     luna_vector_destroy(&function->parameter_types);
     luna_vector_destroy(&function->slots);
     luna_vector_destroy(&function->value_types);
@@ -66,7 +115,10 @@ LunaIrFunctionId luna_ir_module_add_function(LunaIrModule *module,
         .linkage = linkage,
         .return_type = return_type,
     };
+    luna_ir_aggregate_layout_init(&function.return_aggregate, false, 0U, 0U);
     luna_vector_init(&function.parameter_types, sizeof(LunaIrType));
+    luna_vector_init(&function.parameter_aggregates,
+                     sizeof(LunaIrAggregateLayout));
     luna_vector_init(&function.slots, sizeof(LunaIrSlot));
     luna_vector_init(&function.value_types, sizeof(LunaIrType));
     luna_vector_init(&function.arguments, sizeof(LunaIrValueId));
@@ -399,6 +451,45 @@ static bool luna_ir_verify_binary(const LunaIrFunction *function,
            luna_ir_verify_result(function, instruction, result_type, reason);
 }
 
+static const LunaIrInstruction *
+luna_ir_find_value_definition(const LunaIrFunction *function,
+                              LunaIrValueId value) {
+    for (size_t block_index = 0U; block_index < function->blocks.length;
+         block_index += 1U) {
+        const LunaIrBlock *block =
+            luna_vector_at_const(&function->blocks, block_index);
+        if (block == NULL) {
+            return NULL;
+        }
+        for (size_t instruction_index = 0U;
+             instruction_index < block->instructions.length;
+             instruction_index += 1U) {
+            const LunaIrInstruction *instruction =
+                luna_vector_at_const(&block->instructions, instruction_index);
+            if (instruction != NULL && instruction->result == value) {
+                return instruction;
+            }
+        }
+    }
+    return NULL;
+}
+
+static bool luna_ir_value_addresses_exact_memory_slot(
+    const LunaIrFunction *function, LunaIrValueId value, uint64_t size_bytes,
+    uint32_t alignment_bytes) {
+    const LunaIrInstruction *definition =
+        luna_ir_find_value_definition(function, value);
+    const LunaIrSlot *slot =
+        definition == NULL
+            ? NULL
+            : luna_vector_at_const(&function->slots, definition->slot);
+    return definition != NULL &&
+           definition->opcode == LUNA_IR_ADDRESS_OF_SLOT && slot != NULL &&
+           !slot->is_scalar && slot->type == LUNA_IR_TYPE_VOID &&
+           slot->size_bytes == size_bytes &&
+           slot->alignment_bytes == alignment_bytes;
+}
+
 static bool luna_ir_verify_call(const LunaIrModule *module,
                                 const LunaIrFunction *function,
                                 const LunaIrInstruction *instruction,
@@ -426,6 +517,21 @@ static bool luna_ir_verify_call(const LunaIrModule *module,
                                reason)) {
         return false;
     }
+    if (callee->return_aggregate.is_aggregate) {
+        const LunaIrSlot *result_slot =
+            luna_vector_at_const(&function->slots, instruction->slot);
+        if (result_slot == NULL || result_slot->is_scalar ||
+            result_slot->type != LUNA_IR_TYPE_VOID ||
+            result_slot->size_bytes != callee->return_aggregate.size_bytes ||
+            result_slot->alignment_bytes !=
+                callee->return_aggregate.alignment_bytes) {
+            return luna_ir_reject(
+                reason, "aggregate call has an invalid result memory slot");
+        }
+    } else if (instruction->slot != LUNA_IR_INVALID_ID) {
+        return luna_ir_reject(reason,
+                              "scalar call unexpectedly names a result slot");
+    }
 
     for (size_t index = 0U; index < argument_count; index += 1U) {
         const size_t argument_index = first_argument + index;
@@ -438,9 +544,22 @@ static bool luna_ir_verify_call(const LunaIrModule *module,
             luna_vector_at_const(&function->arguments, argument_index);
         const LunaIrType *parameter_type =
             luna_vector_at_const(&callee->parameter_types, index);
-        if (!luna_ir_verify_value(function, *argument, *parameter_type,
+        const LunaIrAggregateLayout *parameter_aggregate =
+            luna_vector_at_const(&callee->parameter_aggregates, index);
+        if (argument == NULL || parameter_type == NULL ||
+            parameter_aggregate == NULL ||
+            !luna_ir_verify_value(function, *argument, *parameter_type,
                                   defined_in_block, reason)) {
             return false;
+        }
+        if (parameter_aggregate->is_aggregate) {
+            if (!luna_ir_value_addresses_exact_memory_slot(
+                    function, *argument, parameter_aggregate->size_bytes,
+                    parameter_aggregate->alignment_bytes)) {
+                return luna_ir_reject(
+                    reason, "aggregate call argument does not address an exact "
+                            "snapshot slot");
+            }
         }
         argument_used[argument_index] = true;
     }
@@ -903,9 +1022,21 @@ static bool luna_ir_verify_instruction(const LunaIrModule *module,
             }
             return true;
         }
-        return luna_ir_verify_value(function, instruction->left,
-                                    function->return_type, defined_in_block,
-                                    reason);
+        if (!luna_ir_verify_value(function, instruction->left,
+                                  function->return_type, defined_in_block,
+                                  reason)) {
+            return false;
+        }
+        if (function->return_aggregate.is_aggregate &&
+            !luna_ir_value_addresses_exact_memory_slot(
+                function, instruction->left,
+                function->return_aggregate.size_bytes,
+                function->return_aggregate.alignment_bytes)) {
+            return luna_ir_reject(
+                reason,
+                "aggregate return does not address an exact snapshot slot");
+        }
+        return true;
     }
 
     return luna_ir_reject(reason, "opcode is invalid");
@@ -921,6 +1052,45 @@ static bool luna_ir_add_computed_predecessor(uint32_t *predecessors,
     return true;
 }
 
+static bool
+luna_ir_aggregate_layout_is_valid(const LunaIrAggregateLayout *layout,
+                                  const LunaDataLayout *data_layout) {
+    if (layout == NULL ||
+        layout->components.element_size != sizeof(LunaIrAggregateComponent) ||
+        layout->components.capacity < layout->components.length ||
+        (layout->components.length != 0U && layout->components.data == NULL)) {
+        return false;
+    }
+    if (!layout->is_aggregate) {
+        return layout->size_bytes == 0U && layout->alignment_bytes == 0U &&
+               layout->components.length == 0U;
+    }
+    if (layout->size_bytes == 0U || layout->alignment_bytes == 0U ||
+        (layout->alignment_bytes & (layout->alignment_bytes - 1U)) != 0U ||
+        layout->size_bytes % (uint64_t)layout->alignment_bytes != 0U ||
+        (layout->size_bytes <= 16U && layout->components.length == 0U)) {
+        return false;
+    }
+    for (size_t index = 0U; index < layout->components.length; index += 1U) {
+        const LunaIrAggregateComponent *component =
+            luna_vector_at_const(&layout->components, index);
+        const uint32_t bit_width =
+            component == NULL
+                ? 0U
+                : luna_ir_type_bit_width(component->type, data_layout);
+        const uint64_t expected_size = (uint64_t)bit_width / 8U;
+        if (component == NULL || bit_width == 0U || bit_width % 8U != 0U ||
+            component->size_bytes != expected_size ||
+            component->alignment_bytes != expected_size ||
+            component->offset_bytes > layout->size_bytes ||
+            component->size_bytes >
+                layout->size_bytes - component->offset_bytes) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool luna_ir_verify_function(const LunaIrModule *module,
                                     const LunaIrFunction *function,
                                     size_t function_index, FILE *error_stream) {
@@ -932,11 +1102,44 @@ static bool luna_ir_verify_function(const LunaIrModule *module,
     LunaIrBlockId *worklist = NULL;
     bool success = false;
 
-    if (!luna_ir_type_is_return(function->return_type)) {
+    if (!luna_ir_type_is_return(function->return_type) ||
+        !luna_ir_aggregate_layout_is_valid(&function->return_aggregate,
+                                           &module->target->data_layout) ||
+        (function->return_aggregate.is_aggregate &&
+         function->return_type != LUNA_IR_TYPE_POINTER) ||
+        function->parameter_aggregates.element_size !=
+            sizeof(LunaIrAggregateLayout) ||
+        function->parameter_aggregates.length !=
+            function->parameter_types.length ||
+        function->parameter_aggregates.capacity <
+            function->parameter_aggregates.length ||
+        (function->parameter_aggregates.length != 0U &&
+         function->parameter_aggregates.data == NULL)) {
         (void)fprintf(error_stream,
-                      "IR verification: function %zu has invalid return type\n",
+                      "IR verification: function %zu has invalid signature "
+                      "layout\n",
                       function_index);
         goto cleanup;
+    }
+
+    for (size_t index = 0U; index < function->parameter_types.length;
+         index += 1U) {
+        const LunaIrType *parameter_type =
+            luna_vector_at_const(&function->parameter_types, index);
+        const LunaIrAggregateLayout *parameter_aggregate =
+            luna_vector_at_const(&function->parameter_aggregates, index);
+        if (parameter_type == NULL || parameter_aggregate == NULL ||
+            !luna_ir_aggregate_layout_is_valid(parameter_aggregate,
+                                               &module->target->data_layout) ||
+            (parameter_aggregate->is_aggregate &&
+             *parameter_type != LUNA_IR_TYPE_POINTER)) {
+            (void)fprintf(
+                error_stream,
+                "IR verification: function %zu parameter %zu has an invalid "
+                "signature layout\n",
+                function_index, index);
+            goto cleanup;
+        }
     }
 
     if (function->linkage != LUNA_IR_LINKAGE_INTERNAL &&
@@ -1018,9 +1221,20 @@ static bool luna_ir_verify_function(const LunaIrModule *module,
          index += 1U) {
         const LunaIrType *parameter_type =
             luna_vector_at_const(&function->parameter_types, index);
+        const LunaIrAggregateLayout *parameter_aggregate =
+            luna_vector_at_const(&function->parameter_aggregates, index);
         const LunaIrSlot *slot = luna_vector_at_const(&function->slots, index);
-        if (!luna_ir_type_is_value(*parameter_type) || !slot->is_scalar ||
-            slot->type != *parameter_type) {
+        const bool valid_scalar = !parameter_aggregate->is_aggregate &&
+                                  luna_ir_type_is_value(*parameter_type) &&
+                                  slot->is_scalar &&
+                                  slot->type == *parameter_type;
+        const bool valid_aggregate =
+            parameter_aggregate->is_aggregate &&
+            *parameter_type == LUNA_IR_TYPE_POINTER && !slot->is_scalar &&
+            slot->type == LUNA_IR_TYPE_VOID &&
+            slot->size_bytes == parameter_aggregate->size_bytes &&
+            slot->alignment_bytes == parameter_aggregate->alignment_bytes;
+        if (!valid_scalar && !valid_aggregate) {
             (void)fprintf(error_stream,
                           "IR verification: invalid parameter %zu in function "
                           "%zu\n",
@@ -1340,6 +1554,7 @@ bool luna_ir_verify(const LunaIrModule *module, FILE *error_stream) {
             luna_ir_module_function_const(module, module->entry_function);
         if (entry->linkage != LUNA_IR_LINKAGE_INTERNAL ||
             entry->return_type != LUNA_IR_TYPE_I32 ||
+            entry->return_aggregate.is_aggregate ||
             entry->parameter_types.length != 0U) {
             (void)fputs(
                 "IR verification: entry function must be an internal fn() -> "
@@ -1402,6 +1617,17 @@ static bool luna_ir_print_function_metadata(const LunaIrFunction *function,
            luna_string_builder_append_format(output,
                                              " [metadata 0x%016" PRIx64 "]",
                                              function->module_metadata_hash);
+}
+
+static bool
+luna_ir_print_signature_type(LunaStringBuilder *output, LunaIrType type,
+                             const LunaIrAggregateLayout *aggregate) {
+    if (aggregate != NULL && aggregate->is_aggregate) {
+        return luna_string_builder_append_format(
+            output, "aggregate[%" PRIu64 ",%" PRIu32 "]", aggregate->size_bytes,
+            aggregate->alignment_bytes);
+    }
+    return luna_string_builder_append_c_string(output, luna_ir_type_name(type));
 }
 
 static int64_t luna_ir_signed_immediate(LunaIrType type, uint64_t bits,
@@ -1790,7 +2016,15 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
             }
         }
 
-        return luna_string_builder_append_c_string(output, ")\n");
+        if (!luna_string_builder_append_c_string(output, ")")) {
+            return false;
+        }
+        if (callee->return_aggregate.is_aggregate &&
+            !luna_string_builder_append_format(output, " result=$%" PRIu32,
+                                               instruction->slot)) {
+            return false;
+        }
+        return luna_string_builder_append_c_string(output, "\n");
     }
 
     case LUNA_IR_JUMP:
@@ -1881,17 +2115,18 @@ bool luna_ir_print(const LunaIrModule *module, LunaStringBuilder *output) {
                  parameter_index += 1U) {
                 const LunaIrType *type = luna_vector_at_const(
                     &function->parameter_types, parameter_index);
+                const LunaIrAggregateLayout *aggregate = luna_vector_at_const(
+                    &function->parameter_aggregates, parameter_index);
                 if ((parameter_index > 0U &&
                      !luna_string_builder_append_c_string(output, ", ")) ||
-                    type == NULL ||
-                    !luna_string_builder_append_c_string(
-                        output, luna_ir_type_name(*type))) {
+                    type == NULL || aggregate == NULL ||
+                    !luna_ir_print_signature_type(output, *type, aggregate)) {
                     return false;
                 }
             }
-            if (!luna_string_builder_append_format(
-                    output, ") -> %s",
-                    luna_ir_type_name(function->return_type)) ||
+            if (!luna_string_builder_append_c_string(output, ") -> ") ||
+                !luna_ir_print_signature_type(output, function->return_type,
+                                              &function->return_aggregate) ||
                 !luna_ir_print_function_metadata(function, output) ||
                 !luna_string_builder_append_c_string(output, "\n\n")) {
                 return false;
@@ -1913,17 +2148,21 @@ bool luna_ir_print(const LunaIrModule *module, LunaStringBuilder *output) {
              parameter_index += 1U) {
             const LunaIrType *type = luna_vector_at_const(
                 &function->parameter_types, parameter_index);
+            const LunaIrAggregateLayout *aggregate = luna_vector_at_const(
+                &function->parameter_aggregates, parameter_index);
             if ((parameter_index > 0U &&
                  !luna_string_builder_append_c_string(output, ", ")) ||
-                !luna_string_builder_append_format(output, "$%zu: %s",
-                                                   parameter_index,
-                                                   luna_ir_type_name(*type))) {
+                !luna_string_builder_append_format(output,
+                                                   "$%zu: ", parameter_index) ||
+                type == NULL || aggregate == NULL ||
+                !luna_ir_print_signature_type(output, *type, aggregate)) {
                 return false;
             }
         }
 
-        if (!luna_string_builder_append_format(
-                output, ") -> %s", luna_ir_type_name(function->return_type)) ||
+        if (!luna_string_builder_append_c_string(output, ") -> ") ||
+            !luna_ir_print_signature_type(output, function->return_type,
+                                          &function->return_aggregate) ||
             !luna_ir_print_function_metadata(function, output) ||
             !luna_string_builder_append_c_string(output, " {\n")) {
             return false;

@@ -14,7 +14,8 @@ The project is deliberately narrow at this stage:
   pointers, local fixed arrays, immutable string literals, functions,
   exact-layout structures and unions, scoped enums, typed external C function
   declarations, context-directed named aggregate initialization, exact
-  whole-object copies, matched module interface/implementation pairs,
+  whole-object copies, aggregate parameters, results and temporaries, matched
+  module interface/implementation pairs,
   direct imports with explicit export visibility and validated dependency
   graphs, and deterministic compiled `.lmi` module metadata,
   type-only `sizeof`, `alignof` and `offsetof` queries, expressions, the
@@ -33,7 +34,9 @@ The project is deliberately narrow at this stage:
   IEEE-754 scalar SSE floating-point operations and checked numeric
   conversions, exact-width indirect memory access, checked fixed-array
   indexing, read-only static data, inline overlap-safe object copies and direct
-  System V calls to unmangled external C symbols;
+  System V scalar and aggregate calls to unmangled external C symbols,
+  including register rollback, stack copies, multi-register results and
+  hidden result pointers;
 - bootstrap host: conforming C23 with IEC 60559 binary32 and binary64;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests,
   typed-IR, machine-IR, liveness and register-allocation snapshots,
@@ -103,15 +106,15 @@ build/debug/lunac --emit mir -o hello.mir examples/hello.luna
 This is the x86-64 pre-register-allocation boundary, not a portable interchange
 format. Its `isize` and `usize` values have already become `i64` and `u64`.
 
-Verified System V scalar parameter locations and stack-frame sizes can be
+Verified System V parameter, result and stack-frame locations can be
 inspected independently:
 
 ```sh
 build/debug/lunac --emit abi -o hello.abi examples/hello.luna
 ```
 
-This output also exposes the verified aggregate eightbyte classifier. Aggregate
-values are not yet legal function parameters or results.
+This output exposes scalar locations, aggregate eightbyte pieces, whole-value
+stack rollback and hidden-result-pointer contracts.
 
 Verified block and instruction live sets can be inspected independently:
 
@@ -197,9 +200,10 @@ extern fn c_value(input: i32) -> i32;
 Compile the C23 implementation to an x86-64 object and include that object in
 the final `ld.lld` command. Luna emits the exact symbol name and does not
 implicitly link libc. The current external ABI accepts non-variadic
-scalar/pointer signatures, using the six integer and eight SSE System V
-argument registers independently and stack slots for further arguments.
-Aggregate arguments and results remain deferred.
+scalar, pointer, structure and union signatures. It uses the six integer and
+eight SSE System V argument registers independently, stack slots and aggregate
+memory copies when needed. Fixed arrays remain internal-only by value because
+C function types do not have by-value array parameters or results.
 
 ## Runtime boundary
 

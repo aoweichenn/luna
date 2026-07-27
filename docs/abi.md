@@ -75,15 +75,39 @@ is deterministic:
 
 The aggregate-classification verifier recomputes the result from the layout
 and rejects stale, corrupted or malformed data. Unit tests cover structures,
-mixed integer/SSE layouts, overlapping union leaves, unaligned fields,
-oversized aggregates and verifier corruption.
+fixed arrays, mixed integer/SSE layouts, overlapping union leaves, unaligned
+fields, oversized aggregates and verifier corruption.
 
-This classifier is intentionally ahead of value lowering. Typed IR and
-machine IR still represent aggregate objects as memory, so structures, unions
-and arrays cannot yet be passed or returned by value. Connecting classified
-aggregate values to function signatures, register rollback, stack copying and
-multi-register returns is a separate roadmap stage. The compiler does not
-claim that support merely because the classification algorithm exists.
+## Aggregate parameters and results
+
+Typed IR and machine IR attach an explicit aggregate layout descriptor to
+every by-value aggregate parameter and result. The run-time carrier in these
+IRs is an object address, but this is not a source-level pointer parameter:
+semantic lowering first snapshots each argument into distinct exact-layout
+storage. Calls therefore preserve source-order evaluation and by-value
+semantics even when later arguments branch, call other functions or alias the
+original object.
+
+An aggregate of at most two eightbytes uses all of its classified registers
+only when both register banks have enough capacity. If any required register
+is unavailable, assignment rolls back and the complete aggregate is copied to
+the stack. A `MEMORY` aggregate is also copied to one aligned stack area.
+Caller stack copies happen before argument registers are populated, and
+callees materialize register parameters before performing stack copies, so
+the `rep movsb` scratch registers cannot destroy live incoming arguments.
+
+Small aggregate results use `%rax` and `%rdx` for successive `INTEGER`
+eightbytes and `%xmm0` and `%xmm1` for successive `SSE` eightbytes. Mixed
+results count the two banks independently. A `MEMORY` result receives a
+hidden destination pointer in `%rdi`; user integer parameters begin at
+`%rsi`, the callee copies the exact result bytes to that destination and
+returns the destination address in `%rax`.
+
+Internal Luna signatures support structures, unions and fixed arrays by
+value. External C structures and unions use the same classifier and are
+tested against real strict C23 objects. Fixed arrays are rejected specifically
+at an external C boundary because a C function type has no by-value array
+parameter or result form. Variadic calls remain unsupported.
 
 ## Ownership and verification
 
@@ -93,7 +117,8 @@ including imports and external declarations. Each function result records:
 - used general-purpose and vector-register counts;
 - exact unrounded stack-argument bytes;
 - the aligned caller frame size;
-- one class and physical location for every parameter.
+- one scalar location or aggregate piece/stack location for every parameter;
+- aggregate result pieces or the hidden-return-pointer contract.
 
 Analysis accepts only an empty initialized destination, first verifies machine
 IR, builds into temporary owned storage, independently verifies the complete
@@ -106,7 +131,7 @@ The textual form is deliberately small:
 define @f0 app::consume parameters=7 gp=6 sse=0 stack-bytes=8 call-frame=16
   p0 type=i32 class=integer location=%rdi
   ...
-  p6 type=i32 class=integer location=stack[0]
+  p6 type=aggregate[8,4] class=memory location=stack[0] stack-size=8
 ```
 
 It is a deterministic review and test format, not a versioned object format.

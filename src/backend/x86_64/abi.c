@@ -85,7 +85,10 @@ static bool luna_x86_64_abi_aggregate_layout_is_valid(
         layout->size_bytes % (uint64_t)layout->alignment_bytes != 0U ||
         layout->components.element_size !=
             sizeof(LunaX8664AbiAggregateComponent) ||
-        layout->components.length == 0U ||
+        (layout->size_bytes <=
+             (uint64_t)LUNA_X86_64_ABI_MAX_REGISTER_EIGHTBYTES *
+                 LUNA_X86_64_ABI_EIGHTBYTE_SIZE &&
+         layout->components.length == 0U) ||
         layout->components.capacity < layout->components.length ||
         (layout->components.length != 0U && layout->components.data == NULL)) {
         return false;
@@ -212,16 +215,87 @@ void luna_x86_64_abi_function_destroy_internal(LunaX8664FunctionAbi *abi) {
     abi->vector_register_count = 0U;
     abi->stack_argument_size_bytes = 0U;
     abi->call_frame_size_bytes = 0U;
+    memset(&abi->return_location, 0, sizeof(abi->return_location));
 }
 
-static bool
-luna_x86_64_abi_add_parameter_location(LunaX8664FunctionAbi *abi,
-                                       LunaX8664AbiClass abi_class) {
+static bool luna_x86_64_abi_build_aggregate_layout(
+    const LunaX8664MachineAggregateLayout *source,
+    LunaX8664AbiAggregateLayout *destination) {
+    if (source == NULL || destination == NULL || !source->is_aggregate) {
+        return false;
+    }
+    luna_x86_64_abi_aggregate_layout_init(destination, source->size_bytes,
+                                          source->alignment_bytes);
+    for (size_t index = 0U; index < source->components.length; index += 1U) {
+        const LunaX8664MachineAggregateComponent *component =
+            luna_vector_at_const(&source->components, index);
+        const LunaX8664AbiClass abi_class =
+            component != NULL &&
+                    luna_x86_64_machine_type_is_float(component->type)
+                ? LUNA_X86_64_ABI_CLASS_SSE
+                : LUNA_X86_64_ABI_CLASS_INTEGER;
+        if (component == NULL ||
+            luna_x86_64_machine_type_register_class(component->type) ==
+                LUNA_X86_64_MACHINE_REGISTER_NONE ||
+            !luna_x86_64_abi_aggregate_layout_add_component(
+                destination, component->offset_bytes, component->size_bytes,
+                component->alignment_bytes, abi_class)) {
+            luna_x86_64_abi_aggregate_layout_destroy(destination);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool luna_x86_64_abi_classify_machine_aggregate(
+    const LunaX8664MachineAggregateLayout *source,
+    LunaX8664AbiAggregateClassification *classification) {
+    LunaX8664AbiAggregateLayout layout;
+    if (!luna_x86_64_abi_build_aggregate_layout(source, &layout)) {
+        return false;
+    }
+    const bool success =
+        luna_x86_64_abi_classify_aggregate(&layout, classification);
+    luna_x86_64_abi_aggregate_layout_destroy(&layout);
+    return success;
+}
+
+static bool luna_x86_64_abi_add_stack_area(LunaX8664FunctionAbi *abi,
+                                           uint64_t size_bytes,
+                                           uint32_t alignment_bytes,
+                                           uint64_t *offset_bytes,
+                                           uint64_t *area_size_bytes) {
+    uint64_t aligned_offset = 0U;
+    uint64_t aligned_size = 0U;
+    const uint32_t stack_alignment =
+        alignment_bytes > LUNA_X86_64_ABI_EIGHTBYTE_SIZE
+            ? alignment_bytes
+            : LUNA_X86_64_ABI_EIGHTBYTE_SIZE;
+    if (!luna_x86_64_abi_align_up(abi->stack_argument_size_bytes,
+                                  stack_alignment, &aligned_offset) ||
+        !luna_x86_64_abi_align_up(size_bytes, LUNA_X86_64_ABI_EIGHTBYTE_SIZE,
+                                  &aligned_size) ||
+        aligned_offset > (uint64_t)INT32_MAX ||
+        aligned_size > (uint64_t)INT32_MAX - aligned_offset) {
+        return false;
+    }
+    *offset_bytes = aligned_offset;
+    *area_size_bytes = aligned_size;
+    abi->stack_argument_size_bytes = aligned_offset + aligned_size;
+    return true;
+}
+
+static bool luna_x86_64_abi_add_parameter_location(LunaX8664FunctionAbi *abi,
+                                                   LunaX8664AbiClass abi_class,
+                                                   uint64_t size_bytes,
+                                                   uint32_t alignment_bytes) {
     LunaX8664AbiParameterLocation location = {
         .abi_class = abi_class,
         .kind = LUNA_X86_64_ABI_LOCATION_INVALID,
         .register_index = UINT32_MAX,
         .stack_offset_bytes = UINT64_MAX,
+        .size_bytes = size_bytes,
+        .alignment_bytes = alignment_bytes,
     };
     if (abi_class == LUNA_X86_64_ABI_CLASS_INTEGER &&
         abi->general_register_count < LUNA_X86_64_ABI_GENERAL_REGISTER_COUNT) {
@@ -235,14 +309,128 @@ luna_x86_64_abi_add_parameter_location(LunaX8664FunctionAbi *abi,
         location.register_index = abi->vector_register_count;
         abi->vector_register_count += 1U;
     } else {
-        if (abi->stack_argument_size_bytes >
-            (uint64_t)INT32_MAX -
-                (2U * (uint64_t)LUNA_X86_64_ABI_EIGHTBYTE_SIZE)) {
+        if (!luna_x86_64_abi_add_stack_area(abi, LUNA_X86_64_ABI_EIGHTBYTE_SIZE,
+                                            LUNA_X86_64_ABI_EIGHTBYTE_SIZE,
+                                            &location.stack_offset_bytes,
+                                            &location.stack_size_bytes)) {
             return false;
         }
         location.kind = LUNA_X86_64_ABI_LOCATION_STACK;
-        location.stack_offset_bytes = abi->stack_argument_size_bytes;
-        abi->stack_argument_size_bytes += LUNA_X86_64_ABI_EIGHTBYTE_SIZE;
+    }
+    return luna_vector_push(&abi->parameter_locations, &location);
+}
+
+static bool luna_x86_64_abi_classify_aggregate_return(
+    const LunaX8664MachineAggregateLayout *aggregate,
+    LunaX8664FunctionAbi *abi) {
+    if (!aggregate->is_aggregate) {
+        return true;
+    }
+    LunaX8664AbiAggregateClassification classification;
+    if (!luna_x86_64_abi_classify_machine_aggregate(aggregate,
+                                                    &classification)) {
+        return false;
+    }
+    abi->return_location.is_aggregate = true;
+    abi->return_location.size_bytes = aggregate->size_bytes;
+    abi->return_location.alignment_bytes = aggregate->alignment_bytes;
+    if (classification.eightbytes[0] == LUNA_X86_64_ABI_CLASS_MEMORY) {
+        abi->return_location.uses_hidden_pointer = true;
+        abi->general_register_count = 1U;
+        return true;
+    }
+
+    uint32_t general_index = 0U;
+    uint32_t vector_index = 0U;
+    abi->return_location.piece_count = classification.eightbyte_count;
+    for (uint32_t index = 0U; index < classification.eightbyte_count;
+         index += 1U) {
+        const uint64_t offset =
+            (uint64_t)index * LUNA_X86_64_ABI_EIGHTBYTE_SIZE;
+        const uint64_t remaining = aggregate->size_bytes - offset;
+        abi->return_location.pieces[index].abi_class =
+            classification.eightbytes[index];
+        abi->return_location.pieces[index].register_index =
+            classification.eightbytes[index] == LUNA_X86_64_ABI_CLASS_INTEGER
+                ? general_index++
+                : vector_index++;
+        abi->return_location.pieces[index].value_offset_bytes = offset;
+        abi->return_location.pieces[index].size_bytes =
+            remaining < LUNA_X86_64_ABI_EIGHTBYTE_SIZE
+                ? remaining
+                : LUNA_X86_64_ABI_EIGHTBYTE_SIZE;
+    }
+    return true;
+}
+
+static bool luna_x86_64_abi_add_aggregate_parameter(
+    LunaX8664FunctionAbi *abi,
+    const LunaX8664MachineAggregateLayout *aggregate) {
+    LunaX8664AbiAggregateClassification classification;
+    if (!luna_x86_64_abi_classify_machine_aggregate(aggregate,
+                                                    &classification)) {
+        return false;
+    }
+    LunaX8664AbiParameterLocation location = {
+        .abi_class = LUNA_X86_64_ABI_CLASS_NO_CLASS,
+        .kind = LUNA_X86_64_ABI_LOCATION_INVALID,
+        .register_index = UINT32_MAX,
+        .stack_offset_bytes = UINT64_MAX,
+        .is_aggregate = true,
+        .size_bytes = aggregate->size_bytes,
+        .alignment_bytes = aggregate->alignment_bytes,
+    };
+
+    uint32_t needed_general = 0U;
+    uint32_t needed_vector = 0U;
+    for (uint32_t index = 0U; index < classification.eightbyte_count;
+         index += 1U) {
+        if (classification.eightbytes[index] == LUNA_X86_64_ABI_CLASS_INTEGER) {
+            needed_general += 1U;
+        } else if (classification.eightbytes[index] ==
+                   LUNA_X86_64_ABI_CLASS_SSE) {
+            needed_vector += 1U;
+        }
+    }
+
+    const bool must_use_memory =
+        classification.eightbytes[0] == LUNA_X86_64_ABI_CLASS_MEMORY ||
+        needed_general > LUNA_X86_64_ABI_GENERAL_REGISTER_COUNT -
+                             abi->general_register_count ||
+        needed_vector >
+            LUNA_X86_64_ABI_VECTOR_REGISTER_COUNT - abi->vector_register_count;
+    if (must_use_memory) {
+        location.abi_class = LUNA_X86_64_ABI_CLASS_MEMORY;
+        location.kind = LUNA_X86_64_ABI_LOCATION_STACK;
+        if (!luna_x86_64_abi_add_stack_area(
+                abi, aggregate->size_bytes, aggregate->alignment_bytes,
+                &location.stack_offset_bytes, &location.stack_size_bytes)) {
+            return false;
+        }
+        return luna_vector_push(&abi->parameter_locations, &location);
+    }
+
+    location.piece_count = classification.eightbyte_count;
+    for (uint32_t index = 0U; index < classification.eightbyte_count;
+         index += 1U) {
+        const LunaX8664AbiClass abi_class = classification.eightbytes[index];
+        const uint64_t offset =
+            (uint64_t)index * LUNA_X86_64_ABI_EIGHTBYTE_SIZE;
+        const uint64_t remaining = aggregate->size_bytes - offset;
+        location.pieces[index].abi_class = abi_class;
+        location.pieces[index].kind =
+            abi_class == LUNA_X86_64_ABI_CLASS_INTEGER
+                ? LUNA_X86_64_ABI_LOCATION_GENERAL_REGISTER
+                : LUNA_X86_64_ABI_LOCATION_VECTOR_REGISTER;
+        location.pieces[index].register_index =
+            abi_class == LUNA_X86_64_ABI_CLASS_INTEGER
+                ? abi->general_register_count++
+                : abi->vector_register_count++;
+        location.pieces[index].value_offset_bytes = offset;
+        location.pieces[index].size_bytes =
+            remaining < LUNA_X86_64_ABI_EIGHTBYTE_SIZE
+                ? remaining
+                : LUNA_X86_64_ABI_EIGHTBYTE_SIZE;
     }
     return luna_vector_push(&abi->parameter_locations, &location);
 }
@@ -260,19 +448,39 @@ bool luna_x86_64_abi_classify_function_internal(
         luna_x86_64_abi_function_destroy_internal(abi);
         return false;
     }
+    if (!luna_x86_64_abi_classify_aggregate_return(&function->return_aggregate,
+                                                   abi)) {
+        luna_x86_64_abi_function_destroy_internal(abi);
+        return false;
+    }
 
     for (size_t index = 0U; index < function->parameter_types.length;
          index += 1U) {
         const LunaX8664MachineType *type =
             luna_vector_at_const(&function->parameter_types, index);
+        const LunaX8664MachineAggregateLayout *aggregate =
+            luna_vector_at_const(&function->parameter_aggregates, index);
+        if (aggregate != NULL && aggregate->is_aggregate) {
+            if (!luna_x86_64_abi_add_aggregate_parameter(abi, aggregate)) {
+                luna_x86_64_abi_function_destroy_internal(abi);
+                return false;
+            }
+            continue;
+        }
         const LunaX8664AbiClass abi_class =
             type != NULL && luna_x86_64_machine_type_is_float(*type)
                 ? LUNA_X86_64_ABI_CLASS_SSE
                 : LUNA_X86_64_ABI_CLASS_INTEGER;
-        if (type == NULL ||
+        const uint64_t size_bytes =
+            type == NULL
+                ? 0U
+                : (uint64_t)luna_x86_64_machine_type_bit_width(*type) / 8U;
+        if (type == NULL || aggregate == NULL || aggregate->is_aggregate ||
             luna_x86_64_machine_type_register_class(*type) ==
                 LUNA_X86_64_MACHINE_REGISTER_NONE ||
-            !luna_x86_64_abi_add_parameter_location(abi, abi_class)) {
+            size_bytes == 0U ||
+            !luna_x86_64_abi_add_parameter_location(abi, abi_class, size_bytes,
+                                                    (uint32_t)size_bytes)) {
             luna_x86_64_abi_function_destroy_internal(abi);
             return false;
         }

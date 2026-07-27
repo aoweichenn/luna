@@ -1409,16 +1409,16 @@ TEST(SemaTest, RejectsInvalidAggregateAndScopedEnumPrograms) {
          " switch (kind) { case 0 { return 1; } default { return 0; } }\n"
          "}\n",
          "enum switch case label must be a member"},
-        {"module test.aggregate_parameter;\n"
-         "struct Item { value: i32; }\n"
-         "fn take(item: Item) -> i32 { return 0; }\n"
+        {"module test.empty_aggregate_parameter;\n"
+         "struct Empty {}\n"
+         "fn take(value: Empty) -> i32 { return 0; }\n"
          "fn main() -> i32 { return 0; }\n",
-         "aggregate types cannot be passed by value"},
-        {"module test.aggregate_return;\n"
-         "struct Item { value: i32; }\n"
-         "fn make() -> Item { var item: Item = {}; return item; }\n"
+         "aggregate parameter type requires a positive target layout"},
+        {"module test.empty_aggregate_return;\n"
+         "struct Empty {}\n"
+         "fn make() -> Empty { return {}; }\n"
          "fn main() -> i32 { return 0; }\n",
-         "aggregate types cannot be returned by value"},
+         "aggregate return type requires a positive target layout"},
         {"module test.aggregate_initializer;\n"
          "struct Item { value: i32; }\n"
          "fn main() -> i32 { var item: Item = 0; return 0; }\n",
@@ -1574,6 +1574,88 @@ TEST(SemaTest, PreservesSequencedMemoryValuesAcrossControlFlowExpressions) {
     EXPECT_TRUE(harness.Verify()) << harness.Diagnostics();
 }
 
+TEST(SemaTest, LowersAggregateParametersReturnsAndCallResultStorage) {
+    FrontendHarness harness{
+        "module test.aggregate_values;\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "fn make() -> Pair { return { left = 20, right = 22, }; }\n"
+        "fn sum(value: Pair) -> i32 { return value.left + value.right; }\n"
+        "fn main() -> i32 { let value: Pair = make(); return sum(value); }\n"};
+
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    ASSERT_EQ(harness.Module()->functions.length, 3U);
+    const LunaIrFunction *make =
+        luna_ir_module_function_const(harness.Module(), 0U);
+    const LunaIrFunction *sum =
+        luna_ir_module_function_const(harness.Module(), 1U);
+    LunaIrFunction *main_function =
+        luna_ir_module_function(harness.Module(), 2U);
+    ASSERT_NE(make, nullptr);
+    ASSERT_NE(sum, nullptr);
+    ASSERT_NE(main_function, nullptr);
+
+    EXPECT_EQ(make->return_type, LUNA_IR_TYPE_POINTER);
+    EXPECT_TRUE(make->return_aggregate.is_aggregate);
+    EXPECT_EQ(make->return_aggregate.size_bytes, UINT64_C(8));
+    EXPECT_EQ(make->return_aggregate.alignment_bytes, UINT32_C(4));
+    EXPECT_EQ(make->return_aggregate.components.length, 2U);
+
+    ASSERT_EQ(sum->parameter_types.length, 1U);
+    ASSERT_EQ(sum->parameter_aggregates.length, 1U);
+    const LunaIrType *parameter_type = static_cast<const LunaIrType *>(
+        luna_vector_at_const(&sum->parameter_types, 0U));
+    const LunaIrAggregateLayout *parameter_aggregate =
+        static_cast<const LunaIrAggregateLayout *>(
+            luna_vector_at_const(&sum->parameter_aggregates, 0U));
+    ASSERT_NE(parameter_type, nullptr);
+    ASSERT_NE(parameter_aggregate, nullptr);
+    EXPECT_EQ(*parameter_type, LUNA_IR_TYPE_POINTER);
+    EXPECT_TRUE(parameter_aggregate->is_aggregate);
+    ASSERT_EQ(sum->slots.length, 1U);
+    const LunaIrSlot *parameter_home =
+        static_cast<const LunaIrSlot *>(luna_vector_at_const(&sum->slots, 0U));
+    ASSERT_NE(parameter_home, nullptr);
+    EXPECT_FALSE(parameter_home->is_scalar);
+    EXPECT_EQ(parameter_home->size_bytes, UINT64_C(8));
+
+    LunaIrInstruction *call = FindInstruction(main_function, LUNA_IR_CALL);
+    ASSERT_NE(call, nullptr);
+    EXPECT_EQ(call->type, LUNA_IR_TYPE_POINTER);
+    EXPECT_NE(call->slot, LUNA_IR_INVALID_ID);
+}
+
+TEST(SemaTest, LowersAggregateConditionalsAndTemporaryMemberAccess) {
+    FrontendHarness harness{
+        "module test.aggregate_temporaries;\n"
+        "struct Pair { left: i32; right: i32; }\n"
+        "fn make(flag: bool) -> Pair {\n"
+        "    return flag\n"
+        "        ? { left = 20, right = 22, }\n"
+        "        : { left = 1, right = 2, };\n"
+        "}\n"
+        "fn values() -> [2]i32 {\n"
+        "    var result: [2]i32 = {};\n"
+        "    result[0] = 20; result[1] = 22; return result;\n"
+        "}\n"
+        "fn sum(value: Pair) -> i32 { return value.left + value.right; }\n"
+        "fn main() -> i32 {\n"
+        "    let selected: Pair = true ? make(true) : make(false);\n"
+        "    return sum(selected) + make(false).right + values()[1] - 24;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+    LunaIrFunction *make = luna_ir_module_function(harness.Module(), 0U);
+    LunaIrFunction *main_function =
+        luna_ir_module_function(harness.Module(), 3U);
+    ASSERT_NE(make, nullptr);
+    ASSERT_NE(main_function, nullptr);
+    EXPECT_GE(make->blocks.length, 4U);
+    EXPECT_GE(main_function->blocks.length, 4U);
+    EXPECT_NE(FindInstruction(make, LUNA_IR_MEMORY_COPY), nullptr);
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_MEMBER_ADDRESS), nullptr);
+    EXPECT_NE(FindInstruction(main_function, LUNA_IR_POINTER_OFFSET), nullptr);
+}
+
 TEST(SemaTest, RejectsUnsafePointerAndArrayOperations) {
     FrontendHarness read_only{"module test.read_only;\n"
                               "fn main() -> i32 {\n"
@@ -1599,12 +1681,12 @@ TEST(SemaTest, RejectsUnsafePointerAndArrayOperations) {
 
     FrontendHarness array_parameter{
         "module test.array_parameter;\n"
-        "fn invalid(values: [2]i32) -> i32 { return values[0]; }\n"
-        "fn main() -> i32 { return 0; }\n"};
-    EXPECT_FALSE(array_parameter.ParseAndLower());
-    EXPECT_NE(array_parameter.Diagnostics().find(
-                  "fixed arrays cannot be passed by value"),
-              std::string::npos);
+        "fn first(values: [2]i32) -> i32 { return values[0]; }\n"
+        "fn main() -> i32 {\n"
+        "    var values: [2]i32 = {}; values[0] = 42;\n"
+        "    return first(values);\n"
+        "}\n"};
+    EXPECT_TRUE(array_parameter.Verify()) << array_parameter.Diagnostics();
 
     FrontendHarness nested_read_only_cast{
         "module test.nested_read_only_cast;\n"

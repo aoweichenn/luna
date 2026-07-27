@@ -70,14 +70,106 @@ static bool luna_x86_64_abi_print_function(
         return false;
     }
 
+    if (abi->return_location.is_aggregate) {
+        if (!luna_string_builder_append_format(
+                output, "  return type=aggregate[%" PRIu64 ",%" PRIu32 "] ",
+                abi->return_location.size_bytes,
+                abi->return_location.alignment_bytes)) {
+            return false;
+        }
+        if (abi->return_location.uses_hidden_pointer) {
+            if (!luna_string_builder_append_c_string(
+                    output, "location=hidden-sret\n")) {
+                return false;
+            }
+        } else {
+            if (!luna_string_builder_append_c_string(output, "pieces=[")) {
+                return false;
+            }
+            for (uint32_t index = 0U; index < abi->return_location.piece_count;
+                 index += 1U) {
+                const LunaX8664AbiClass abi_class =
+                    abi->return_location.pieces[index].abi_class;
+                const char *register_name =
+                    abi_class == LUNA_X86_64_ABI_CLASS_INTEGER
+                        ? (abi->return_location.pieces[index].register_index ==
+                                   0U
+                               ? "rax"
+                               : "rdx")
+                        : luna_x86_64_abi_vector_register_name(
+                              abi->return_location.pieces[index]
+                                  .register_index);
+                if ((index > 0U &&
+                     !luna_string_builder_append_c_string(output, ", ")) ||
+                    !luna_string_builder_append_format(
+                        output, "%s:%%%s@%" PRIu64 "+%" PRIu64,
+                        luna_x86_64_abi_class_name(abi_class), register_name,
+                        abi->return_location.pieces[index].value_offset_bytes,
+                        abi->return_location.pieces[index].size_bytes)) {
+                    return false;
+                }
+            }
+            if (!luna_string_builder_append_c_string(output, "]\n")) {
+                return false;
+            }
+        }
+    }
+
     for (size_t index = 0U; index < function->parameter_types.length;
          index += 1U) {
         const LunaX8664MachineType *type =
             luna_vector_at_const(&function->parameter_types, index);
         const LunaX8664AbiParameterLocation *location =
             luna_vector_at_const(&abi->parameter_locations, index);
-        if (type == NULL || location == NULL ||
-            !luna_string_builder_append_format(
+        if (type == NULL || location == NULL) {
+            return false;
+        }
+        if (location->is_aggregate) {
+            if (!luna_string_builder_append_format(
+                    output, "  p%zu type=aggregate[%" PRIu64 ",%" PRIu32 "] ",
+                    index, location->size_bytes, location->alignment_bytes)) {
+                return false;
+            }
+            if (location->kind == LUNA_X86_64_ABI_LOCATION_STACK) {
+                if (!luna_string_builder_append_format(
+                        output,
+                        "class=memory location=stack[%" PRIu64
+                        "] stack-size=%" PRIu64 "\n",
+                        location->stack_offset_bytes,
+                        location->stack_size_bytes)) {
+                    return false;
+                }
+                continue;
+            }
+            if (!luna_string_builder_append_c_string(output, "pieces=[")) {
+                return false;
+            }
+            for (uint32_t piece_index = 0U; piece_index < location->piece_count;
+                 piece_index += 1U) {
+                const LunaX8664AbiClass abi_class =
+                    location->pieces[piece_index].abi_class;
+                const char *register_name =
+                    abi_class == LUNA_X86_64_ABI_CLASS_INTEGER
+                        ? luna_x86_64_abi_general_register_name(
+                              location->pieces[piece_index].register_index)
+                        : luna_x86_64_abi_vector_register_name(
+                              location->pieces[piece_index].register_index);
+                if ((piece_index > 0U &&
+                     !luna_string_builder_append_c_string(output, ", ")) ||
+                    !luna_string_builder_append_format(
+                        output, "%s:%%%s@%" PRIu64 "+%" PRIu64,
+                        luna_x86_64_abi_class_name(abi_class), register_name,
+                        location->pieces[piece_index].value_offset_bytes,
+                        location->pieces[piece_index].size_bytes)) {
+                    return false;
+                }
+            }
+            if (!luna_string_builder_append_c_string(output, "]\n")) {
+                return false;
+            }
+            continue;
+        }
+        if (!luna_string_builder_append_format(
                 output, "  p%zu type=%s class=%s location=", index,
                 luna_x86_64_machine_type_name(*type),
                 luna_x86_64_abi_class_name(location->abi_class)) ||

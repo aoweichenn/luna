@@ -277,7 +277,7 @@ if(BUILD_TESTING)
             --compiler "$<TARGET_FILE:lunac>"
             --work-dir "${CMAKE_CURRENT_BINARY_DIR}/random"
             --seed 0x4c554e41
-            --cases 88
+            --cases 92
     )
     set_tests_properties(
         random.differential
@@ -333,6 +333,7 @@ if(LUNA_BUILD_FUZZERS)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/external.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/stack_arguments.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/aggregate.luna"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/aggregate_by_value.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/module_pair.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/module_import.luna"
             DESTINATION "${LUNA_FUZZ_CORPUS_DIR}"
