@@ -6,9 +6,10 @@ dynamic loader, a host assembler or generated C code.
 
 The runtime is deliberately a mechanism layer. It provides the process, file
 and virtual-memory operations required to build the minimum standard library
-and self-hosting compiler. Allocation, buffering, strings, formatting,
-path abstractions and retry policy remain in the following standard-library
-stage.
+and self-hosting compiler. Allocation, buffering, UTF-8 text, path ownership
+and complete-I/O retry policy are now implemented by the separate minimum
+standard-library layer. Formatting and higher-level facilities remain
+deferred.
 
 ## Sysroot artifacts
 
@@ -115,7 +116,12 @@ using it after unmap or unmapping it twice violates the runtime contract.
 
 This is virtual-memory plumbing, not a heap allocator. Alignment classes,
 allocation metadata, growth strategies and object lifetimes belong to the
-minimum standard library.
+minimum standard library. Its current correctness-first allocator maps one
+independent region per nonempty allocation.
+
+See [the minimum standard-library contract](minimum-standard-library.md) for
+the ownership, buffering, text, path and I/O policies built on these
+operations.
 
 ## Correctness gates
 

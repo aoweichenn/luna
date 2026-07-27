@@ -418,6 +418,14 @@ services, preserves explicit Linux errors and remains independent of libc.
 Its deterministic `.lmi` and `.o` files are sysroot artifacts; applications
 compile against the metadata and link the object explicitly.
 
+The minimum standard library is the next typed layer. Its independent
+`memory`, `bytes`, `text`, `path` and `io` modules are implemented in Luna and
+compile to deterministic sysroot metadata and objects. Only `memory` consumes
+the virtual-memory runtime API; higher modules build on typed standard
+dependencies. None can reach the raw system-call module. The layer deliberately
+uses explicit owner/result structures and contains no global allocator state,
+runtime initialization or implicit linking.
+
 This backend is intentionally not the performance endpoint. Planned stages are:
 
 1. correct stack-homed code;

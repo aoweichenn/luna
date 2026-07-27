@@ -151,6 +151,36 @@ set(LUNA_RUNTIME_METADATA
 set(LUNA_RUNTIME_OBJECT
     "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/runtime.o"
 )
+set(LUNA_STD_MEMORY_METADATA
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/std/memory.lmi"
+)
+set(LUNA_STD_MEMORY_OBJECT
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/std/memory.o"
+)
+set(LUNA_STD_BYTES_METADATA
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/std/bytes.lmi"
+)
+set(LUNA_STD_BYTES_OBJECT
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/std/bytes.o"
+)
+set(LUNA_STD_TEXT_METADATA
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/std/text.lmi"
+)
+set(LUNA_STD_TEXT_OBJECT
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/std/text.o"
+)
+set(LUNA_STD_PATH_METADATA
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/std/path.lmi"
+)
+set(LUNA_STD_PATH_OBJECT
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/std/path.o"
+)
+set(LUNA_STD_IO_METADATA
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/std/io.lmi"
+)
+set(LUNA_STD_IO_OBJECT
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/std/io.o"
+)
 add_custom_command(
     OUTPUT "${LUNA_SYSCALL_METADATA}"
     COMMAND
@@ -170,44 +200,112 @@ add_custom_command(
     COMMENT "Generating the Luna Linux syscall ABI module metadata"
     VERBATIM
 )
-add_custom_command(
-    OUTPUT "${LUNA_RUNTIME_METADATA}"
-    COMMAND
-        "${CMAKE_COMMAND}" -E make_directory
-        "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna"
-    COMMAND
-        "$<TARGET_FILE:lunac>"
-        --compile-module luna.runtime
-        --emit metadata
-        -o "${LUNA_RUNTIME_METADATA}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/luna/runtime.interface.luna"
-        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/luna/runtime.luna"
-        "${LUNA_SYSCALL_METADATA}"
-    DEPENDS
-        lunac
-        "${LUNA_SYSCALL_METADATA}"
-        runtime/luna/runtime.interface.luna
-        runtime/luna/runtime.luna
-    COMMENT "Generating the freestanding Luna runtime module metadata"
-    VERBATIM
+
+function(
+    luna_add_sysroot_module
+    module_name
+    interface_source
+    implementation_source
+    metadata_output
+    object_output
 )
-add_custom_command(
-    OUTPUT "${LUNA_RUNTIME_OBJECT}"
-    COMMAND
-        "$<TARGET_FILE:lunac>"
-        --compile-module luna.runtime
-        --emit obj
-        -o "${LUNA_RUNTIME_OBJECT}"
-        "${LUNA_RUNTIME_METADATA}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/luna/runtime.luna"
-        "${LUNA_SYSCALL_METADATA}"
-    DEPENDS
-        lunac
-        "${LUNA_SYSCALL_METADATA}"
-        "${LUNA_RUNTIME_METADATA}"
-        runtime/luna/runtime.luna
-    COMMENT "Generating the freestanding Luna runtime object"
-    VERBATIM
+    get_filename_component(metadata_directory "${metadata_output}" DIRECTORY)
+    add_custom_command(
+        OUTPUT "${metadata_output}"
+        COMMAND
+            "${CMAKE_COMMAND}" -E make_directory "${metadata_directory}"
+        COMMAND
+            "$<TARGET_FILE:lunac>"
+            --compile-module "${module_name}"
+            --emit metadata
+            -o "${metadata_output}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/${interface_source}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/${implementation_source}"
+            ${ARGN}
+        DEPENDS
+            lunac
+            "${interface_source}"
+            "${implementation_source}"
+            ${ARGN}
+        COMMENT "Generating ${module_name} metadata"
+        VERBATIM
+        COMMAND_EXPAND_LISTS
+    )
+    add_custom_command(
+        OUTPUT "${object_output}"
+        COMMAND
+            "$<TARGET_FILE:lunac>"
+            --compile-module "${module_name}"
+            --emit obj
+            -o "${object_output}"
+            "${metadata_output}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/${implementation_source}"
+            ${ARGN}
+        DEPENDS
+            lunac
+            "${metadata_output}"
+            "${implementation_source}"
+            ${ARGN}
+        COMMENT "Generating ${module_name} object"
+        VERBATIM
+        COMMAND_EXPAND_LISTS
+    )
+endfunction()
+
+luna_add_sysroot_module(
+    luna.runtime
+    runtime/luna/runtime.interface.luna
+    runtime/luna/runtime.luna
+    "${LUNA_RUNTIME_METADATA}"
+    "${LUNA_RUNTIME_OBJECT}"
+    "${LUNA_SYSCALL_METADATA}"
+)
+luna_add_sysroot_module(
+    luna.std.memory
+    runtime/luna/std/memory.interface.luna
+    runtime/luna/std/memory.luna
+    "${LUNA_STD_MEMORY_METADATA}"
+    "${LUNA_STD_MEMORY_OBJECT}"
+    "${LUNA_RUNTIME_METADATA}"
+)
+luna_add_sysroot_module(
+    luna.std.bytes
+    runtime/luna/std/bytes.interface.luna
+    runtime/luna/std/bytes.luna
+    "${LUNA_STD_BYTES_METADATA}"
+    "${LUNA_STD_BYTES_OBJECT}"
+    "${LUNA_RUNTIME_METADATA}"
+    "${LUNA_STD_MEMORY_METADATA}"
+)
+luna_add_sysroot_module(
+    luna.std.text
+    runtime/luna/std/text.interface.luna
+    runtime/luna/std/text.luna
+    "${LUNA_STD_TEXT_METADATA}"
+    "${LUNA_STD_TEXT_OBJECT}"
+    "${LUNA_RUNTIME_METADATA}"
+    "${LUNA_STD_BYTES_METADATA}"
+)
+luna_add_sysroot_module(
+    luna.std.path
+    runtime/luna/std/path.interface.luna
+    runtime/luna/std/path.luna
+    "${LUNA_STD_PATH_METADATA}"
+    "${LUNA_STD_PATH_OBJECT}"
+    "${LUNA_RUNTIME_METADATA}"
+    "${LUNA_STD_BYTES_METADATA}"
+    "${LUNA_STD_TEXT_METADATA}"
+)
+luna_add_sysroot_module(
+    luna.std.io
+    runtime/luna/std/io.interface.luna
+    runtime/luna/std/io.luna
+    "${LUNA_STD_IO_METADATA}"
+    "${LUNA_STD_IO_OBJECT}"
+    "${LUNA_RUNTIME_METADATA}"
+    "${LUNA_STD_BYTES_METADATA}"
+    "${LUNA_STD_TEXT_METADATA}"
+    "${LUNA_STD_PATH_METADATA}"
 )
 add_custom_target(
     luna_sysroot
@@ -215,6 +313,16 @@ add_custom_target(
         "${LUNA_SYSCALL_METADATA}"
         "${LUNA_RUNTIME_METADATA}"
         "${LUNA_RUNTIME_OBJECT}"
+        "${LUNA_STD_MEMORY_METADATA}"
+        "${LUNA_STD_MEMORY_OBJECT}"
+        "${LUNA_STD_BYTES_METADATA}"
+        "${LUNA_STD_BYTES_OBJECT}"
+        "${LUNA_STD_TEXT_METADATA}"
+        "${LUNA_STD_TEXT_OBJECT}"
+        "${LUNA_STD_PATH_METADATA}"
+        "${LUNA_STD_PATH_OBJECT}"
+        "${LUNA_STD_IO_METADATA}"
+        "${LUNA_STD_IO_OBJECT}"
 )
 
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
@@ -281,6 +389,7 @@ if(BUILD_TESTING)
         tests/unit/backend/debug_ir_test.cpp
         tests/unit/runtime/linux_syscall_test.cpp
         tests/unit/runtime/freestanding_runtime_test.cpp
+        tests/unit/stdlib/minimum_standard_library_test.cpp
         tests/unit/support/arena_test.cpp
         tests/unit/support/buffer_test.cpp
         tests/unit/frontend/diagnostic/diagnostic_test.cpp
@@ -449,6 +558,26 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME integration.minimum_standard_library
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/run_minimum_standard_library.py"
+            --compiler "$<TARGET_FILE:lunac>"
+            --linker "$<TARGET_FILE:lunalink>"
+            --sysroot "${CMAKE_CURRENT_BINARY_DIR}/sysroot"
+            --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --work-dir "${CMAKE_CURRENT_BINARY_DIR}/minimum-standard-library"
+    )
+    set_tests_properties(
+        integration.minimum_standard_library
+        PROPERTIES
+            LABELS "integration"
+            RESOURCE_LOCK "luna_sysroot"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 120
+    )
+
+    add_test(
         NAME unit.machine_ir_reference
         COMMAND
             "${Python3_EXECUTABLE}"
@@ -497,6 +626,26 @@ if(BUILD_TESTING)
             LABELS "random"
             SKIP_RETURN_CODE 77
             TIMEOUT 180
+    )
+
+    add_test(
+        NAME random.standard_library
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/random/run_standard_library_random.py"
+            --compiler "$<TARGET_FILE:lunac>"
+            --linker "$<TARGET_FILE:lunalink>"
+            --sysroot "${CMAKE_CURRENT_BINARY_DIR}/sysroot"
+            --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --work-dir "${CMAKE_CURRENT_BINARY_DIR}/standard-library-random"
+    )
+    set_tests_properties(
+        random.standard_library
+        PROPERTIES
+            LABELS "random"
+            RESOURCE_LOCK "luna_sysroot"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 90
     )
 endif()
 
@@ -550,6 +699,7 @@ if(LUNA_BUILD_FUZZERS)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/module_import.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/linux_syscall.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/freestanding_runtime.luna"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/minimum_standard_library.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/object_assembly.s"
             DESTINATION "${LUNA_FUZZ_CORPUS_DIR}"
         )

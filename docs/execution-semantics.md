@@ -331,8 +331,14 @@ Negative kernel error results are preserved without `errno` translation. The
 `luna.runtime` module converts them to the scoped `RuntimeError` representation
 and supplies named file and memory resources. Its read and write operations
 perform exactly one system call, expose short counts and do not hide
-`interrupted` or `would_block`. The future standard library must build
-allocation, buffering and retry policies only on this runtime layer. This
+`interrupted` or `would_block`.
+
+The `luna.std.memory`, `luna.std.bytes`, `luna.std.text`, `luna.std.path` and
+`luna.std.io` modules build allocation, buffering, UTF-8 validation, path
+termination and complete-I/O policies only on that runtime layer. Owning
+structures are copyable at the language level, but copying does not duplicate
+the resource: successful transforms transfer the documented release obligation
+to the result, and successful release invalidates every handle copy. This
 target-side restriction does not apply to the hosted C23 bootstrap compiler
 and does not prohibit an application from explicitly linking a caller-supplied
 object through `extern fn`.

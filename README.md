@@ -46,7 +46,8 @@ The project is deliberately narrow at this stage:
 - runtime boundary: canonical zero-to-six-argument Linux x86-64 system-call
   wrappers generated and verified by the project assembler, with raw kernel
   error results, plus a Luna-implemented typed process/file/virtual-memory
-  runtime and no target libc;
+  runtime and a Luna-implemented minimum memory/byte-buffer/UTF-8/path/I/O
+  standard library, with no target libc;
 - bootstrap host: conforming C23 with IEC 60559 binary32 and binary64;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests,
   typed-IR, machine-IR, ABI, liveness, register-allocation and
@@ -262,6 +263,13 @@ Compile applications with `sysroot/luna/runtime.lmi` and link
 wrapper object. Optional user-supplied `extern fn` objects remain an explicit
 FFI choice and are not part of the Luna runtime.
 
+The same sysroot target builds the minimum standard-library modules under
+`sysroot/luna/std/`. They provide owned allocations, growable byte buffers,
+validated UTF-8 text, NUL-terminated paths and complete file I/O. Every module
+is written in Luna, imports only the typed runtime or another standard module,
+and is emitted as deterministic `.lmi` and `.o` artifacts. Ownership is an
+explicit API invariant until the language has a move or affine type system.
+
 The bootstrap compiler itself remains a hosted C23 development tool. Its host
 library use does not become a dependency of generated target programs.
 
@@ -277,6 +285,7 @@ See [the language draft](docs/language.md),
 [project-owned static ELF64 linking](docs/elf-linker.md),
 [Linux x86-64 system-call ABI](docs/linux-syscall-abi.md),
 [freestanding runtime](docs/freestanding-runtime.md),
+[minimum standard library](docs/minimum-standard-library.md),
 [compiled module metadata format](docs/module-metadata.md),
 [bootstrap execution semantics](docs/execution-semantics.md), and the
 [implementation roadmap](docs/roadmap.md).

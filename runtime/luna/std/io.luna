@@ -1,0 +1,182 @@
+module luna.std.io;
+
+enum StdIoLimit: usize {
+    read_chunk = 4096,
+    maximum_size = 18446744073709551615,
+}
+
+fn std_io_write_all(
+    file: RuntimeFile,
+    data: *const u8,
+    length: usize
+) -> RuntimeError {
+    if (length != 0 && data == null) {
+        return RuntimeError.bad_address;
+    }
+
+    var written: usize = 0;
+    while (written < length) {
+        let result: RuntimeIoResult = runtime_file_write(
+            file,
+            &data[written],
+            length - written
+        );
+        if (result.error == RuntimeError.interrupted) {
+            continue;
+        }
+        if (result.error != RuntimeError.none) {
+            return result.error;
+        }
+        if (result.count == 0) {
+            return RuntimeError.io;
+        }
+        written += result.count;
+    }
+    return RuntimeError.none;
+}
+
+fn std_io_read_to_end(
+    file: RuntimeFile,
+    buffer: StdByteBuffer
+) -> StdByteBufferResult {
+    if (!std_byte_buffer_is_valid(buffer)) {
+        return {
+            buffer = buffer,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+
+    var result_buffer: StdByteBuffer = buffer;
+    while (true) {
+        if (result_buffer.capacity == result_buffer.length) {
+            if (result_buffer.length >
+                (StdIoLimit.maximum_size as usize) -
+                    (StdIoLimit.read_chunk as usize)) {
+                return {
+                    buffer = result_buffer,
+                    error = RuntimeError.out_of_memory,
+                };
+            }
+            let reserved: StdByteBufferResult =
+                std_byte_buffer_reserve(
+                    result_buffer,
+                    result_buffer.length +
+                        (StdIoLimit.read_chunk as usize)
+                );
+            if (reserved.error != RuntimeError.none) {
+                return reserved;
+            }
+            result_buffer = reserved.buffer;
+        }
+
+        let read: RuntimeIoResult = runtime_file_read(
+            file,
+            &result_buffer.data[result_buffer.length],
+            result_buffer.capacity - result_buffer.length
+        );
+        if (read.error == RuntimeError.interrupted) {
+            continue;
+        }
+        if (read.error != RuntimeError.none) {
+            return {
+                buffer = result_buffer,
+                error = read.error,
+            };
+        }
+        if (read.count == 0) {
+            return {
+                buffer = result_buffer,
+                error = RuntimeError.none,
+            };
+        }
+        result_buffer.length += read.count;
+    }
+    return {
+        buffer = result_buffer,
+        error = RuntimeError.io,
+    };
+}
+
+fn std_io_read_file(path: StdPath) -> StdByteBufferResult {
+    if (!std_path_is_valid(path)) {
+        return {
+            buffer = std_byte_buffer_empty(),
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    let opened: RuntimeFileResult =
+        runtime_file_open_read(std_path_as_c_string(path));
+    if (opened.error != RuntimeError.none) {
+        return {
+            buffer = std_byte_buffer_empty(),
+            error = opened.error,
+        };
+    }
+
+    let read: StdByteBufferResult =
+        std_io_read_to_end(opened.file, std_byte_buffer_empty());
+    let close_error: RuntimeError = runtime_file_close(opened.file);
+    if (read.error != RuntimeError.none) {
+        std_byte_buffer_release(read.buffer);
+        return {
+            buffer = std_byte_buffer_empty(),
+            error = read.error,
+        };
+    }
+    if (close_error != RuntimeError.none) {
+        std_byte_buffer_release(read.buffer);
+        return {
+            buffer = std_byte_buffer_empty(),
+            error = close_error,
+        };
+    }
+    return read;
+}
+
+fn std_io_write_file(
+    path: StdPath,
+    data: *const u8,
+    length: usize
+) -> RuntimeError {
+    if (!std_path_is_valid(path)) {
+        return RuntimeError.invalid_argument;
+    }
+    if (length != 0 && data == null) {
+        return RuntimeError.bad_address;
+    }
+    let opened: RuntimeFileResult =
+        runtime_file_create(std_path_as_c_string(path));
+    if (opened.error != RuntimeError.none) {
+        return opened.error;
+    }
+
+    let write_error: RuntimeError =
+        std_io_write_all(opened.file, data, length);
+    let close_error: RuntimeError = runtime_file_close(opened.file);
+    if (write_error != RuntimeError.none) {
+        return write_error;
+    }
+    return close_error;
+}
+
+fn std_io_print(text: StdTextView) -> RuntimeError {
+    if (!std_text_is_valid_utf8(text)) {
+        return RuntimeError.invalid_argument;
+    }
+    return std_io_write_all(
+        runtime_standard_output(),
+        text.data,
+        text.length
+    );
+}
+
+fn std_io_print_error(text: StdTextView) -> RuntimeError {
+    if (!std_text_is_valid_utf8(text)) {
+        return RuntimeError.invalid_argument;
+    }
+    return std_io_write_all(
+        runtime_standard_error(),
+        text.data,
+        text.length
+    );
+}

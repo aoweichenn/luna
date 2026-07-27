@@ -1,0 +1,251 @@
+module luna.std.text;
+
+fn std_text_empty_view() -> StdTextView {
+    return {
+        data = null,
+        length = 0,
+    };
+}
+
+fn std_text_view_result(
+    view: StdTextView,
+    error: RuntimeError
+) -> StdTextViewResult {
+    return {
+        view = view,
+        error = error,
+    };
+}
+
+fn std_owned_text_result(
+    text: StdOwnedText,
+    error: RuntimeError
+) -> StdOwnedTextResult {
+    return {
+        text = text,
+        error = error,
+    };
+}
+
+fn std_text_is_continuation(byte: u8) -> bool {
+    return byte >= 128 && byte <= 191;
+}
+
+fn std_text_is_valid_utf8(view: StdTextView) -> bool {
+    if (view.length == 0) {
+        return true;
+    }
+    if (view.data == null) {
+        return false;
+    }
+
+    var index: usize = 0;
+    while (index < view.length) {
+        let first: u8 = view.data[index];
+        if (first <= 127) {
+            index += 1;
+            continue;
+        }
+
+        if (first >= 194 && first <= 223) {
+            if (view.length - index < 2 ||
+                !std_text_is_continuation(view.data[index + 1])) {
+                return false;
+            }
+            index += 2;
+            continue;
+        }
+
+        if (first >= 224 && first <= 239) {
+            if (view.length - index < 3) {
+                return false;
+            }
+            let second: u8 = view.data[index + 1];
+            let third: u8 = view.data[index + 2];
+            if (!std_text_is_continuation(third)) {
+                return false;
+            }
+            if (first == 224 && (second < 160 || second > 191)) {
+                return false;
+            }
+            if (first == 237 && (second < 128 || second > 159)) {
+                return false;
+            }
+            if (first != 224 && first != 237 &&
+                !std_text_is_continuation(second)) {
+                return false;
+            }
+            index += 3;
+            continue;
+        }
+
+        if (first >= 240 && first <= 244) {
+            if (view.length - index < 4) {
+                return false;
+            }
+            let second: u8 = view.data[index + 1];
+            if (first == 240 && (second < 144 || second > 191)) {
+                return false;
+            }
+            if (first == 244 && (second < 128 || second > 143)) {
+                return false;
+            }
+            if (first != 240 && first != 244 &&
+                !std_text_is_continuation(second)) {
+                return false;
+            }
+            if (!std_text_is_continuation(view.data[index + 2]) ||
+                !std_text_is_continuation(view.data[index + 3])) {
+                return false;
+            }
+            index += 4;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+fn std_text_view(
+    data: *const u8,
+    length: usize
+) -> StdTextViewResult {
+    let view: StdTextView = {
+        data = data,
+        length = length,
+    };
+    if (length != 0 && data == null) {
+        return std_text_view_result(
+            std_text_empty_view(),
+            RuntimeError.bad_address
+        );
+    }
+    if (!std_text_is_valid_utf8(view)) {
+        return std_text_view_result(
+            std_text_empty_view(),
+            RuntimeError.invalid_argument
+        );
+    }
+    return std_text_view_result(view, RuntimeError.none);
+}
+
+fn std_text_from_c_string(
+    data: *const u8,
+    maximum_length: usize
+) -> StdTextViewResult {
+    if (data == null) {
+        return std_text_view_result(
+            std_text_empty_view(),
+            RuntimeError.bad_address
+        );
+    }
+
+    var length: usize = 0;
+    while (length < maximum_length && data[length] != 0) {
+        length += 1;
+    }
+    if (length == maximum_length) {
+        return std_text_view_result(
+            std_text_empty_view(),
+            RuntimeError.name_too_long
+        );
+    }
+    return std_text_view(data, length);
+}
+
+fn std_text_slice(
+    view: StdTextView,
+    offset: usize,
+    length: usize
+) -> StdTextViewResult {
+    if (!std_text_is_valid_utf8(view) || offset > view.length ||
+        length > view.length - offset) {
+        return std_text_view_result(
+            std_text_empty_view(),
+            RuntimeError.invalid_argument
+        );
+    }
+    if (length == 0) {
+        return std_text_view_result(
+            std_text_empty_view(),
+            RuntimeError.none
+        );
+    }
+    return std_text_view(&view.data[offset], length);
+}
+
+fn std_text_equal(left: StdTextView, right: StdTextView) -> bool {
+    if (!std_text_is_valid_utf8(left) ||
+        !std_text_is_valid_utf8(right) ||
+        left.length != right.length) {
+        return false;
+    }
+    if (left.length == 0) {
+        return true;
+    }
+
+    var index: usize = 0;
+    while (index < left.length) {
+        if (left.data[index] != right.data[index]) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn std_text_copy(view: StdTextView) -> StdOwnedTextResult {
+    if (!std_text_is_valid_utf8(view)) {
+        return std_owned_text_result(
+            { buffer = std_byte_buffer_empty(), },
+            RuntimeError.invalid_argument
+        );
+    }
+    let copied: StdByteBufferResult =
+        std_byte_buffer_from(view.data, view.length);
+    return std_owned_text_result(
+        { buffer = copied.buffer, },
+        copied.error
+    );
+}
+
+fn std_owned_text_view(text: StdOwnedText) -> StdTextViewResult {
+    if (!std_byte_buffer_is_valid(text.buffer)) {
+        return std_text_view_result(
+            std_text_empty_view(),
+            RuntimeError.invalid_argument
+        );
+    }
+    return std_text_view(
+        text.buffer.data as *const u8,
+        text.buffer.length
+    );
+}
+
+fn std_owned_text_append(
+    text: StdOwnedText,
+    suffix: StdTextView
+) -> StdOwnedTextResult {
+    let current: StdTextViewResult = std_owned_text_view(text);
+    if (current.error != RuntimeError.none ||
+        !std_text_is_valid_utf8(suffix)) {
+        return std_owned_text_result(
+            text,
+            RuntimeError.invalid_argument
+        );
+    }
+
+    let appended: StdByteBufferResult = std_byte_buffer_append(
+        text.buffer,
+        suffix.data,
+        suffix.length
+    );
+    return std_owned_text_result(
+        { buffer = appended.buffer, },
+        appended.error
+    );
+}
+
+fn std_owned_text_release(text: StdOwnedText) -> RuntimeError {
+    return std_byte_buffer_release(text.buffer);
+}

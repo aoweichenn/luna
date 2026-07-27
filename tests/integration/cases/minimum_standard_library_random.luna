@@ -1,0 +1,81 @@
+module tests.minimum_standard_library_random;
+
+import luna.runtime;
+import luna.std.memory;
+import luna.std.bytes;
+
+fn random_next(state: *u64) -> u64 {
+    var value: u64 = *state;
+    value ^= value << 13;
+    value ^= value >> 7;
+    value ^= value << 17;
+    *state = value;
+    return value;
+}
+
+fn main() -> i32 {
+    var expected: [8192]u8 = {};
+    var expected_length: usize = 0;
+    var state: u64 = 0x4c554e415354444c;
+    var buffer: StdByteBuffer = std_byte_buffer_empty();
+
+    var operation: usize = 0;
+    while (operation < 2048) {
+        let value: u8 = random_next(&state) as u8;
+        let pushed: StdByteBufferResult =
+            std_byte_buffer_push(buffer, value);
+        if (pushed.error != RuntimeError.none) {
+            return 1;
+        }
+        buffer = pushed.buffer;
+        expected[expected_length] = value;
+        expected_length += 1;
+        operation += 1;
+    }
+
+    operation = 0;
+    while (operation < 256) {
+        let offset: usize =
+            (random_next(&state) as usize) % expected_length;
+        var length: usize =
+            (random_next(&state) as usize) % 17;
+        if (length > expected_length - offset) {
+            length = expected_length - offset;
+        }
+        if (length > 8192 - expected_length) {
+            length = 8192 - expected_length;
+        }
+
+        let appended: StdByteBufferResult = std_byte_buffer_append(
+            buffer,
+            &buffer.data[offset] as *const u8,
+            length
+        );
+        if (appended.error != RuntimeError.none) {
+            return 2;
+        }
+        buffer = appended.buffer;
+        var index: usize = 0;
+        while (index < length) {
+            expected[expected_length + index] =
+                expected[offset + index];
+            index += 1;
+        }
+        expected_length += length;
+        operation += 1;
+    }
+
+    if (buffer.length != expected_length ||
+        !std_memory_equal(
+            buffer.data as *const u8,
+            &expected[0] as *const u8,
+            expected_length
+        )) {
+        return 3;
+    }
+    if (!std_byte_buffer_is_valid(buffer) ||
+        std_byte_buffer_release(buffer) != RuntimeError.none) {
+        return 4;
+    }
+    return 42;
+}
