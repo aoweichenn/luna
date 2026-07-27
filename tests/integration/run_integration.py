@@ -57,6 +57,7 @@ def require_target_runner() -> list[str]:
 def compile_and_run(
     compiler: pathlib.Path,
     llvm_mc: str,
+    oracle_linker: str,
     linker: str,
     target_runner: list[str],
     source: pathlib.Path,
@@ -106,7 +107,7 @@ def compile_and_run(
     )
     run(
         [
-            linker,
+            oracle_linker,
             "-static",
             "-e",
             "_start",
@@ -163,6 +164,7 @@ def metadata_fingerprint(payload: bytes, language_abi: int) -> int:
 def compile_separate_module_graph(
     compiler: pathlib.Path,
     llvm_mc: str,
+    oracle_linker: str,
     linker: str,
     target_runner: list[str],
     case_dir: pathlib.Path,
@@ -523,7 +525,7 @@ def compile_separate_module_graph(
     )
     run(
         [
-            linker,
+            oracle_linker,
             "-static",
             "-e",
             "_start",
@@ -721,19 +723,9 @@ def compile_separate_module_graph(
         )
 
 
-def compile_external_support(
-    clang: str,
-    source_root: pathlib.Path,
-    work_dir: pathlib.Path,
+def compile_c_support(
+    clang: str, source: pathlib.Path, object_file: pathlib.Path
 ) -> pathlib.Path:
-    source = (
-        source_root
-        / "tests"
-        / "integration"
-        / "support"
-        / "external_functions.c"
-    )
-    object_file = work_dir / "external_functions.o"
     run(
         [
             clang,
@@ -743,6 +735,7 @@ def compile_external_support(
             "-ffreestanding",
             "-fno-builtin",
             "-fno-stack-protector",
+            "-fno-common",
             "-fno-pic",
             "-fno-pie",
             "-Wall",
@@ -760,6 +753,58 @@ def compile_external_support(
         ]
     )
     return object_file
+
+
+def compile_external_support(
+    clang: str,
+    source_root: pathlib.Path,
+    work_dir: pathlib.Path,
+) -> pathlib.Path:
+    source = (
+        source_root
+        / "tests"
+        / "integration"
+        / "support"
+        / "external_functions.c"
+    )
+    return compile_c_support(clang, source, work_dir / "external_functions.o")
+
+
+def compile_bss_only_support(
+    clang: str,
+    source_root: pathlib.Path,
+    work_dir: pathlib.Path,
+) -> pathlib.Path:
+    source = (
+        source_root / "tests" / "integration" / "support" / "bss_only.c"
+    )
+    return compile_c_support(clang, source, work_dir / "bss_only_support.o")
+
+
+def verify_bss_only_load_segment(executable: pathlib.Path) -> None:
+    image = executable.read_bytes()
+    if len(image) < 64:
+        raise AssertionError("BSS-only executable has a truncated ELF header")
+    program_headers = struct.unpack_from("<Q", image, 32)[0]
+    program_size = struct.unpack_from("<H", image, 54)[0]
+    program_count = struct.unpack_from("<H", image, 56)[0]
+    writable_segments = 0
+    for index in range(program_count):
+        offset = program_headers + index * program_size
+        if offset + program_size > len(image) or program_size != 56:
+            raise AssertionError("BSS-only executable has invalid segments")
+        flags = struct.unpack_from("<I", image, offset + 4)[0]
+        if flags != 6:
+            continue
+        writable_segments += 1
+        file_size = struct.unpack_from("<Q", image, offset + 32)[0]
+        memory_size = struct.unpack_from("<Q", image, offset + 40)[0]
+        if file_size != 0 or memory_size == 0:
+            raise AssertionError(
+                "BSS-only writable segment is not zero-filled"
+            )
+    if writable_segments != 1:
+        raise AssertionError("BSS-only executable lacks one writable segment")
 
 
 def convert_integer(
@@ -1055,18 +1100,22 @@ def generate_switch_matrix(work_dir: pathlib.Path) -> pathlib.Path:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--compiler", type=pathlib.Path, required=True)
+    parser.add_argument("--linker", type=pathlib.Path, required=True)
     parser.add_argument("--source-root", type=pathlib.Path, required=True)
     parser.add_argument("--work-dir", type=pathlib.Path, required=True)
     arguments = parser.parse_args()
 
     llvm_mc = require_tool("llvm-mc")
-    linker = require_tool("ld.lld")
+    oracle_linker = require_tool("ld.lld")
     clang = require_tool("clang")
     target_runner = require_target_runner()
 
     arguments.work_dir.mkdir(parents=True, exist_ok=True)
     case_dir = arguments.source_root / "tests" / "integration" / "cases"
     external_support = compile_external_support(
+        clang, arguments.source_root, arguments.work_dir
+    )
+    bss_only_support = compile_bss_only_support(
         clang, arguments.source_root, arguments.work_dir
     )
 
@@ -1180,6 +1229,35 @@ def main() -> int:
         raise AssertionError("duplicate interface diagnostic is missing")
     print("PASS compiler command-line contract")
 
+    linker_help = run([str(arguments.linker), "--help"])
+    if (
+        "usage: lunalink" not in linker_help.stdout
+        or "static x86-64 Linux ELF" not in linker_help.stdout
+        or "implicit C runtime" not in linker_help.stdout
+    ):
+        raise AssertionError("--help did not print the linker contract")
+    linker_version = run([str(arguments.linker), "--version"])
+    if "lunalink 0.1.0-dev" not in linker_version.stdout:
+        raise AssertionError("--version did not print the linker version")
+    run([str(arguments.linker)], expected_code=2)
+    run([str(arguments.linker), "--unknown"], expected_code=2)
+    malformed_object = arguments.work_dir / "malformed-link-input.o"
+    transactional_output = arguments.work_dir / "preserved-link-output"
+    malformed_object.write_bytes(b"\x7fELF")
+    transactional_output.write_bytes(b"preserve-existing-output")
+    run(
+        [
+            str(arguments.linker),
+            "-o",
+            str(transactional_output),
+            str(malformed_object),
+        ],
+        expected_code=1,
+    )
+    if transactional_output.read_bytes() != b"preserve-existing-output":
+        raise AssertionError("failed link replaced the prior output")
+    print("PASS linker command-line contract")
+
     executable_cases = {
         "return_42.luna": 42,
         "arithmetic.luna": 42,
@@ -1263,7 +1341,8 @@ def main() -> int:
         compile_and_run(
             arguments.compiler,
             llvm_mc,
-            linker,
+            oracle_linker,
+            str(arguments.linker),
             target_runner,
             case_dir / case_name,
             arguments.work_dir,
@@ -1274,7 +1353,8 @@ def main() -> int:
     compile_and_run(
         arguments.compiler,
         llvm_mc,
-        linker,
+        oracle_linker,
+        str(arguments.linker),
         target_runner,
         case_dir / "external_c_abi.luna",
         arguments.work_dir,
@@ -1286,7 +1366,22 @@ def main() -> int:
     compile_and_run(
         arguments.compiler,
         llvm_mc,
-        linker,
+        oracle_linker,
+        str(arguments.linker),
+        target_runner,
+        case_dir / "bss_only.luna",
+        arguments.work_dir,
+        42,
+        (bss_only_support,),
+    )
+    verify_bss_only_load_segment(arguments.work_dir / "bss_only")
+    print("PASS executable: bss_only.luna with a zero-fill-only data segment")
+
+    compile_and_run(
+        arguments.compiler,
+        llvm_mc,
+        oracle_linker,
+        str(arguments.linker),
         target_runner,
         case_dir / "aggregate_c_abi.luna",
         arguments.work_dir,
@@ -1298,7 +1393,8 @@ def main() -> int:
     compile_and_run(
         arguments.compiler,
         llvm_mc,
-        linker,
+        oracle_linker,
+        str(arguments.linker),
         target_runner,
         case_dir / "module_pair_implementation.luna",
         arguments.work_dir,
@@ -1317,7 +1413,8 @@ def main() -> int:
     compile_and_run(
         arguments.compiler,
         llvm_mc,
-        linker,
+        oracle_linker,
+        str(arguments.linker),
         target_runner,
         case_dir / "module_import_app.luna",
         arguments.work_dir,
@@ -1329,7 +1426,8 @@ def main() -> int:
     compile_separate_module_graph(
         arguments.compiler,
         llvm_mc,
-        linker,
+        oracle_linker,
+        str(arguments.linker),
         target_runner,
         case_dir,
         arguments.work_dir,
@@ -1340,7 +1438,8 @@ def main() -> int:
     compile_and_run(
         arguments.compiler,
         llvm_mc,
-        linker,
+        oracle_linker,
+        str(arguments.linker),
         target_runner,
         conversion_matrix,
         arguments.work_dir,
@@ -1354,7 +1453,8 @@ def main() -> int:
     compile_and_run(
         arguments.compiler,
         llvm_mc,
-        linker,
+        oracle_linker,
+        str(arguments.linker),
         target_runner,
         scalar_conversion_matrix,
         arguments.work_dir,
@@ -1366,7 +1466,8 @@ def main() -> int:
     compile_and_run(
         arguments.compiler,
         llvm_mc,
-        linker,
+        oracle_linker,
+        str(arguments.linker),
         target_runner,
         conditional_matrix,
         arguments.work_dir,
@@ -1378,7 +1479,8 @@ def main() -> int:
     compile_and_run(
         arguments.compiler,
         llvm_mc,
-        linker,
+        oracle_linker,
+        str(arguments.linker),
         target_runner,
         switch_matrix,
         arguments.work_dir,

@@ -52,6 +52,7 @@ struct LunaTestState {
 };
 
 _Bool c_bool_flip(_Bool value);
+unsigned int c_data_bss_round_trip(void);
 signed char c_i8_identity(signed char value);
 short c_i16_identity(short value);
 int c_i32_identity(int value);

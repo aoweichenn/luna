@@ -50,6 +50,12 @@ add_library(luna_compiler STATIC
     src/backend/x86_64/backend.c
     src/backend/x86_64/elf_object.c
     src/backend/x86_64/instruction_encoder.c
+    src/backend/x86_64/linker/elf_executable.c
+    src/backend/x86_64/linker/elf_layout.c
+    src/backend/x86_64/linker/elf_linker.c
+    src/backend/x86_64/linker/elf_reader.c
+    src/backend/x86_64/linker/elf_relocation.c
+    src/backend/x86_64/linker/elf_symbols.c
     src/backend/x86_64/instruction_rewrite.c
     src/backend/x86_64/instruction_rewrite_print.c
     src/backend/x86_64/instruction_rewrite_verify.c
@@ -130,8 +136,25 @@ endif()
 add_executable(lunac src/frontend/compiler/main.c)
 target_link_libraries(lunac PRIVATE luna_compiler)
 
+add_executable(lunalink src/backend/x86_64/linker/main.c)
+target_link_libraries(lunalink PRIVATE luna_compiler)
+
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(lunac PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Werror
+        -Wconversion
+        -Wsign-conversion
+        -Wshadow
+        -Wformat=2
+        -Wundef
+        -Wcast-qual
+        -Wstrict-prototypes
+        -Wmissing-prototypes
+    )
+    target_compile_options(lunalink PRIVATE
         -Wall
         -Wextra
         -Wpedantic
@@ -194,6 +217,7 @@ if(BUILD_TESTING)
         tests/unit/backend/x86_64_machine_ir_test.cpp
         tests/unit/backend/x86_64_register_allocation_test.cpp
         tests/unit/backend/x86_64_instruction_rewrite_test.cpp
+        tests/unit/backend/x86_64_elf_linker_test.cpp
         tests/unit/backend/x86_64_elf_object_test.cpp
         tests/unit/backend/x86_64_test.cpp
     )
@@ -266,6 +290,7 @@ if(BUILD_TESTING)
             "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/run_integration.py"
             --compiler "$<TARGET_FILE:lunac>"
+            --linker "$<TARGET_FILE:lunalink>"
             --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
             --work-dir "${CMAKE_CURRENT_BINARY_DIR}/integration"
     )
@@ -295,6 +320,7 @@ if(BUILD_TESTING)
             "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/random/run_random.py"
             --compiler "$<TARGET_FILE:lunac>"
+            --linker "$<TARGET_FILE:lunalink>"
             --work-dir "${CMAKE_CURRENT_BINARY_DIR}/random"
             --seed 0x4c554e41
             --cases 92
@@ -313,6 +339,7 @@ if(BUILD_TESTING)
             "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/differential/run_instruction_differential.py"
             --compiler "$<TARGET_FILE:lunac>"
+            --linker "$<TARGET_FILE:lunalink>"
             --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
             --work-dir "${CMAKE_CURRENT_BINARY_DIR}/instruction-differential"
             --seed 0x4c554e414952

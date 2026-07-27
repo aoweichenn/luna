@@ -15,9 +15,10 @@ boundary, not a runtime dependency.
 
 The compiler owns the language semantics. Luna now encodes its x86-64
 instructions and writes ELF64 relocatable objects directly. LLVM MC remains
-only an independent test oracle, while LLD performs the final static link
-until the minimal project-owned linker is implemented. Neither tool is used as
-the compiler IR, optimizer or instruction selector.
+only an independent test oracle. The project-owned `lunalink` resolves symbols,
+applies static relocations and writes ELF64 executables directly. LLD remains
+only an independent final-link oracle in differential tests. Neither external
+tool is used by the production compiler or linker path.
 
 External C functions are represented directly throughout the pipeline; Luna
 never generates a C translation unit. The final ELF link may combine a
@@ -76,7 +77,10 @@ lexer -> parser -> syntax tree
                   verified ELF64 relocatable object
                               |
                               v
-                             LLD
+                   project-owned static linker
+                              |
+                              v
+                  verified static ELF64 executable
 ```
 
 Assembly is a closed output encoding of the x86-64 backend, not a user-facing
@@ -422,10 +426,10 @@ This backend is intentionally not the performance endpoint. Planned stages are:
 10. minimal project-owned ELF64 static linking;
 11. debug information design.
 
-The first nine stages are complete. The native writer produces deterministic,
+The first ten stages are complete. The native writer produces deterministic,
 self-verified objects with direct x86-64 encoding and explicit relocations.
-The next binary-toolchain stage is the minimal project-owned static linker;
-debug information remains separately deferred.
+The static linker consumes Luna and supported freestanding C23 objects without
+invoking another linker. Debug information remains separately deferred.
 
 The current direct pseudo expansions remain unoptimized and serve as the
 semantic reference for future local instruction-selection work.
@@ -453,7 +457,8 @@ The quality gate contains:
   instruction-rewrite snapshots;
 - native x86-64 encoding and ELF64 object verification, with LLVM MC retained
   as an independent differential oracle;
-- static ELF64 linking through LLD;
+- project-owned static ELF64 linking, executable verification and malformed
+  object mutation tests, with LLD retained only as an oracle;
 - execution under `qemu-x86_64-static`;
 - deterministic generated-program differential tests;
 - executable matrices and boundary traps for every numeric scalar conversion

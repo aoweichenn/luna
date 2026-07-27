@@ -151,6 +151,7 @@ def evaluate_reference_trap(machine_ir: pathlib.Path) -> tuple[int, set[str]]:
 def execute_case(
     compiler: pathlib.Path,
     llvm_mc: str,
+    oracle_linker: str,
     linker: str,
     target_runner: list[str],
     sources: tuple[pathlib.Path, ...],
@@ -190,7 +191,7 @@ def execute_case(
     emit(compiler, "asm", assembly, sources)
     assemble_and_link(
         llvm_mc,
-        linker,
+        oracle_linker,
         assembly,
         oracle_object,
         oracle_executable,
@@ -327,6 +328,7 @@ def parse_seed(text: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--compiler", type=pathlib.Path, required=True)
+    parser.add_argument("--linker", type=pathlib.Path, required=True)
     parser.add_argument("--source-root", type=pathlib.Path, required=True)
     parser.add_argument("--work-dir", type=pathlib.Path, required=True)
     parser.add_argument("--seed", type=parse_seed, required=True)
@@ -336,7 +338,8 @@ def main() -> int:
         parser.error("--cases must be positive")
 
     llvm_mc = require_tool("llvm-mc")
-    linker = require_tool("ld.lld")
+    oracle_linker = require_tool("ld.lld")
+    linker = str(arguments.linker)
     target_runner = require_target_runner()
     arguments.work_dir.mkdir(parents=True, exist_ok=True)
     generator_dir = arguments.source_root / "tests" / "random"
@@ -351,6 +354,7 @@ def main() -> int:
         opcodes, rewrite_text = execute_case(
             arguments.compiler,
             llvm_mc,
+            oracle_linker,
             linker,
             target_runner,
             (fixture_root / case_name,),
@@ -368,6 +372,7 @@ def main() -> int:
     pressure_opcodes, pressure_rewrite = execute_case(
         arguments.compiler,
         llvm_mc,
+        oracle_linker,
         linker,
         target_runner,
         (pressure_path,),
@@ -383,6 +388,7 @@ def main() -> int:
         opcodes, _ = execute_case(
             arguments.compiler,
             llvm_mc,
+            oracle_linker,
             linker,
             target_runner,
             (fixture_root / case_name,),
@@ -404,6 +410,7 @@ def main() -> int:
             opcodes, _ = execute_case(
                 arguments.compiler,
                 llvm_mc,
+                oracle_linker,
                 linker,
                 target_runner,
                 (source_path,),

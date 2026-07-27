@@ -369,9 +369,62 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
                 .length = object.length,
             },
             diagnostic_file);
+        LunaStringBuilder executable{};
+        luna_string_builder_init(&executable);
+        const LunaX8664ElfLinkInput input = {
+            .name = luna_string_view_from_c_string("<fuzz-object>"),
+            .object =
+                {
+                    .data = luna_string_builder_data(&object),
+                    .length = object.length,
+                },
+        };
+        if (invariant_holds &&
+            luna_x86_64_link_elf_executable(
+                &input, 1U, luna_string_view_from_c_string("_start"),
+                diagnostic_file, &executable)) {
+            invariant_holds = luna_x86_64_elf_executable_verify(
+                LunaStringView{
+                    .data = luna_string_builder_data(&executable),
+                    .length = executable.length,
+                },
+                diagnostic_file);
+        }
+        luna_string_builder_destroy(&executable);
     }
 
     luna_string_builder_destroy(&object);
+    static_cast<void>(std::fclose(diagnostic_file));
+    return invariant_holds;
+}
+
+[[nodiscard]] bool RunObjectLinker(const std::uint8_t *data, std::size_t size) {
+    std::FILE *diagnostic_file = std::fopen("/dev/null", "wb");
+    if (diagnostic_file == nullptr) {
+        return true;
+    }
+    const LunaX8664ElfLinkInput input = {
+        .name = luna_string_view_from_c_string("<fuzz-raw-object>"),
+        .object =
+            {
+                .data = reinterpret_cast<const char *>(data),
+                .length = size,
+            },
+    };
+    LunaStringBuilder executable{};
+    luna_string_builder_init(&executable);
+    bool invariant_holds = true;
+    if (luna_x86_64_link_elf_executable(
+            &input, 1U, luna_string_view_from_c_string("_start"),
+            diagnostic_file, &executable)) {
+        invariant_holds = luna_x86_64_elf_executable_verify(
+            LunaStringView{
+                .data = luna_string_builder_data(&executable),
+                .length = executable.length,
+            },
+            diagnostic_file);
+    }
+    luna_string_builder_destroy(&executable);
     static_cast<void>(std::fclose(diagnostic_file));
     return invariant_holds;
 }
@@ -383,7 +436,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data,
     if (size <= LUNA_FUZZ_MAX_INPUT_SIZE &&
         (!RunAggregateAbiClassification(data, size) ||
          !RunFrontend(data, size) || !RunModuleCompilation(data, size) ||
-         !RunMetadataDecoder(data, size) || !RunObjectAssembler(data, size))) {
+         !RunMetadataDecoder(data, size) || !RunObjectAssembler(data, size) ||
+         !RunObjectLinker(data, size))) {
         __builtin_trap();
     }
     return 0;

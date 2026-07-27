@@ -2,8 +2,9 @@
 
 Luna is a small, strongly typed systems language derived from the procedural
 core of C23. The bootstrap compiler is written in C23 and lowers Luna directly
-to a typed control-flow IR, an x86-64 machine IR, native x86-64 instructions
-and ELF64 relocatable objects. It does not transpile through C or C++.
+to a typed control-flow IR, an x86-64 machine IR, native x86-64 instructions,
+ELF64 relocatable objects and static ELF64 executables. It does not transpile
+through C or C++.
 
 The project is deliberately narrow at this stage:
 
@@ -40,6 +41,8 @@ The project is deliberately narrow at this stage:
   hidden result pointers;
 - object writer: deterministic, self-verified ELF64 relocatable objects with
   native x86-64 encoding, symbols and explicit PC-relative relocations;
+- static linker: deterministic, self-verified x86-64 ELF64 executables with
+  project-owned section layout, symbol resolution and relocation application;
 - bootstrap host: conforming C23 with IEC 60559 binary32 and binary64;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests,
   typed-IR, machine-IR, ABI, liveness, register-allocation and
@@ -96,12 +99,13 @@ Native Linux CI additionally runs the same target with the `fuzz-asan` preset.
 ```sh
 build/debug/lunac --target x86_64-unknown-linux-gnu \
   --emit obj -o hello.o examples/hello.luna
-ld.lld -static -e _start -o hello hello.o
+build/debug/lunalink -o hello hello.o
 qemu-x86_64-static ./hello
 ```
 
 `--emit asm` remains available for backend review. Native object emission does
-not invoke LLVM MC or another external assembler.
+not invoke LLVM MC or another external assembler. `lunalink` performs the
+static link itself and does not invoke LLD, GNU ld or a host compiler.
 
 The verified target machine IR can be inspected without producing assembly:
 
@@ -177,7 +181,7 @@ build/debug/lunac --compile-module app.math --emit obj \
   -o math.o math.lmi math.luna core.lmi
 
 build/debug/lunac --emit obj -o app.o app.luna math.lmi core.lmi
-ld.lld -static -e _start -o app app.o math.o core.o
+build/debug/lunalink -o app app.o math.o core.o
 ```
 
 `--compile-module` emits no `_start`. Metadata emission validates the selected
@@ -209,7 +213,7 @@ extern fn c_value(input: i32) -> i32;
 ```
 
 Compile the C23 implementation to an x86-64 object and include that object in
-the final `ld.lld` command. Luna emits the exact symbol name and does not
+the final `lunalink` command. Luna emits the exact symbol name and does not
 implicitly link libc. The current external ABI accepts non-variadic
 scalar, pointer, structure and union signatures. It uses the six integer and
 eight SSE System V argument registers independently, stack slots and aggregate
@@ -237,6 +241,7 @@ See [the language draft](docs/language.md),
 [allocation-aware instruction rewrite](docs/instruction-rewrite.md),
 [instruction-level differential testing](docs/instruction-differential-testing.md),
 [native ELF64 objects](docs/elf-object.md),
+[project-owned static ELF64 linking](docs/elf-linker.md),
 [compiled module metadata format](docs/module-metadata.md),
 [bootstrap execution semantics](docs/execution-semantics.md), and the
 [implementation roadmap](docs/roadmap.md).

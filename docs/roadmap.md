@@ -55,7 +55,7 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] allocation-aware instruction rewrite with fixed-register constraints
 - [x] instruction-level differential tests
 - [x] native ELF64 relocatable-object writer
-- [ ] minimal project-owned ELF64 static linker
+- [x] minimal project-owned ELF64 static linker
 - [ ] debug information design
 
 ## M4: self-hosting

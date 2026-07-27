@@ -8,9 +8,8 @@ lunac --emit obj -o program.o program.luna
 ```
 
 The result is an ELF64 little-endian `ET_REL` object for `EM_X86_64`. It can be
-linked with LLD while the project-owned static linker remains unfinished.
-Generated target code is freestanding and the object introduces no libc
-dependency.
+linked directly with `lunalink`. Generated target code is freestanding and the
+object introduces no libc dependency.
 
 ## Backend boundary
 
@@ -99,5 +98,6 @@ The native object path is tested at four levels:
    from native Luna objects and executed natively or under
    `qemu-x86_64-static`.
 
-LLD remains only the final-link test and development tool. It is not used to
-encode instructions or construct relocatable objects.
+`lunalink` is the production final-link path. LLD remains only an independent
+test oracle; it is not used to encode instructions, construct relocatable
+objects or produce Luna executables.

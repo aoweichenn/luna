@@ -1273,6 +1273,7 @@ def parse_seed(text: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--compiler", type=pathlib.Path, required=True)
+    parser.add_argument("--linker", type=pathlib.Path, required=True)
     parser.add_argument("--work-dir", type=pathlib.Path, required=True)
     parser.add_argument("--seed", type=parse_seed, required=True)
     parser.add_argument("--cases", type=int, default=64)
@@ -1281,7 +1282,7 @@ def main() -> int:
     if arguments.cases <= 0:
         parser.error("--cases must be positive")
 
-    linker = require_tool("ld.lld")
+    linker = str(arguments.linker)
     target_runner = require_target_runner()
     arguments.work_dir.mkdir(parents=True, exist_ok=True)
 

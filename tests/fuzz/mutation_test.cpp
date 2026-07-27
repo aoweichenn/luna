@@ -430,10 +430,9 @@ TEST(MutationFuzzTest, CleanModuleGraphResultsAlwaysProduceValidTypedIr) {
 
 TEST(MutationFuzzTest, ElfVerifierHandlesDeterministicObjectMutations) {
     FrontendHarness clean{"module fuzz.elf_object;\n"
-                          "extern fn c_i32_identity(value: i32) -> i32;\n"
                           "fn main() -> i32 {\n"
                           " let text: *const u8 = \"mutation\";\n"
-                          " return c_i32_identity(text[0] as i32);\n"
+                          " return text[0] as i32;\n"
                           "}\n"};
     ASSERT_TRUE(clean.EmitObject()) << clean.Diagnostics();
     const std::string valid_object = clean.Object();
@@ -444,6 +443,25 @@ TEST(MutationFuzzTest, ElfVerifierHandlesDeterministicObjectMutations) {
             .length = valid_object.size(),
         },
         nullptr));
+
+    const LunaX8664ElfLinkInput clean_input = {
+        .name = luna_string_view_from_c_string("<clean-object>"),
+        .object =
+            {
+                .data = valid_object.data(),
+                .length = valid_object.size(),
+            },
+    };
+    LunaStringBuilder valid_executable_builder{};
+    luna_string_builder_init(&valid_executable_builder);
+    ASSERT_TRUE(luna_x86_64_link_elf_executable(
+        &clean_input, 1U, luna_string_view_from_c_string("_start"), nullptr,
+        &valid_executable_builder));
+    const std::string valid_executable{
+        luna_string_builder_data(&valid_executable_builder),
+        valid_executable_builder.length,
+    };
+    luna_string_builder_destroy(&valid_executable_builder);
 
     for (std::size_t length = 0U; length < 64U; length += 1U) {
         EXPECT_FALSE(luna_x86_64_elf_object_verify(
@@ -484,6 +502,54 @@ TEST(MutationFuzzTest, ElfVerifierHandlesDeterministicObjectMutations) {
         const bool first = luna_x86_64_elf_object_verify(view, nullptr);
         const bool second = luna_x86_64_elf_object_verify(view, nullptr);
         EXPECT_EQ(first, second) << "case " << case_index;
+
+        const LunaX8664ElfLinkInput input = {
+            .name = luna_string_view_from_c_string("<mutated-object>"),
+            .object = view,
+        };
+        LunaStringBuilder first_executable{};
+        LunaStringBuilder second_executable{};
+        luna_string_builder_init(&first_executable);
+        luna_string_builder_init(&second_executable);
+        const bool first_link = luna_x86_64_link_elf_executable(
+            &input, 1U, luna_string_view_from_c_string("_start"), nullptr,
+            &first_executable);
+        const bool second_link = luna_x86_64_link_elf_executable(
+            &input, 1U, luna_string_view_from_c_string("_start"), nullptr,
+            &second_executable);
+        EXPECT_EQ(first_link, second_link) << "case " << case_index;
+        if (first_link && second_link) {
+            EXPECT_TRUE(luna_x86_64_elf_executable_verify(
+                LunaStringView{
+                    .data = luna_string_builder_data(&first_executable),
+                    .length = first_executable.length,
+                },
+                nullptr))
+                << "case " << case_index;
+            const std::string_view first_bytes{
+                luna_string_builder_data(&first_executable),
+                first_executable.length,
+            };
+            const std::string_view second_bytes{
+                luna_string_builder_data(&second_executable),
+                second_executable.length,
+            };
+            EXPECT_EQ(first_bytes, second_bytes) << "case " << case_index;
+        }
+        luna_string_builder_destroy(&second_executable);
+        luna_string_builder_destroy(&first_executable);
+
+        std::string mutated_executable = valid_executable;
+        Mutate(mutated_executable, random_engine);
+        const LunaStringView executable_view = {
+            .data = mutated_executable.data(),
+            .length = mutated_executable.size(),
+        };
+        const bool first_verify =
+            luna_x86_64_elf_executable_verify(executable_view, nullptr);
+        const bool second_verify =
+            luna_x86_64_elf_executable_verify(executable_view, nullptr);
+        EXPECT_EQ(first_verify, second_verify) << "case " << case_index;
     }
 }
 

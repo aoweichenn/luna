@@ -14,10 +14,14 @@ Luna source
 
 Luna source
     -> ABI analysis, liveness, allocation and instruction rewrite
-    -> x86-64 assembly review output
-    -> Luna native ELF64 object and LLD
+    -> Luna native ELF64 object and project-owned static linker
     -> native or QEMU execution
     -> emitted result or trap signal
+
+Luna source
+    -> x86-64 assembly review output
+    -> LLVM MC object and LLD
+    -> independent binary-toolchain oracle
 ```
 
 The test succeeds only when both paths agree. Generated programs also retain
@@ -77,14 +81,15 @@ The reference unit tests require only Python:
 python3 tests/differential/test_machine_ir_reference.py
 ```
 
-The executable differential gate additionally requires `llvm-mc`, `ld.lld`
-and either a native x86-64 Linux host or `qemu-x86_64-static`:
+The executable differential gate additionally requires `llvm-mc` and `ld.lld`
+for the independent oracle, plus either a native x86-64 Linux host or
+`qemu-x86_64-static`:
 
 ```sh
 ctest --test-dir build/debug -R instruction_differential --output-on-failure
 ```
 
 LLVM MC is now an independent encoding oracle: its object and Luna's native
-object are both linked and executed against the reference result. LLVM MC is
-not in the native compiler path. LLD remains the final-link tool until the
-minimal project-owned Luna linker is complete.
+object are linked through independent linkers and executed against the
+reference result. LLVM MC and LLD are not in the native compiler or linker
+path.

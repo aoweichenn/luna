@@ -64,6 +64,15 @@ _Bool c_bool_flip(_Bool value) {
     return !value;
 }
 
+unsigned int luna_test_initialized_value = 20U;
+unsigned int luna_test_zero_initialized_value;
+unsigned int *luna_test_initialized_pointer = &luna_test_initialized_value;
+
+unsigned int c_data_bss_round_trip(void) {
+    luna_test_zero_initialized_value = *luna_test_initialized_pointer + 22U;
+    return luna_test_zero_initialized_value;
+}
+
 signed char c_i8_identity(signed char value) {
     return value;
 }

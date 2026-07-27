@@ -2,6 +2,7 @@
 #define LUNA_X86_64_H
 
 #include "luna/backend/x86_64/abi.h"
+#include "luna/backend/x86_64/elf_linker.h"
 #include "luna/backend/x86_64/elf_object.h"
 #include "luna/backend/x86_64/instruction_rewrite.h"
 #include "luna/backend/x86_64/liveness.h"
