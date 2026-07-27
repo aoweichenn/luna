@@ -60,6 +60,9 @@ lexer -> parser -> syntax tree
       verified register allocation
                     |
                     v
+    verified instruction rewrite
+                    |
+                    v
           x86-64 instruction emission
                     |
                     v
@@ -195,7 +198,8 @@ types, bounds checks, slot layouts and global-data references.
 
 Local slots record byte size and ABI alignment instead of assuming one
 eight-byte home. Fixed arrays, structures and unions therefore occupy their
-exact target layout while scalar and enum virtual values remain stack-homed.
+exact target layout while scalar and enum virtual values remain abstract until
+the verified x86-64 rewrite assigns registers or spill slots.
 The `member_address` instruction derives an opaque pointer from a verified
 base pointer and a bounded byte offset; scalar field loads and stores remain
 ordinary typed indirect memory operations. `memory_copy` takes destination
@@ -272,11 +276,11 @@ register classes, stack slots, virtual registers, blocks, definitions, uses and
 instruction-specific operands. It is a debugging and test contract for the
 current x86-64 backend, not a stable cross-version object format.
 
-The current emitter still gives virtual registers stack homes and expands
-machine pseudos directly into correct assembly. The backend computes and
-verifies a physical-register assignment before this reference emitter runs,
-but instruction rewriting and optimization are deliberately absent. The
-complete representation and invariants are documented in
+The current emitter expands machine pseudos only after verified liveness,
+allocation and fixed-register rewriting. Scalar virtual registers use their
+assigned physical registers or dense spill slots; exact source objects retain
+their machine stack slots. Optimization is deliberately absent. The complete
+representation and invariants are documented in
 [x86-64 machine IR](machine-ir.md).
 
 ## x86-64 System V ABI analysis
@@ -325,11 +329,25 @@ The allocation has its own verifier. It reconstructs intervals from verified
 liveness, checks class and call-preservation constraints, rejects overlapping
 assignments, verifies dense unique spill slots and recomputes used-register
 masks. `lunac --emit allocation` exposes the result deterministically. The
-assembly boundary requires this verification to succeed, but continues to use
-the stack-homed emitter until fixed-register instruction constraints,
-parallel moves and prologue/epilogue preservation are represented and tested.
-The full contract is documented in
+assembly boundary requires this verification to succeed and passes the result
+to the fixed-register rewrite stage. The full allocation contract is
+documented in
 [x86-64 register allocation](register-allocation.md).
+
+## x86-64 instruction rewrite
+
+The rewrite stage combines verified machine IR, System V locations, liveness
+and allocation into an owned physical-storage plan. It records every ordered
+use and result location, division and shift registers, call destinations,
+caller-saved clobbers and used callee-saved GPRs.
+
+Its verifier rejects stale locations or instruction order, reserved-register
+assignments, malformed parallel-move sets and any live-through value whose
+physical register intersects an instruction clobber. The emitter then uses
+assigned registers directly, materializes only real spills and saves/restores
+used callee-saved registers in disjoint aligned frame slots. `lunac --emit
+rewrite` exposes the checked plan. The full contract is documented in
+[allocation-aware instruction rewrite](instruction-rewrite.md).
 
 ## x86-64 backend
 
@@ -344,8 +362,12 @@ The current machine-IR consumer is correctness-first:
   register bank, with a 16-byte-aligned caller argument area;
 - System V aggregate register pieces, whole-value register rollback, exact
   stack copies, multi-register results and hidden-pointer results;
-- explicit stack frames;
-- virtual values assigned stack homes;
+- explicit 16-byte-aligned stack frames;
+- register-resident virtual values plus dense, unique spill slots;
+- fixed-register constraints for division, variable shifts and pseudo
+  expansion;
+- verified parallel ABI destinations and complete caller-saved clobber sets;
+- explicit save and restore slots for every used callee-saved GPR;
 - canonical zero-extended raw bits in the low 32 bits for 8-bit and 16-bit
   arguments, results and stack homes, with explicit sign extension at signed
   comparisons, division, right shifts and widening conversions;
@@ -386,14 +408,15 @@ This backend is intentionally not the performance endpoint. Planned stages are:
 5. stack arguments and aggregate ABI classification;
 6. aggregate by-value IR and ABI lowering;
 7. allocation-aware instruction rewrite;
-8. peephole and local instruction selection improvements;
-9. ELF64 relocatable-object emission.
+8. instruction-level differential tests;
+9. ELF64 relocatable-object emission;
+10. debug information design.
 
-The first six stages are complete. Allocation-aware instruction rewriting is
+The first seven stages are complete. Instruction-level differential testing is
 the next backend stage.
 
-The simple backend remains available as a reference backend for differential
-testing after optimization is introduced.
+The current direct pseudo expansions remain unoptimized and serve as the
+semantic reference for future local instruction-selection work.
 
 ## Error handling
 
@@ -414,8 +437,8 @@ The quality gate contains:
 - deterministic metadata round trips, re-checksummed binary mutations,
   corrupt/version/stale-dependency negatives and three-object separate-link
   execution tests;
-- textual typed-IR, machine-IR, ABI, liveness and register-allocation
-  snapshots;
+- textual typed-IR, machine-IR, ABI, liveness, register-allocation and
+  instruction-rewrite snapshots;
 - x86-64 assembly validation through LLVM MC;
 - static ELF64 linking through LLD;
 - execution under `qemu-x86_64-static`;
@@ -438,7 +461,7 @@ The quality gate contains:
   programs;
 - deterministic mutation tests and a coverage-guided libFuzzer target that
   exercise machine lowering, ABI analysis, liveness, register allocation,
-  verification, printing and assembly emission;
+  instruction rewriting, verification, printing and assembly emission;
 - UBSan runs for the host compiler and ASan runs on compatible native hosts;
 - warnings treated as errors.
 

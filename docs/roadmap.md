@@ -52,7 +52,7 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] verified linear-scan register allocation result
 - [x] scalar stack arguments and verified aggregate ABI classification
 - [x] aggregate by-value IR and ABI lowering
-- [ ] allocation-aware instruction rewrite with fixed-register constraints
+- [x] allocation-aware instruction rewrite with fixed-register constraints
 - [ ] instruction-level differential tests
 - [ ] native ELF64 relocatable-object writer
 - [ ] debug information design

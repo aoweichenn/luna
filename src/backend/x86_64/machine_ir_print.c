@@ -5,8 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-static const char *
-luna_x86_64_machine_opcode_name(LunaX8664MachineOpcode opcode) {
+const char *luna_x86_64_machine_opcode_name(LunaX8664MachineOpcode opcode) {
     switch (opcode) {
     case LUNA_X86_64_MACHINE_CONST_INTEGER:
         return "const.integer";

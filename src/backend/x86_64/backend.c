@@ -165,6 +165,76 @@ bool luna_x86_64_emit_register_allocation(const LunaIrModule *module,
     return success;
 }
 
+bool luna_x86_64_emit_instruction_rewrite(const LunaIrModule *module,
+                                          LunaDiagnosticEngine *diagnostics,
+                                          LunaStringBuilder *output) {
+    if (module == NULL || diagnostics == NULL || output == NULL ||
+        output->length != 0U) {
+        if (diagnostics != NULL) {
+            luna_diagnostic_error_plain(
+                diagnostics,
+                "x86-64 instruction rewrite emission received invalid state");
+        }
+        return false;
+    }
+
+    LunaX8664MachineModule machine_module;
+    LunaX8664ModuleAbi abi;
+    LunaX8664ModuleLiveness liveness;
+    LunaX8664ModuleRegisterAllocation allocation;
+    LunaX8664ModuleInstructionRewrite rewrite;
+    luna_x86_64_abi_init(&abi);
+    luna_x86_64_liveness_init(&liveness);
+    luna_x86_64_register_allocation_init(&allocation);
+    luna_x86_64_instruction_rewrite_init(&rewrite);
+
+    const bool prepared = luna_x86_64_prepare_machine_module(
+        module, diagnostics, &machine_module);
+    const bool abi_analyzed =
+        prepared &&
+        luna_x86_64_abi_analyze(&machine_module, &abi, diagnostics->stream);
+    if (prepared && !abi_analyzed) {
+        luna_diagnostic_error_plain(diagnostics, "x86-64 ABI analysis failed");
+    }
+    const bool live =
+        abi_analyzed && luna_x86_64_liveness_analyze(&machine_module, &liveness,
+                                                     diagnostics->stream);
+    if (abi_analyzed && !live) {
+        luna_diagnostic_error_plain(diagnostics,
+                                    "x86-64 liveness analysis failed");
+    }
+    const bool allocated =
+        live && luna_x86_64_register_allocate(&machine_module, &liveness,
+                                              &allocation, diagnostics->stream);
+    if (live && !allocated) {
+        luna_diagnostic_error_plain(diagnostics,
+                                    "x86-64 register allocation failed");
+    }
+    const bool rewritten =
+        allocated && luna_x86_64_instruction_rewrite_build(
+                         &machine_module, &abi, &liveness, &allocation,
+                         &rewrite, diagnostics->stream);
+    if (allocated && !rewritten) {
+        luna_diagnostic_error_plain(diagnostics,
+                                    "x86-64 instruction rewrite failed");
+    }
+    const bool success = rewritten && luna_x86_64_instruction_rewrite_print(
+                                          &machine_module, &abi, &liveness,
+                                          &allocation, &rewrite, output);
+    if (rewritten && !success) {
+        luna_diagnostic_error_plain(
+            diagnostics,
+            "out of memory while printing x86-64 instruction rewrite");
+    }
+
+    luna_x86_64_instruction_rewrite_destroy(&rewrite);
+    luna_x86_64_register_allocation_destroy(&allocation);
+    luna_x86_64_liveness_destroy(&liveness);
+    luna_x86_64_abi_destroy(&abi);
+    luna_x86_64_machine_module_destroy(&machine_module);
+    return success;
+}
+
 bool luna_x86_64_emit_assembly(const LunaIrModule *module,
                                LunaDiagnosticEngine *diagnostics,
                                LunaStringBuilder *output) {
@@ -178,16 +248,26 @@ bool luna_x86_64_emit_assembly(const LunaIrModule *module,
     }
 
     LunaX8664MachineModule machine_module;
+    LunaX8664ModuleAbi abi;
     LunaX8664ModuleLiveness liveness;
     LunaX8664ModuleRegisterAllocation allocation;
+    LunaX8664ModuleInstructionRewrite rewrite;
+    luna_x86_64_abi_init(&abi);
     luna_x86_64_liveness_init(&liveness);
     luna_x86_64_register_allocation_init(&allocation);
+    luna_x86_64_instruction_rewrite_init(&rewrite);
     const bool prepared = luna_x86_64_prepare_machine_module(
         module, diagnostics, &machine_module);
+    const bool abi_analyzed =
+        prepared &&
+        luna_x86_64_abi_analyze(&machine_module, &abi, diagnostics->stream);
+    if (prepared && !abi_analyzed) {
+        luna_diagnostic_error_plain(diagnostics, "x86-64 ABI analysis failed");
+    }
     const bool analyzed =
-        prepared && luna_x86_64_liveness_analyze(&machine_module, &liveness,
-                                                 diagnostics->stream);
-    if (prepared && !analyzed) {
+        abi_analyzed && luna_x86_64_liveness_analyze(&machine_module, &liveness,
+                                                     diagnostics->stream);
+    if (abi_analyzed && !analyzed) {
         luna_diagnostic_error_plain(diagnostics,
                                     "x86-64 liveness analysis failed");
     }
@@ -198,10 +278,22 @@ bool luna_x86_64_emit_assembly(const LunaIrModule *module,
         luna_diagnostic_error_plain(diagnostics,
                                     "x86-64 register allocation failed");
     }
-    const bool success = allocated && luna_x86_64_machine_emit_assembly(
-                                          &machine_module, diagnostics, output);
+    const bool rewritten =
+        allocated && luna_x86_64_instruction_rewrite_build(
+                         &machine_module, &abi, &liveness, &allocation,
+                         &rewrite, diagnostics->stream);
+    if (allocated && !rewritten) {
+        luna_diagnostic_error_plain(diagnostics,
+                                    "x86-64 instruction rewrite failed");
+    }
+    const bool success =
+        rewritten && luna_x86_64_machine_emit_assembly(
+                         &machine_module, &abi, &liveness, &allocation,
+                         &rewrite, diagnostics, output);
+    luna_x86_64_instruction_rewrite_destroy(&rewrite);
     luna_x86_64_register_allocation_destroy(&allocation);
     luna_x86_64_liveness_destroy(&liveness);
+    luna_x86_64_abi_destroy(&abi);
     luna_x86_64_machine_module_destroy(&machine_module);
     return success;
 }

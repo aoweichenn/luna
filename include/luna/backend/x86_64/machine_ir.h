@@ -205,6 +205,7 @@ bool luna_x86_64_machine_print(const LunaX8664MachineModule *module,
                                LunaStringBuilder *output);
 
 const char *luna_x86_64_machine_type_name(LunaX8664MachineType type);
+const char *luna_x86_64_machine_opcode_name(LunaX8664MachineOpcode opcode);
 uint32_t luna_x86_64_machine_type_bit_width(LunaX8664MachineType type);
 bool luna_x86_64_machine_type_is_integer(LunaX8664MachineType type);
 bool luna_x86_64_machine_type_is_signed_integer(LunaX8664MachineType type);

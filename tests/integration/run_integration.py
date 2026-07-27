@@ -156,6 +156,7 @@ def compile_separate_module_graph(
     math_abi = work_dir / "metadata_math.abi"
     math_liveness = work_dir / "metadata_math.live"
     math_allocation = work_dir / "metadata_math.alloc"
+    math_rewrite = work_dir / "metadata_math.rewrite"
     math_object = work_dir / "metadata_math.o"
     application_assembly = work_dir / "metadata_app.s"
     application_object = work_dir / "metadata_app.o"
@@ -294,6 +295,20 @@ def compile_separate_module_graph(
             "--compile-module",
             "tests.metadata.math",
             "--emit",
+            "rewrite",
+            "-o",
+            str(math_rewrite),
+            str(math_metadata),
+            str(math_implementation),
+            str(core_metadata),
+        ]
+    )
+    run(
+        [
+            str(compiler),
+            "--compile-module",
+            "tests.metadata.math",
+            "--emit",
             "asm",
             "-o",
             str(math_assembly),
@@ -377,6 +392,16 @@ def compile_separate_module_graph(
     ):
         raise AssertionError(
             "separate module register allocation linkage is missing"
+        )
+    math_rewrite_text = math_rewrite.read_text(encoding="utf-8")
+    if (
+        "declare @f0 tests.metadata.core::add_bias values=0 instructions=0"
+        not in math_rewrite_text
+        or "define @f1 tests.metadata.math::calculate"
+        not in math_rewrite_text
+    ):
+        raise AssertionError(
+            "separate module instruction rewrite linkage is missing"
         )
     math_text = math_assembly.read_text(encoding="utf-8")
     if (
@@ -962,6 +987,10 @@ def main() -> int:
     if "--emit allocation" not in help_result.stdout:
         raise AssertionError(
             "--help did not describe register allocation emission"
+        )
+    if "--emit rewrite" not in help_result.stdout:
+        raise AssertionError(
+            "--help did not describe instruction rewrite emission"
         )
     version_result = run([str(arguments.compiler), "--version"])
     if "lunac 0.1.0-dev" not in version_result.stdout:
@@ -1822,6 +1851,39 @@ def main() -> int:
         raise AssertionError("register allocation output is not deterministic")
     print(
         "PASS register allocation snapshot and determinism: "
+        "function_call.luna"
+    )
+
+    rewrite_first = arguments.work_dir / "function_call_first.rewrite"
+    rewrite_second = arguments.work_dir / "function_call_second.rewrite"
+    for output in (rewrite_first, rewrite_second):
+        run(
+            [
+                str(arguments.compiler),
+                "--emit",
+                "rewrite",
+                "-o",
+                str(output),
+                str(case_dir / "function_call.luna"),
+            ]
+        )
+    expected_rewrite = (
+        arguments.source_root
+        / "tests"
+        / "integration"
+        / "golden"
+        / "function_call.rewrite"
+    ).read_text(encoding="utf-8")
+    actual_rewrite = rewrite_first.read_text(encoding="utf-8")
+    if actual_rewrite.rstrip("\n") != expected_rewrite.rstrip("\n"):
+        raise AssertionError(
+            "instruction rewrite snapshot mismatch for function_call.luna\n"
+            f"expected:\n{expected_rewrite}\nactual:\n{actual_rewrite}"
+        )
+    if rewrite_first.read_bytes() != rewrite_second.read_bytes():
+        raise AssertionError("instruction rewrite output is not deterministic")
+    print(
+        "PASS instruction rewrite snapshot and determinism: "
         "function_call.luna"
     )
 

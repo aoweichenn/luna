@@ -331,6 +331,7 @@ from explicitly linking a caller-supplied object through `extern fn`.
 
 ## Optimization boundary
 
-The bootstrap compiler performs no optimization. Its stack-homed x86-64
-backend is the reference implementation used by differential tests. Any
-future optimized backend must reproduce this contract exactly.
+The bootstrap compiler performs no optimization. Its verified x86-64 rewrite
+uses assigned physical registers and dense spill slots while retaining the
+direct correctness-first instruction expansions used by differential tests.
+Any future optimizing backend must reproduce this contract exactly.

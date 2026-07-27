@@ -13,6 +13,9 @@ x86-64 machine lowering
 verified pre-allocation machine IR
     |
     v
+verified liveness, allocation and instruction rewrite
+    |
+    v
 x86-64 assembly emission
 ```
 
@@ -152,17 +155,17 @@ serialization format.
 ## Current boundary
 
 The current assembly boundary analyzes verified machine IR, allocates physical
-registers and independently verifies both results before emission. For
-correctness, the emitter does not yet consume the allocation: it still assigns
-stack homes to virtual registers and emits direct assembly without
-optimization. Generated executables remain freestanding: `_start` exits
-through the Linux x86-64 `syscall` instruction and no target libc is linked.
+registers, builds fixed-register instruction rewrites and independently
+verifies every result before emission. The emitter consumes register and spill
+locations, preserves used callee-saved registers and expands ABI moves only
+from the checked rewrite. It performs no optimization. Generated executables
+remain freestanding: `_start` exits through the Linux x86-64 `syscall`
+instruction and no target libc is linked.
 
 The analysis representation and invariants are documented in
 [x86-64 liveness analysis](liveness.md); the physical-location result is
 documented in [x86-64 register allocation](register-allocation.md), and scalar
 register/stack placement plus aggregate lowering are documented in the
-[x86-64 System V ABI analysis](abi.md). Allocation-aware rewriting is the next
-backend stage; it must first encode fixed-register instruction constraints,
-parallel call moves and callee-save preservation without changing Luna
-language semantics.
+[x86-64 System V ABI analysis](abi.md). Fixed-register constraints, parallel
+call moves, spill materialization and callee-save preservation are documented
+in [allocation-aware instruction rewrite](instruction-rewrite.md).

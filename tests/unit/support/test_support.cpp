@@ -47,6 +47,7 @@ FrontendHarness::FrontendHarness(std::string_view source_text,
     luna_string_builder_init(&this->abi_);
     luna_string_builder_init(&this->liveness_);
     luna_string_builder_init(&this->register_allocation_);
+    luna_string_builder_init(&this->instruction_rewrite_);
     luna_string_builder_init(&this->assembly_);
 
     this->diagnostic_file_ = std::tmpfile();
@@ -72,6 +73,7 @@ FrontendHarness::FrontendHarness(std::string_view interface_text,
 
 FrontendHarness::~FrontendHarness() {
     luna_string_builder_destroy(&this->assembly_);
+    luna_string_builder_destroy(&this->instruction_rewrite_);
     luna_string_builder_destroy(&this->register_allocation_);
     luna_string_builder_destroy(&this->liveness_);
     luna_string_builder_destroy(&this->abi_);
@@ -191,6 +193,15 @@ bool FrontendHarness::EmitRegisterAllocation() {
         &this->module_, &this->diagnostics_, &this->register_allocation_);
 }
 
+bool FrontendHarness::EmitInstructionRewrite() {
+    if (!this->Verify()) {
+        return false;
+    }
+
+    return luna_x86_64_emit_instruction_rewrite(
+        &this->module_, &this->diagnostics_, &this->instruction_rewrite_);
+}
+
 std::size_t FrontendHarness::ErrorCount() const noexcept {
     return luna_diagnostic_error_count(&this->diagnostics_);
 }
@@ -217,6 +228,11 @@ std::string FrontendHarness::Liveness() const {
 std::string FrontendHarness::RegisterAllocation() const {
     return std::string{luna_string_builder_data(&this->register_allocation_),
                        this->register_allocation_.length};
+}
+
+std::string FrontendHarness::InstructionRewrite() const {
+    return std::string{luna_string_builder_data(&this->instruction_rewrite_),
+                       this->instruction_rewrite_.length};
 }
 
 std::string FrontendHarness::Assembly() const {
@@ -254,6 +270,7 @@ CompilationHarness::CompilationHarness(
     luna_string_builder_init(&this->abi_);
     luna_string_builder_init(&this->liveness_);
     luna_string_builder_init(&this->register_allocation_);
+    luna_string_builder_init(&this->instruction_rewrite_);
     luna_string_builder_init(&this->assembly_);
 
     this->diagnostic_file_ = std::tmpfile();
@@ -278,6 +295,7 @@ CompilationHarness::CompilationHarness(
 
 CompilationHarness::~CompilationHarness() {
     luna_string_builder_destroy(&this->assembly_);
+    luna_string_builder_destroy(&this->instruction_rewrite_);
     luna_string_builder_destroy(&this->register_allocation_);
     luna_string_builder_destroy(&this->liveness_);
     luna_string_builder_destroy(&this->abi_);
@@ -389,6 +407,14 @@ bool CompilationHarness::EmitRegisterAllocation() {
         &this->module_, &this->diagnostics_, &this->register_allocation_);
 }
 
+bool CompilationHarness::EmitInstructionRewrite() {
+    if (!this->Verify()) {
+        return false;
+    }
+    return luna_x86_64_emit_instruction_rewrite(
+        &this->module_, &this->diagnostics_, &this->instruction_rewrite_);
+}
+
 std::size_t CompilationHarness::ErrorCount() const noexcept {
     return luna_diagnostic_error_count(&this->diagnostics_);
 }
@@ -415,6 +441,11 @@ std::string CompilationHarness::Liveness() const {
 std::string CompilationHarness::RegisterAllocation() const {
     return std::string{luna_string_builder_data(&this->register_allocation_),
                        this->register_allocation_.length};
+}
+
+std::string CompilationHarness::InstructionRewrite() const {
+    return std::string{luna_string_builder_data(&this->instruction_rewrite_),
+                       this->instruction_rewrite_.length};
 }
 
 std::string CompilationHarness::Assembly() const {

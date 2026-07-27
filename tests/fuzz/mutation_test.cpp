@@ -263,6 +263,9 @@ TEST(MutationFuzzTest, CleanFrontendResultsAlwaysProduceValidTypedIr) {
         EXPECT_TRUE(harness.EmitRegisterAllocation())
             << "case " << case_index << ", seed " << seed_index << '\n'
             << harness.Diagnostics();
+        EXPECT_TRUE(harness.EmitInstructionRewrite())
+            << "case " << case_index << ", seed " << seed_index << '\n'
+            << harness.Diagnostics();
         EXPECT_TRUE(harness.EmitAssembly())
             << "case " << case_index << ", seed " << seed_index << '\n'
             << harness.Diagnostics();
@@ -291,6 +294,7 @@ TEST(MutationFuzzTest, CleanModulePairResultsAlwaysProduceValidTypedIr) {
     ASSERT_TRUE(clean.EmitAbi()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitLiveness()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitRegisterAllocation()) << clean.Diagnostics();
+    ASSERT_TRUE(clean.EmitInstructionRewrite()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitAssembly()) << clean.Diagnostics();
 
     std::mt19937_64 random_engine{LUNA_TEST_MODULE_MUTATION_SEED};
@@ -321,6 +325,9 @@ TEST(MutationFuzzTest, CleanModulePairResultsAlwaysProduceValidTypedIr) {
         EXPECT_TRUE(harness.EmitLiveness()) << "case " << case_index << '\n'
                                             << harness.Diagnostics();
         EXPECT_TRUE(harness.EmitRegisterAllocation())
+            << "case " << case_index << '\n'
+            << harness.Diagnostics();
+        EXPECT_TRUE(harness.EmitInstructionRewrite())
             << "case " << case_index << '\n'
             << harness.Diagnostics();
         EXPECT_TRUE(harness.EmitAssembly()) << "case " << case_index << '\n'
@@ -362,6 +369,7 @@ TEST(MutationFuzzTest, CleanModuleGraphResultsAlwaysProduceValidTypedIr) {
     ASSERT_TRUE(clean.EmitAbi()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitLiveness()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitRegisterAllocation()) << clean.Diagnostics();
+    ASSERT_TRUE(clean.EmitInstructionRewrite()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitAssembly()) << clean.Diagnostics();
 
     std::mt19937_64 random_engine{LUNA_TEST_MODULE_GRAPH_MUTATION_SEED};
@@ -396,6 +404,9 @@ TEST(MutationFuzzTest, CleanModuleGraphResultsAlwaysProduceValidTypedIr) {
             << "case " << case_index << ", source " << mutated_source << '\n'
             << harness.Diagnostics();
         EXPECT_TRUE(harness.EmitRegisterAllocation())
+            << "case " << case_index << ", source " << mutated_source << '\n'
+            << harness.Diagnostics();
+        EXPECT_TRUE(harness.EmitInstructionRewrite())
             << "case " << case_index << ", source " << mutated_source << '\n'
             << harness.Diagnostics();
         EXPECT_TRUE(harness.EmitAssembly())

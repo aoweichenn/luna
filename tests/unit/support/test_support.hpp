@@ -36,6 +36,7 @@ class FrontendHarness final {
     [[nodiscard]] bool EmitAbi();
     [[nodiscard]] bool EmitLiveness();
     [[nodiscard]] bool EmitRegisterAllocation();
+    [[nodiscard]] bool EmitInstructionRewrite();
     [[nodiscard]] bool EmitAssembly();
 
     [[nodiscard]] std::size_t ErrorCount() const noexcept;
@@ -44,6 +45,7 @@ class FrontendHarness final {
     [[nodiscard]] std::string Abi() const;
     [[nodiscard]] std::string Liveness() const;
     [[nodiscard]] std::string RegisterAllocation() const;
+    [[nodiscard]] std::string InstructionRewrite() const;
     [[nodiscard]] std::string Assembly() const;
     [[nodiscard]] const LunaSourceFile *Source() const noexcept;
     [[nodiscard]] LunaDiagnosticEngine *DiagnosticEngine() noexcept;
@@ -64,6 +66,7 @@ class FrontendHarness final {
     LunaStringBuilder abi_{};
     LunaStringBuilder liveness_{};
     LunaStringBuilder register_allocation_{};
+    LunaStringBuilder instruction_rewrite_{};
     LunaStringBuilder assembly_{};
     bool ready_{false};
     bool has_interface_{false};
@@ -94,6 +97,7 @@ class CompilationHarness final {
     [[nodiscard]] bool EmitAbi();
     [[nodiscard]] bool EmitLiveness();
     [[nodiscard]] bool EmitRegisterAllocation();
+    [[nodiscard]] bool EmitInstructionRewrite();
     [[nodiscard]] bool EmitAssembly();
     [[nodiscard]] std::size_t ErrorCount() const noexcept;
     [[nodiscard]] std::string Diagnostics() const;
@@ -101,6 +105,7 @@ class CompilationHarness final {
     [[nodiscard]] std::string Abi() const;
     [[nodiscard]] std::string Liveness() const;
     [[nodiscard]] std::string RegisterAllocation() const;
+    [[nodiscard]] std::string InstructionRewrite() const;
     [[nodiscard]] std::string Assembly() const;
     [[nodiscard]] LunaIrModule *Module() noexcept;
 
@@ -115,6 +120,7 @@ class CompilationHarness final {
     LunaStringBuilder abi_{};
     LunaStringBuilder liveness_{};
     LunaStringBuilder register_allocation_{};
+    LunaStringBuilder instruction_rewrite_{};
     LunaStringBuilder assembly_{};
     bool ready_{false};
     bool parse_attempted_{false};

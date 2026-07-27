@@ -13,13 +13,15 @@ verified liveness
 verified linear-scan allocation
     |
     v
-stack-homed reference assembly
+verified instruction rewrite
+    |
+    v
+register-resident assembly
 ```
 
 This stage allocates locations but does not optimize or rewrite machine
-instructions. Assembly emission requires the allocation to verify, then keeps
-using the established stack-homed path as its executable correctness
-reference.
+instructions. The independently verified instruction-rewrite stage consumes
+the result and supplies the only accepted assembly-emission path.
 
 ## Result model
 
@@ -33,9 +35,9 @@ A location is either:
 - one allocatable physical register of the virtual register's class; or
 - one function-local spill slot.
 
-General-purpose allocation uses `rax`, `rbx`, `rcx`, `rdx`, `rsi`, `rdi`,
-`r8` through `r15`. `rsp` and `rbp` are deliberately not allocatable.
-Floating allocation uses `xmm0` through `xmm15`. GPR and FPR ownership is
+The current correctness-first pool uses `rbx` and `r12` through `r15` for GPR
+values, and `xmm8` through `xmm14` for FPR values. Fixed scratch and ABI
+registers are reserved for instruction expansion. GPR and FPR ownership is
 independent.
 
 Each spilled value receives a unique, dense slot number. Slot reuse is
@@ -49,8 +51,8 @@ both `live_before` and `live_after`. Under the x86-64 System V ABI, such a GPR
 value may be assigned only to `rbx` or `r12` through `r15`. All XMM registers
 are caller-saved, so an FPR value crossing a call is spilled.
 
-This is a conservative allocation contract. It does not yet insert
-caller-save stores, split an interval around a call or rematerialize values.
+This is a conservative allocation contract. It does not insert caller-save
+stores, split an interval around a call or rematerialize values.
 
 ## Deterministic linear scan
 
@@ -84,19 +86,21 @@ verification succeeds. `lunac --emit allocation` prints the checked result in
 a deterministic review and snapshot format. Unit mutation tests deliberately
 corrupt intervals and locations to ensure the verifier rejects them; random
 mutation and coverage-guided fuzz tests exercise lowering, liveness,
-allocation, printing and the reference emitter together.
+allocation, instruction rewriting, printing and assembly emission together.
 
-## Deliberate boundary
+## Rewrite handoff
 
-The allocation result is not yet used to emit register-resident code. Before
-that handoff, the machine representation must describe fixed-register
-constraints such as division and variable shifts, parallel ABI moves, call
-clobbers, spill loads/stores and callee-saved prologues/epilogues. Consuming an
-abstract assignment without those contracts would risk miscompilation.
+The allocation result is copied into an owned instruction-rewrite result that
+also describes division and shift constraints, parallel ABI destinations,
+call clobbers, spill slots and callee-saved preservation. Rewrite verification
+proves that no live-through physical value intersects an instruction clobber
+before the emitter consumes any location.
 
-Consequently this stage changes neither generated program behavior nor the
-no-libc runtime boundary. Target executables still enter through project-owned
-`_start` code and use the Linux x86-64 `syscall` ABI directly.
+The complete handoff is documented in
+[allocation-aware instruction rewrite](instruction-rewrite.md). It changes
+neither Luna semantics nor the no-libc runtime boundary: target executables
+still enter through project-owned `_start` and use the Linux x86-64 `syscall`
+ABI directly.
 
 ## Cost
 

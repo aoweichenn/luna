@@ -13,12 +13,15 @@ verified liveness
 verified register allocation
     |
     v
-stack-homed reference assembly
+verified instruction rewrite
+    |
+    v
+register-resident assembly
 ```
 
 This stage is analysis only. It does not allocate physical registers, rewrite
-instructions, optimize code or change the assembly emitter's stack-homed
-correctness model.
+instructions or optimize code. Its exact instruction sets are consumed by
+both allocation and rewrite verification.
 
 ## Result model
 
@@ -109,6 +112,7 @@ marks a value as crossing a call from the intersection of that call's
 `live_before` and `live_after` sets. Its independently checked contract is
 documented in [x86-64 register allocation](register-allocation.md).
 
-The existing stack-homed emitter remains the executable reference while
-allocation-aware instruction rewriting is deferred. Liveness itself performs
-no optimization and introduces no target libc dependency.
+The allocation-aware rewrite verifier also uses each instruction's
+`live_before`/`live_after` intersection to prove that no assigned physical
+register survives across a matching clobber. Liveness itself performs no
+optimization and introduces no target libc dependency.

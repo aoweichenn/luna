@@ -42,12 +42,13 @@ parameter order: `stack[0]`, `stack[8]`, and so on. The caller reserves the
 complete stack-argument area, rounded up to 16 bytes, before moving any
 arguments and restores `%rsp` after the call.
 
-The reference emitter keeps `%rsp` 16-byte aligned immediately before `call`.
+The allocation-aware emitter keeps `%rsp` 16-byte aligned immediately before
+`call`.
 After the return address and old frame pointer are stored, the callee reads
 `stack[0]` at `16(%rbp)`, `stack[8]` at `24(%rbp)`, and so on. It then copies
-all incoming parameters into the same stack-home representation used for
-register parameters. This path is shared by internal calls, compiled-module
-calls and non-variadic external C calls.
+all incoming parameters into their exact local parameter slots. This path is
+shared by internal calls, compiled-module calls and non-variadic external C
+calls.
 
 Scalar results keep the existing System V locations: general-purpose results
 use `%rax`, and `f32`/`f64` results use `%xmm0`. Narrow signed arguments at an

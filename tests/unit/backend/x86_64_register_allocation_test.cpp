@@ -102,10 +102,14 @@ ValueType(const LunaX8664MachineFunction *function, std::uint32_t value_index) {
 
 TEST(X8664RegisterAllocationTest,
      DescribesTheSystemVRegisterClassesAndPreservation) {
-    EXPECT_TRUE(luna_x86_64_physical_register_is_allocatable(
+    EXPECT_FALSE(luna_x86_64_physical_register_is_allocatable(
         LUNA_X86_64_PHYSICAL_REGISTER_RAX));
-    EXPECT_TRUE(luna_x86_64_physical_register_is_allocatable(
+    EXPECT_FALSE(luna_x86_64_physical_register_is_allocatable(
         LUNA_X86_64_PHYSICAL_REGISTER_XMM15));
+    EXPECT_TRUE(luna_x86_64_physical_register_is_allocatable(
+        LUNA_X86_64_PHYSICAL_REGISTER_RBX));
+    EXPECT_TRUE(luna_x86_64_physical_register_is_allocatable(
+        LUNA_X86_64_PHYSICAL_REGISTER_XMM8));
     EXPECT_FALSE(luna_x86_64_physical_register_is_allocatable(
         LUNA_X86_64_PHYSICAL_REGISTER_INVALID));
     EXPECT_EQ(
@@ -147,9 +151,9 @@ TEST(X8664RegisterAllocationTest, AllocatesExactOverlappingIntervals) {
     constexpr std::uint64_t LUNA_TEST_EXPECTED_STARTS[] = {0U, 1U, 2U};
     constexpr std::uint64_t LUNA_TEST_EXPECTED_ENDS[] = {2U, 2U, 3U};
     constexpr LunaX8664PhysicalRegister LUNA_TEST_EXPECTED_REGISTERS[] = {
-        LUNA_X86_64_PHYSICAL_REGISTER_R10,
-        LUNA_X86_64_PHYSICAL_REGISTER_R11,
-        LUNA_X86_64_PHYSICAL_REGISTER_R8,
+        LUNA_X86_64_PHYSICAL_REGISTER_RBX,
+        LUNA_X86_64_PHYSICAL_REGISTER_R12,
+        LUNA_X86_64_PHYSICAL_REGISTER_R13,
     };
     for (std::uint32_t value_index = 0U; value_index < 3U; value_index += 1U) {
         const LunaX8664LiveInterval *interval =
@@ -330,7 +334,7 @@ TEST(X8664RegisterAllocationTest,
               std::string::npos);
     EXPECT_NE(first.RegisterAllocation().find(
                   "%v2 type=i32 class=gpr interval=[2, 3] "
-                  "crosses-call=no location=%r8"),
+                  "crosses-call=no location=%r13"),
               std::string::npos);
 }
 

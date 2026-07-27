@@ -1,5 +1,7 @@
 #include "register_allocation_internal.h"
 
+#include "luna/backend/x86_64/instruction_rewrite.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -9,28 +11,11 @@
 
 static const LunaX8664PhysicalRegister luna_x86_64_register_allocation_order[] =
     {
-        LUNA_X86_64_PHYSICAL_REGISTER_R10,
-        LUNA_X86_64_PHYSICAL_REGISTER_R11,
-        LUNA_X86_64_PHYSICAL_REGISTER_R8,
-        LUNA_X86_64_PHYSICAL_REGISTER_R9,
-        LUNA_X86_64_PHYSICAL_REGISTER_RSI,
-        LUNA_X86_64_PHYSICAL_REGISTER_RDI,
-        LUNA_X86_64_PHYSICAL_REGISTER_RAX,
-        LUNA_X86_64_PHYSICAL_REGISTER_RCX,
-        LUNA_X86_64_PHYSICAL_REGISTER_RDX,
         LUNA_X86_64_PHYSICAL_REGISTER_RBX,
         LUNA_X86_64_PHYSICAL_REGISTER_R12,
         LUNA_X86_64_PHYSICAL_REGISTER_R13,
         LUNA_X86_64_PHYSICAL_REGISTER_R14,
         LUNA_X86_64_PHYSICAL_REGISTER_R15,
-        LUNA_X86_64_PHYSICAL_REGISTER_XMM0,
-        LUNA_X86_64_PHYSICAL_REGISTER_XMM1,
-        LUNA_X86_64_PHYSICAL_REGISTER_XMM2,
-        LUNA_X86_64_PHYSICAL_REGISTER_XMM3,
-        LUNA_X86_64_PHYSICAL_REGISTER_XMM4,
-        LUNA_X86_64_PHYSICAL_REGISTER_XMM5,
-        LUNA_X86_64_PHYSICAL_REGISTER_XMM6,
-        LUNA_X86_64_PHYSICAL_REGISTER_XMM7,
         LUNA_X86_64_PHYSICAL_REGISTER_XMM8,
         LUNA_X86_64_PHYSICAL_REGISTER_XMM9,
         LUNA_X86_64_PHYSICAL_REGISTER_XMM10,
@@ -38,7 +23,6 @@ static const LunaX8664PhysicalRegister luna_x86_64_register_allocation_order[] =
         LUNA_X86_64_PHYSICAL_REGISTER_XMM12,
         LUNA_X86_64_PHYSICAL_REGISTER_XMM13,
         LUNA_X86_64_PHYSICAL_REGISTER_XMM14,
-        LUNA_X86_64_PHYSICAL_REGISTER_XMM15,
 };
 
 const char *luna_x86_64_physical_register_name(
@@ -126,8 +110,12 @@ LunaX8664MachineRegisterClass luna_x86_64_physical_register_class(
 
 bool luna_x86_64_physical_register_is_allocatable(
     LunaX8664PhysicalRegister physical_register) {
+    const uint64_t bit =
+        luna_x86_64_physical_register_bit_internal(physical_register);
     return luna_x86_64_physical_register_class(physical_register) !=
-           LUNA_X86_64_MACHINE_REGISTER_NONE;
+               LUNA_X86_64_MACHINE_REGISTER_NONE &&
+           (bit & luna_x86_64_instruction_rewrite_reserved_register_mask()) ==
+               0U;
 }
 
 bool luna_x86_64_physical_register_is_callee_saved(
