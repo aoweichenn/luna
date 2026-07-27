@@ -958,12 +958,77 @@ def generate_module_pair_case(
     return (interface_source, implementation_source), 42
 
 
+def generate_module_import_case(
+    engine: random.Random,
+    case_index: int,
+) -> tuple[tuple[str, ...], int]:
+    scalar_type = engine.choice(
+        (
+            "i8",
+            "i16",
+            "i32",
+            "i64",
+            "isize",
+            "u8",
+            "u16",
+            "u32",
+            "u64",
+            "usize",
+        )
+    )
+    first_value = engine.randrange(0, 43)
+    delta = 42 - first_value
+    module_prefix = f"random.import_case{case_index}"
+    core_interface = (
+        f"export module {module_prefix}.core;\n"
+        f"export struct Input {{ value: {scalar_type}; }}\n"
+        f"export fn adjust(input: *const Input, delta: {scalar_type}) "
+        f"-> {scalar_type};\n"
+    )
+    core_implementation = (
+        f"module {module_prefix}.core;\n"
+        f"fn adjust(data: *const Input, amount: {scalar_type}) "
+        f"-> {scalar_type} {{\n"
+        "    return data->value + amount;\n"
+        "}\n"
+    )
+    math_interface = (
+        f"export module {module_prefix}.math;\n"
+        f"import {module_prefix}.core;\n"
+        f"export fn calculate(input: *const Input) -> {scalar_type};\n"
+    )
+    math_implementation = (
+        f"module {module_prefix}.math;\n"
+        f"fn calculate(input: *const Input) -> {scalar_type} {{\n"
+        f"    return adjust(input, {delta});\n"
+        "}\n"
+    )
+    root_implementation = (
+        f"module {module_prefix}.app;\n"
+        f"import {module_prefix}.math;\n"
+        f"import {module_prefix}.core;\n"
+        "fn main() -> i32 {\n"
+        f"    var input: Input = {{ value = {first_value}, }};\n"
+        f"    let result: {scalar_type} = "
+        "calculate((&input) as *const Input);\n"
+        "    return result == 42 ? 42 : 1;\n"
+        "}\n"
+    )
+    return (
+        root_implementation,
+        math_implementation,
+        core_interface,
+        math_interface,
+        core_implementation,
+    ), 42
+
+
 def compile_and_run(
     compiler: pathlib.Path,
     llvm_mc: str,
     linker: str,
     target_runner: list[str],
-    source_text: str | tuple[str, str],
+    source_text: str | tuple[str, ...],
     expected_code: int,
     case_index: int,
     work_dir: pathlib.Path,
@@ -977,23 +1042,19 @@ def compile_and_run(
         source_units = (source,)
         rendered_source = source_text
     else:
-        interface_text, implementation_text = source_text
-        interface_source = work_dir / f"case_{case_index}_interface.luna"
-        implementation_source = (
-            work_dir / f"case_{case_index}_implementation.luna"
+        source_files = tuple(
+            work_dir / f"case_{case_index}_unit_{unit_index}.luna"
+            for unit_index in range(len(source_text))
         )
-        interface_source.write_text(interface_text, encoding="utf-8")
-        implementation_source.write_text(
-            implementation_text, encoding="utf-8"
-        )
+        for source_file, unit_text in zip(source_files, source_text):
+            source_file.write_text(unit_text, encoding="utf-8")
+        rotation = case_index % len(source_files)
         source_units = (
-            (interface_source, implementation_source)
-            if case_index % 2 == 0
-            else (implementation_source, interface_source)
+            source_files[rotation:] + source_files[:rotation]
         )
-        rendered_source = (
-            f"interface:\n{interface_text}\n"
-            f"implementation:\n{implementation_text}"
+        rendered_source = "\n".join(
+            f"unit {unit_index}:\n{unit_text}"
+            for unit_index, unit_text in enumerate(source_text)
         )
 
     try:
@@ -1058,7 +1119,7 @@ def main() -> int:
 
     engine = random.Random(arguments.seed)
     for case_index in range(arguments.cases):
-        case_kind = case_index % 21
+        case_kind = case_index % 22
         if case_kind == 0:
             source, expected_code = generate_case(engine, case_index)
         elif case_kind == 1:
@@ -1140,8 +1201,12 @@ def main() -> int:
             source, expected_code = generate_aggregate_case(
                 engine, case_index
             )
-        else:
+        elif case_kind == 20:
             source, expected_code = generate_module_pair_case(
+                engine, case_index
+            )
+        else:
+            source, expected_code = generate_module_import_case(
                 engine, case_index
             )
         compile_and_run(

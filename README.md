@@ -15,6 +15,8 @@ The project is deliberately narrow at this stage:
   exact-layout structures and unions, scoped enums, typed external C function
   declarations, context-directed named aggregate initialization, exact
   whole-object copies, matched module interface/implementation pairs,
+  direct imports with explicit export visibility and validated dependency
+  graphs,
   type-only `sizeof`, `alignof` and `offsetof` queries, expressions, the
   short-circuit conditional operator, local variables, `if`, `while`, `do`,
   `for` and non-fallthrough `switch` control flow;
@@ -88,17 +90,23 @@ ld.lld -static -e _start -o hello hello.o
 qemu-x86_64-static ./hello
 ```
 
-For a module with a separate interface, pass both source units in either
-order:
+Pass the executable root and every transitive module source unit in one
+invocation. Source order has no semantic effect:
 
 ```sh
-build/debug/lunac --emit asm -o app.s app.luna app.interface.luna
+build/debug/lunac --emit asm -o app.s \
+  app.luna math.interface.luna math.luna \
+  core.interface.luna core.luna
 ```
 
 The interface begins with `export module`, contains complete type definitions
 and bodyless function declarations, and is matched exactly against definitions
-in the implementation unit. Cross-module imports remain disabled until the
-next M2 stage.
+in the implementation unit. An `import` exposes only declarations marked
+`export` by the imported interface. The compiler rejects missing or duplicate
+units, unknown or repeated imports, cycles, ambiguous names, private access,
+multiple executable roots and supplied modules unreachable from the root.
+Serialized compiled-module metadata is deferred, so dependency source units
+must currently be supplied together.
 
 `--target` defaults to `x86_64-unknown-linux-gnu`, currently the only
 supported target. On an x86-64 Linux host, the integration and differential
@@ -116,6 +124,18 @@ the final `ld.lld` command. Luna emits the exact symbol name and does not
 implicitly link libc. The current external ABI accepts non-variadic
 scalar/pointer signatures that fit in the six integer and eight SSE System V
 argument registers; stack and aggregate arguments remain deferred.
+
+## Runtime boundary
+
+Luna target programs are freestanding. Generated executables enter at
+project-owned `_start` code and do not link libc. The future Luna runtime and
+standard library must be built on a project-owned x86-64 Linux system-call
+layer that invokes the kernel ABI directly; adding libc as an implementation
+dependency is outside the accepted design. Optional user-supplied `extern fn`
+objects remain an explicit FFI choice and are not part of the Luna runtime.
+
+The bootstrap compiler itself remains a hosted C23 development tool. Its host
+library use does not become a dependency of generated target programs.
 
 See [the language draft](docs/language.md),
 [compiler architecture](docs/architecture.md),

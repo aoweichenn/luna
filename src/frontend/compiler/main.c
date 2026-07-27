@@ -1,12 +1,14 @@
 #include "luna/frontend/compiler/compiler.h"
+#include "luna/frontend/support/buffer.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 static void luna_print_usage(FILE *stream) {
     (void)fputs("usage: lunac [--target triple] [--emit check|ir|asm] "
-                "[-o path] implementation.luna [interface.luna]\n"
+                "[-o path] root.luna [module-source.luna ...]\n"
                 "\n"
                 "targets:\n"
                 "  x86_64-unknown-linux-gnu (default)\n"
@@ -17,8 +19,8 @@ static void luna_print_usage(FILE *stream) {
                 "  --emit ir      write textual Luna IR\n"
                 "  --emit asm     write x86-64 GNU assembly (default)\n"
                 "  -o path        output path; '-' writes to stdout\n"
-                "  source units   one implementation, or one "
-                "interface/implementation pair in either order\n"
+                "  source units   executable root and every transitive module "
+                "source, in any order\n"
                 "  --version      print compiler version\n"
                 "  --help         print this help\n",
                 stream);
@@ -41,25 +43,31 @@ static bool luna_parse_emit_kind(const char *name, LunaEmitKind *emit_kind) {
 }
 
 int main(int argument_count, char **arguments) {
+    LunaVector input_paths;
+    luna_vector_init(&input_paths, sizeof(const char *));
+
     LunaCompilerOptions options = {
-        .input_paths = {NULL, NULL},
+        .input_paths = NULL,
         .input_count = 0U,
         .output_path = NULL,
         .emit_kind = LUNA_EMIT_ASSEMBLY,
         .target = luna_target_info_default(),
     };
+    int exit_code = 2;
 
     for (int index = 1; index < argument_count; index += 1) {
         const char *argument = arguments[index];
 
         if (strcmp(argument, "--help") == 0) {
             luna_print_usage(stdout);
-            return 0;
+            exit_code = 0;
+            goto cleanup;
         }
 
         if (strcmp(argument, "--version") == 0) {
             (void)puts("lunac 0.1.0-dev");
-            return 0;
+            exit_code = 0;
+            goto cleanup;
         }
 
         if (strcmp(argument, "--emit") == 0) {
@@ -68,7 +76,7 @@ int main(int argument_count, char **arguments) {
                                       &options.emit_kind)) {
                 (void)fputs("error: --emit requires check, ir or asm\n",
                             stderr);
-                return 2;
+                goto cleanup;
             }
             index += 1;
             continue;
@@ -78,13 +86,13 @@ int main(int argument_count, char **arguments) {
             if (index + 1 >= argument_count) {
                 (void)fputs("error: --target requires a target triple\n",
                             stderr);
-                return 2;
+                goto cleanup;
             }
             options.target = luna_target_info_from_triple(arguments[index + 1]);
             if (options.target == NULL) {
                 (void)fprintf(stderr, "error: unsupported target '%s'\n",
                               arguments[index + 1]);
-                return 2;
+                goto cleanup;
             }
             index += 1;
             continue;
@@ -93,7 +101,7 @@ int main(int argument_count, char **arguments) {
         if (strcmp(argument, "-o") == 0) {
             if (index + 1 >= argument_count) {
                 (void)fputs("error: -o requires an output path\n", stderr);
-                return 2;
+                goto cleanup;
             }
             options.output_path = arguments[index + 1];
             index += 1;
@@ -102,23 +110,23 @@ int main(int argument_count, char **arguments) {
 
         if (argument[0] == '-') {
             (void)fprintf(stderr, "error: unknown option '%s'\n", argument);
-            return 2;
+            goto cleanup;
         }
 
-        if (options.input_count >= LUNA_COMPILER_MAX_SOURCE_UNITS) {
-            (void)fputs(
-                "error: the bootstrap compiler accepts one implementation "
-                "unit or one interface/implementation pair\n",
-                stderr);
-            return 2;
+        if (!luna_vector_push(&input_paths, (const void *)&argument)) {
+            (void)fputs("error: out of memory while recording source units\n",
+                        stderr);
+            goto cleanup;
         }
-        options.input_paths[options.input_count] = argument;
-        options.input_count += 1U;
     }
 
-    if (options.input_count == 0U) {
+    if (input_paths.length == 0U) {
         luna_print_usage(stderr);
-        return 2;
+        goto cleanup;
+    }
+    if (input_paths.length > UINT32_MAX) {
+        (void)fputs("error: too many source units\n", stderr);
+        goto cleanup;
     }
 
     if (options.emit_kind != LUNA_EMIT_CHECK && options.output_path == NULL) {
@@ -126,5 +134,11 @@ int main(int argument_count, char **arguments) {
             options.emit_kind == LUNA_EMIT_IR ? "a.lir" : "a.s";
     }
 
-    return luna_compile(&options, stderr);
+    options.input_paths = (const char *const *)input_paths.data;
+    options.input_count = (uint32_t)input_paths.length;
+    exit_code = luna_compile(&options, stderr);
+
+cleanup:
+    luna_vector_destroy(&input_paths);
+    return exit_code;
 }

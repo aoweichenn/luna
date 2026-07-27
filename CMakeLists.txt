@@ -34,6 +34,7 @@ add_library(luna_compiler STATIC
     src/frontend/compiler/compiler.c
     src/frontend/diagnostic/diagnostic.c
     src/middleend/ir/ir.c
+    src/middleend/module/module.c
     src/frontend/lexer/lexer.c
     src/frontend/parser/parser.c
     src/middleend/sema/sema.c
@@ -163,6 +164,7 @@ if(BUILD_TESTING)
         tests/unit/frontend/lexer/lexer_test.cpp
         tests/unit/frontend/parser/parser_test.cpp
         tests/unit/middleend/sema_test.cpp
+        tests/unit/middleend/module_test.cpp
         tests/unit/frontend/source/source_test.cpp
         tests/unit/frontend/type_test.cpp
         tests/unit/target/target_test.cpp
@@ -256,7 +258,7 @@ if(BUILD_TESTING)
             --compiler "$<TARGET_FILE:lunac>"
             --work-dir "${CMAKE_CURRENT_BINARY_DIR}/random"
             --seed 0x4c554e41
-            --cases 76
+            --cases 88
     )
     set_tests_properties(
         random.differential
@@ -312,6 +314,7 @@ if(LUNA_BUILD_FUZZERS)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/external.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/aggregate.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/module_pair.luna"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/module_import.luna"
             DESTINATION "${LUNA_FUZZ_CORPUS_DIR}"
         )
 

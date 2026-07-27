@@ -5,8 +5,10 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <initializer_list>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace luna::test {
 
@@ -53,6 +55,44 @@ class FrontendHarness final {
     LunaStringBuilder assembly_{};
     bool ready_{false};
     bool has_interface_{false};
+    bool parse_attempted_{false};
+    bool parse_succeeded_{false};
+    bool lower_attempted_{false};
+    bool lower_succeeded_{false};
+};
+
+class CompilationHarness final {
+  public:
+    explicit CompilationHarness(
+        std::initializer_list<std::string_view> source_texts,
+        const LunaTargetInfo *target = luna_target_info_default());
+    ~CompilationHarness();
+
+    CompilationHarness(const CompilationHarness &) = delete;
+    CompilationHarness &operator=(const CompilationHarness &) = delete;
+    CompilationHarness(CompilationHarness &&) = delete;
+    CompilationHarness &operator=(CompilationHarness &&) = delete;
+
+    [[nodiscard]] bool IsReady() const noexcept;
+    [[nodiscard]] bool Parse();
+    [[nodiscard]] bool Lower();
+    [[nodiscard]] bool ParseAndLower();
+    [[nodiscard]] bool Verify();
+    [[nodiscard]] bool EmitAssembly();
+    [[nodiscard]] std::size_t ErrorCount() const noexcept;
+    [[nodiscard]] std::string Diagnostics() const;
+    [[nodiscard]] std::string Assembly() const;
+    [[nodiscard]] LunaIrModule *Module() noexcept;
+
+  private:
+    std::vector<LunaSourceFile> sources_;
+    std::vector<const LunaProgram *> programs_;
+    LunaArena arena_{};
+    std::FILE *diagnostic_file_{nullptr};
+    LunaDiagnosticEngine diagnostics_{};
+    LunaIrModule module_{};
+    LunaStringBuilder assembly_{};
+    bool ready_{false};
     bool parse_attempted_{false};
     bool parse_succeeded_{false};
     bool lower_attempted_{false};

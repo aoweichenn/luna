@@ -460,8 +460,8 @@ def main() -> int:
         raise AssertionError("--help did not print the compiler usage")
     if "x86_64-unknown-linux-gnu" not in help_result.stdout:
         raise AssertionError("--help did not list the supported target")
-    if "interface/implementation" not in help_result.stdout:
-        raise AssertionError("--help did not describe paired module units")
+    if "transitive module source" not in help_result.stdout:
+        raise AssertionError("--help did not describe module source inputs")
     version_result = run([str(arguments.compiler), "--version"])
     if "lunac 0.1.0-dev" not in version_result.stdout:
         raise AssertionError("--version did not print the compiler version")
@@ -501,17 +501,6 @@ def main() -> int:
         ],
         expected_code=1,
     )
-    too_many_units = run(
-        [
-            str(arguments.compiler),
-            str(case_dir / "return_42.luna"),
-            str(case_dir / "return_42.luna"),
-            str(case_dir / "return_42.luna"),
-        ],
-        expected_code=2,
-    )
-    if "one interface/implementation pair" not in too_many_units.stderr:
-        raise AssertionError("too-many-source-units diagnostic is missing")
     duplicate_implementation = run(
         [
             str(arguments.compiler),
@@ -522,7 +511,10 @@ def main() -> int:
         ],
         expected_code=1,
     )
-    if "more than one implementation unit" not in duplicate_implementation.stderr:
+    if (
+        "more than one implementation unit"
+        not in duplicate_implementation.stderr
+    ):
         raise AssertionError("duplicate implementation diagnostic is missing")
     duplicate_interface = run(
         [
@@ -659,6 +651,24 @@ def main() -> int:
     )
     print("PASS executable: matched module interface and implementation")
 
+    module_import_sources = (
+        case_dir / "module_import_math_implementation.luna",
+        case_dir / "module_import_core_interface.luna",
+        case_dir / "module_import_math_interface.luna",
+        case_dir / "module_import_core_implementation.luna",
+    )
+    compile_and_run(
+        arguments.compiler,
+        llvm_mc,
+        linker,
+        target_runner,
+        case_dir / "module_import_app.luna",
+        arguments.work_dir,
+        42,
+        additional_source_units=module_import_sources,
+    )
+    print("PASS executable: transitive module imports and exported types")
+
     conversion_matrix = generate_integer_conversion_matrix(arguments.work_dir)
     compile_and_run(
         arguments.compiler,
@@ -722,11 +732,9 @@ def main() -> int:
         ),
         "integer_overflow.luna": "integer literal does not fit in i32",
         "module_interface_pending.luna": (
-            "requires a matching implementation source unit"
+            "requires a matching implementation unit"
         ),
-        "import_pending.luna": (
-            "import visibility and dependency validation"
-        ),
+        "import_pending.luna": "was not supplied to this compilation",
         "duplicate_function.luna": "duplicate function 'main'",
         "unreachable_type_error.luna": "expected bool, found i32",
         "void_local.luna": "local variables cannot have type void",
@@ -971,7 +979,7 @@ def main() -> int:
         (
             "module_pair_name_mismatch_interface.luna",
             "module_pair_name_mismatch_implementation.luna",
-            "does not match interface module",
+            "requires a matching implementation unit",
         ),
         (
             "module_pair_missing_interface.luna",
@@ -1028,6 +1036,58 @@ def main() -> int:
                 f"{expected_diagnostic!r}\nstderr:\n{result.stderr}"
             )
         print(f"PASS module-pair negative: {interface_name}")
+
+    module_import_negative_cases = (
+        (
+            (
+                "module_import_cycle_left_implementation.luna",
+                "module_import_cycle_right_interface.luna",
+                "module_import_cycle_left_interface.luna",
+                "module_import_cycle_right_implementation.luna",
+            ),
+            "import cycle detected",
+        ),
+        (
+            (
+                "module_import_private_app.luna",
+                "module_import_private_interface.luna",
+                "module_import_private_implementation.luna",
+            ),
+            "unknown function 'hidden'",
+        ),
+        (
+            (
+                "module_import_duplicate_app_implementation.luna",
+                "module_import_core_implementation.luna",
+                "module_import_duplicate_app_interface.luna",
+                "module_import_core_interface.luna",
+            ),
+            "imports module 'tests.imports.core' more than once",
+        ),
+        (
+            (
+                "module_import_unreachable_library.luna",
+                "module_import_unreachable_app.luna",
+            ),
+            "is not reachable from executable root",
+        ),
+    )
+    for source_names, expected_diagnostic in module_import_negative_cases:
+        result = run(
+            [
+                str(arguments.compiler),
+                "--emit",
+                "check",
+                *(str(case_dir / name) for name in source_names),
+            ],
+            expected_code=1,
+        )
+        if expected_diagnostic not in result.stderr:
+            raise AssertionError(
+                f"{source_names}: expected {expected_diagnostic!r}\n"
+                f"stderr:\n{result.stderr}"
+            )
+        print(f"PASS module-import negative: {source_names[0]}")
 
     for snapshot_name in (
         "function_call",
@@ -1100,6 +1160,36 @@ def main() -> int:
         )
     print("PASS IR snapshot: matched module interface and implementation")
 
+    module_import_ir = arguments.work_dir / "module_import.lir"
+    run(
+        [
+            str(arguments.compiler),
+            "--emit",
+            "ir",
+            "-o",
+            str(module_import_ir),
+            str(case_dir / "module_import_app.luna"),
+            *(str(path) for path in module_import_sources),
+        ]
+    )
+    expected_module_import_ir = (
+        arguments.source_root
+        / "tests"
+        / "integration"
+        / "golden"
+        / "module_import.lir"
+    ).read_text(encoding="utf-8")
+    actual_module_import_ir = module_import_ir.read_text(encoding="utf-8")
+    if actual_module_import_ir.rstrip(
+        "\n"
+    ) != expected_module_import_ir.rstrip("\n"):
+        raise AssertionError(
+            "IR snapshot mismatch for imported module graph\n"
+            f"expected:\n{expected_module_import_ir}\n"
+            f"actual:\n{actual_module_import_ir}"
+        )
+    print("PASS IR snapshot: imported module graph")
+
     for deterministic_name in (
         "recursive_factorial",
         "i64_operations",
@@ -1170,6 +1260,32 @@ def main() -> int:
             "paired-module assembly depends on source-unit argument order"
         )
     print("PASS deterministic assembly: paired module in either CLI order")
+
+    module_import_first = arguments.work_dir / "module_import_first.s"
+    module_import_second = arguments.work_dir / "module_import_second.s"
+    module_import_units = (
+        case_dir / "module_import_app.luna",
+        *module_import_sources,
+    )
+    for output, source_units in (
+        (module_import_first, module_import_units),
+        (module_import_second, tuple(reversed(module_import_units))),
+    ):
+        run(
+            [
+                str(arguments.compiler),
+                "--emit",
+                "asm",
+                "-o",
+                str(output),
+                *(str(path) for path in source_units),
+            ]
+        )
+    if module_import_first.read_bytes() != module_import_second.read_bytes():
+        raise AssertionError(
+            "imported-module assembly depends on source-unit argument order"
+        )
+    print("PASS deterministic assembly: imported module graph in any CLI order")
 
     print("all integration tests passed")
     return 0

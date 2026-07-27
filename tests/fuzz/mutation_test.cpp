@@ -17,6 +17,9 @@ constexpr std::uint64_t LUNA_TEST_MUTATION_CASES = 1000U;
 constexpr std::uint64_t LUNA_TEST_MODULE_MUTATION_SEED =
     UINT64_C(0x4d4f44554c45);
 constexpr std::uint64_t LUNA_TEST_MODULE_MUTATION_CASES = 500U;
+constexpr std::uint64_t LUNA_TEST_MODULE_GRAPH_MUTATION_SEED =
+    UINT64_C(0x4d4f44554c454752);
+constexpr std::uint64_t LUNA_TEST_MODULE_GRAPH_MUTATION_CASES = 300U;
 constexpr std::size_t LUNA_TEST_MAX_INPUT_SIZE = 4096U;
 
 [[nodiscard]] std::size_t RandomIndex(std::mt19937_64 &random_engine,
@@ -218,6 +221,66 @@ TEST(MutationFuzzTest, CleanModulePairResultsAlwaysProduceValidTypedIr) {
                                       << harness.Diagnostics();
         EXPECT_TRUE(harness.EmitAssembly()) << "case " << case_index << '\n'
                                             << harness.Diagnostics();
+    }
+}
+
+TEST(MutationFuzzTest, CleanModuleGraphResultsAlwaysProduceValidTypedIr) {
+    constexpr std::array<std::string_view, 5U> LUNA_TEST_MODULE_SOURCES = {
+        "module fuzz.graph.app;\n"
+        "import fuzz.graph.math;\n"
+        "import fuzz.graph.core;\n"
+        "fn main() -> i32 {\n"
+        " var input: Input = { value = 20, };\n"
+        " return calculate((&input) as *const Input);\n"
+        "}\n",
+        "export module fuzz.graph.core;\n"
+        "export struct Input { value: i32; }\n"
+        "export fn adjust(input: *const Input, delta: i32) -> i32;\n",
+        "module fuzz.graph.math;\n"
+        "fn calculate(input: *const Input) -> i32 {\n"
+        " return adjust(input, 22);\n"
+        "}\n",
+        "export module fuzz.graph.math;\n"
+        "import fuzz.graph.core;\n"
+        "export fn calculate(input: *const Input) -> i32;\n",
+        "module fuzz.graph.core;\n"
+        "fn adjust(input: *const Input, delta: i32) -> i32 {\n"
+        " return input->value + delta;\n"
+        "}\n",
+    };
+
+    CompilationHarness clean{
+        LUNA_TEST_MODULE_SOURCES[0], LUNA_TEST_MODULE_SOURCES[1],
+        LUNA_TEST_MODULE_SOURCES[2], LUNA_TEST_MODULE_SOURCES[3],
+        LUNA_TEST_MODULE_SOURCES[4]};
+    ASSERT_TRUE(clean.Verify()) << clean.Diagnostics();
+    ASSERT_TRUE(clean.EmitAssembly()) << clean.Diagnostics();
+
+    std::mt19937_64 random_engine{LUNA_TEST_MODULE_GRAPH_MUTATION_SEED};
+    for (std::uint64_t case_index = 0U;
+         case_index < LUNA_TEST_MODULE_GRAPH_MUTATION_CASES; case_index += 1U) {
+        std::array<std::string, LUNA_TEST_MODULE_SOURCES.size()> sources;
+        for (std::size_t index = 0U; index < sources.size(); index += 1U) {
+            sources[index] = LUNA_TEST_MODULE_SOURCES[index];
+        }
+        const std::size_t mutated_source =
+            RandomIndex(random_engine, sources.size());
+        Mutate(sources[mutated_source], random_engine);
+
+        CompilationHarness harness{
+            std::string_view{sources[0]}, std::string_view{sources[1]},
+            std::string_view{sources[2]}, std::string_view{sources[3]},
+            std::string_view{sources[4]}};
+        ASSERT_TRUE(harness.IsReady()) << "case " << case_index;
+        if (!harness.ParseAndLower()) {
+            continue;
+        }
+        EXPECT_TRUE(harness.Verify())
+            << "case " << case_index << ", source " << mutated_source << '\n'
+            << harness.Diagnostics();
+        EXPECT_TRUE(harness.EmitAssembly())
+            << "case " << case_index << ", source " << mutated_source << '\n'
+            << harness.Diagnostics();
     }
 }
 

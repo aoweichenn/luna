@@ -252,9 +252,32 @@ before implementation-private types enter scope, so an interface cannot
 silently depend on implementation details. Command-line source order has no
 semantic effect.
 
+An interface import is visible while checking both the interface and its
+implementation. An implementation-only import is visible only in that
+implementation. Only declarations explicitly exported by the imported
+interface enter scope, and imports are not transitively visible or re-exported.
+Conflicting unqualified imported names and local shadowing of imported names
+are rejected.
+
+The executable module is the unique implementation containing `main`. Every
+supplied module must be reachable from it through direct imports. Every
+imported module has one interface and one implementation, and the dependency
+graph must be acyclic. Dependencies are checked before importers in an
+order independent of command-line source order. Compatible declarations of
+one external C symbol share that symbol globally; incompatible signatures are
+rejected.
+
 This contract is compile-time only and adds no run-time initialization or
-dispatch. `import` remains rejected until dependency validation and compiled
-module metadata are implemented.
+dispatch. Serialized module metadata is not implemented yet, so one compiler
+invocation must include the root and all transitive source units.
+
+## Runtime boundary
+
+Generated programs enter through project-owned `_start` code and use no libc.
+The runtime and standard library will call the x86-64 Linux kernel through a
+project-owned direct system-call layer. This target-side restriction does not
+apply to the hosted C23 bootstrap compiler and does not prohibit an application
+from explicitly linking a caller-supplied object through `extern fn`.
 
 ## Optimization boundary
 

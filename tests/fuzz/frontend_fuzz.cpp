@@ -4,13 +4,15 @@
 #include <cstdint>
 #include <cstdio>
 #include <string_view>
+#include <vector>
 
 namespace {
 
-constexpr std::size_t LUNA_FUZZ_MAX_INPUT_SIZE = 64U * 1024U;
-constexpr std::size_t LUNA_FUZZ_ARENA_BLOCK_SIZE = 32U * 1024U;
+constexpr std::size_t LUNA_FUZZ_MAX_INPUT_SIZE = std::size_t{64U} * 1024U;
+constexpr std::size_t LUNA_FUZZ_ARENA_BLOCK_SIZE = std::size_t{32U} * 1024U;
+constexpr std::size_t LUNA_FUZZ_MAX_SOURCE_UNITS = 16U;
 constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
-    "\n===LUNA_IMPLEMENTATION===\n";
+    "\n===LUNA_SOURCE_UNIT===\n";
 
 [[nodiscard]] bool RunFrontend(const std::uint8_t *data, std::size_t size) {
     std::FILE *diagnostic_file = std::fopen("/dev/null", "wb");
@@ -53,22 +55,38 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
     return invariant_holds;
 }
 
-[[nodiscard]] bool RunModulePair(const std::uint8_t *data, std::size_t size) {
+[[nodiscard]] bool RunModuleCompilation(const std::uint8_t *data,
+                                        std::size_t size) {
     const std::string_view input{reinterpret_cast<const char *>(data), size};
-    const std::size_t separator_offset = input.find(LUNA_FUZZ_MODULE_SEPARATOR);
-    if (separator_offset == std::string_view::npos) {
+    if (input.find(LUNA_FUZZ_MODULE_SEPARATOR) == std::string_view::npos) {
         return true;
     }
-    const std::size_t implementation_offset =
-        separator_offset + LUNA_FUZZ_MODULE_SEPARATOR.size();
+
+    std::vector<std::string_view> source_units;
+    std::size_t source_offset = 0U;
+    for (;;) {
+        const std::size_t separator_offset =
+            input.find(LUNA_FUZZ_MODULE_SEPARATOR, source_offset);
+        if (separator_offset == std::string_view::npos) {
+            source_units.push_back(input.substr(source_offset));
+            break;
+        }
+        source_units.push_back(
+            input.substr(source_offset, separator_offset - source_offset));
+        if (source_units.size() >= LUNA_FUZZ_MAX_SOURCE_UNITS) {
+            return true;
+        }
+        source_offset = separator_offset + LUNA_FUZZ_MODULE_SEPARATOR.size();
+    }
 
     std::FILE *diagnostic_file = std::fopen("/dev/null", "wb");
     if (diagnostic_file == nullptr) {
         return true;
     }
 
-    LunaSourceFile interface_source{};
-    LunaSourceFile implementation_source{};
+    std::vector<LunaSourceFile> sources(source_units.size());
+    std::vector<const LunaProgram *> programs;
+    programs.reserve(source_units.size());
     LunaArena arena{};
     LunaIrModule module{};
     LunaStringBuilder assembly{};
@@ -80,31 +98,31 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
     luna_diagnostic_init(&diagnostics, diagnostic_file);
 
     bool invariant_holds = true;
-    const bool sources_ready =
-        luna_source_from_bytes("<fuzz-interface>",
-                               reinterpret_cast<const char *>(data),
-                               separator_offset, &interface_source) &&
-        luna_source_from_bytes(
-            "<fuzz-implementation>",
-            reinterpret_cast<const char *>(data + implementation_offset),
-            size - implementation_offset, &implementation_source);
+    bool sources_ready = true;
+    for (std::size_t index = 0U; index < source_units.size(); index += 1U) {
+        const std::string_view source_unit = source_units[index];
+        if (!luna_source_from_bytes("<fuzz-module>", source_unit.data(),
+                                    source_unit.size(), &sources[index])) {
+            sources_ready = false;
+        }
+    }
     if (sources_ready) {
-        LunaParser interface_parser{};
-        luna_parser_init(&interface_parser, &interface_source, &diagnostics,
-                         &arena);
-        LunaProgram *interface_program =
-            luna_parser_parse_program(&interface_parser);
+        for (LunaSourceFile &source : sources) {
+            LunaParser parser{};
+            luna_parser_init(&parser, &source, &diagnostics, &arena);
+            programs.push_back(luna_parser_parse_program(&parser));
+        }
 
-        LunaParser implementation_parser{};
-        luna_parser_init(&implementation_parser, &implementation_source,
-                         &diagnostics, &arena);
-        LunaProgram *implementation_program =
-            luna_parser_parse_program(&implementation_parser);
-
-        if (interface_program != nullptr && implementation_program != nullptr &&
-            luna_diagnostic_error_count(&diagnostics) == 0U &&
-            luna_sema_lower_module(interface_program, implementation_program,
-                                   &diagnostics, &module) &&
+        bool programs_ready = luna_diagnostic_error_count(&diagnostics) == 0U;
+        for (const LunaProgram *program : programs) {
+            if (program == nullptr) {
+                programs_ready = false;
+            }
+        }
+        if (programs_ready &&
+            luna_module_lower_programs(
+                programs.data(), static_cast<std::uint32_t>(programs.size()),
+                &diagnostics, &module) &&
             luna_diagnostic_error_count(&diagnostics) == 0U) {
             invariant_holds =
                 luna_ir_verify(&module, diagnostic_file) &&
@@ -115,8 +133,9 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
     luna_string_builder_destroy(&assembly);
     luna_ir_module_destroy(&module);
     luna_arena_destroy(&arena);
-    luna_source_destroy(&implementation_source);
-    luna_source_destroy(&interface_source);
+    for (LunaSourceFile &source : sources) {
+        luna_source_destroy(&source);
+    }
     static_cast<void>(std::fclose(diagnostic_file));
     return invariant_holds;
 }
@@ -126,7 +145,7 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data,
                                       std::size_t size) {
     if (size <= LUNA_FUZZ_MAX_INPUT_SIZE &&
-        (!RunFrontend(data, size) || !RunModulePair(data, size))) {
+        (!RunFrontend(data, size) || !RunModuleCompilation(data, size))) {
         __builtin_trap();
     }
     return 0;

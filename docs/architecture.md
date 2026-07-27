@@ -6,6 +6,13 @@ The bootstrap compiler is C23. Luna source is never translated to C. The
 initial target is exactly `x86_64-unknown-linux-gnu`: x86-64 instructions,
 System V calling convention and ELF64 objects or executables.
 
+Generated target programs are freestanding and never depend on libc. The
+bootstrap compiler is a hosted C23 tool, but host-library use is confined to
+the compiler process. The Luna runtime and standard library will use a
+project-owned x86-64 Linux system-call ABI layer that invokes `syscall`
+directly. Optional caller-supplied external objects are an explicit FFI
+boundary, not a runtime dependency.
+
 The compiler owns the language semantics. LLVM tools are currently used only
 to encode emitted x86-64 assembly and link ELF64 test executables. They are not
 used as the compiler IR, optimizer or instruction selector.
@@ -27,6 +34,9 @@ source units
     |
     v
 lexer -> parser -> syntax tree
+                    |
+                    v
+             module graph resolution
                     |
                     v
              name and type checking
@@ -78,21 +88,31 @@ layout-query instruction.
 Compilation is split into global and local phases:
 
 1. parse every source unit;
-2. classify and validate module units;
-3. collect exported and module-private declarations;
-4. match interface declarations with implementation definitions;
-5. type-check function bodies;
-6. lower checked bodies to IR.
+2. group interface and implementation units by exact module name;
+3. resolve imports and validate one rooted, reachable, acyclic graph;
+4. topologically lower dependencies into one shared semantic world;
+5. collect exported and module-private declarations;
+6. match interface declarations with implementation definitions;
+7. type-check function bodies;
+8. lower checked bodies to IR.
 
 This order removes source-order dependencies and ordinary forward declarations.
-The current module-contract stage accepts one implementation or one
-interface/implementation pair. Source order on the command line is irrelevant.
-The interface type graph is resolved before implementation-private types are
-collected, making the interface independently valid. Function matching uses
-canonical semantic types, so nested arrays, named-type identity and pointer
-read-only qualifiers cannot match accidentally by spelling or layout.
-Cross-module import lookup, dependency validation and serialized module
-metadata remain separate later stages.
+Source order on the command line is irrelevant. The module resolver identifies
+the unique implementation containing `main`, requires every supplied module
+to be reachable from it and lowers dependencies before importers. Interface
+imports enter both interface and implementation scope; implementation-only
+imports never enter interface scope. Only exported declarations enter an
+importer's scope, and visibility is never transitive.
+
+All modules in one invocation share canonical named-type and function records.
+This preserves type identity across module boundaries, rejects ambiguous
+unqualified imports and lets compatible repeated external declarations share
+one IR symbol while rejecting conflicting signatures. The interface type
+graph is resolved before implementation-private types are collected, making
+the interface independently valid. Function matching uses canonical semantic
+types, so nested arrays, named-type identity and pointer read-only qualifiers
+cannot match accidentally by spelling or layout. Serialized module metadata
+remains a separate later stage.
 
 ## Luna IR
 
@@ -198,6 +218,11 @@ The first backend is correctness-first:
 - a Linux `_start` shim that exits through syscall 60;
 - no dependency on a target C runtime.
 
+The `_start` shim is the first instance of the project-owned system-call
+boundary. M4 extends that boundary into a typed runtime layer for process,
+memory and I/O services. It must preserve raw Linux error results internally,
+define Luna-facing error semantics explicitly and remain independent of libc.
+
 This backend is intentionally not the performance endpoint. Planned stages are:
 
 1. correct stack-homed code;
@@ -223,9 +248,9 @@ The quality gate contains:
 - GoogleTest unit tests for utilities, source handling, lexing, parsing,
   semantic lowering, IR invariants and x86-64 emission;
 - parser, type and module-error negative tests;
-- paired module execution and IR snapshots, argument-order determinism,
-  interface self-containment, exact signature matching and cross-source
-  diagnostic-note tests;
+- transitive module execution and IR snapshots, full source-order determinism,
+  interface self-containment, exact signature matching, import visibility,
+  graph validation and cross-source diagnostic-note tests;
 - textual IR snapshots;
 - x86-64 assembly validation through LLVM MC;
 - static ELF64 linking through LLD;

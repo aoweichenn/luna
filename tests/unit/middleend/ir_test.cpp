@@ -215,6 +215,39 @@ TEST(IrPrinterTest, PrintsExternalSignaturesWithoutBodiesOrSlots) {
     EXPECT_EQ(text.find("fn @c_mix($0:"), std::string::npos);
 }
 
+TEST(IrPrinterTest, QualifiesCollidingInternalFunctionNamesAcrossModules) {
+    CompilationHarness harness{
+        "module app.ir_names;\n"
+        "import lib.left;\n"
+        "import lib.right;\n"
+        "fn main() -> i32 { return left() + right(); }\n",
+        "export module lib.left;\n"
+        "export fn left() -> i32;\n",
+        "module lib.left;\n"
+        "fn helper() -> i32 { return 20; }\n"
+        "fn left() -> i32 { return helper(); }\n",
+        "export module lib.right;\n"
+        "export fn right() -> i32;\n",
+        "module lib.right;\n"
+        "fn helper() -> i32 { return 22; }\n"
+        "fn right() -> i32 { return helper(); }\n"};
+    ASSERT_TRUE(harness.Verify()) << harness.Diagnostics();
+
+    LunaStringBuilder output{};
+    luna_string_builder_init(&output);
+    const bool printed = luna_ir_print(harness.Module(), &output);
+    const std::string text =
+        printed ? std::string{luna_string_builder_data(&output), output.length}
+                : std::string{};
+    luna_string_builder_destroy(&output);
+
+    ASSERT_TRUE(printed);
+    EXPECT_NE(text.find("fn @lib.left::helper("), std::string::npos);
+    EXPECT_NE(text.find("fn @lib.right::helper("), std::string::npos);
+    EXPECT_NE(text.find("call @lib.left::helper("), std::string::npos);
+    EXPECT_NE(text.find("call @lib.right::helper("), std::string::npos);
+}
+
 TEST(IrPrinterTest, PrintsTypedAggregateMemberAddresses) {
     FrontendHarness harness{
         "module test.aggregate_ir_print;\n"

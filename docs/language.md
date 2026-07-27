@@ -44,11 +44,25 @@ interface are module-private and need no prior declaration. Interface types
 and function signatures must resolve using the interface itself; they cannot
 depend on a type declared only in the implementation.
 
-The bootstrap compiler accepts either one implementation unit or one
-interface/implementation pair, in either command-line order. A pair must use
-the same exact module name, and the implementation must define the bootstrap
-`main`. Interface-only compilation and cross-module imports are deferred until
-compiled module metadata is available.
+An import written in an interface is visible to both units of that module. An
+implementation may add imports that remain private to the implementation.
+Imports are direct and non-transitive: importing one module does not expose
+that module's imports. An exported function or aggregate type cannot expose a
+module-private named type in its public signature or fields.
+
+Imported declarations are used by their unqualified names. Importing two
+exported declarations with the same name is an error, and a local declaration
+cannot shadow an imported declaration. Luna 0 deliberately has no
+qualification or overload-resolution rule to hide such ambiguity.
+
+One compiler invocation receives the executable root and all of its transitive
+source units, in any order. Exactly one implementation module must contain
+`main`; it is the executable root. Every imported module must have an
+interface and a matching implementation, every supplied module must be
+reachable from the root, and the import graph must be acyclic. Unknown,
+self, repeated and cyclic imports are rejected before type checking.
+Serialized compiled-module metadata is deferred, so dependency source units
+must currently be supplied together.
 
 There are no module partitions, header units, re-exports, aliases, selective
 imports, wildcard imports or cyclic dependencies in Luna 0.

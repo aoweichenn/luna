@@ -6,8 +6,6 @@
 #include <stdint.h>
 #include <stdio.h>
 
-enum { LUNA_COMPILER_MAX_SOURCE_UNITS = 2 };
-
 typedef enum LunaEmitKind {
     LUNA_EMIT_CHECK,
     LUNA_EMIT_IR,
@@ -15,7 +13,7 @@ typedef enum LunaEmitKind {
 } LunaEmitKind;
 
 typedef struct LunaCompilerOptions {
-    const char *input_paths[LUNA_COMPILER_MAX_SOURCE_UNITS];
+    const char *const *input_paths;
     uint32_t input_count;
     const char *output_path;
     LunaEmitKind emit_kind;

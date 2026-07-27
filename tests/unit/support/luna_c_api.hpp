@@ -13,6 +13,7 @@ extern "C" {
 #include "luna/frontend/support/string_view.h"
 #include "luna/frontend/token/token.h"
 #include "luna/middleend/ir/ir.h"
+#include "luna/middleend/module/module.h"
 #include "luna/middleend/sema/sema.h"
 #include "luna/target/target.h"
 }

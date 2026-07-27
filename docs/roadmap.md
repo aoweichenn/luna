@@ -42,7 +42,7 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] type-only target layout queries
 - [x] aggregate initialization
 - [x] module interface and implementation matching
-- [ ] import visibility and dependency validation
+- [x] import visibility and dependency validation
 - [ ] separate compiled module metadata
 
 ## M3: production x86-64 backend
@@ -57,7 +57,9 @@ M0 supports enough language to compile arithmetic functions, local variables,
 
 ## M4: self-hosting
 
-- [ ] runtime and standard-library minimum
+- [ ] project-owned x86-64 Linux system-call ABI layer using direct `syscall`
+- [ ] freestanding runtime with no libc dependency
+- [ ] standard-library minimum built only on the project system-call layer
 - [ ] Luna implementation of lexer and parser
 - [ ] Luna implementation of type checking and IR
 - [ ] Luna implementation of x86-64 backend
@@ -68,3 +70,5 @@ M0 supports enough language to compile arithmetic functions, local variables,
 Optimization beyond local x86-64 improvements, general metaprogramming,
 parallel compilation, incremental compilation, package management, language
 server work and non-x86-64 backends are outside the bootstrap path.
+Using libc to implement the target runtime or standard library is also outside
+the accepted design; optional explicit FFI remains supported.

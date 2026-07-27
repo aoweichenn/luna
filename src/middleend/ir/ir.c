@@ -1334,6 +1334,28 @@ static bool luna_ir_print_value(LunaStringBuilder *output,
     return luna_string_builder_append_format(output, "%%%u", value);
 }
 
+static bool luna_ir_print_function_name(const LunaIrModule *module,
+                                        const LunaIrFunction *function,
+                                        LunaStringBuilder *output) {
+    bool has_collision = false;
+    if (function->linkage == LUNA_IR_LINKAGE_INTERNAL) {
+        for (size_t index = 0U; index < module->functions.length; index += 1U) {
+            const LunaIrFunction *candidate =
+                luna_vector_at_const(&module->functions, index);
+            if (candidate != function &&
+                luna_string_view_equal(candidate->name, function->name)) {
+                has_collision = true;
+                break;
+            }
+        }
+    }
+
+    return (!has_collision ||
+            (luna_string_builder_append_view(output, function->module_name) &&
+             luna_string_builder_append_c_string(output, "::"))) &&
+           luna_string_builder_append_view(output, function->name);
+}
+
 static int64_t luna_ir_signed_immediate(LunaIrType type, uint64_t bits,
                                         const LunaDataLayout *data_layout) {
     const uint64_t maximum_bits = luna_ir_integer_bit_mask(type, data_layout);
@@ -1703,7 +1725,7 @@ static bool luna_ir_print_instruction(const LunaIrModule *module,
         const LunaIrFunction *callee =
             luna_ir_module_function_const(module, instruction->callee);
         if (!luna_string_builder_append_c_string(output, "call @") ||
-            !luna_string_builder_append_view(output, callee->name) ||
+            !luna_ir_print_function_name(module, callee, output) ||
             !luna_string_builder_append_c_string(output, "(")) {
             return false;
         }
@@ -1797,7 +1819,7 @@ bool luna_ir_print(const LunaIrModule *module, LunaStringBuilder *output) {
 
         if (function->linkage == LUNA_IR_LINKAGE_EXTERNAL_C) {
             if (!luna_string_builder_append_c_string(output, "extern fn @") ||
-                !luna_string_builder_append_view(output, function->name) ||
+                !luna_ir_print_function_name(module, function, output) ||
                 !luna_string_builder_append_c_string(output, "(")) {
                 return false;
             }
@@ -1823,7 +1845,7 @@ bool luna_ir_print(const LunaIrModule *module, LunaStringBuilder *output) {
         }
 
         if (!luna_string_builder_append_c_string(output, "fn @") ||
-            !luna_string_builder_append_view(output, function->name) ||
+            !luna_ir_print_function_name(module, function, output) ||
             !luna_string_builder_append_c_string(output, "(")) {
             return false;
         }

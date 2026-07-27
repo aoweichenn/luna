@@ -8,47 +8,14 @@
 #include "luna/frontend/support/arena.h"
 #include "luna/frontend/support/buffer.h"
 #include "luna/middleend/ir/ir.h"
+#include "luna/middleend/module/module.h"
 #include "luna/middleend/sema/sema.h"
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 
-static bool luna_compiler_select_module_units(
-    LunaProgram *const *programs, uint32_t program_count,
-    LunaDiagnosticEngine *diagnostics, const LunaProgram **interface_unit,
-    const LunaProgram **implementation_unit) {
-    *interface_unit = NULL;
-    *implementation_unit = NULL;
-
-    for (uint32_t index = 0U; index < program_count; index += 1U) {
-        const LunaProgram *program = programs[index];
-        const LunaProgram **selected =
-            program->is_interface ? interface_unit : implementation_unit;
-        if (*selected != NULL) {
-            luna_diagnostic_error(
-                diagnostics, program->module_span,
-                "module compilation received more than one %s unit",
-                program->is_interface ? "interface" : "implementation");
-            luna_diagnostic_note(diagnostics, (*selected)->module_span,
-                                 "the first %s unit is here",
-                                 program->is_interface ? "interface"
-                                                       : "implementation");
-            continue;
-        }
-        *selected = program;
-    }
-
-    if (*implementation_unit == NULL && *interface_unit != NULL &&
-        luna_diagnostic_error_count(diagnostics) == 0U) {
-        luna_diagnostic_error(
-            diagnostics, (*interface_unit)->module_span,
-            "module interface requires a matching implementation source unit");
-    }
-
-    return *implementation_unit != NULL &&
-           luna_diagnostic_error_count(diagnostics) == 0U;
-}
+static const size_t luna_compiler_arena_block_size = (size_t)32U * 1024U;
 
 static bool luna_compiler_write_output(const char *path,
                                        const LunaStringBuilder *output,
@@ -91,10 +58,9 @@ int luna_compile(const LunaCompilerOptions *options, FILE *diagnostic_stream) {
         return 1;
     }
 
-    if (options->input_count == 0U ||
-        options->input_count > (uint32_t)LUNA_COMPILER_MAX_SOURCE_UNITS) {
-        luna_diagnostic_error_plain(
-            &diagnostics, "compiler requires one or two source units");
+    if (options->input_paths == NULL || options->input_count == 0U) {
+        luna_diagnostic_error_plain(&diagnostics,
+                                    "compiler requires source units");
         return 1;
     }
     for (uint32_t index = 0U; index < options->input_count; index += 1U) {
@@ -124,54 +90,69 @@ int luna_compile(const LunaCompilerOptions *options, FILE *diagnostic_stream) {
     }
 
     LunaArena arena;
-    luna_arena_init(&arena, 32U * 1024U);
+    luna_arena_init(&arena, luna_compiler_arena_block_size);
 
-    LunaSourceFile sources[LUNA_COMPILER_MAX_SOURCE_UNITS] = {0};
-    LunaProgram *programs[LUNA_COMPILER_MAX_SOURCE_UNITS] = {0};
-    uint32_t loaded_count = 0U;
+    LunaVector sources;
+    LunaVector programs;
+    luna_vector_init(&sources, sizeof(LunaSourceFile));
+    luna_vector_init(&programs, sizeof(const LunaProgram *));
+
     bool success = true;
     for (uint32_t index = 0U; index < options->input_count; index += 1U) {
-        if (!luna_source_load(options->input_paths[index], &sources[index])) {
+        const LunaSourceFile empty_source = {0};
+        if (!luna_vector_push(&sources, &empty_source)) {
+            luna_diagnostic_error_plain(
+                &diagnostics, "out of memory while loading source units");
+            success = false;
+            break;
+        }
+
+        LunaSourceFile *source = luna_vector_at(&sources, sources.length - 1U);
+        if (!luna_source_load(options->input_paths[index], source)) {
             luna_diagnostic_error_plain(&diagnostics,
                                         "cannot read input file '%s'",
                                         options->input_paths[index]);
             success = false;
             break;
         }
-        loaded_count += 1U;
     }
 
     if (success) {
         for (uint32_t index = 0U; index < options->input_count; index += 1U) {
+            const LunaSourceFile *source =
+                luna_vector_at_const(&sources, (size_t)index);
             LunaParser parser;
-            luna_parser_init(&parser, &sources[index], &diagnostics, &arena);
-            programs[index] = luna_parser_parse_program(&parser);
+            luna_parser_init(&parser, source, &diagnostics, &arena);
+            const LunaProgram *program = luna_parser_parse_program(&parser);
+            if (!luna_vector_push(&programs, (const void *)&program)) {
+                luna_diagnostic_error_plain(
+                    &diagnostics,
+                    "out of memory while recording parsed source units");
+                success = false;
+                break;
+            }
         }
-        success = luna_diagnostic_error_count(&diagnostics) == 0U;
+        success = success && luna_diagnostic_error_count(&diagnostics) == 0U;
     }
 
     LunaIrModule module;
     luna_ir_module_init(&module, options->target);
 
-    const LunaProgram *interface_unit = NULL;
-    const LunaProgram *implementation_unit = NULL;
     if (success) {
-        for (uint32_t index = 0U; index < options->input_count; index += 1U) {
-            if (programs[index] == NULL) {
+        for (size_t index = 0U; index < programs.length; index += 1U) {
+            const LunaProgram *const *program =
+                (const LunaProgram *const *)luna_vector_at_const(&programs,
+                                                                 index);
+            if (*program == NULL) {
                 success = false;
             }
         }
     }
 
     if (success) {
-        success = luna_compiler_select_module_units(
-            programs, options->input_count, &diagnostics, &interface_unit,
-            &implementation_unit);
-    }
-
-    if (success) {
-        success = luna_sema_lower_module(interface_unit, implementation_unit,
-                                         &diagnostics, &module);
+        success = luna_module_lower_programs(
+            (const LunaProgram *const *)programs.data, options->input_count,
+            &diagnostics, &module);
     }
 
     if (success && !luna_ir_verify(&module, diagnostics.stream)) {
@@ -201,9 +182,12 @@ int luna_compile(const LunaCompilerOptions *options, FILE *diagnostic_stream) {
     luna_string_builder_destroy(&output);
     luna_ir_module_destroy(&module);
     luna_arena_destroy(&arena);
-    for (uint32_t index = 0U; index < loaded_count; index += 1U) {
-        luna_source_destroy(&sources[index]);
+    for (size_t index = 0U; index < sources.length; index += 1U) {
+        LunaSourceFile *source = luna_vector_at(&sources, index);
+        luna_source_destroy(source);
     }
+    luna_vector_destroy(&programs);
+    luna_vector_destroy(&sources);
 
     return success && luna_diagnostic_error_count(&diagnostics) == 0U ? 0 : 1;
 }
