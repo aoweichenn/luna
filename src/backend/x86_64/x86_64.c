@@ -34,6 +34,12 @@ static bool luna_x86_64_append_symbol(LunaStringBuilder *output,
         }
     }
 
+    if (function->has_module_metadata_hash &&
+        !luna_string_builder_append_format(output, "_H%016" PRIx64,
+                                           function->module_metadata_hash)) {
+        return false;
+    }
+
     if (!luna_string_builder_append_c_string(output, "_")) {
         return false;
     }
@@ -1658,6 +1664,13 @@ static bool luna_x86_64_emit_function(LunaStringBuilder *output,
         return false;
     }
 
+    if (function->linkage == LUNA_IR_LINKAGE_MODULE_EXPORT &&
+        (!luna_string_builder_append_c_string(output, "    .globl ") ||
+         !luna_x86_64_append_symbol(output, function) ||
+         !luna_string_builder_append_c_string(output, "\n"))) {
+        return false;
+    }
+
     if (!luna_string_builder_append_c_string(output, "    .p2align 4\n"
                                                      "    .type ") ||
         !luna_x86_64_append_symbol(output, function) ||
@@ -1796,7 +1809,8 @@ static bool luna_x86_64_emit_external_declarations(LunaStringBuilder *output,
         const LunaIrFunction *function =
             luna_vector_at_const(&module->functions, function_index);
         if (function == NULL ||
-            function->linkage != LUNA_IR_LINKAGE_EXTERNAL_C) {
+            (function->linkage != LUNA_IR_LINKAGE_EXTERNAL_C &&
+             function->linkage != LUNA_IR_LINKAGE_MODULE_IMPORT)) {
             continue;
         }
         if (!luna_string_builder_append_c_string(output, "    .extern ") ||
@@ -1820,37 +1834,49 @@ bool luna_x86_64_emit_assembly(const LunaIrModule *module,
         return false;
     }
 
-    const LunaIrFunction *entry =
-        luna_ir_module_function_const(module, module->entry_function);
-    if (entry == NULL) {
-        luna_diagnostic_error_plain(
-            diagnostics, "x86-64 backend received no entry function");
+    const LunaIrFunction *entry = NULL;
+    if (module->kind == LUNA_IR_MODULE_EXECUTABLE) {
+        entry = luna_ir_module_function_const(module, module->entry_function);
+        if (entry == NULL) {
+            luna_diagnostic_error_plain(
+                diagnostics, "x86-64 backend received no entry function");
+            return false;
+        }
+    } else if (module->kind != LUNA_IR_MODULE_LIBRARY) {
+        luna_diagnostic_error_plain(diagnostics,
+                                    "x86-64 backend received invalid module "
+                                    "kind");
         return false;
     }
 
     if (!luna_x86_64_emit_globals(output, module) ||
         !luna_x86_64_emit_external_declarations(output, module) ||
-        !luna_string_builder_append_c_string(output,
-                                             "    .text\n"
-                                             "    .globl _start\n"
-                                             "    .type _start, @function\n"
-                                             "_start:\n"
-                                             "    xorl %ebp, %ebp\n"
-                                             "    andq $-16, %rsp\n"
-                                             "    subq $16, %rsp\n"
-                                             "    movl $0x1f80, (%rsp)\n"
-                                             "    ldmxcsr (%rsp)\n"
-                                             "    addq $16, %rsp\n"
-                                             "    call ") ||
-        !luna_x86_64_append_symbol(output, entry) ||
-        !luna_string_builder_append_c_string(
-            output, "\n"
-                    "    movl %eax, %edi\n"
-                    "    movl $60, %eax\n"
-                    "    syscall\n"
-                    "    .size _start, .-_start\n\n")) {
+        !luna_string_builder_append_c_string(output, "    .text\n")) {
         luna_diagnostic_error_plain(
             diagnostics, "out of memory while emitting x86-64 assembly");
+        return false;
+    }
+
+    if (entry != NULL && (!luna_string_builder_append_c_string(
+                              output, "    .globl _start\n"
+                                      "    .type _start, @function\n"
+                                      "_start:\n"
+                                      "    xorl %ebp, %ebp\n"
+                                      "    andq $-16, %rsp\n"
+                                      "    subq $16, %rsp\n"
+                                      "    movl $0x1f80, (%rsp)\n"
+                                      "    ldmxcsr (%rsp)\n"
+                                      "    addq $16, %rsp\n"
+                                      "    call ") ||
+                          !luna_x86_64_append_symbol(output, entry) ||
+                          !luna_string_builder_append_c_string(
+                              output, "\n"
+                                      "    movl %eax, %edi\n"
+                                      "    movl $60, %eax\n"
+                                      "    syscall\n"
+                                      "    .size _start, .-_start\n\n"))) {
+        luna_diagnostic_error_plain(
+            diagnostics, "out of memory while emitting x86-64 entry point");
         return false;
     }
 
@@ -1858,7 +1884,8 @@ bool luna_x86_64_emit_assembly(const LunaIrModule *module,
          function_index += 1U) {
         const LunaIrFunction *function =
             luna_vector_at_const(&module->functions, function_index);
-        if (function->linkage == LUNA_IR_LINKAGE_EXTERNAL_C) {
+        if (function->linkage == LUNA_IR_LINKAGE_EXTERNAL_C ||
+            function->linkage == LUNA_IR_LINKAGE_MODULE_IMPORT) {
             continue;
         }
         if (!luna_x86_64_emit_function(output, module, function,

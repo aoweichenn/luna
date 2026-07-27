@@ -55,14 +55,31 @@ exported declarations with the same name is an error, and a local declaration
 cannot shadow an imported declaration. Luna 0 deliberately has no
 qualification or overload-resolution rule to hide such ambiguity.
 
-One compiler invocation receives the executable root and all of its transitive
-source units, in any order. Exactly one implementation module must contain
-`main`; it is the executable root. Every imported module must have an
-interface and a matching implementation, every supplied module must be
-reachable from the root, and the import graph must be acyclic. Unknown,
-self, repeated and cyclic imports are rejected before type checking.
-Serialized compiled-module metadata is deferred, so dependency source units
-must currently be supplied together.
+An executable compilation receives the root plus every transitive dependency,
+in any order. A dependency may be supplied as its interface/implementation
+source pair or as compiled `.lmi` interface metadata. Exactly one source
+implementation must contain `main`; it is the executable root. Every supplied
+module must be reachable from the root, and the import graph must be acyclic.
+Unknown, self, repeated and cyclic imports are rejected before type checking.
+A metadata-only dependency contributes declarations but no function bodies;
+its separately compiled object must be supplied to the final link.
+
+`--compile-module name` compiles exactly one non-executable implementation and
+does not generate `_start`. `--emit metadata` validates the selected source
+interface and implementation before writing the `.lmi`; subsequent IR or
+assembly emission requires that exact `.lmi` as the selected module's
+interface. All imported dependencies must also be `.lmi`, and passing another
+module's implementation source is rejected.
+
+Compiled metadata is target-specific, deterministic and versioned. It records
+the language ABI, target triple, complete interface declarations and direct
+imports. Every direct import carries the content fingerprint of the exact
+dependency metadata used when it was built. A stale dependency, corrupt or
+truncated file, unsupported format, incompatible language ABI or wrong target
+is rejected before semantic lowering. The content fingerprint is a build
+consistency check rather than an authenticity signature. Luna import/export
+symbols carry the interface fingerprint, so the final linker also rejects an
+object compiled from different metadata.
 
 There are no module partitions, header units, re-exports, aliases, selective
 imports, wildcard imports or cyclic dependencies in Luna 0.

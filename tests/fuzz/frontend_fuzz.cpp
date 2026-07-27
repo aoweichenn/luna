@@ -14,6 +14,41 @@ constexpr std::size_t LUNA_FUZZ_MAX_SOURCE_UNITS = 16U;
 constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
     "\n===LUNA_SOURCE_UNIT===\n";
 
+[[nodiscard]] bool RoundTripMetadata(const LunaProgram *interface_unit,
+                                     LunaDiagnosticEngine *diagnostics,
+                                     LunaArena *arena) {
+    std::vector<LunaModuleMetadataDependency> dependencies;
+    for (const LunaImport *import = interface_unit->first_import;
+         import != nullptr; import = import->next) {
+        dependencies.push_back(LunaModuleMetadataDependency{
+            .module_name = import->module_name,
+            .content_hash =
+                static_cast<std::uint64_t>(dependencies.size()) + 1U,
+        });
+    }
+    LunaStringBuilder encoded{};
+    luna_string_builder_init(&encoded);
+    bool invariant_holds = luna_module_metadata_encode(
+        interface_unit, luna_target_info_default(), dependencies.data(),
+        static_cast<std::uint32_t>(dependencies.size()), diagnostics, &encoded);
+
+    LunaSourceFile source{};
+    LunaModuleMetadata metadata{};
+    if (invariant_holds) {
+        invariant_holds =
+            luna_source_from_bytes("<fuzz-generated.lmi>",
+                                   luna_string_builder_data(&encoded),
+                                   encoded.length, &source) &&
+            luna_module_metadata_decode(&source, luna_target_info_default(),
+                                        arena, diagnostics, &metadata);
+    }
+
+    luna_module_metadata_destroy(&metadata);
+    luna_source_destroy(&source);
+    luna_string_builder_destroy(&encoded);
+    return invariant_holds;
+}
+
 [[nodiscard]] bool RunFrontend(const std::uint8_t *data, std::size_t size) {
     std::FILE *diagnostic_file = std::fopen("/dev/null", "wb");
     if (diagnostic_file == nullptr) {
@@ -127,6 +162,13 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
             invariant_holds =
                 luna_ir_verify(&module, diagnostic_file) &&
                 luna_x86_64_emit_assembly(&module, &diagnostics, &assembly);
+            for (const LunaProgram *program : programs) {
+                if (invariant_holds && program->is_interface) {
+                    invariant_holds =
+                        RoundTripMetadata(program, &diagnostics, &arena);
+                    break;
+                }
+            }
         }
     }
 
@@ -140,12 +182,50 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
     return invariant_holds;
 }
 
+[[nodiscard]] bool RunMetadataDecoder(const std::uint8_t *data,
+                                      std::size_t size) {
+    std::FILE *diagnostic_file = std::fopen("/dev/null", "wb");
+    if (diagnostic_file == nullptr) {
+        return true;
+    }
+
+    LunaDiagnosticEngine diagnostics{};
+    luna_diagnostic_init(&diagnostics, diagnostic_file);
+    LunaArena arena{};
+    luna_arena_init(&arena, LUNA_FUZZ_ARENA_BLOCK_SIZE);
+    LunaSourceFile source{};
+    LunaModuleMetadata metadata{};
+    bool invariant_holds = true;
+    if (luna_source_from_bytes("<fuzz.lmi>",
+                               reinterpret_cast<const char *>(data), size,
+                               &source) &&
+        luna_module_metadata_decode(&source, luna_target_info_default(), &arena,
+                                    &diagnostics, &metadata)) {
+        LunaStringBuilder encoded{};
+        luna_string_builder_init(&encoded);
+        invariant_holds = luna_module_metadata_encode(
+            metadata.interface_unit, luna_target_info_default(),
+            reinterpret_cast<const LunaModuleMetadataDependency *>(
+                metadata.dependencies.data),
+            static_cast<std::uint32_t>(metadata.dependencies.length),
+            &diagnostics, &encoded);
+        luna_string_builder_destroy(&encoded);
+    }
+
+    luna_module_metadata_destroy(&metadata);
+    luna_source_destroy(&source);
+    luna_arena_destroy(&arena);
+    static_cast<void>(std::fclose(diagnostic_file));
+    return invariant_holds;
+}
+
 }
 
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data,
                                       std::size_t size) {
     if (size <= LUNA_FUZZ_MAX_INPUT_SIZE &&
-        (!RunFrontend(data, size) || !RunModuleCompilation(data, size))) {
+        (!RunFrontend(data, size) || !RunModuleCompilation(data, size) ||
+         !RunMetadataDecoder(data, size))) {
         __builtin_trap();
     }
     return 0;

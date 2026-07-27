@@ -261,15 +261,28 @@ are rejected.
 
 The executable module is the unique implementation containing `main`. Every
 supplied module must be reachable from it through direct imports. Every
-imported module has one interface and one implementation, and the dependency
-graph must be acyclic. Dependencies are checked before importers in an
-order independent of command-line source order. Compatible declarations of
-one external C symbol share that symbol globally; incompatible signatures are
-rejected.
+imported module has either an interface/implementation source pair or a
+validated metadata interface, and the dependency graph must be acyclic.
+Dependencies are checked before importers in an order independent of
+command-line input order. Compatible declarations of one external C symbol
+share that symbol globally; incompatible signatures are rejected.
 
 This contract is compile-time only and adds no run-time initialization or
-dispatch. Serialized module metadata is not implemented yet, so one compiler
-invocation must include the root and all transitive source units.
+dispatch. A metadata interface contributes the same canonical public types and
+function signatures as source, but its Luna functions are bodyless IR imports.
+The final link resolves them against separately compiled module objects.
+Imported and exported Luna symbols include the defining interface's metadata
+fingerprint, making an object built from a different interface an unresolved
+symbol rather than a silently accepted ABI mismatch.
+
+A separately compiled library has exactly one selected implementation root,
+has no `main` or `_start`, and accepts dependencies only as metadata. Metadata
+records its target, format and language ABI versions, complete interface and
+the content fingerprints of direct dependencies. A fingerprint mismatch,
+corrupt payload, unsupported version or target mismatch is a compile-time
+error before the metadata can affect type checking. Code generation requires
+the selected root's own compiled metadata, ensuring its exported object
+symbols use the same interface identity consumed by dependents.
 
 ## Runtime boundary
 

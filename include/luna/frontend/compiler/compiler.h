@@ -9,13 +9,15 @@
 typedef enum LunaEmitKind {
     LUNA_EMIT_CHECK,
     LUNA_EMIT_IR,
-    LUNA_EMIT_ASSEMBLY
+    LUNA_EMIT_ASSEMBLY,
+    LUNA_EMIT_METADATA
 } LunaEmitKind;
 
 typedef struct LunaCompilerOptions {
     const char *const *input_paths;
     uint32_t input_count;
     const char *output_path;
+    const char *separate_module_name;
     LunaEmitKind emit_kind;
     const LunaTargetInfo *target;
 } LunaCompilerOptions;

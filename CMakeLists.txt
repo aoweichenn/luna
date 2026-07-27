@@ -34,6 +34,7 @@ add_library(luna_compiler STATIC
     src/frontend/compiler/compiler.c
     src/frontend/diagnostic/diagnostic.c
     src/middleend/ir/ir.c
+    src/middleend/module/metadata.c
     src/middleend/module/module.c
     src/frontend/lexer/lexer.c
     src/frontend/parser/parser.c
@@ -161,6 +162,7 @@ if(BUILD_TESTING)
         tests/unit/support/buffer_test.cpp
         tests/unit/frontend/diagnostic/diagnostic_test.cpp
         tests/unit/middleend/ir_test.cpp
+        tests/unit/middleend/metadata_test.cpp
         tests/unit/frontend/lexer/lexer_test.cpp
         tests/unit/frontend/parser/parser_test.cpp
         tests/unit/middleend/sema_test.cpp

@@ -43,7 +43,7 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] aggregate initialization
 - [x] module interface and implementation matching
 - [x] import visibility and dependency validation
-- [ ] separate compiled module metadata
+- [x] separate compiled module metadata
 
 ## M3: production x86-64 backend
 

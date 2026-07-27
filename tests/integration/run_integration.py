@@ -106,6 +106,392 @@ def compile_and_run(
     run([*target_runner, str(executable)], expected_code=expected_code)
 
 
+def assemble(
+    llvm_mc: str,
+    assembly: pathlib.Path,
+    object_file: pathlib.Path,
+) -> None:
+    run(
+        [
+            llvm_mc,
+            "--triple=x86_64-unknown-linux-gnu",
+            "--filetype=obj",
+            "-o",
+            str(object_file),
+            str(assembly),
+        ]
+    )
+
+
+def metadata_fingerprint(payload: bytes, language_abi: int) -> int:
+    fingerprint = 14695981039346656037
+    for byte in b"LUNALMI\0" + struct.pack("<I", language_abi) + payload:
+        fingerprint ^= byte
+        fingerprint = (fingerprint * 1099511628211) & ((1 << 64) - 1)
+    return fingerprint
+
+
+def compile_separate_module_graph(
+    compiler: pathlib.Path,
+    llvm_mc: str,
+    linker: str,
+    target_runner: list[str],
+    case_dir: pathlib.Path,
+    work_dir: pathlib.Path,
+) -> None:
+    core_interface = case_dir / "metadata_core_interface.luna"
+    core_implementation = case_dir / "metadata_core_implementation.luna"
+    math_interface = case_dir / "metadata_math_interface.luna"
+    math_implementation = case_dir / "metadata_math_implementation.luna"
+    application = case_dir / "metadata_app.luna"
+
+    core_metadata = work_dir / "metadata_core.lmi"
+    core_metadata_reordered = work_dir / "metadata_core_reordered.lmi"
+    core_assembly = work_dir / "metadata_core.s"
+    core_object = work_dir / "metadata_core.o"
+    math_metadata = work_dir / "metadata_math.lmi"
+    math_assembly = work_dir / "metadata_math.s"
+    math_ir = work_dir / "metadata_math.lir"
+    math_object = work_dir / "metadata_math.o"
+    application_assembly = work_dir / "metadata_app.s"
+    application_object = work_dir / "metadata_app.o"
+    executable = work_dir / "metadata_app"
+
+    for output, sources in (
+        (core_metadata, (core_interface, core_implementation)),
+        (core_metadata_reordered, (core_implementation, core_interface)),
+    ):
+        run(
+            [
+                str(compiler),
+                "--compile-module",
+                "tests.metadata.core",
+                "--emit",
+                "metadata",
+                "-o",
+                str(output),
+                *(str(source) for source in sources),
+            ]
+        )
+    if core_metadata.read_bytes() != core_metadata_reordered.read_bytes():
+        raise AssertionError("module metadata depends on source input order")
+
+    metadata_bytes = core_metadata.read_bytes()
+    if metadata_bytes[:8] != b"LUNALMI\0":
+        raise AssertionError("module metadata magic is invalid")
+    major, minor, language_abi = struct.unpack_from("<HHI", metadata_bytes, 8)
+    if (major, minor, language_abi) != (1, 0, 1):
+        raise AssertionError("module metadata version header is invalid")
+
+    run(
+        [
+            str(compiler),
+            "--compile-module",
+            "tests.metadata.core",
+            "--emit",
+            "asm",
+            "-o",
+            str(core_assembly),
+            str(core_metadata),
+            str(core_implementation),
+        ]
+    )
+    core_text = core_assembly.read_text(encoding="utf-8")
+    if "_start:" in core_text or ".globl _L" not in core_text:
+        raise AssertionError(
+            "separately compiled library has an invalid symbol boundary"
+        )
+    if "_H" not in core_text:
+        raise AssertionError(
+            "separately compiled export lacks its metadata identity"
+        )
+    assemble(llvm_mc, core_assembly, core_object)
+
+    source_root_codegen = run(
+        [
+            str(compiler),
+            "--compile-module",
+            "tests.metadata.core",
+            "--emit",
+            "asm",
+            "-o",
+            str(work_dir / "metadata_core_from_source.s"),
+            str(core_interface),
+            str(core_implementation),
+        ],
+        expected_code=1,
+    )
+    if "requires its compiled .lmi interface" not in (
+        source_root_codegen.stderr
+    ):
+        raise AssertionError(
+            "separate source-interface code generation was not rejected"
+        )
+
+    run(
+        [
+            str(compiler),
+            "--compile-module",
+            "tests.metadata.math",
+            "--emit",
+            "metadata",
+            "-o",
+            str(math_metadata),
+            str(math_interface),
+            str(math_implementation),
+            str(core_metadata),
+        ]
+    )
+    run(
+        [
+            str(compiler),
+            "--compile-module",
+            "tests.metadata.math",
+            "--emit",
+            "asm",
+            "-o",
+            str(math_assembly),
+            str(math_metadata),
+            str(math_implementation),
+            str(core_metadata),
+        ]
+    )
+    run(
+        [
+            str(compiler),
+            "--compile-module",
+            "tests.metadata.math",
+            "--emit",
+            "ir",
+            "-o",
+            str(math_ir),
+            str(math_metadata),
+            str(math_implementation),
+            str(core_metadata),
+        ]
+    )
+    math_ir_text = math_ir.read_text(encoding="utf-8")
+    if (
+        "import fn @tests.metadata.core::add_bias" not in math_ir_text
+        or "export fn @calculate" not in math_ir_text
+        or math_ir_text.count("[metadata 0x") != 2
+    ):
+        raise AssertionError("separate module IR linkage is missing")
+    math_text = math_assembly.read_text(encoding="utf-8")
+    if (
+        "_start:" in math_text
+        or ".extern _L" not in math_text
+        or math_text.count("_H") < 3
+    ):
+        raise AssertionError(
+            "separately compiled dependent module has invalid assembly"
+        )
+    assemble(llvm_mc, math_assembly, math_object)
+
+    run(
+        [
+            str(compiler),
+            "--emit",
+            "asm",
+            "-o",
+            str(application_assembly),
+            str(application),
+            str(math_metadata),
+            str(core_metadata),
+        ]
+    )
+    application_text = application_assembly.read_text(encoding="utf-8")
+    if "_start:" not in application_text or ".extern _L" not in application_text:
+        raise AssertionError("metadata-backed executable has invalid assembly")
+    assemble(llvm_mc, application_assembly, application_object)
+    run(
+        [
+            linker,
+            "-static",
+            "-e",
+            "_start",
+            "-o",
+            str(executable),
+            str(application_object),
+            str(math_object),
+            str(core_object),
+        ]
+    )
+    run([*target_runner, str(executable)], expected_code=42)
+
+    missing_dependency = run(
+        [
+            str(compiler),
+            "--emit",
+            "check",
+            str(application),
+            str(math_metadata),
+        ],
+        expected_code=1,
+    )
+    if "was not supplied to this compilation" not in missing_dependency.stderr:
+        raise AssertionError("missing transitive metadata diagnostic is absent")
+
+    source_dependency = run(
+        [
+            str(compiler),
+            "--compile-module",
+            "tests.metadata.math",
+            "--emit",
+            "check",
+            str(math_interface),
+            str(math_implementation),
+            str(core_interface),
+            str(core_implementation),
+        ],
+        expected_code=1,
+    )
+    if "requires dependency 'tests.metadata.core' as compiled metadata" not in (
+        source_dependency.stderr
+    ):
+        raise AssertionError("source dependency rejection is missing")
+
+    corrupted_bytes = bytearray(core_metadata.read_bytes())
+    corrupted_bytes[-1] ^= 1
+    corrupted_metadata = work_dir / "metadata_core_corrupted.lmi"
+    corrupted_metadata.write_bytes(corrupted_bytes)
+    corrupted_result = run(
+        [
+            str(compiler),
+            "--emit",
+            "check",
+            str(application),
+            str(math_metadata),
+            str(corrupted_metadata),
+        ],
+        expected_code=1,
+    )
+    if "payload checksum mismatch" not in corrupted_result.stderr:
+        raise AssertionError("corrupt metadata checksum diagnostic is missing")
+
+    version_bytes = bytearray(core_metadata.read_bytes())
+    struct.pack_into("<H", version_bytes, 8, 2)
+    version_metadata = work_dir / "metadata_core_version.lmi"
+    version_metadata.write_bytes(version_bytes)
+    version_result = run(
+        [
+            str(compiler),
+            "--emit",
+            "check",
+            str(application),
+            str(math_metadata),
+            str(version_metadata),
+        ],
+        expected_code=1,
+    )
+    if "unsupported module metadata format" not in version_result.stderr:
+        raise AssertionError("metadata version diagnostic is missing")
+
+    target_bytes = bytearray(core_metadata.read_bytes())
+    encoded_target = b"x86_64-unknown-linux-gnu"
+    target_offset = target_bytes.find(encoded_target, 32)
+    if target_offset < 0:
+        raise AssertionError("module metadata target triple is missing")
+    target_bytes[target_offset : target_offset + len(encoded_target)] = (
+        b"x86_64-unknown-linux-mus"
+    )
+    payload = bytes(target_bytes[32:])
+    struct.pack_into(
+        "<Q",
+        target_bytes,
+        24,
+        metadata_fingerprint(payload, language_abi),
+    )
+    target_metadata = work_dir / "metadata_core_target.lmi"
+    target_metadata.write_bytes(target_bytes)
+    target_result = run(
+        [
+            str(compiler),
+            "--emit",
+            "check",
+            str(application),
+            str(math_metadata),
+            str(target_metadata),
+        ],
+        expected_code=1,
+    )
+    if "compilation target is 'x86_64-unknown-linux-gnu'" not in (
+        target_result.stderr
+    ):
+        raise AssertionError("metadata target mismatch diagnostic is missing")
+
+    changed_interface = work_dir / "metadata_core_changed_interface.luna"
+    changed_interface.write_text(
+        core_interface.read_text(encoding="utf-8").replace(
+            "    value: i32;\n",
+            "    value: i32;\n    generation: i32;\n",
+        ),
+        encoding="utf-8",
+    )
+    changed_metadata = work_dir / "metadata_core_changed.lmi"
+    run(
+        [
+            str(compiler),
+            "--compile-module",
+            "tests.metadata.core",
+            "--emit",
+            "metadata",
+            "-o",
+            str(changed_metadata),
+            str(changed_interface),
+            str(core_implementation),
+        ]
+    )
+    stale_result = run(
+        [
+            str(compiler),
+            "--emit",
+            "check",
+            str(application),
+            str(math_metadata),
+            str(changed_metadata),
+        ],
+        expected_code=1,
+    )
+    if "was built against different metadata" not in stale_result.stderr:
+        raise AssertionError("stale dependency metadata diagnostic is missing")
+
+    changed_assembly = work_dir / "metadata_core_changed.s"
+    changed_object = work_dir / "metadata_core_changed.o"
+    run(
+        [
+            str(compiler),
+            "--compile-module",
+            "tests.metadata.core",
+            "--emit",
+            "asm",
+            "-o",
+            str(changed_assembly),
+            str(changed_metadata),
+            str(core_implementation),
+        ]
+    )
+    assemble(llvm_mc, changed_assembly, changed_object)
+    incompatible_link = run(
+        [
+            linker,
+            "-static",
+            "-e",
+            "_start",
+            "-o",
+            str(work_dir / "metadata_app_incompatible"),
+            str(application_object),
+            str(math_object),
+            str(changed_object),
+        ],
+        expected_code=1,
+    )
+    if "undefined symbol" not in incompatible_link.stderr:
+        raise AssertionError(
+            "linker did not report the incompatible module object"
+        )
+
+
 def compile_external_support(
     clang: str,
     source_root: pathlib.Path,
@@ -462,6 +848,10 @@ def main() -> int:
         raise AssertionError("--help did not list the supported target")
     if "transitive module source" not in help_result.stdout:
         raise AssertionError("--help did not describe module source inputs")
+    if "--compile-module" not in help_result.stdout or ".lmi" not in (
+        help_result.stdout
+    ):
+        raise AssertionError("--help did not describe separate compilation")
     version_result = run([str(arguments.compiler), "--version"])
     if "lunac 0.1.0-dev" not in version_result.stdout:
         raise AssertionError("--version did not print the compiler version")
@@ -471,6 +861,21 @@ def main() -> int:
         expected_code=2,
     )
     run([str(arguments.compiler), "--target"], expected_code=2)
+    run([str(arguments.compiler), "--compile-module"], expected_code=2)
+    metadata_without_module = run(
+        [
+            str(arguments.compiler),
+            "--emit",
+            "metadata",
+            str(case_dir / "module_pair_interface.luna"),
+            str(case_dir / "module_pair_implementation.luna"),
+        ],
+        expected_code=1,
+    )
+    if "metadata emission requires --compile-module" not in (
+        metadata_without_module.stderr
+    ):
+        raise AssertionError("metadata mode diagnostic is missing")
     unsupported_target = run(
         [
             str(arguments.compiler),
@@ -668,6 +1073,16 @@ def main() -> int:
         additional_source_units=module_import_sources,
     )
     print("PASS executable: transitive module imports and exported types")
+
+    compile_separate_module_graph(
+        arguments.compiler,
+        llvm_mc,
+        linker,
+        target_runner,
+        case_dir,
+        arguments.work_dir,
+    )
+    print("PASS separate compilation: versioned .lmi dependency graph")
 
     conversion_matrix = generate_integer_conversion_matrix(arguments.work_dir)
     compile_and_run(

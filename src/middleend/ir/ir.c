@@ -28,6 +28,7 @@ static void luna_ir_function_destroy(LunaIrFunction *function) {
 
 void luna_ir_module_init(LunaIrModule *module, const LunaTargetInfo *target) {
     module->target = target;
+    module->kind = LUNA_IR_MODULE_EXECUTABLE;
     luna_vector_init(&module->globals, sizeof(LunaIrGlobal));
     luna_vector_init(&module->functions, sizeof(LunaIrFunction));
     module->entry_function = LUNA_IR_INVALID_ID;
@@ -46,6 +47,7 @@ void luna_ir_module_destroy(LunaIrModule *module) {
     luna_vector_destroy(&module->globals);
     luna_vector_destroy(&module->functions);
     module->target = NULL;
+    module->kind = LUNA_IR_MODULE_EXECUTABLE;
     module->entry_function = LUNA_IR_INVALID_ID;
 }
 
@@ -938,6 +940,8 @@ static bool luna_ir_verify_function(const LunaIrModule *module,
     }
 
     if (function->linkage != LUNA_IR_LINKAGE_INTERNAL &&
+        function->linkage != LUNA_IR_LINKAGE_MODULE_EXPORT &&
+        function->linkage != LUNA_IR_LINKAGE_MODULE_IMPORT &&
         function->linkage != LUNA_IR_LINKAGE_EXTERNAL_C) {
         (void)fprintf(error_stream,
                       "IR verification: function %zu has invalid linkage\n",
@@ -945,7 +949,26 @@ static bool luna_ir_verify_function(const LunaIrModule *module,
         goto cleanup;
     }
 
-    if (function->linkage == LUNA_IR_LINKAGE_EXTERNAL_C) {
+    if (function->linkage == LUNA_IR_LINKAGE_MODULE_IMPORT &&
+        !function->has_module_metadata_hash) {
+        (void)fprintf(error_stream,
+                      "IR verification: imported function %zu has no module "
+                      "metadata identity\n",
+                      function_index);
+        goto cleanup;
+    }
+    if ((function->linkage == LUNA_IR_LINKAGE_INTERNAL ||
+         function->linkage == LUNA_IR_LINKAGE_EXTERNAL_C) &&
+        function->has_module_metadata_hash) {
+        (void)fprintf(error_stream,
+                      "IR verification: function %zu has an unexpected module "
+                      "metadata identity\n",
+                      function_index);
+        goto cleanup;
+    }
+
+    if (function->linkage == LUNA_IR_LINKAGE_EXTERNAL_C ||
+        function->linkage == LUNA_IR_LINKAGE_MODULE_IMPORT) {
         for (size_t index = 0U; index < function->parameter_types.length;
              index += 1U) {
             const LunaIrType *parameter_type =
@@ -954,7 +977,7 @@ static bool luna_ir_verify_function(const LunaIrModule *module,
                 !luna_ir_type_is_value(*parameter_type)) {
                 (void)fprintf(
                     error_stream,
-                    "IR verification: invalid external parameter %zu in "
+                    "IR verification: invalid declaration parameter %zu in "
                     "function %zu\n",
                     index, function_index);
                 goto cleanup;
@@ -963,10 +986,13 @@ static bool luna_ir_verify_function(const LunaIrModule *module,
         if (function->slots.length != 0U ||
             function->value_types.length != 0U ||
             function->arguments.length != 0U || function->blocks.length != 0U) {
-            (void)fprintf(
-                error_stream,
-                "IR verification: external function %zu has a definition\n",
-                function_index);
+            (void)fprintf(error_stream,
+                          function->linkage == LUNA_IR_LINKAGE_EXTERNAL_C
+                              ? "IR verification: external function %zu has "
+                                "a definition\n"
+                              : "IR verification: imported function %zu has "
+                                "a definition\n",
+                          function_index);
             goto cleanup;
         }
         success = true;
@@ -1284,6 +1310,11 @@ bool luna_ir_verify(const LunaIrModule *module, FILE *error_stream) {
             stream);
         return false;
     }
+    if (module->kind != LUNA_IR_MODULE_EXECUTABLE &&
+        module->kind != LUNA_IR_MODULE_LIBRARY) {
+        (void)fputs("IR verification: module kind is invalid\n", stream);
+        return false;
+    }
 
     for (size_t index = 0U; index < module->globals.length; index += 1U) {
         const LunaIrGlobal *global =
@@ -1298,20 +1329,27 @@ bool luna_ir_verify(const LunaIrModule *module, FILE *error_stream) {
         }
     }
 
-    if (module->entry_function == LUNA_IR_INVALID_ID ||
-        (size_t)module->entry_function >= module->functions.length) {
-        (void)fputs("IR verification: missing entry function\n", stream);
-        return false;
-    }
+    if (module->kind == LUNA_IR_MODULE_EXECUTABLE) {
+        if (module->entry_function == LUNA_IR_INVALID_ID ||
+            (size_t)module->entry_function >= module->functions.length) {
+            (void)fputs("IR verification: missing entry function\n", stream);
+            return false;
+        }
 
-    const LunaIrFunction *entry =
-        luna_ir_module_function_const(module, module->entry_function);
-    if (entry->linkage != LUNA_IR_LINKAGE_INTERNAL ||
-        entry->return_type != LUNA_IR_TYPE_I32 ||
-        entry->parameter_types.length != 0U) {
+        const LunaIrFunction *entry =
+            luna_ir_module_function_const(module, module->entry_function);
+        if (entry->linkage != LUNA_IR_LINKAGE_INTERNAL ||
+            entry->return_type != LUNA_IR_TYPE_I32 ||
+            entry->parameter_types.length != 0U) {
+            (void)fputs(
+                "IR verification: entry function must be an internal fn() -> "
+                "i32\n",
+                stream);
+            return false;
+        }
+    } else if (module->entry_function != LUNA_IR_INVALID_ID) {
         (void)fputs(
-            "IR verification: entry function must be an internal fn() -> "
-            "i32\n",
+            "IR verification: library module must not have an entry function\n",
             stream);
         return false;
     }
@@ -1337,23 +1375,33 @@ static bool luna_ir_print_value(LunaStringBuilder *output,
 static bool luna_ir_print_function_name(const LunaIrModule *module,
                                         const LunaIrFunction *function,
                                         LunaStringBuilder *output) {
-    bool has_collision = false;
-    if (function->linkage == LUNA_IR_LINKAGE_INTERNAL) {
+    bool needs_module_name = function->linkage == LUNA_IR_LINKAGE_MODULE_IMPORT;
+    if (function->linkage == LUNA_IR_LINKAGE_INTERNAL ||
+        function->linkage == LUNA_IR_LINKAGE_MODULE_EXPORT) {
         for (size_t index = 0U; index < module->functions.length; index += 1U) {
             const LunaIrFunction *candidate =
                 luna_vector_at_const(&module->functions, index);
             if (candidate != function &&
+                candidate->linkage != LUNA_IR_LINKAGE_EXTERNAL_C &&
                 luna_string_view_equal(candidate->name, function->name)) {
-                has_collision = true;
+                needs_module_name = true;
                 break;
             }
         }
     }
 
-    return (!has_collision ||
+    return (!needs_module_name ||
             (luna_string_builder_append_view(output, function->module_name) &&
              luna_string_builder_append_c_string(output, "::"))) &&
            luna_string_builder_append_view(output, function->name);
+}
+
+static bool luna_ir_print_function_metadata(const LunaIrFunction *function,
+                                            LunaStringBuilder *output) {
+    return !function->has_module_metadata_hash ||
+           luna_string_builder_append_format(output,
+                                             " [metadata 0x%016" PRIx64 "]",
+                                             function->module_metadata_hash);
 }
 
 static int64_t luna_ir_signed_immediate(LunaIrType type, uint64_t bits,
@@ -1817,8 +1865,13 @@ bool luna_ir_print(const LunaIrModule *module, LunaStringBuilder *output) {
         const LunaIrFunction *function =
             luna_vector_at_const(&module->functions, function_index);
 
-        if (function->linkage == LUNA_IR_LINKAGE_EXTERNAL_C) {
-            if (!luna_string_builder_append_c_string(output, "extern fn @") ||
+        if (function->linkage == LUNA_IR_LINKAGE_EXTERNAL_C ||
+            function->linkage == LUNA_IR_LINKAGE_MODULE_IMPORT) {
+            const char *declaration_prefix =
+                function->linkage == LUNA_IR_LINKAGE_EXTERNAL_C ? "extern fn @"
+                                                                : "import fn @";
+            if (!luna_string_builder_append_c_string(output,
+                                                     declaration_prefix) ||
                 !luna_ir_print_function_name(module, function, output) ||
                 !luna_string_builder_append_c_string(output, "(")) {
                 return false;
@@ -1837,14 +1890,19 @@ bool luna_ir_print(const LunaIrModule *module, LunaStringBuilder *output) {
                 }
             }
             if (!luna_string_builder_append_format(
-                    output, ") -> %s\n\n",
-                    luna_ir_type_name(function->return_type))) {
+                    output, ") -> %s",
+                    luna_ir_type_name(function->return_type)) ||
+                !luna_ir_print_function_metadata(function, output) ||
+                !luna_string_builder_append_c_string(output, "\n\n")) {
                 return false;
             }
             continue;
         }
 
-        if (!luna_string_builder_append_c_string(output, "fn @") ||
+        const char *definition_prefix =
+            function->linkage == LUNA_IR_LINKAGE_MODULE_EXPORT ? "export fn @"
+                                                               : "fn @";
+        if (!luna_string_builder_append_c_string(output, definition_prefix) ||
             !luna_ir_print_function_name(module, function, output) ||
             !luna_string_builder_append_c_string(output, "(")) {
             return false;
@@ -1865,8 +1923,9 @@ bool luna_ir_print(const LunaIrModule *module, LunaStringBuilder *output) {
         }
 
         if (!luna_string_builder_append_format(
-                output, ") -> %s {\n",
-                luna_ir_type_name(function->return_type))) {
+                output, ") -> %s", luna_ir_type_name(function->return_type)) ||
+            !luna_ir_print_function_metadata(function, output) ||
+            !luna_string_builder_append_c_string(output, " {\n")) {
             return false;
         }
 

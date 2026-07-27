@@ -38,8 +38,15 @@ typedef enum LunaIrType {
 
 typedef enum LunaIrFunctionLinkage {
     LUNA_IR_LINKAGE_INTERNAL,
+    LUNA_IR_LINKAGE_MODULE_EXPORT,
+    LUNA_IR_LINKAGE_MODULE_IMPORT,
     LUNA_IR_LINKAGE_EXTERNAL_C
 } LunaIrFunctionLinkage;
+
+typedef enum LunaIrModuleKind {
+    LUNA_IR_MODULE_EXECUTABLE,
+    LUNA_IR_MODULE_LIBRARY
+} LunaIrModuleKind;
 
 typedef enum LunaIrOpcode {
     LUNA_IR_CONST_INTEGER,
@@ -139,6 +146,8 @@ typedef struct LunaIrFunction {
     LunaStringView module_name;
     LunaStringView name;
     LunaIrFunctionLinkage linkage;
+    bool has_module_metadata_hash;
+    uint64_t module_metadata_hash;
     LunaIrType return_type;
     LunaVector parameter_types;
     LunaVector slots;
@@ -149,6 +158,7 @@ typedef struct LunaIrFunction {
 
 typedef struct LunaIrModule {
     const LunaTargetInfo *target;
+    LunaIrModuleKind kind;
     LunaVector globals;
     LunaVector functions;
     LunaIrFunctionId entry_function;

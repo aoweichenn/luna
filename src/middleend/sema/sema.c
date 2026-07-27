@@ -149,9 +149,11 @@ typedef struct LunaSemaContext {
     const LunaFunction *current_syntax_function;
     LunaIrBlockId current_block;
     uint32_t scope_depth;
+    uint64_t current_metadata_content_hash;
     bool reachable;
     bool checking_dead_code;
     bool allocation_failed;
+    bool current_interface_is_metadata;
 } LunaSemaContext;
 
 static const LunaSemaType *luna_sema_type(const LunaSemaContext *context,
@@ -5081,6 +5083,8 @@ static bool luna_sema_external_signatures_match(const LunaSemaFunction *left,
 
 static bool luna_sema_add_ir_function(LunaSemaContext *context,
                                       const LunaFunction *syntax,
+                                      LunaStringView module_name,
+                                      LunaIrFunctionLinkage linkage,
                                       bool is_exported) {
     LunaSemaFunction *existing = luna_sema_find_function(context, syntax->name);
     if (existing != NULL) {
@@ -5097,7 +5101,7 @@ static bool luna_sema_add_ir_function(LunaSemaContext *context,
         luna_sema_resolve_type(context, &syntax->return_type);
     LunaSemaFunction function = {
         .syntax = syntax,
-        .module_name = context->implementation_unit->module_name,
+        .module_name = module_name,
         .return_type = return_type,
         .ir_id = LUNA_IR_INVALID_ID,
         .is_exported = is_exported,
@@ -5115,7 +5119,7 @@ static bool luna_sema_add_ir_function(LunaSemaContext *context,
         }
     }
 
-    if (syntax->is_external) {
+    if (linkage == LUNA_IR_LINKAGE_EXTERNAL_C) {
         LunaSemaFunction *external =
             luna_sema_find_external_symbol(context, syntax->name);
         if (external != NULL) {
@@ -5137,10 +5141,8 @@ static bool luna_sema_add_ir_function(LunaSemaContext *context,
     LunaIrFunction *ir_function = NULL;
     if (function.ir_id == LUNA_IR_INVALID_ID) {
         const LunaIrFunctionId ir_id = luna_ir_module_add_function(
-            context->module, context->implementation_unit->module_name,
-            syntax->name, luna_sema_ir_type(context, return_type),
-            syntax->is_external ? LUNA_IR_LINKAGE_EXTERNAL_C
-                                : LUNA_IR_LINKAGE_INTERNAL);
+            context->module, module_name, syntax->name,
+            luna_sema_ir_type(context, return_type), linkage);
         if (ir_id == LUNA_IR_INVALID_ID) {
             luna_sema_report_allocation_failure(context);
             luna_vector_destroy(&function.parameter_types);
@@ -5149,6 +5151,13 @@ static bool luna_sema_add_ir_function(LunaSemaContext *context,
         function.ir_id = ir_id;
 
         ir_function = luna_ir_module_function(context->module, ir_id);
+        if (context->current_interface_is_metadata &&
+            (linkage == LUNA_IR_LINKAGE_MODULE_EXPORT ||
+             linkage == LUNA_IR_LINKAGE_MODULE_IMPORT)) {
+            ir_function->has_module_metadata_hash = true;
+            ir_function->module_metadata_hash =
+                context->current_metadata_content_hash;
+        }
     }
 
     if (ir_function != NULL) {
@@ -5162,7 +5171,8 @@ static bool luna_sema_add_ir_function(LunaSemaContext *context,
                 luna_vector_destroy(&function.parameter_types);
                 return false;
             }
-            if (!syntax->is_external &&
+            if ((linkage == LUNA_IR_LINKAGE_INTERNAL ||
+                 linkage == LUNA_IR_LINKAGE_MODULE_EXPORT) &&
                 luna_ir_function_add_slot(ir_function, type) ==
                     LUNA_IR_INVALID_ID) {
                 luna_sema_report_allocation_failure(context);
@@ -5245,8 +5255,9 @@ static bool luna_sema_collect_functions(LunaSemaContext *context) {
                  context->interface_unit->first_function;
              declaration != NULL; declaration = declaration->next) {
             if (declaration->is_external &&
-                !luna_sema_add_ir_function(context, declaration,
-                                           declaration->is_exported)) {
+                !luna_sema_add_ir_function(
+                    context, declaration, context->interface_unit->module_name,
+                    LUNA_IR_LINKAGE_EXTERNAL_C, declaration->is_exported)) {
                 return false;
             }
         }
@@ -5262,7 +5273,35 @@ static bool luna_sema_collect_functions(LunaSemaContext *context) {
             is_exported = declaration != NULL && declaration->is_exported &&
                           !declaration->is_external;
         }
-        if (!luna_sema_add_ir_function(context, definition, is_exported)) {
+        LunaIrFunctionLinkage linkage = LUNA_IR_LINKAGE_INTERNAL;
+        if (definition->is_external) {
+            linkage = LUNA_IR_LINKAGE_EXTERNAL_C;
+        } else if (is_exported &&
+                   !luna_string_view_equal_c_string(definition->name, "main")) {
+            linkage = LUNA_IR_LINKAGE_MODULE_EXPORT;
+        }
+        if (!luna_sema_add_ir_function(
+                context, definition, context->implementation_unit->module_name,
+                linkage, is_exported)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool luna_sema_collect_precompiled_functions(LunaSemaContext *context) {
+    for (const LunaFunction *declaration =
+             context->interface_unit->first_function;
+         declaration != NULL; declaration = declaration->next) {
+        if (!declaration->is_exported) {
+            continue;
+        }
+        const LunaIrFunctionLinkage linkage =
+            declaration->is_external ? LUNA_IR_LINKAGE_EXTERNAL_C
+                                     : LUNA_IR_LINKAGE_MODULE_IMPORT;
+        if (!luna_sema_add_ir_function(context, declaration,
+                                       context->interface_unit->module_name,
+                                       linkage, true)) {
             return false;
         }
     }
@@ -5353,10 +5392,28 @@ static void luna_sema_lower_function(LunaSemaContext *context,
     }
 }
 
-static bool
-luna_sema_validate_module_units(const LunaProgram *interface_unit,
-                                const LunaProgram *implementation_unit,
-                                LunaDiagnosticEngine *diagnostics) {
+static bool luna_sema_validate_module_units(const LunaSemaModule *input,
+                                            LunaDiagnosticEngine *diagnostics) {
+    const LunaProgram *interface_unit = input->interface_unit;
+    const LunaProgram *implementation_unit = input->implementation_unit;
+    if ((input->has_metadata_interface &&
+         (interface_unit == NULL || !interface_unit->is_interface)) ||
+        (!input->has_metadata_interface &&
+         input->metadata_content_hash != UINT64_C(0))) {
+        luna_diagnostic_error_plain(
+            diagnostics, "semantic module metadata identity is malformed");
+        return false;
+    }
+    if (input->is_precompiled) {
+        if (interface_unit == NULL || implementation_unit != NULL ||
+            !interface_unit->is_interface || input->is_compilation_root ||
+            !input->has_metadata_interface) {
+            luna_diagnostic_error_plain(
+                diagnostics, "precompiled semantic module input is malformed");
+            return false;
+        }
+        return true;
+    }
     if (implementation_unit == NULL) {
         if (interface_unit != NULL) {
             luna_diagnostic_error(
@@ -5437,14 +5494,14 @@ static bool luna_sema_lower_one_module(LunaSemaContext *context,
                                        const LunaSemaModule *input) {
     context->interface_unit = input->interface_unit;
     context->implementation_unit = input->implementation_unit;
+    context->current_interface_is_metadata = input->has_metadata_interface;
+    context->current_metadata_content_hash = input->metadata_content_hash;
     context->visible_functions.length = 0U;
     context->visible_named_types.length = 0U;
     context->locals.length = 0U;
     context->control_frames.length = 0U;
 
-    if (!luna_sema_validate_module_units(input->interface_unit,
-                                         input->implementation_unit,
-                                         context->diagnostics)) {
+    if (!luna_sema_validate_module_units(input, context->diagnostics)) {
         return false;
     }
     if ((input->interface_import_count > 0U &&
@@ -5469,6 +5526,14 @@ static bool luna_sema_lower_one_module(LunaSemaContext *context,
         (void)luna_sema_validate_exported_type_declarations(
             context, first_interface_type);
         (void)luna_sema_validate_interface_functions(context);
+    }
+
+    if (input->is_precompiled) {
+        if (luna_diagnostic_error_count(context->diagnostics) == 0U) {
+            (void)luna_sema_collect_precompiled_functions(context);
+        }
+        return luna_diagnostic_error_count(context->diagnostics) == 0U &&
+               !context->allocation_failed;
     }
 
     if (luna_diagnostic_error_count(context->diagnostics) == 0U) {
@@ -5525,18 +5590,30 @@ bool luna_sema_lower_modules(const LunaSemaModule *modules,
         return false;
     }
 
-    uint32_t root_count = 0U;
+    uint32_t compilation_root_count = 0U;
+    uint32_t executable_root_count = 0U;
     for (uint32_t index = 0U; index < module_count; index += 1U) {
+        if (modules[index].is_compilation_root) {
+            compilation_root_count += 1U;
+        }
         if (modules[index].is_executable_root) {
-            root_count += 1U;
+            executable_root_count += 1U;
+            if (!modules[index].is_compilation_root) {
+                luna_diagnostic_error_plain(
+                    diagnostics,
+                    "executable semantic root must be the compilation root");
+                return false;
+            }
         }
     }
-    if (root_count != 1U) {
+    if (compilation_root_count != 1U || executable_root_count > 1U) {
         luna_diagnostic_error_plain(
             diagnostics,
-            "semantic lowering requires exactly one executable root module");
+            "semantic lowering requires exactly one compilation root module");
         return false;
     }
+    module->kind = executable_root_count == 1U ? LUNA_IR_MODULE_EXECUTABLE
+                                               : LUNA_IR_MODULE_LIBRARY;
 
     LunaSemaContext context;
     luna_sema_context_init(&context, diagnostics, module);
@@ -5571,6 +5648,7 @@ bool luna_sema_lower_module(const LunaProgram *interface_unit,
     const LunaSemaModule input = {
         .interface_unit = interface_unit,
         .implementation_unit = implementation_unit,
+        .is_compilation_root = true,
         .is_executable_root = true,
     };
     return luna_sema_lower_modules(&input, 1U, diagnostics, module);

@@ -30,7 +30,7 @@ properties.
 ## Pipeline
 
 ```text
-source units
+source units / validated .lmi metadata
     |
     v
 lexer -> parser -> syntax tree
@@ -87,14 +87,16 @@ layout-query instruction.
 
 Compilation is split into global and local phases:
 
-1. parse every source unit;
-2. group interface and implementation units by exact module name;
-3. resolve imports and validate one rooted, reachable, acyclic graph;
-4. topologically lower dependencies into one shared semantic world;
-5. collect exported and module-private declarations;
-6. match interface declarations with implementation definitions;
-7. type-check function bodies;
-8. lower checked bodies to IR.
+1. load source units and structurally validate every `.lmi`;
+2. parse source units and reconstruct metadata interface declarations;
+3. group interface and implementation units by exact module name;
+4. resolve imports and validate one rooted, reachable, acyclic graph;
+5. verify every metadata dependency content fingerprint;
+6. topologically lower dependencies into one shared semantic world;
+7. collect exported and module-private declarations;
+8. match source or metadata interfaces with implementation definitions;
+9. type-check function bodies;
+10. lower checked bodies to IR.
 
 This order removes source-order dependencies and ordinary forward declarations.
 Source order on the command line is irrelevant. The module resolver identifies
@@ -111,8 +113,34 @@ one IR symbol while rejecting conflicting signatures. The interface type
 graph is resolved before implementation-private types are collected, making
 the interface independently valid. Function matching uses canonical semantic
 types, so nested arrays, named-type identity and pointer read-only qualifiers
-cannot match accidentally by spelling or layout. Serialized module metadata
-remains a separate later stage.
+cannot match accidentally by spelling or layout.
+
+Separate compilation uses deterministic little-endian `.lmi` files rather
+than serializing host memory or parser pointers. The fixed header contains a
+magic value, format major/minor version, language ABI version, payload byte
+count and a 64-bit content fingerprint. The payload contains the exact target
+triple, module name, direct imports, interface types, fields, enum values and
+function signatures. Recursive type encodings and all record/string/file
+sizes have explicit limits. The decoder rejects malformed flags and tags,
+invalid identifiers, truncation, trailing bytes, target mismatches and
+fingerprint failures before declarations reach semantic analysis.
+
+Each encoded direct import includes the content fingerprint of its dependency.
+The module resolver requires metadata dependencies to match those
+fingerprints exactly. Separate code generation also requires the root
+module's own compiled metadata instead of its source interface. IR module
+imports and exports retain that interface identity, and x86-64 symbol mangling
+includes it so the static linker cannot silently combine objects compiled
+from different metadata. The fingerprint protects build consistency and
+accidental corruption; it is not a cryptographic authentication mechanism.
+The exact byte layout and compatibility rules are specified in the
+[module metadata format](module-metadata.md).
+
+`--compile-module` selects one non-executable root, forbids implementation
+source for its dependencies and produces IR without an entry function. A
+normal executable may mix source modules with metadata-only dependencies.
+Metadata-only functions become checked bodyless Luna declarations, while the
+selected module's implementation alone contributes definitions.
 
 ## Luna IR
 
@@ -172,11 +200,13 @@ signatures and flattened argument ownership, terminator placement, cached
 predecessor counts and graph reachability. Backend emission never receives
 unchecked compiler-generated IR.
 
-Function linkage is explicit IR metadata. An internal function owns parameter
-slots, values and a CFG body. An external C function owns only its typed
-signature and must have no slots, values, call-argument storage or blocks.
-External functions may be callees but may never be the module entry point.
-Textual IR prints them as bodyless `extern fn` declarations.
+Function linkage is explicit IR metadata. Internal and module-export
+functions own parameter slots, values and a CFG body. Module imports and
+external C functions own only a typed signature and must have no slots,
+values, call-argument storage or blocks. Module exports print as `export fn`;
+metadata imports print as qualified `import fn`; C symbols print as bodyless
+`extern fn`. No declaration may be the module entry point. Library IR has no
+entry function at all.
 
 The IR instruction set is target-neutral. Each module is parameterized by an
 explicit target data layout so `isize` and `usize` retain their exact IR types
@@ -201,7 +231,10 @@ The first backend is correctness-first:
   comparisons, division, right shifts and widening conversions;
 - canonical `bool` values after both direct and indirect memory loads,
   including raw-pointer aliasing;
-- deterministic labels and symbol mangling;
+- deterministic labels and collision-free module symbol mangling;
+- global definitions for exported Luna functions and unresolved declarations
+  for functions imported from `.lmi` metadata, with the exact module metadata
+  fingerprint retained in IR and encoded into both symbol names;
 - exact, unmangled ELF names for external C functions, with `.extern`
   declarations and unresolved relocations left for the final linker;
 - C ABI sign extension for external `i8` and `i16` arguments and explicit
@@ -215,7 +248,8 @@ The first backend is correctness-first:
 - exact-width indirect scalar loads and stores, checked fixed-array indexing,
   raw-pointer scaled addressing, deterministic read-only data emission and
   inline forward/backward `rep movsb` lowering for overlap-safe object copies;
-- a Linux `_start` shim that exits through syscall 60;
+- a Linux `_start` shim for executable IR that exits through syscall 60,
+  omitted entirely for separately compiled library modules;
 - no dependency on a target C runtime.
 
 The `_start` shim is the first instance of the project-owned system-call
@@ -251,6 +285,9 @@ The quality gate contains:
 - transitive module execution and IR snapshots, full source-order determinism,
   interface self-containment, exact signature matching, import visibility,
   graph validation and cross-source diagnostic-note tests;
+- deterministic metadata round trips, re-checksummed binary mutations,
+  corrupt/version/stale-dependency negatives and three-object separate-link
+  execution tests;
 - textual IR snapshots;
 - x86-64 assembly validation through LLVM MC;
 - static ELF64 linking through LLD;

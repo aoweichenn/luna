@@ -16,7 +16,7 @@ The project is deliberately narrow at this stage:
   declarations, context-directed named aggregate initialization, exact
   whole-object copies, matched module interface/implementation pairs,
   direct imports with explicit export visibility and validated dependency
-  graphs,
+  graphs, and deterministic compiled `.lmi` module metadata,
   type-only `sizeof`, `alignof` and `offsetof` queries, expressions, the
   short-circuit conditional operator, local variables, `if`, `while`, `do`,
   `for` and non-fallthrough `switch` control flow;
@@ -90,7 +90,7 @@ ld.lld -static -e _start -o hello hello.o
 qemu-x86_64-static ./hello
 ```
 
-Pass the executable root and every transitive module source unit in one
+An executable build may pass every transitive module source unit in one
 invocation. Source order has no semantic effect:
 
 ```sh
@@ -105,8 +105,43 @@ in the implementation unit. An `import` exposes only declarations marked
 `export` by the imported interface. The compiler rejects missing or duplicate
 units, unknown or repeated imports, cycles, ambiguous names, private access,
 multiple executable roots and supplied modules unreachable from the root.
-Serialized compiled-module metadata is deferred, so dependency source units
-must currently be supplied together.
+
+Modules can instead be compiled independently. First emit and consume their
+versioned `.lmi` interface metadata, then assemble and link each module object:
+
+```sh
+build/debug/lunac --compile-module app.core --emit metadata \
+  -o core.lmi core.interface.luna core.luna
+build/debug/lunac --compile-module app.core --emit asm \
+  -o core.s core.lmi core.luna
+
+build/debug/lunac --compile-module app.math --emit metadata \
+  -o math.lmi math.interface.luna math.luna core.lmi
+build/debug/lunac --compile-module app.math --emit asm \
+  -o math.s math.lmi math.luna core.lmi
+
+build/debug/lunac --emit asm -o app.s app.luna math.lmi core.lmi
+llvm-mc --triple=x86_64-unknown-linux-gnu --filetype=obj -o core.o core.s
+llvm-mc --triple=x86_64-unknown-linux-gnu --filetype=obj -o math.o math.s
+llvm-mc --triple=x86_64-unknown-linux-gnu --filetype=obj -o app.o app.s
+ld.lld -static -e _start -o app app.o math.o core.o
+```
+
+`--compile-module` emits no `_start`. Metadata emission validates the selected
+module's source interface and implementation; IR and assembly emission then
+require that module's generated `.lmi` plus its implementation. Every
+dependency must also be a `.lmi`. Exported Luna definitions and metadata
+imports receive global symbols bound to the exact interface fingerprint, so a
+stale or mismatched module object is rejected by the final static link.
+
+The `.lmi` format is deterministic and little-endian. Its fixed header records
+the format version, language ABI version, payload size and content fingerprint;
+the protected payload begins with the target triple. Each direct import records
+the exact dependency fingerprint used to build it. The compiler rejects
+truncation, corruption, unsupported versions, target mismatches and stale or
+mixed dependency metadata before semantic lowering. The fingerprint is an
+accidental-corruption and build consistency check, not a signature for
+untrusted distribution.
 
 `--target` defaults to `x86_64-unknown-linux-gnu`, currently the only
 supported target. On an x86-64 Linux host, the integration and differential
@@ -139,5 +174,6 @@ library use does not become a dependency of generated target programs.
 
 See [the language draft](docs/language.md),
 [compiler architecture](docs/architecture.md),
+[compiled module metadata format](docs/module-metadata.md),
 [bootstrap execution semantics](docs/execution-semantics.md), and the
 [implementation roadmap](docs/roadmap.md).

@@ -1058,6 +1058,123 @@ def compile_and_run(
         )
 
     try:
+        if not isinstance(source_text, str) and len(source_text) == 5:
+            module_prefix = f"random.import_case{case_index}"
+            core_metadata = work_dir / f"case_{case_index}_core.lmi"
+            core_assembly = work_dir / f"case_{case_index}_core.s"
+            core_object = work_dir / f"case_{case_index}_core.o"
+            math_metadata = work_dir / f"case_{case_index}_math.lmi"
+            math_assembly = work_dir / f"case_{case_index}_math.s"
+            math_object = work_dir / f"case_{case_index}_math.o"
+
+            run(
+                [
+                    str(compiler),
+                    "--emit",
+                    "check",
+                    *(str(source) for source in source_units),
+                ]
+            )
+            run(
+                [
+                    str(compiler),
+                    "--compile-module",
+                    f"{module_prefix}.core",
+                    "--emit",
+                    "metadata",
+                    "-o",
+                    str(core_metadata),
+                    str(source_files[4]),
+                    str(source_files[2]),
+                ]
+            )
+            run(
+                [
+                    str(compiler),
+                    "--compile-module",
+                    f"{module_prefix}.core",
+                    "--emit",
+                    "asm",
+                    "-o",
+                    str(core_assembly),
+                    str(core_metadata),
+                    str(source_files[4]),
+                ]
+            )
+            run(
+                [
+                    str(compiler),
+                    "--compile-module",
+                    f"{module_prefix}.math",
+                    "--emit",
+                    "metadata",
+                    "-o",
+                    str(math_metadata),
+                    str(core_metadata),
+                    str(source_files[1]),
+                    str(source_files[3]),
+                ]
+            )
+            run(
+                [
+                    str(compiler),
+                    "--compile-module",
+                    f"{module_prefix}.math",
+                    "--emit",
+                    "asm",
+                    "-o",
+                    str(math_assembly),
+                    str(source_files[1]),
+                    str(core_metadata),
+                    str(math_metadata),
+                ]
+            )
+            run(
+                [
+                    str(compiler),
+                    "--emit",
+                    "asm",
+                    "-o",
+                    str(assembly),
+                    str(math_metadata),
+                    str(source_files[0]),
+                    str(core_metadata),
+                ]
+            )
+            for input_assembly, output_object in (
+                (core_assembly, core_object),
+                (math_assembly, math_object),
+                (assembly, object_file),
+            ):
+                run(
+                    [
+                        llvm_mc,
+                        "--triple=x86_64-unknown-linux-gnu",
+                        "--filetype=obj",
+                        "-o",
+                        str(output_object),
+                        str(input_assembly),
+                    ]
+                )
+            run(
+                [
+                    linker,
+                    "-static",
+                    "-e",
+                    "_start",
+                    "-o",
+                    str(executable),
+                    str(object_file),
+                    str(math_object),
+                    str(core_object),
+                ]
+            )
+            run(
+                [*target_runner, str(executable)],
+                expected_code=expected_code,
+            )
+            return
+
         run(
             [
                 str(compiler),

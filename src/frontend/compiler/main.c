@@ -7,8 +7,9 @@
 #include <string.h>
 
 static void luna_print_usage(FILE *stream) {
-    (void)fputs("usage: lunac [--target triple] [--emit check|ir|asm] "
-                "[-o path] root.luna [module-source.luna ...]\n"
+    (void)fputs("usage: lunac [--target triple] "
+                "[--emit check|ir|asm|metadata] "
+                "[--compile-module name] [-o path] input...\n"
                 "\n"
                 "targets:\n"
                 "  x86_64-unknown-linux-gnu (default)\n"
@@ -18,9 +19,11 @@ static void luna_print_usage(FILE *stream) {
                 "  --emit check   parse, type-check and verify IR\n"
                 "  --emit ir      write textual Luna IR\n"
                 "  --emit asm     write x86-64 GNU assembly (default)\n"
+                "  --emit metadata  write deterministic .lmi metadata\n"
+                "  --compile-module name  compile one module without _start\n"
                 "  -o path        output path; '-' writes to stdout\n"
-                "  source units   executable root and every transitive module "
-                "source, in any order\n"
+                "  inputs         executable root, every transitive module "
+                "source or compiled .lmi dependency, in any order\n"
                 "  --version      print compiler version\n"
                 "  --help         print this help\n",
                 stream);
@@ -37,6 +40,10 @@ static bool luna_parse_emit_kind(const char *name, LunaEmitKind *emit_kind) {
     }
     if (strcmp(name, "asm") == 0) {
         *emit_kind = LUNA_EMIT_ASSEMBLY;
+        return true;
+    }
+    if (strcmp(name, "metadata") == 0) {
+        *emit_kind = LUNA_EMIT_METADATA;
         return true;
     }
     return false;
@@ -74,8 +81,9 @@ int main(int argument_count, char **arguments) {
             if (index + 1 >= argument_count ||
                 !luna_parse_emit_kind(arguments[index + 1],
                                       &options.emit_kind)) {
-                (void)fputs("error: --emit requires check, ir or asm\n",
-                            stderr);
+                (void)fputs(
+                    "error: --emit requires check, ir, asm or metadata\n",
+                    stderr);
                 goto cleanup;
             }
             index += 1;
@@ -94,6 +102,23 @@ int main(int argument_count, char **arguments) {
                               arguments[index + 1]);
                 goto cleanup;
             }
+            index += 1;
+            continue;
+        }
+
+        if (strcmp(argument, "--compile-module") == 0) {
+            if (index + 1 >= argument_count) {
+                (void)fputs("error: --compile-module requires a module name\n",
+                            stderr);
+                goto cleanup;
+            }
+            if (options.separate_module_name != NULL) {
+                (void)fputs(
+                    "error: --compile-module may be specified only once\n",
+                    stderr);
+                goto cleanup;
+            }
+            options.separate_module_name = arguments[index + 1];
             index += 1;
             continue;
         }
@@ -130,8 +155,13 @@ int main(int argument_count, char **arguments) {
     }
 
     if (options.emit_kind != LUNA_EMIT_CHECK && options.output_path == NULL) {
-        options.output_path =
-            options.emit_kind == LUNA_EMIT_IR ? "a.lir" : "a.s";
+        if (options.emit_kind == LUNA_EMIT_IR) {
+            options.output_path = "a.lir";
+        } else if (options.emit_kind == LUNA_EMIT_METADATA) {
+            options.output_path = "a.lmi";
+        } else {
+            options.output_path = "a.s";
+        }
     }
 
     options.input_paths = (const char *const *)input_paths.data;

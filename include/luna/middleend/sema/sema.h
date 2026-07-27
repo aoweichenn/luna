@@ -27,7 +27,11 @@ typedef struct LunaSemaModule {
     uint32_t interface_import_count;
     const LunaSemaImport *implementation_imports;
     uint32_t implementation_import_count;
+    bool is_precompiled;
+    bool is_compilation_root;
     bool is_executable_root;
+    bool has_metadata_interface;
+    uint64_t metadata_content_hash;
 } LunaSemaModule;
 
 bool luna_sema_lower_modules(const LunaSemaModule *modules,
