@@ -232,11 +232,13 @@ extern fn hash(bytes: *const u8, length: usize) -> u64;
 
 The current target uses the x86-64 System V C ABI. External declarations may
 use `void` as the return type and may otherwise pass and return only scalar or
-pointer types. The bootstrap backend supports at most six integer-class
-arguments and eight floating-point arguments, counted independently; stack
-arguments, aggregate arguments and variadic calls are deferred. Luna does not
-implicitly link a C runtime or any library—the final linker invocation must
-supply an object or library that defines every referenced external symbol.
+pointer types. The bootstrap backend assigns the first six integer-class
+arguments and first eight floating-point arguments to their independent
+System V register banks, then passes further scalar arguments on the stack.
+Aggregate arguments, aggregate results and variadic calls remain deferred.
+Luna does not implicitly link a C runtime or any library—the final linker
+invocation must supply an object or library that defines every referenced
+external symbol.
 
 For `x86_64-unknown-linux-gnu`, the interoperable C23 spellings are:
 

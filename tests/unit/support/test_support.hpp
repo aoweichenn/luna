@@ -33,6 +33,7 @@ class FrontendHarness final {
     [[nodiscard]] bool ParseAndLower();
     [[nodiscard]] bool Verify();
     [[nodiscard]] bool EmitMachineIr();
+    [[nodiscard]] bool EmitAbi();
     [[nodiscard]] bool EmitLiveness();
     [[nodiscard]] bool EmitRegisterAllocation();
     [[nodiscard]] bool EmitAssembly();
@@ -40,6 +41,7 @@ class FrontendHarness final {
     [[nodiscard]] std::size_t ErrorCount() const noexcept;
     [[nodiscard]] std::string Diagnostics() const;
     [[nodiscard]] std::string MachineIr() const;
+    [[nodiscard]] std::string Abi() const;
     [[nodiscard]] std::string Liveness() const;
     [[nodiscard]] std::string RegisterAllocation() const;
     [[nodiscard]] std::string Assembly() const;
@@ -59,6 +61,7 @@ class FrontendHarness final {
     LunaProgram *interface_program_{nullptr};
     LunaIrModule module_{};
     LunaStringBuilder machine_ir_{};
+    LunaStringBuilder abi_{};
     LunaStringBuilder liveness_{};
     LunaStringBuilder register_allocation_{};
     LunaStringBuilder assembly_{};
@@ -88,12 +91,14 @@ class CompilationHarness final {
     [[nodiscard]] bool ParseAndLower();
     [[nodiscard]] bool Verify();
     [[nodiscard]] bool EmitMachineIr();
+    [[nodiscard]] bool EmitAbi();
     [[nodiscard]] bool EmitLiveness();
     [[nodiscard]] bool EmitRegisterAllocation();
     [[nodiscard]] bool EmitAssembly();
     [[nodiscard]] std::size_t ErrorCount() const noexcept;
     [[nodiscard]] std::string Diagnostics() const;
     [[nodiscard]] std::string MachineIr() const;
+    [[nodiscard]] std::string Abi() const;
     [[nodiscard]] std::string Liveness() const;
     [[nodiscard]] std::string RegisterAllocation() const;
     [[nodiscard]] std::string Assembly() const;
@@ -107,6 +112,7 @@ class CompilationHarness final {
     LunaDiagnosticEngine diagnostics_{};
     LunaIrModule module_{};
     LunaStringBuilder machine_ir_{};
+    LunaStringBuilder abi_{};
     LunaStringBuilder liveness_{};
     LunaStringBuilder register_allocation_{};
     LunaStringBuilder assembly_{};

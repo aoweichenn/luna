@@ -1,6 +1,7 @@
 #ifndef LUNA_X86_64_H
 #define LUNA_X86_64_H
 
+#include "luna/backend/x86_64/abi.h"
 #include "luna/backend/x86_64/liveness.h"
 #include "luna/backend/x86_64/machine_ir.h"
 #include "luna/backend/x86_64/register_allocation.h"
@@ -13,6 +14,9 @@
 bool luna_x86_64_emit_assembly(const LunaIrModule *module,
                                LunaDiagnosticEngine *diagnostics,
                                LunaStringBuilder *output);
+bool luna_x86_64_emit_abi(const LunaIrModule *module,
+                          LunaDiagnosticEngine *diagnostics,
+                          LunaStringBuilder *output);
 bool luna_x86_64_emit_machine_ir(const LunaIrModule *module,
                                  LunaDiagnosticEngine *diagnostics,
                                  LunaStringBuilder *output);

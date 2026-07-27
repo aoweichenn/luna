@@ -40,6 +40,14 @@ void c_store_i32(int *pointer, int value);
 _Bool c_mixed_register_banks(signed char first, unsigned short second,
                              int third, unsigned long long fourth, void *fifth,
                              long sixth, float seventh, double eighth);
+int c_stack_integer(int first, int second, int third, int fourth, int fifth,
+                    int sixth, signed char seventh, long long eighth);
+double c_stack_float(double first, double second, double third, double fourth,
+                     double fifth, double sixth, double seventh, double eighth,
+                     double ninth, double tenth);
+_Bool c_stack_mixed(int i0, float f0, int i1, double f1, int i2, float f2,
+                    int i3, double f3, int i4, float f4, int i5, double f5,
+                    int i6, float f6, double f7, float f8);
 _Bool c_validate_aggregate_layout(const struct LunaTestState *state);
 
 #endif

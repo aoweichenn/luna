@@ -116,7 +116,7 @@ void MutateMetadataPayload(std::string &metadata,
 }
 
 TEST(MutationFuzzTest, CleanFrontendResultsAlwaysProduceValidTypedIr) {
-    constexpr std::array<std::string_view, 15U> LUNA_TEST_SEEDS = {
+    constexpr std::array<std::string_view, 16U> LUNA_TEST_SEEDS = {
         "module fuzz.empty;\nfn main() -> i32 { return 0; }\n",
         "module fuzz.call;\n"
         "fn id(value: i32) -> i32 { return value; }\n"
@@ -198,6 +198,16 @@ TEST(MutationFuzzTest, CleanFrontendResultsAlwaysProduceValidTypedIr) {
         "fn main() -> i32 {\n"
         " return c_mix(-7, 4096, 1.25) ? 42 : 1;\n"
         "}\n",
+        "module fuzz.stack_arguments;\n"
+        "fn pick(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32,\n"
+        "        g: i32, x: f64, y: f64, z: f64, p: f64, q: f64,\n"
+        "        r: f64, s: f64, t: f64, u: f64) -> i32 {\n"
+        " return g + (u as i32);\n"
+        "}\n"
+        "fn main() -> i32 {\n"
+        " return pick(0, 0, 0, 0, 0, 0, 40,\n"
+        "             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0);\n"
+        "}\n",
         "module fuzz.aggregate;\n"
         "enum Kind: u8 { empty, ready = 7, }\n"
         "struct Pair { kind: Kind; byte: u8; value: i32; }\n"
@@ -232,6 +242,9 @@ TEST(MutationFuzzTest, CleanFrontendResultsAlwaysProduceValidTypedIr) {
         EXPECT_TRUE(harness.EmitMachineIr())
             << "case " << case_index << ", seed " << seed_index << '\n'
             << harness.Diagnostics();
+        EXPECT_TRUE(harness.EmitAbi())
+            << "case " << case_index << ", seed " << seed_index << '\n'
+            << harness.Diagnostics();
         EXPECT_TRUE(harness.EmitLiveness())
             << "case " << case_index << ", seed " << seed_index << '\n'
             << harness.Diagnostics();
@@ -263,6 +276,7 @@ TEST(MutationFuzzTest, CleanModulePairResultsAlwaysProduceValidTypedIr) {
     FrontendHarness clean{LUNA_TEST_INTERFACE, LUNA_TEST_IMPLEMENTATION};
     ASSERT_TRUE(clean.Verify()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitMachineIr()) << clean.Diagnostics();
+    ASSERT_TRUE(clean.EmitAbi()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitLiveness()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitRegisterAllocation()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitAssembly()) << clean.Diagnostics();
@@ -290,6 +304,8 @@ TEST(MutationFuzzTest, CleanModulePairResultsAlwaysProduceValidTypedIr) {
                                       << harness.Diagnostics();
         EXPECT_TRUE(harness.EmitMachineIr()) << "case " << case_index << '\n'
                                              << harness.Diagnostics();
+        EXPECT_TRUE(harness.EmitAbi()) << "case " << case_index << '\n'
+                                       << harness.Diagnostics();
         EXPECT_TRUE(harness.EmitLiveness()) << "case " << case_index << '\n'
                                             << harness.Diagnostics();
         EXPECT_TRUE(harness.EmitRegisterAllocation())
@@ -331,6 +347,7 @@ TEST(MutationFuzzTest, CleanModuleGraphResultsAlwaysProduceValidTypedIr) {
         LUNA_TEST_MODULE_SOURCES[4]};
     ASSERT_TRUE(clean.Verify()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitMachineIr()) << clean.Diagnostics();
+    ASSERT_TRUE(clean.EmitAbi()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitLiveness()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitRegisterAllocation()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitAssembly()) << clean.Diagnostics();
@@ -358,6 +375,9 @@ TEST(MutationFuzzTest, CleanModuleGraphResultsAlwaysProduceValidTypedIr) {
             << "case " << case_index << ", source " << mutated_source << '\n'
             << harness.Diagnostics();
         EXPECT_TRUE(harness.EmitMachineIr())
+            << "case " << case_index << ", source " << mutated_source << '\n'
+            << harness.Diagnostics();
+        EXPECT_TRUE(harness.EmitAbi())
             << "case " << case_index << ", source " << mutated_source << '\n'
             << harness.Diagnostics();
         EXPECT_TRUE(harness.EmitLiveness())

@@ -71,6 +71,30 @@ TEST(X8664BackendTest, EmitsI64InstructionsAndCallingConvention) {
     EXPECT_NE(assembly.find("cmpq"), std::string::npos);
 }
 
+TEST(X8664BackendTest, EmitsScalarStackArgumentsForBothCallBoundaries) {
+    FrontendHarness harness{
+        "module test.stack_argument_codegen;\n"
+        "fn select(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32,\n"
+        "          g: i64, x: f64, y: f64, z: f64, p: f64, q: f64,\n"
+        "          r: f64, s: f64, t: f64, u: f64) -> i64 {\n"
+        "    return g + (u as i64);\n"
+        "}\n"
+        "fn main() -> i32 {\n"
+        "    return select(0, 0, 0, 0, 0, 0, 40,\n"
+        "                  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,\n"
+        "                  2.0) as i32;\n"
+        "}\n"};
+
+    ASSERT_TRUE(harness.EmitAssembly()) << harness.Diagnostics();
+    const std::string assembly = harness.Assembly();
+    EXPECT_NE(assembly.find("subq $16, %rsp"), std::string::npos);
+    EXPECT_NE(assembly.find("movq %rax, 0(%rsp)"), std::string::npos);
+    EXPECT_NE(assembly.find("movsd %xmm15, 8(%rsp)"), std::string::npos);
+    EXPECT_NE(assembly.find("movq 16(%rbp), %rax"), std::string::npos);
+    EXPECT_NE(assembly.find("movsd 24(%rbp), %xmm15"), std::string::npos);
+    EXPECT_NE(assembly.find("addq $16, %rsp"), std::string::npos);
+}
+
 TEST(X8664BackendTest, EmitsIntegerExtensionAndTruncation) {
     FrontendHarness harness{"module test.conversion_codegen;\n"
                             "fn convert(value: i32) -> i32 {\n"

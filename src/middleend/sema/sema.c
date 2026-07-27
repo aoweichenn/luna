@@ -4808,8 +4808,6 @@ static bool luna_sema_validate_function_signature(LunaSemaContext *context,
         success = false;
     }
 
-    uint32_t integer_parameter_count = 0U;
-    uint32_t float_parameter_count = 0U;
     for (const LunaParameter *parameter = syntax->first_parameter;
          parameter != NULL; parameter = parameter->next) {
         for (const LunaParameter *previous = syntax->first_parameter;
@@ -4853,19 +4851,6 @@ static bool luna_sema_validate_function_signature(LunaSemaContext *context,
             success = false;
             continue;
         }
-        if (luna_sema_is_float_type(parameter_type)) {
-            float_parameter_count += 1U;
-        } else {
-            integer_parameter_count += 1U;
-        }
-    }
-
-    if (integer_parameter_count > 6U || float_parameter_count > 8U) {
-        luna_diagnostic_error(
-            context->diagnostics, syntax->span,
-            "the bootstrap ABI supports at most six integer-class and eight "
-            "floating-point arguments");
-        success = false;
     }
     return success;
 }

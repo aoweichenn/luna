@@ -408,8 +408,6 @@ luna_x86_64_machine_verify_function(const LunaX8664MachineModule *module,
         return false;
     }
 
-    uint32_t general_parameter_count = 0U;
-    uint32_t float_parameter_count = 0U;
     for (size_t index = 0U; index < function->parameter_types.length;
          index += 1U) {
         const LunaX8664MachineType *type =
@@ -422,18 +420,6 @@ luna_x86_64_machine_verify_function(const LunaX8664MachineModule *module,
                 function_index, index);
             return false;
         }
-        if (luna_x86_64_machine_type_is_float(*type)) {
-            float_parameter_count += 1U;
-        } else {
-            general_parameter_count += 1U;
-        }
-    }
-    if (general_parameter_count > 6U || float_parameter_count > 8U) {
-        (void)fprintf(stream,
-                      "machine IR verification: function %zu exceeds the "
-                      "implemented register argument ABI\n",
-                      function_index);
-        return false;
     }
 
     const bool is_declaration =

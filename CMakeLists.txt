@@ -43,6 +43,9 @@ add_library(luna_compiler STATIC
     src/frontend/support/string_view.c
     src/frontend/token/token.c
     src/frontend/type/type.c
+    src/backend/x86_64/abi.c
+    src/backend/x86_64/abi_print.c
+    src/backend/x86_64/abi_verify.c
     src/backend/x86_64/backend.c
     src/backend/x86_64/liveness.c
     src/backend/x86_64/liveness_print.c
@@ -180,6 +183,7 @@ if(BUILD_TESTING)
         tests/unit/frontend/source/source_test.cpp
         tests/unit/frontend/type_test.cpp
         tests/unit/target/target_test.cpp
+        tests/unit/backend/x86_64_abi_test.cpp
         tests/unit/backend/x86_64_liveness_test.cpp
         tests/unit/backend/x86_64_machine_ir_test.cpp
         tests/unit/backend/x86_64_register_allocation_test.cpp
@@ -327,6 +331,7 @@ if(LUNA_BUILD_FUZZERS)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/structured_control_flow.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/memory.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/external.luna"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/stack_arguments.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/aggregate.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/module_pair.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/module_import.luna"

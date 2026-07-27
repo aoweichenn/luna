@@ -51,6 +51,9 @@ lexer -> parser -> syntax tree
        verified x86-64 machine IR
                     |
                     v
+      verified System V ABI analysis
+                    |
+                    v
          verified liveness analysis
                     |
                     v
@@ -91,8 +94,9 @@ are interned into canonical types, and each structure, union and enum retains
 a distinct semantic identity. Context-directed aggregate initialization lowers
 directly into exact-layout local storage after validating every field before
 evaluating any initializer expression. Exact same-typed local memory objects
-copy by representation; composite values remain outside the scalar ABI until
-aggregate ABI classification is implemented. Type-only `sizeof`, `alignof`
+copy by representation; composite values remain outside function signatures
+until aggregate by-value IR and ABI lowering is implemented. Type-only
+`sizeof`, `alignof`
 and `offsetof` expressions are resolved against the same target layout records
 and lowered directly to typed `usize` constants; the IR has no host-dependent
 layout-query instruction.
@@ -264,6 +268,25 @@ but instruction rewriting and optimization are deliberately absent. The
 complete representation and invariants are documented in
 [x86-64 machine IR](machine-ir.md).
 
+## x86-64 System V ABI analysis
+
+ABI analysis consumes verified machine IR and assigns every scalar parameter
+to one of the six general-purpose registers, eight vector registers or a
+dense eight-byte stack slot. The two register banks are counted independently.
+The caller frame is rounded to 16 bytes, and the callee reads the first stack
+parameter at `16(%rbp)` after establishing its frame pointer.
+
+The same owned module result contains an aggregate eightbyte classifier for
+future by-value lowering. It handles flattened integer/SSE leaves, structures,
+overlapping union fields, unaligned layouts and the two-eightbyte memory
+cutoff. Aggregate values do not yet enter typed or machine function
+signatures, so this stage does not claim aggregate passing or returning.
+
+The ABI verifier recomputes every function location and every aggregate
+classification. `lunac --emit abi` exposes deterministic parameter locations
+and frame sizes. The full boundary is documented in
+[x86-64 System V ABI analysis](abi.md).
+
 ## x86-64 liveness
 
 The backend computes liveness over the verified machine def/use and CFG
@@ -306,6 +329,8 @@ The current machine-IR consumer is correctness-first:
 - System V's first eight SSE argument-register assignments and SSE result
   register for `f32` and `f64`, classified independently from integer
   registers so mixed signatures can use both banks;
+- dense eight-byte stack slots for scalar arguments that exhaust either
+  register bank, with a 16-byte-aligned caller argument area;
 - explicit stack frames;
 - virtual values assigned stack homes;
 - canonical zero-extended raw bits in the low 32 bits for 8-bit and 16-bit
@@ -346,12 +371,13 @@ This backend is intentionally not the performance endpoint. Planned stages are:
 3. liveness;
 4. linear-scan register allocation;
 5. stack arguments and aggregate ABI classification;
-6. allocation-aware instruction rewrite;
-7. peephole and local instruction selection improvements;
-8. ELF64 relocatable-object emission.
+6. aggregate by-value IR and ABI lowering;
+7. allocation-aware instruction rewrite;
+8. peephole and local instruction selection improvements;
+9. ELF64 relocatable-object emission.
 
-The first four stages are complete. Stack arguments and aggregate ABI
-classification are the next backend stage.
+The first five stages are complete. Aggregate by-value IR and ABI lowering is
+the next backend stage.
 
 The simple backend remains available as a reference backend for differential
 testing after optimization is introduced.
@@ -375,7 +401,8 @@ The quality gate contains:
 - deterministic metadata round trips, re-checksummed binary mutations,
   corrupt/version/stale-dependency negatives and three-object separate-link
   execution tests;
-- textual typed-IR, machine-IR, liveness and register-allocation snapshots;
+- textual typed-IR, machine-IR, ABI, liveness and register-allocation
+  snapshots;
 - x86-64 assembly validation through LLVM MC;
 - static ELF64 linking through LLD;
 - execution under `qemu-x86_64-static`;
@@ -392,12 +419,13 @@ The quality gate contains:
   mutation checks and generated aggregate differential programs;
 - real C23-to-Luna static linking tests covering every scalar type, pointers,
   aggregate layout through pointers, no-result calls, narrow signed promotion
-  and independently classified integer/SSE register banks;
+  independently classified integer/SSE register banks and scalar stack
+  arguments;
 - structured-control negative cases, IR snapshots and randomized differential
   programs;
 - deterministic mutation tests and a coverage-guided libFuzzer target that
-  exercise machine lowering, liveness, register allocation, verification,
-  printing and assembly emission;
+  exercise machine lowering, ABI analysis, liveness, register allocation,
+  verification, printing and assembly emission;
 - UBSan runs for the host compiler and ASan runs on compatible native hosts;
 - warnings treated as errors.
 

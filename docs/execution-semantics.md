@@ -235,6 +235,24 @@ read-only qualification. Conversion between a pointer and `usize` also
 preserves the target-width bit pattern. These conversions do not validate
 that the resulting address refers to a live object.
 
+## Scalar call ABI
+
+On `x86_64-unknown-linux-gnu`, scalar calls use the System V ABI. Integer,
+boolean and pointer parameters use `%rdi`, `%rsi`, `%rdx`, `%rcx`, `%r8` and
+`%r9`; `f32` and `f64` parameters independently use `%xmm0` through `%xmm7`.
+After one class exhausts its bank, each further parameter of that class uses a
+dense eight-byte stack slot. A later parameter of the other class may still
+use its remaining registers.
+
+The caller reserves a 16-byte-aligned argument area before the call and
+restores it afterward. Internal Luna calls, compiled-module calls and
+non-variadic external C calls share this placement. Integer-like scalar
+results use `%rax`, and floating results use `%xmm0`.
+
+Structures, unions and fixed arrays remain memory objects and cannot yet be
+passed or returned by value. Variadic calls are not part of the bootstrap
+language.
+
 ## Module contracts
 
 An interface and implementation form one compilation module only when their

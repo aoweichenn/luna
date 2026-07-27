@@ -910,8 +910,8 @@ TEST(SemaTest, RejectsImplicitFloatingPointTypeMixing) {
               std::string::npos);
 }
 
-TEST(SemaTest, EnforcesIndependentScalarArgumentRegisterLimits) {
-    FrontendHarness valid{
+TEST(SemaTest, AcceptsIndependentScalarRegisterAndStackArguments) {
+    FrontendHarness mixed{
         "module test.mixed_registers;\n"
         "fn mixed(a: i32, b: f32, c: i64, d: f64, e: u32, f: f32,\n"
         "         g: u64, h: f64, i: isize, j: f32, k: usize, l: f64,\n"
@@ -919,30 +919,25 @@ TEST(SemaTest, EnforcesIndependentScalarArgumentRegisterLimits) {
         "    return true;\n"
         "}\n"
         "fn main() -> i32 { return 0; }\n"};
-    EXPECT_TRUE(valid.Verify()) << valid.Diagnostics();
+    EXPECT_TRUE(mixed.Verify()) << mixed.Diagnostics();
 
-    FrontendHarness invalid{
+    FrontendHarness floating_stack{
         "module test.too_many_float_registers;\n"
         "fn too_many(a: f64, b: f64, c: f64, d: f64, e: f64,\n"
         "            f: f64, g: f64, h: f64, i: f64) -> f64 {\n"
         "    return a;\n"
         "}\n"
         "fn main() -> i32 { return 0; }\n"};
-    EXPECT_FALSE(invalid.ParseAndLower());
-    EXPECT_NE(invalid.Diagnostics().find("eight floating-point arguments"),
-              std::string::npos);
+    EXPECT_TRUE(floating_stack.Verify()) << floating_stack.Diagnostics();
 
-    FrontendHarness too_many_integers{
+    FrontendHarness integer_stack{
         "module test.too_many_integer_registers;\n"
         "fn too_many(a: i8, b: i16, c: i32, d: i64, e: u32, f: usize,\n"
         "            g: isize) -> i32 {\n"
         "    return 0;\n"
         "}\n"
         "fn main() -> i32 { return 0; }\n"};
-    EXPECT_FALSE(too_many_integers.ParseAndLower());
-    EXPECT_NE(too_many_integers.Diagnostics().find(
-                  "six integer-class and eight floating-point arguments"),
-              std::string::npos);
+    EXPECT_TRUE(integer_stack.Verify()) << integer_stack.Diagnostics();
 }
 
 TEST(SemaTest, LowersConditionalAndStructuredControlFlowToValidIr) {

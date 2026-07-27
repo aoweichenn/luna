@@ -44,6 +44,7 @@ FrontendHarness::FrontendHarness(std::string_view source_text,
     luna_arena_init(&this->arena_, LUNA_TEST_ARENA_BLOCK_SIZE);
     luna_ir_module_init(&this->module_, target);
     luna_string_builder_init(&this->machine_ir_);
+    luna_string_builder_init(&this->abi_);
     luna_string_builder_init(&this->liveness_);
     luna_string_builder_init(&this->register_allocation_);
     luna_string_builder_init(&this->assembly_);
@@ -73,6 +74,7 @@ FrontendHarness::~FrontendHarness() {
     luna_string_builder_destroy(&this->assembly_);
     luna_string_builder_destroy(&this->register_allocation_);
     luna_string_builder_destroy(&this->liveness_);
+    luna_string_builder_destroy(&this->abi_);
     luna_string_builder_destroy(&this->machine_ir_);
     luna_ir_module_destroy(&this->module_);
     luna_arena_destroy(&this->arena_);
@@ -162,6 +164,15 @@ bool FrontendHarness::EmitMachineIr() {
                                        &this->machine_ir_);
 }
 
+bool FrontendHarness::EmitAbi() {
+    if (!this->Verify()) {
+        return false;
+    }
+
+    return luna_x86_64_emit_abi(&this->module_, &this->diagnostics_,
+                                &this->abi_);
+}
+
 bool FrontendHarness::EmitLiveness() {
     if (!this->Verify()) {
         return false;
@@ -191,6 +202,11 @@ std::string FrontendHarness::Diagnostics() const {
 std::string FrontendHarness::MachineIr() const {
     return std::string{luna_string_builder_data(&this->machine_ir_),
                        this->machine_ir_.length};
+}
+
+std::string FrontendHarness::Abi() const {
+    return std::string{luna_string_builder_data(&this->abi_),
+                       this->abi_.length};
 }
 
 std::string FrontendHarness::Liveness() const {
@@ -235,6 +251,7 @@ CompilationHarness::CompilationHarness(
     luna_arena_init(&this->arena_, LUNA_TEST_ARENA_BLOCK_SIZE);
     luna_ir_module_init(&this->module_, target);
     luna_string_builder_init(&this->machine_ir_);
+    luna_string_builder_init(&this->abi_);
     luna_string_builder_init(&this->liveness_);
     luna_string_builder_init(&this->register_allocation_);
     luna_string_builder_init(&this->assembly_);
@@ -263,6 +280,7 @@ CompilationHarness::~CompilationHarness() {
     luna_string_builder_destroy(&this->assembly_);
     luna_string_builder_destroy(&this->register_allocation_);
     luna_string_builder_destroy(&this->liveness_);
+    luna_string_builder_destroy(&this->abi_);
     luna_string_builder_destroy(&this->machine_ir_);
     luna_ir_module_destroy(&this->module_);
     luna_arena_destroy(&this->arena_);
@@ -347,6 +365,14 @@ bool CompilationHarness::EmitMachineIr() {
                                        &this->machine_ir_);
 }
 
+bool CompilationHarness::EmitAbi() {
+    if (!this->Verify()) {
+        return false;
+    }
+    return luna_x86_64_emit_abi(&this->module_, &this->diagnostics_,
+                                &this->abi_);
+}
+
 bool CompilationHarness::EmitLiveness() {
     if (!this->Verify()) {
         return false;
@@ -374,6 +400,11 @@ std::string CompilationHarness::Diagnostics() const {
 std::string CompilationHarness::MachineIr() const {
     return std::string{luna_string_builder_data(&this->machine_ir_),
                        this->machine_ir_.length};
+}
+
+std::string CompilationHarness::Abi() const {
+    return std::string{luna_string_builder_data(&this->abi_),
+                       this->abi_.length};
 }
 
 std::string CompilationHarness::Liveness() const {

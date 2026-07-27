@@ -153,6 +153,7 @@ def compile_separate_module_graph(
     math_assembly = work_dir / "metadata_math.s"
     math_ir = work_dir / "metadata_math.lir"
     math_mir = work_dir / "metadata_math.mir"
+    math_abi = work_dir / "metadata_math.abi"
     math_liveness = work_dir / "metadata_math.live"
     math_allocation = work_dir / "metadata_math.alloc"
     math_object = work_dir / "metadata_math.o"
@@ -251,6 +252,20 @@ def compile_separate_module_graph(
             "--compile-module",
             "tests.metadata.math",
             "--emit",
+            "abi",
+            "-o",
+            str(math_abi),
+            str(math_metadata),
+            str(math_implementation),
+            str(core_metadata),
+        ]
+    )
+    run(
+        [
+            str(compiler),
+            "--compile-module",
+            "tests.metadata.math",
+            "--emit",
             "liveness",
             "-o",
             str(math_liveness),
@@ -330,6 +345,17 @@ def compile_separate_module_graph(
         or math_mir_text.count("metadata=0x") != 2
     ):
         raise AssertionError("separate module machine IR linkage is missing")
+    math_abi_text = math_abi.read_text(encoding="utf-8")
+    if (
+        "declare @f0 tests.metadata.core::add_bias parameters=7 "
+        "gp=6 sse=0 stack-bytes=8 call-frame=16"
+        not in math_abi_text
+        or "p6 type=i32 class=integer location=stack[0]"
+        not in math_abi_text
+        or "define @f1 tests.metadata.math::calculate"
+        not in math_abi_text
+    ):
+        raise AssertionError("separate module ABI linkage is missing")
     math_liveness_text = math_liveness.read_text(encoding="utf-8")
     if (
         "declare @f0 tests.metadata.core::add_bias values=0 iterations=0"
@@ -925,6 +951,8 @@ def main() -> int:
         raise AssertionError("--help did not describe separate compilation")
     if "--emit mir" not in help_result.stdout:
         raise AssertionError("--help did not describe machine IR emission")
+    if "--emit abi" not in help_result.stdout:
+        raise AssertionError("--help did not describe ABI emission")
     if "--emit liveness" not in help_result.stdout:
         raise AssertionError("--help did not describe liveness emission")
     if "--emit allocation" not in help_result.stdout:
@@ -1025,6 +1053,8 @@ def main() -> int:
         "recursive_factorial.luna": 120,
         "break_continue.luna": 25,
         "six_arguments.luna": 21,
+        "stack_arguments.luna": 42,
+        "too_many_float_arguments.luna": 42,
         "signed_arithmetic.luna": 36,
         "defined_i32_semantics.luna": 42,
         "defined_i64_semantics.luna": 42,
@@ -1269,9 +1299,6 @@ def main() -> int:
             "explicit conversion requires numeric source and target types"
         ),
         "malformed_float_literal.luna": "invalid floating-point literal",
-        "too_many_float_arguments.luna": (
-            "at most six integer-class and eight floating-point arguments"
-        ),
         "conditional_condition_error.luna": "expected bool, found i32",
         "conditional_type_error.luna": "expected i32, found bool",
         "conditional_numeric_type_error.luna": "expected i32, found i64",
@@ -1365,12 +1392,6 @@ def main() -> int:
         ),
         "external_duplicate_definition.luna": (
             "duplicate function 'c_value'"
-        ),
-        "external_too_many_integer_arguments.luna": (
-            "at most six integer-class and eight floating-point arguments"
-        ),
-        "external_too_many_float_arguments.luna": (
-            "at most six integer-class and eight floating-point arguments"
         ),
         "duplicate_type_declaration.luna": (
             "duplicate type declaration 'Item'"
@@ -1713,6 +1734,36 @@ def main() -> int:
     if machine_ir_first.read_bytes() != machine_ir_second.read_bytes():
         raise AssertionError("machine IR output is not deterministic")
     print("PASS machine IR snapshot and determinism: function_call.luna")
+
+    abi_first = arguments.work_dir / "stack_arguments_first.abi"
+    abi_second = arguments.work_dir / "stack_arguments_second.abi"
+    for output in (abi_first, abi_second):
+        run(
+            [
+                str(arguments.compiler),
+                "--emit",
+                "abi",
+                "-o",
+                str(output),
+                str(case_dir / "stack_arguments.luna"),
+            ]
+        )
+    expected_abi = (
+        arguments.source_root
+        / "tests"
+        / "integration"
+        / "golden"
+        / "stack_arguments.abi"
+    ).read_text(encoding="utf-8")
+    actual_abi = abi_first.read_text(encoding="utf-8")
+    if actual_abi.rstrip("\n") != expected_abi.rstrip("\n"):
+        raise AssertionError(
+            "ABI snapshot mismatch for stack_arguments.luna\n"
+            f"expected:\n{expected_abi}\nactual:\n{actual_abi}"
+        )
+    if abi_first.read_bytes() != abi_second.read_bytes():
+        raise AssertionError("ABI output is not deterministic")
+    print("PASS ABI snapshot and determinism: stack_arguments.luna")
 
     liveness_first = arguments.work_dir / "function_call_first.live"
     liveness_second = arguments.work_dir / "function_call_second.live"

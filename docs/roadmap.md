@@ -11,7 +11,7 @@ separate. A checked box means the feature has executable tests.
 - [x] parser for module units, functions and the M0 statement subset
 - [x] exact checking for `i32`, `bool` and no-result functions
 - [x] typed CFG IR and verifier
-- [x] direct internal calls with up to six integer arguments
+- [x] direct internal scalar calls
 - [x] x86-64 System V stack-homed backend
 - [x] standalone Linux `_start`
 - [x] GoogleTest unit, negative, IR snapshot and executable QEMU tests
@@ -50,7 +50,8 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] target machine IR
 - [x] liveness analysis
 - [x] verified linear-scan register allocation result
-- [ ] stack arguments and aggregate ABI classification
+- [x] scalar stack arguments and verified aggregate ABI classification
+- [ ] aggregate by-value IR and ABI lowering
 - [ ] allocation-aware instruction rewrite with fixed-register constraints
 - [ ] instruction-level differential tests
 - [ ] native ELF64 relocatable-object writer

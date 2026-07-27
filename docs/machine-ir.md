@@ -99,7 +99,7 @@ It rejects:
 - an unsupported or inconsistent target and malformed module storage;
 - an executable without exactly one valid internal entry definition;
 - invalid linkage, metadata identity or declaration/definition ownership;
-- parameter counts that violate the implemented System V register boundary;
+- invalid scalar parameter and result types;
 - invalid stack sizes, alignments, scalar layouts or virtual-register types;
 - missing, duplicate or mistyped virtual-register definitions;
 - invalid or mistyped uses, including every call argument;
@@ -149,8 +149,9 @@ through the Linux x86-64 `syscall` instruction and no target libc is linked.
 
 The analysis representation and invariants are documented in
 [x86-64 liveness analysis](liveness.md); the physical-location result is
-documented in [x86-64 register allocation](register-allocation.md). The next
-backend stage is stack arguments and aggregate ABI classification. Later
-allocation-aware rewriting must first encode fixed-register instruction
-constraints, call moves and callee-save preservation without changing Luna
-language semantics.
+documented in [x86-64 register allocation](register-allocation.md), and scalar
+register/stack placement plus aggregate classification are documented in the
+[x86-64 System V ABI analysis](abi.md). Aggregate by-value IR and ABI lowering
+is the next representation stage. Later allocation-aware rewriting must first
+encode fixed-register instruction constraints, call moves and callee-save
+preservation without changing Luna language semantics.

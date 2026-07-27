@@ -48,6 +48,40 @@ bool luna_x86_64_emit_machine_ir(const LunaIrModule *module,
     return success;
 }
 
+bool luna_x86_64_emit_abi(const LunaIrModule *module,
+                          LunaDiagnosticEngine *diagnostics,
+                          LunaStringBuilder *output) {
+    if (module == NULL || diagnostics == NULL || output == NULL ||
+        output->length != 0U) {
+        if (diagnostics != NULL) {
+            luna_diagnostic_error_plain(
+                diagnostics, "x86-64 ABI emission received invalid state");
+        }
+        return false;
+    }
+
+    LunaX8664MachineModule machine_module;
+    LunaX8664ModuleAbi abi;
+    luna_x86_64_abi_init(&abi);
+    const bool prepared = luna_x86_64_prepare_machine_module(
+        module, diagnostics, &machine_module);
+    const bool analyzed =
+        prepared &&
+        luna_x86_64_abi_analyze(&machine_module, &abi, diagnostics->stream);
+    if (prepared && !analyzed) {
+        luna_diagnostic_error_plain(diagnostics, "x86-64 ABI analysis failed");
+    }
+    const bool success =
+        analyzed && luna_x86_64_abi_print(&machine_module, &abi, output);
+    if (analyzed && !success) {
+        luna_diagnostic_error_plain(diagnostics,
+                                    "out of memory while printing x86-64 ABI");
+    }
+    luna_x86_64_abi_destroy(&abi);
+    luna_x86_64_machine_module_destroy(&machine_module);
+    return success;
+}
+
 bool luna_x86_64_emit_liveness(const LunaIrModule *module,
                                LunaDiagnosticEngine *diagnostics,
                                LunaStringBuilder *output) {

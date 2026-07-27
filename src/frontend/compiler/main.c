@@ -8,7 +8,7 @@
 
 static void luna_print_usage(FILE *stream) {
     (void)fputs("usage: lunac [--target triple] "
-                "[--emit check|ir|mir|liveness|allocation|asm|metadata] "
+                "[--emit check|ir|mir|abi|liveness|allocation|asm|metadata] "
                 "[--compile-module name] [-o path] input...\n"
                 "\n"
                 "targets:\n"
@@ -19,6 +19,7 @@ static void luna_print_usage(FILE *stream) {
                 "  --emit check   parse, type-check and verify IR\n"
                 "  --emit ir      write textual Luna IR\n"
                 "  --emit mir     write verified x86-64 machine IR\n"
+                "  --emit abi     write verified x86-64 System V locations\n"
                 "  --emit liveness  write verified x86-64 live sets\n"
                 "  --emit allocation  write verified x86-64 register "
                 "allocation\n"
@@ -44,6 +45,10 @@ static bool luna_parse_emit_kind(const char *name, LunaEmitKind *emit_kind) {
     }
     if (strcmp(name, "mir") == 0) {
         *emit_kind = LUNA_EMIT_MACHINE_IR;
+        return true;
+    }
+    if (strcmp(name, "abi") == 0) {
+        *emit_kind = LUNA_EMIT_ABI;
         return true;
     }
     if (strcmp(name, "liveness") == 0) {
@@ -97,8 +102,8 @@ int main(int argument_count, char **arguments) {
             if (index + 1 >= argument_count ||
                 !luna_parse_emit_kind(arguments[index + 1],
                                       &options.emit_kind)) {
-                (void)fputs("error: --emit requires check, ir, mir, liveness, "
-                            "allocation, asm or metadata\n",
+                (void)fputs("error: --emit requires check, ir, mir, abi, "
+                            "liveness, allocation, asm or metadata\n",
                             stderr);
                 goto cleanup;
             }
@@ -175,6 +180,8 @@ int main(int argument_count, char **arguments) {
             options.output_path = "a.lir";
         } else if (options.emit_kind == LUNA_EMIT_MACHINE_IR) {
             options.output_path = "a.mir";
+        } else if (options.emit_kind == LUNA_EMIT_ABI) {
+            options.output_path = "a.abi";
         } else if (options.emit_kind == LUNA_EMIT_LIVENESS) {
             options.output_path = "a.live";
         } else if (options.emit_kind == LUNA_EMIT_REGISTER_ALLOCATION) {

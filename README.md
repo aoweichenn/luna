@@ -103,6 +103,16 @@ build/debug/lunac --emit mir -o hello.mir examples/hello.luna
 This is the x86-64 pre-register-allocation boundary, not a portable interchange
 format. Its `isize` and `usize` values have already become `i64` and `u64`.
 
+Verified System V scalar parameter locations and stack-frame sizes can be
+inspected independently:
+
+```sh
+build/debug/lunac --emit abi -o hello.abi examples/hello.luna
+```
+
+This output also exposes the verified aggregate eightbyte classifier. Aggregate
+values are not yet legal function parameters or results.
+
 Verified block and instruction live sets can be inspected independently:
 
 ```sh
@@ -187,8 +197,9 @@ extern fn c_value(input: i32) -> i32;
 Compile the C23 implementation to an x86-64 object and include that object in
 the final `ld.lld` command. Luna emits the exact symbol name and does not
 implicitly link libc. The current external ABI accepts non-variadic
-scalar/pointer signatures that fit in the six integer and eight SSE System V
-argument registers; stack and aggregate arguments remain deferred.
+scalar/pointer signatures, using the six integer and eight SSE System V
+argument registers independently and stack slots for further arguments.
+Aggregate arguments and results remain deferred.
 
 ## Runtime boundary
 
@@ -205,6 +216,7 @@ library use does not become a dependency of generated target programs.
 See [the language draft](docs/language.md),
 [compiler architecture](docs/architecture.md),
 [x86-64 machine IR](docs/machine-ir.md),
+[x86-64 System V ABI analysis](docs/abi.md),
 [x86-64 liveness analysis](docs/liveness.md),
 [x86-64 register allocation](docs/register-allocation.md),
 [compiled module metadata format](docs/module-metadata.md),
