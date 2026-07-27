@@ -25,6 +25,9 @@ constexpr std::uint64_t LUNA_TEST_MODULE_GRAPH_MUTATION_CASES = 300U;
 constexpr std::uint64_t LUNA_TEST_METADATA_MUTATION_SEED =
     UINT64_C(0x4d45544144415441);
 constexpr std::uint64_t LUNA_TEST_METADATA_MUTATION_CASES = 500U;
+constexpr std::uint64_t LUNA_TEST_ELF_MUTATION_SEED =
+    UINT64_C(0x454c4636344f424a);
+constexpr std::uint64_t LUNA_TEST_ELF_MUTATION_CASES = 1000U;
 constexpr std::size_t LUNA_TEST_MAX_INPUT_SIZE = 4096U;
 constexpr std::size_t LUNA_TEST_METADATA_HEADER_SIZE = 32U;
 constexpr std::size_t LUNA_TEST_METADATA_ARENA_BLOCK_SIZE =
@@ -269,6 +272,9 @@ TEST(MutationFuzzTest, CleanFrontendResultsAlwaysProduceValidTypedIr) {
         EXPECT_TRUE(harness.EmitAssembly())
             << "case " << case_index << ", seed " << seed_index << '\n'
             << harness.Diagnostics();
+        EXPECT_TRUE(harness.EmitObject())
+            << "case " << case_index << ", seed " << seed_index << '\n'
+            << harness.Diagnostics();
     }
 }
 
@@ -296,6 +302,7 @@ TEST(MutationFuzzTest, CleanModulePairResultsAlwaysProduceValidTypedIr) {
     ASSERT_TRUE(clean.EmitRegisterAllocation()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitInstructionRewrite()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitAssembly()) << clean.Diagnostics();
+    ASSERT_TRUE(clean.EmitObject()) << clean.Diagnostics();
 
     std::mt19937_64 random_engine{LUNA_TEST_MODULE_MUTATION_SEED};
     for (std::uint64_t case_index = 0U;
@@ -332,6 +339,8 @@ TEST(MutationFuzzTest, CleanModulePairResultsAlwaysProduceValidTypedIr) {
             << harness.Diagnostics();
         EXPECT_TRUE(harness.EmitAssembly()) << "case " << case_index << '\n'
                                             << harness.Diagnostics();
+        EXPECT_TRUE(harness.EmitObject()) << "case " << case_index << '\n'
+                                          << harness.Diagnostics();
     }
 }
 
@@ -371,6 +380,7 @@ TEST(MutationFuzzTest, CleanModuleGraphResultsAlwaysProduceValidTypedIr) {
     ASSERT_TRUE(clean.EmitRegisterAllocation()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitInstructionRewrite()) << clean.Diagnostics();
     ASSERT_TRUE(clean.EmitAssembly()) << clean.Diagnostics();
+    ASSERT_TRUE(clean.EmitObject()) << clean.Diagnostics();
 
     std::mt19937_64 random_engine{LUNA_TEST_MODULE_GRAPH_MUTATION_SEED};
     for (std::uint64_t case_index = 0U;
@@ -412,6 +422,68 @@ TEST(MutationFuzzTest, CleanModuleGraphResultsAlwaysProduceValidTypedIr) {
         EXPECT_TRUE(harness.EmitAssembly())
             << "case " << case_index << ", source " << mutated_source << '\n'
             << harness.Diagnostics();
+        EXPECT_TRUE(harness.EmitObject())
+            << "case " << case_index << ", source " << mutated_source << '\n'
+            << harness.Diagnostics();
+    }
+}
+
+TEST(MutationFuzzTest, ElfVerifierHandlesDeterministicObjectMutations) {
+    FrontendHarness clean{"module fuzz.elf_object;\n"
+                          "extern fn c_i32_identity(value: i32) -> i32;\n"
+                          "fn main() -> i32 {\n"
+                          " let text: *const u8 = \"mutation\";\n"
+                          " return c_i32_identity(text[0] as i32);\n"
+                          "}\n"};
+    ASSERT_TRUE(clean.EmitObject()) << clean.Diagnostics();
+    const std::string valid_object = clean.Object();
+    ASSERT_GE(valid_object.size(), 64U);
+    ASSERT_TRUE(luna_x86_64_elf_object_verify(
+        LunaStringView{
+            .data = valid_object.data(),
+            .length = valid_object.size(),
+        },
+        nullptr));
+
+    for (std::size_t length = 0U; length < 64U; length += 1U) {
+        EXPECT_FALSE(luna_x86_64_elf_object_verify(
+            LunaStringView{
+                .data = valid_object.data(),
+                .length = length,
+            },
+            nullptr))
+            << "truncated length " << length;
+    }
+
+    constexpr std::array<std::size_t, 7U> LUNA_TEST_CRITICAL_OFFSETS = {
+        0U, 4U, 5U, 16U, 18U, 52U, 58U,
+    };
+    for (const std::size_t offset : LUNA_TEST_CRITICAL_OFFSETS) {
+        std::string corrupted = valid_object;
+        corrupted[offset] =
+            static_cast<char>(static_cast<unsigned char>(corrupted[offset]) ^
+                              static_cast<unsigned char>(UINT8_C(0xff)));
+        EXPECT_FALSE(luna_x86_64_elf_object_verify(
+            LunaStringView{
+                .data = corrupted.data(),
+                .length = corrupted.size(),
+            },
+            nullptr))
+            << "critical offset " << offset;
+    }
+
+    std::mt19937_64 random_engine{LUNA_TEST_ELF_MUTATION_SEED};
+    for (std::uint64_t case_index = 0U;
+         case_index < LUNA_TEST_ELF_MUTATION_CASES; case_index += 1U) {
+        std::string mutated = valid_object;
+        Mutate(mutated, random_engine);
+        const LunaStringView view = {
+            .data = mutated.data(),
+            .length = mutated.size(),
+        };
+        const bool first = luna_x86_64_elf_object_verify(view, nullptr);
+        const bool second = luna_x86_64_elf_object_verify(view, nullptr);
+        EXPECT_EQ(first, second) << "case " << case_index;
     }
 }
 

@@ -67,7 +67,9 @@ def compile_and_run(
 ) -> None:
     stem = source.stem
     assembly = work_dir / f"{stem}.s"
+    oracle_object = work_dir / f"{stem}.mc.o"
     object_file = work_dir / f"{stem}.o"
+    oracle_executable = work_dir / f"{stem}.mc"
     executable = work_dir / stem
 
     run(
@@ -87,8 +89,31 @@ def compile_and_run(
             "--triple=x86_64-unknown-linux-gnu",
             "--filetype=obj",
             "-o",
-            str(object_file),
+            str(oracle_object),
             str(assembly),
+        ]
+    )
+    run(
+        [
+            str(compiler),
+            "--emit",
+            "obj",
+            "-o",
+            str(object_file),
+            str(source),
+            *(str(path) for path in additional_source_units),
+        ]
+    )
+    run(
+        [
+            linker,
+            "-static",
+            "-e",
+            "_start",
+            "-o",
+            str(oracle_executable),
+            str(oracle_object),
+            *(str(path) for path in additional_objects),
         ]
     )
     run(
@@ -102,6 +127,10 @@ def compile_and_run(
             str(object_file),
             *(str(path) for path in additional_objects),
         ]
+    )
+    run(
+        [*target_runner, str(oracle_executable)],
+        expected_code=expected_code,
     )
     run([*target_runner, str(executable)], expected_code=expected_code)
 
@@ -148,6 +177,7 @@ def compile_separate_module_graph(
     core_metadata = work_dir / "metadata_core.lmi"
     core_metadata_reordered = work_dir / "metadata_core_reordered.lmi"
     core_assembly = work_dir / "metadata_core.s"
+    core_oracle_object = work_dir / "metadata_core.mc.o"
     core_object = work_dir / "metadata_core.o"
     math_metadata = work_dir / "metadata_math.lmi"
     math_assembly = work_dir / "metadata_math.s"
@@ -157,9 +187,12 @@ def compile_separate_module_graph(
     math_liveness = work_dir / "metadata_math.live"
     math_allocation = work_dir / "metadata_math.alloc"
     math_rewrite = work_dir / "metadata_math.rewrite"
+    math_oracle_object = work_dir / "metadata_math.mc.o"
     math_object = work_dir / "metadata_math.o"
     application_assembly = work_dir / "metadata_app.s"
+    application_oracle_object = work_dir / "metadata_app.mc.o"
     application_object = work_dir / "metadata_app.o"
+    oracle_executable = work_dir / "metadata_app.mc"
     executable = work_dir / "metadata_app"
 
     for output, sources in (
@@ -210,7 +243,20 @@ def compile_separate_module_graph(
         raise AssertionError(
             "separately compiled export lacks its metadata identity"
         )
-    assemble(llvm_mc, core_assembly, core_object)
+    assemble(llvm_mc, core_assembly, core_oracle_object)
+    run(
+        [
+            str(compiler),
+            "--compile-module",
+            "tests.metadata.core",
+            "--emit",
+            "obj",
+            "-o",
+            str(core_object),
+            str(core_metadata),
+            str(core_implementation),
+        ]
+    )
 
     source_root_codegen = run(
         [
@@ -231,6 +277,25 @@ def compile_separate_module_graph(
     ):
         raise AssertionError(
             "separate source-interface code generation was not rejected"
+        )
+
+    source_root_object = run(
+        [
+            str(compiler),
+            "--compile-module",
+            "tests.metadata.core",
+            "--emit",
+            "obj",
+            "-o",
+            str(work_dir / "metadata_core_from_source.o"),
+            str(core_interface),
+            str(core_implementation),
+        ],
+        expected_code=1,
+    )
+    if "requires its compiled .lmi interface" not in source_root_object.stderr:
+        raise AssertionError(
+            "separate source-interface object generation was not rejected"
         )
 
     run(
@@ -412,7 +477,21 @@ def compile_separate_module_graph(
         raise AssertionError(
             "separately compiled dependent module has invalid assembly"
         )
-    assemble(llvm_mc, math_assembly, math_object)
+    assemble(llvm_mc, math_assembly, math_oracle_object)
+    run(
+        [
+            str(compiler),
+            "--compile-module",
+            "tests.metadata.math",
+            "--emit",
+            "obj",
+            "-o",
+            str(math_object),
+            str(math_metadata),
+            str(math_implementation),
+            str(core_metadata),
+        ]
+    )
 
     run(
         [
@@ -429,7 +508,32 @@ def compile_separate_module_graph(
     application_text = application_assembly.read_text(encoding="utf-8")
     if "_start:" not in application_text or ".extern _L" not in application_text:
         raise AssertionError("metadata-backed executable has invalid assembly")
-    assemble(llvm_mc, application_assembly, application_object)
+    assemble(llvm_mc, application_assembly, application_oracle_object)
+    run(
+        [
+            str(compiler),
+            "--emit",
+            "obj",
+            "-o",
+            str(application_object),
+            str(application),
+            str(math_metadata),
+            str(core_metadata),
+        ]
+    )
+    run(
+        [
+            linker,
+            "-static",
+            "-e",
+            "_start",
+            "-o",
+            str(oracle_executable),
+            str(application_oracle_object),
+            str(math_oracle_object),
+            str(core_oracle_object),
+        ]
+    )
     run(
         [
             linker,
@@ -443,6 +547,7 @@ def compile_separate_module_graph(
             str(core_object),
         ]
     )
+    run([*target_runner, str(oracle_executable)], expected_code=42)
     run([*target_runner, str(executable)], expected_code=42)
 
     missing_dependency = run(
@@ -582,7 +687,6 @@ def compile_separate_module_graph(
     if "was built against different metadata" not in stale_result.stderr:
         raise AssertionError("stale dependency metadata diagnostic is missing")
 
-    changed_assembly = work_dir / "metadata_core_changed.s"
     changed_object = work_dir / "metadata_core_changed.o"
     run(
         [
@@ -590,14 +694,13 @@ def compile_separate_module_graph(
             "--compile-module",
             "tests.metadata.core",
             "--emit",
-            "asm",
+            "obj",
             "-o",
-            str(changed_assembly),
+            str(changed_object),
             str(changed_metadata),
             str(core_implementation),
         ]
     )
-    assemble(llvm_mc, changed_assembly, changed_object)
     incompatible_link = run(
         [
             linker,
@@ -992,6 +1095,8 @@ def main() -> int:
         raise AssertionError(
             "--help did not describe instruction rewrite emission"
         )
+    if "--emit obj" not in help_result.stdout:
+        raise AssertionError("--help did not describe native object emission")
     version_result = run([str(arguments.compiler), "--version"])
     if "lunac 0.1.0-dev" not in version_result.stdout:
         raise AssertionError("--version did not print the compiler version")

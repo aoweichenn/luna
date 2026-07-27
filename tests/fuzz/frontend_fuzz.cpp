@@ -125,6 +125,7 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
     LunaStringBuilder register_allocation{};
     LunaStringBuilder instruction_rewrite{};
     LunaStringBuilder assembly{};
+    LunaStringBuilder object{};
     luna_arena_init(&arena, LUNA_FUZZ_ARENA_BLOCK_SIZE);
     luna_ir_module_init(&module, luna_target_info_default());
     luna_string_builder_init(&machine_ir);
@@ -133,6 +134,7 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
     luna_string_builder_init(&register_allocation);
     luna_string_builder_init(&instruction_rewrite);
     luna_string_builder_init(&assembly);
+    luna_string_builder_init(&object);
 
     LunaDiagnosticEngine diagnostics{};
     luna_diagnostic_init(&diagnostics, diagnostic_file);
@@ -157,10 +159,18 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
                                                      &register_allocation) &&
                 luna_x86_64_emit_instruction_rewrite(&module, &diagnostics,
                                                      &instruction_rewrite) &&
-                luna_x86_64_emit_assembly(&module, &diagnostics, &assembly);
+                luna_x86_64_emit_assembly(&module, &diagnostics, &assembly) &&
+                luna_x86_64_emit_object(&module, &diagnostics, &object) &&
+                luna_x86_64_elf_object_verify(
+                    LunaStringView{
+                        .data = luna_string_builder_data(&object),
+                        .length = object.length,
+                    },
+                    diagnostic_file);
         }
     }
 
+    luna_string_builder_destroy(&object);
     luna_string_builder_destroy(&assembly);
     luna_string_builder_destroy(&instruction_rewrite);
     luna_string_builder_destroy(&register_allocation);
@@ -214,6 +224,7 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
     LunaStringBuilder register_allocation{};
     LunaStringBuilder instruction_rewrite{};
     LunaStringBuilder assembly{};
+    LunaStringBuilder object{};
     luna_arena_init(&arena, LUNA_FUZZ_ARENA_BLOCK_SIZE);
     luna_ir_module_init(&module, luna_target_info_default());
     luna_string_builder_init(&machine_ir);
@@ -222,6 +233,7 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
     luna_string_builder_init(&register_allocation);
     luna_string_builder_init(&instruction_rewrite);
     luna_string_builder_init(&assembly);
+    luna_string_builder_init(&object);
 
     LunaDiagnosticEngine diagnostics{};
     luna_diagnostic_init(&diagnostics, diagnostic_file);
@@ -263,7 +275,14 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
                                                      &register_allocation) &&
                 luna_x86_64_emit_instruction_rewrite(&module, &diagnostics,
                                                      &instruction_rewrite) &&
-                luna_x86_64_emit_assembly(&module, &diagnostics, &assembly);
+                luna_x86_64_emit_assembly(&module, &diagnostics, &assembly) &&
+                luna_x86_64_emit_object(&module, &diagnostics, &object) &&
+                luna_x86_64_elf_object_verify(
+                    LunaStringView{
+                        .data = luna_string_builder_data(&object),
+                        .length = object.length,
+                    },
+                    diagnostic_file);
             for (const LunaProgram *program : programs) {
                 if (invariant_holds && program->is_interface) {
                     invariant_holds =
@@ -274,6 +293,7 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
         }
     }
 
+    luna_string_builder_destroy(&object);
     luna_string_builder_destroy(&assembly);
     luna_string_builder_destroy(&instruction_rewrite);
     luna_string_builder_destroy(&register_allocation);
@@ -326,6 +346,36 @@ constexpr std::string_view LUNA_FUZZ_MODULE_SEPARATOR =
     return invariant_holds;
 }
 
+[[nodiscard]] bool RunObjectAssembler(const std::uint8_t *data,
+                                      std::size_t size) {
+    std::FILE *diagnostic_file = std::fopen("/dev/null", "wb");
+    if (diagnostic_file == nullptr) {
+        return true;
+    }
+
+    LunaDiagnosticEngine diagnostics{};
+    luna_diagnostic_init(&diagnostics, diagnostic_file);
+    LunaStringBuilder object{};
+    luna_string_builder_init(&object);
+    const LunaStringView assembly = {
+        .data = reinterpret_cast<const char *>(data),
+        .length = size,
+    };
+    bool invariant_holds = true;
+    if (luna_x86_64_assemble_elf_object(assembly, &diagnostics, &object)) {
+        invariant_holds = luna_x86_64_elf_object_verify(
+            LunaStringView{
+                .data = luna_string_builder_data(&object),
+                .length = object.length,
+            },
+            diagnostic_file);
+    }
+
+    luna_string_builder_destroy(&object);
+    static_cast<void>(std::fclose(diagnostic_file));
+    return invariant_holds;
+}
+
 }
 
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data,
@@ -333,7 +383,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data,
     if (size <= LUNA_FUZZ_MAX_INPUT_SIZE &&
         (!RunAggregateAbiClassification(data, size) ||
          !RunFrontend(data, size) || !RunModuleCompilation(data, size) ||
-         !RunMetadataDecoder(data, size))) {
+         !RunMetadataDecoder(data, size) || !RunObjectAssembler(data, size))) {
         __builtin_trap();
     }
     return 0;

@@ -164,6 +164,8 @@ def execute_case(
     machine_ir = case_dir / "program.mir"
     rewrite = case_dir / "program.rewrite"
     assembly = case_dir / "program.s"
+    oracle_object = case_dir / "program.mc.o"
+    oracle_executable = case_dir / "program.mc"
     object_file = case_dir / "program.o"
     executable = case_dir / "program"
 
@@ -186,7 +188,29 @@ def execute_case(
         emit(compiler, "rewrite", rewrite, sources)
         rewrite_text = rewrite.read_text(encoding="utf-8")
     emit(compiler, "asm", assembly, sources)
-    assemble_and_link(llvm_mc, linker, assembly, object_file, executable)
+    assemble_and_link(
+        llvm_mc,
+        linker,
+        assembly,
+        oracle_object,
+        oracle_executable,
+    )
+    emit(compiler, "obj", object_file, sources)
+    run(
+        [
+            linker,
+            "-static",
+            "-e",
+            "_start",
+            "-o",
+            str(executable),
+            str(object_file),
+        ]
+    )
+    run(
+        [*target_runner, str(oracle_executable)],
+        expected_code=reference_code,
+    )
     run(
         [*target_runner, str(executable)],
         expected_code=reference_code,

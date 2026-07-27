@@ -67,7 +67,7 @@ its separately compiled object must be supplied to the final link.
 `--compile-module name` compiles exactly one non-executable implementation and
 does not generate `_start`. `--emit metadata` validates the selected source
 interface and implementation before writing the `.lmi`; subsequent typed IR,
-x86-64 machine IR or assembly emission requires that exact `.lmi` as the
+x86-64 machine IR, assembly or object emission requires that exact `.lmi` as the
 selected module's interface. All imported dependencies must also be `.lmi`,
 and passing another module's implementation source is rejected.
 

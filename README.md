@@ -2,8 +2,8 @@
 
 Luna is a small, strongly typed systems language derived from the procedural
 core of C23. The bootstrap compiler is written in C23 and lowers Luna directly
-to a typed control-flow IR, an x86-64 machine IR and native x86-64 assembly. It
-does not transpile through C or C++.
+to a typed control-flow IR, an x86-64 machine IR, native x86-64 instructions
+and ELF64 relocatable objects. It does not transpile through C or C++.
 
 The project is deliberately narrow at this stage:
 
@@ -38,6 +38,8 @@ The project is deliberately narrow at this stage:
   System V scalar and aggregate calls to unmangled external C symbols,
   including register rollback, stack copies, multi-register results and
   hidden result pointers;
+- object writer: deterministic, self-verified ELF64 relocatable objects with
+  native x86-64 encoding, symbols and explicit PC-relative relocations;
 - bootstrap host: conforming C23 with IEC 60559 binary32 and binary64;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests,
   typed-IR, machine-IR, ABI, liveness, register-allocation and
@@ -93,12 +95,13 @@ Native Linux CI additionally runs the same target with the `fuzz-asan` preset.
 
 ```sh
 build/debug/lunac --target x86_64-unknown-linux-gnu \
-  --emit asm -o hello.s examples/hello.luna
-llvm-mc --triple=x86_64-unknown-linux-gnu --filetype=obj \
-  -o hello.o hello.s
+  --emit obj -o hello.o examples/hello.luna
 ld.lld -static -e _start -o hello hello.o
 qemu-x86_64-static ./hello
 ```
+
+`--emit asm` remains available for backend review. Native object emission does
+not invoke LLVM MC or another external assembler.
 
 The verified target machine IR can be inspected without producing assembly:
 
@@ -147,7 +150,7 @@ An executable build may pass every transitive module source unit in one
 invocation. Source order has no semantic effect:
 
 ```sh
-build/debug/lunac --emit asm -o app.s \
+build/debug/lunac --emit obj -o app.o \
   app.luna math.interface.luna math.luna \
   core.interface.luna core.luna
 ```
@@ -160,29 +163,26 @@ units, unknown or repeated imports, cycles, ambiguous names, private access,
 multiple executable roots and supplied modules unreachable from the root.
 
 Modules can instead be compiled independently. First emit and consume their
-versioned `.lmi` interface metadata, then assemble and link each module object:
+versioned `.lmi` interface metadata, then emit and link each module object:
 
 ```sh
 build/debug/lunac --compile-module app.core --emit metadata \
   -o core.lmi core.interface.luna core.luna
-build/debug/lunac --compile-module app.core --emit asm \
-  -o core.s core.lmi core.luna
+build/debug/lunac --compile-module app.core --emit obj \
+  -o core.o core.lmi core.luna
 
 build/debug/lunac --compile-module app.math --emit metadata \
   -o math.lmi math.interface.luna math.luna core.lmi
-build/debug/lunac --compile-module app.math --emit asm \
-  -o math.s math.lmi math.luna core.lmi
+build/debug/lunac --compile-module app.math --emit obj \
+  -o math.o math.lmi math.luna core.lmi
 
-build/debug/lunac --emit asm -o app.s app.luna math.lmi core.lmi
-llvm-mc --triple=x86_64-unknown-linux-gnu --filetype=obj -o core.o core.s
-llvm-mc --triple=x86_64-unknown-linux-gnu --filetype=obj -o math.o math.s
-llvm-mc --triple=x86_64-unknown-linux-gnu --filetype=obj -o app.o app.s
+build/debug/lunac --emit obj -o app.o app.luna math.lmi core.lmi
 ld.lld -static -e _start -o app app.o math.o core.o
 ```
 
 `--compile-module` emits no `_start`. Metadata emission validates the selected
-module's source interface and implementation; typed IR, machine IR and
-assembly emission then require that module's generated `.lmi` plus its
+module's source interface and implementation; typed IR, machine IR, assembly
+and object emission then require that module's generated `.lmi` plus its
 implementation. Every dependency must also be a `.lmi`. Exported Luna
 definitions and metadata imports receive global symbols bound to the exact
 interface fingerprint, so a stale or mismatched module object is rejected by
@@ -236,6 +236,7 @@ See [the language draft](docs/language.md),
 [x86-64 register allocation](docs/register-allocation.md),
 [allocation-aware instruction rewrite](docs/instruction-rewrite.md),
 [instruction-level differential testing](docs/instruction-differential-testing.md),
+[native ELF64 objects](docs/elf-object.md),
 [compiled module metadata format](docs/module-metadata.md),
 [bootstrap execution semantics](docs/execution-semantics.md), and the
 [implementation roadmap](docs/roadmap.md).

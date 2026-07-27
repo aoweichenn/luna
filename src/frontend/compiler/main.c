@@ -9,7 +9,7 @@
 static void luna_print_usage(FILE *stream) {
     (void)fputs("usage: lunac [--target triple] "
                 "[--emit check|ir|mir|abi|liveness|allocation|rewrite|asm|"
-                "metadata] "
+                "obj|metadata] "
                 "[--compile-module name] [-o path] input...\n"
                 "\n"
                 "targets:\n"
@@ -27,6 +27,7 @@ static void luna_print_usage(FILE *stream) {
                 "  --emit rewrite  write verified allocation-aware "
                 "instruction rewrite\n"
                 "  --emit asm     write x86-64 GNU assembly (default)\n"
+                "  --emit obj     write native ELF64 relocatable object\n"
                 "  --emit metadata  write deterministic .lmi metadata\n"
                 "  --compile-module name  compile one module without _start\n"
                 "  -o path        output path; '-' writes to stdout\n"
@@ -70,6 +71,10 @@ static bool luna_parse_emit_kind(const char *name, LunaEmitKind *emit_kind) {
         *emit_kind = LUNA_EMIT_ASSEMBLY;
         return true;
     }
+    if (strcmp(name, "obj") == 0) {
+        *emit_kind = LUNA_EMIT_OBJECT;
+        return true;
+    }
     if (strcmp(name, "metadata") == 0) {
         *emit_kind = LUNA_EMIT_METADATA;
         return true;
@@ -110,7 +115,8 @@ int main(int argument_count, char **arguments) {
                 !luna_parse_emit_kind(arguments[index + 1],
                                       &options.emit_kind)) {
                 (void)fputs("error: --emit requires check, ir, mir, abi, "
-                            "liveness, allocation, rewrite, asm or metadata\n",
+                            "liveness, allocation, rewrite, asm, obj or "
+                            "metadata\n",
                             stderr);
                 goto cleanup;
             }
@@ -197,6 +203,8 @@ int main(int argument_count, char **arguments) {
             options.output_path = "a.rewrite";
         } else if (options.emit_kind == LUNA_EMIT_METADATA) {
             options.output_path = "a.lmi";
+        } else if (options.emit_kind == LUNA_EMIT_OBJECT) {
+            options.output_path = "a.o";
         } else {
             options.output_path = "a.s";
         }

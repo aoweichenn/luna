@@ -297,3 +297,29 @@ bool luna_x86_64_emit_assembly(const LunaIrModule *module,
     luna_x86_64_machine_module_destroy(&machine_module);
     return success;
 }
+
+bool luna_x86_64_emit_object(const LunaIrModule *module,
+                             LunaDiagnosticEngine *diagnostics,
+                             LunaStringBuilder *output) {
+    if (module == NULL || diagnostics == NULL || output == NULL ||
+        output->length != 0U) {
+        if (diagnostics != NULL) {
+            luna_diagnostic_error_plain(
+                diagnostics, "x86-64 object emission received invalid state");
+        }
+        return false;
+    }
+
+    LunaStringBuilder assembly;
+    luna_string_builder_init(&assembly);
+    const bool emitted =
+        luna_x86_64_emit_assembly(module, diagnostics, &assembly);
+    const LunaStringView assembly_view = {
+        .data = luna_string_builder_data(&assembly),
+        .length = assembly.length,
+    };
+    const bool success = emitted && luna_x86_64_assemble_elf_object(
+                                        assembly_view, diagnostics, output);
+    luna_string_builder_destroy(&assembly);
+    return success;
+}

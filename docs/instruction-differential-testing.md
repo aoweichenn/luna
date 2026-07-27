@@ -14,8 +14,8 @@ Luna source
 
 Luna source
     -> ABI analysis, liveness, allocation and instruction rewrite
-    -> x86-64 assembly
-    -> LLVM MC and LLD
+    -> x86-64 assembly review output
+    -> Luna native ELF64 object and LLD
     -> native or QEMU execution
     -> emitted result or trap signal
 ```
@@ -84,6 +84,7 @@ and either a native x86-64 Linux host or `qemu-x86_64-static`:
 ctest --test-dir build/debug -R instruction_differential --output-on-failure
 ```
 
-LLVM MC and LLD are test execution tools at this stage. The next backend stage
-replaces LLVM MC in the compiler path with Luna's native ELF64 relocatable
-object writer; the later minimal Luna linker replaces LLD.
+LLVM MC is now an independent encoding oracle: its object and Luna's native
+object are both linked and executed against the reference result. LLVM MC is
+not in the native compiler path. LLD remains the final-link tool until the
+minimal project-owned Luna linker is complete.

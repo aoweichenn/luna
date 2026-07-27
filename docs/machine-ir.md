@@ -1,7 +1,7 @@
 # x86-64 machine IR
 
 Luna's x86-64 machine IR is the verified target boundary between the
-target-neutral typed IR and assembly emission:
+target-neutral typed IR and x86-64 instruction emission:
 
 ```text
 typed Luna IR
@@ -15,8 +15,9 @@ verified pre-allocation machine IR
     v
 verified liveness, allocation and instruction rewrite
     |
-    v
-x86-64 assembly emission
+    +--> x86-64 assembly review output
+    |
+    +--> native x86-64 encoding and ELF64 object emission
 ```
 
 It is deliberately small. It introduces the target facts needed by the

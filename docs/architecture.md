@@ -13,9 +13,11 @@ project-owned x86-64 Linux system-call ABI layer that invokes `syscall`
 directly. Optional caller-supplied external objects are an explicit FFI
 boundary, not a runtime dependency.
 
-The compiler owns the language semantics. LLVM tools are currently used only
-to encode emitted x86-64 assembly and link ELF64 test executables. They are not
-used as the compiler IR, optimizer or instruction selector.
+The compiler owns the language semantics. Luna now encodes its x86-64
+instructions and writes ELF64 relocatable objects directly. LLVM MC remains
+only an independent test oracle, while LLD performs the final static link
+until the minimal project-owned linker is implemented. Neither tool is used as
+the compiler IR, optimizer or instruction selector.
 
 External C functions are represented directly throughout the pipeline; Luna
 never generates a C translation unit. The final ELF link may combine a
@@ -65,16 +67,23 @@ lexer -> parser -> syntax tree
                     v
           x86-64 instruction emission
                     |
-                    v
-              assembly emission
-                    |
-                    v
-       LLVM MC -> ELF64 object -> LLD
+          +---------+---------+
+          |                   |
+          v                   v
+ optional assembly     native instruction encoder
+ review output                |
+                              v
+                  verified ELF64 relocatable object
+                              |
+                              v
+                             LLD
 ```
 
-Assembly is an output encoding of the x86-64 backend, not an intermediate
-source language. A native ELF64 relocatable-object writer is planned after the
-instruction set and relocation model have stabilized.
+Assembly is a closed output encoding of the x86-64 backend, not a user-facing
+intermediate language. During bootstrap, native object emission renders this
+same closed dialect in memory and consumes it with Luna's internal assembler.
+It never invokes an external assembler and rejects forms the backend does not
+own. See [the ELF object contract](elf-object.md).
 
 ## Frontend
 
@@ -410,10 +419,13 @@ This backend is intentionally not the performance endpoint. Planned stages are:
 7. allocation-aware instruction rewrite;
 8. instruction-level differential tests;
 9. ELF64 relocatable-object emission;
-10. debug information design.
+10. minimal project-owned ELF64 static linking;
+11. debug information design.
 
-The first eight stages are complete. Native ELF64 relocatable-object emission
-is the next backend stage.
+The first nine stages are complete. The native writer produces deterministic,
+self-verified objects with direct x86-64 encoding and explicit relocations.
+The next binary-toolchain stage is the minimal project-owned static linker;
+debug information remains separately deferred.
 
 The current direct pseudo expansions remain unoptimized and serve as the
 semantic reference for future local instruction-selection work.
@@ -439,7 +451,8 @@ The quality gate contains:
   execution tests;
 - textual typed-IR, machine-IR, ABI, liveness, register-allocation and
   instruction-rewrite snapshots;
-- x86-64 assembly validation through LLVM MC;
+- native x86-64 encoding and ELF64 object verification, with LLVM MC retained
+  as an independent differential oracle;
 - static ELF64 linking through LLD;
 - execution under `qemu-x86_64-static`;
 - deterministic generated-program differential tests;

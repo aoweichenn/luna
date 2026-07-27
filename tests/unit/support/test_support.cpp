@@ -49,6 +49,7 @@ FrontendHarness::FrontendHarness(std::string_view source_text,
     luna_string_builder_init(&this->register_allocation_);
     luna_string_builder_init(&this->instruction_rewrite_);
     luna_string_builder_init(&this->assembly_);
+    luna_string_builder_init(&this->object_);
 
     this->diagnostic_file_ = std::tmpfile();
     if (this->diagnostic_file_ == nullptr) {
@@ -72,6 +73,7 @@ FrontendHarness::FrontendHarness(std::string_view interface_text,
 }
 
 FrontendHarness::~FrontendHarness() {
+    luna_string_builder_destroy(&this->object_);
     luna_string_builder_destroy(&this->assembly_);
     luna_string_builder_destroy(&this->instruction_rewrite_);
     luna_string_builder_destroy(&this->register_allocation_);
@@ -157,6 +159,15 @@ bool FrontendHarness::EmitAssembly() {
                                      &this->assembly_);
 }
 
+bool FrontendHarness::EmitObject() {
+    if (!this->Verify()) {
+        return false;
+    }
+
+    return luna_x86_64_emit_object(&this->module_, &this->diagnostics_,
+                                   &this->object_);
+}
+
 bool FrontendHarness::EmitMachineIr() {
     if (!this->Verify()) {
         return false;
@@ -240,6 +251,11 @@ std::string FrontendHarness::Assembly() const {
                        this->assembly_.length};
 }
 
+std::string FrontendHarness::Object() const {
+    return std::string{luna_string_builder_data(&this->object_),
+                       this->object_.length};
+}
+
 const LunaSourceFile *FrontendHarness::Source() const noexcept {
     return &this->source_;
 }
@@ -272,6 +288,7 @@ CompilationHarness::CompilationHarness(
     luna_string_builder_init(&this->register_allocation_);
     luna_string_builder_init(&this->instruction_rewrite_);
     luna_string_builder_init(&this->assembly_);
+    luna_string_builder_init(&this->object_);
 
     this->diagnostic_file_ = std::tmpfile();
     if (this->diagnostic_file_ == nullptr || source_texts.size() == 0U ||
@@ -294,6 +311,7 @@ CompilationHarness::CompilationHarness(
 }
 
 CompilationHarness::~CompilationHarness() {
+    luna_string_builder_destroy(&this->object_);
     luna_string_builder_destroy(&this->assembly_);
     luna_string_builder_destroy(&this->instruction_rewrite_);
     luna_string_builder_destroy(&this->register_allocation_);
@@ -375,6 +393,14 @@ bool CompilationHarness::EmitAssembly() {
                                      &this->assembly_);
 }
 
+bool CompilationHarness::EmitObject() {
+    if (!this->Verify()) {
+        return false;
+    }
+    return luna_x86_64_emit_object(&this->module_, &this->diagnostics_,
+                                   &this->object_);
+}
+
 bool CompilationHarness::EmitMachineIr() {
     if (!this->Verify()) {
         return false;
@@ -451,6 +477,11 @@ std::string CompilationHarness::InstructionRewrite() const {
 std::string CompilationHarness::Assembly() const {
     return std::string{luna_string_builder_data(&this->assembly_),
                        this->assembly_.length};
+}
+
+std::string CompilationHarness::Object() const {
+    return std::string{luna_string_builder_data(&this->object_),
+                       this->object_.length};
 }
 
 LunaIrModule *CompilationHarness::Module() noexcept {

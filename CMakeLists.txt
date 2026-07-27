@@ -46,7 +46,10 @@ add_library(luna_compiler STATIC
     src/backend/x86_64/abi.c
     src/backend/x86_64/abi_print.c
     src/backend/x86_64/abi_verify.c
+    src/backend/x86_64/assembler.c
     src/backend/x86_64/backend.c
+    src/backend/x86_64/elf_object.c
+    src/backend/x86_64/instruction_encoder.c
     src/backend/x86_64/instruction_rewrite.c
     src/backend/x86_64/instruction_rewrite_print.c
     src/backend/x86_64/instruction_rewrite_verify.c
@@ -191,6 +194,7 @@ if(BUILD_TESTING)
         tests/unit/backend/x86_64_machine_ir_test.cpp
         tests/unit/backend/x86_64_register_allocation_test.cpp
         tests/unit/backend/x86_64_instruction_rewrite_test.cpp
+        tests/unit/backend/x86_64_elf_object_test.cpp
         tests/unit/backend/x86_64_test.cpp
     )
     target_link_libraries(luna_unit_tests
@@ -371,6 +375,7 @@ if(LUNA_BUILD_FUZZERS)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/aggregate_by_value.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/module_pair.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/module_import.luna"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/object_assembly.s"
             DESTINATION "${LUNA_FUZZ_CORPUS_DIR}"
         )
 

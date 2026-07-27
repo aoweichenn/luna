@@ -277,7 +277,8 @@ int luna_compile(const LunaCompilerOptions *options, FILE *diagnostic_stream) {
                  options->emit_kind == LUNA_EMIT_LIVENESS ||
                  options->emit_kind == LUNA_EMIT_REGISTER_ALLOCATION ||
                  options->emit_kind == LUNA_EMIT_INSTRUCTION_REWRITE ||
-                 options->emit_kind == LUNA_EMIT_ASSEMBLY),
+                 options->emit_kind == LUNA_EMIT_ASSEMBLY ||
+                 options->emit_kind == LUNA_EMIT_OBJECT),
         };
         success = luna_module_lower_inputs(
             (const LunaModuleInput *)inputs.data, options->input_count,
@@ -313,6 +314,8 @@ int luna_compile(const LunaCompilerOptions *options, FILE *diagnostic_stream) {
                                                        &output);
     } else if (success && options->emit_kind == LUNA_EMIT_ASSEMBLY) {
         success = luna_x86_64_emit_assembly(&module, &diagnostics, &output);
+    } else if (success && options->emit_kind == LUNA_EMIT_OBJECT) {
+        success = luna_x86_64_emit_object(&module, &diagnostics, &output);
     } else if (success && options->emit_kind == LUNA_EMIT_METADATA) {
         const LunaStringView root_name =
             luna_string_view_from_c_string(options->separate_module_name);

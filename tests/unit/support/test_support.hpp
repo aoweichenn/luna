@@ -38,6 +38,7 @@ class FrontendHarness final {
     [[nodiscard]] bool EmitRegisterAllocation();
     [[nodiscard]] bool EmitInstructionRewrite();
     [[nodiscard]] bool EmitAssembly();
+    [[nodiscard]] bool EmitObject();
 
     [[nodiscard]] std::size_t ErrorCount() const noexcept;
     [[nodiscard]] std::string Diagnostics() const;
@@ -47,6 +48,7 @@ class FrontendHarness final {
     [[nodiscard]] std::string RegisterAllocation() const;
     [[nodiscard]] std::string InstructionRewrite() const;
     [[nodiscard]] std::string Assembly() const;
+    [[nodiscard]] std::string Object() const;
     [[nodiscard]] const LunaSourceFile *Source() const noexcept;
     [[nodiscard]] LunaDiagnosticEngine *DiagnosticEngine() noexcept;
     [[nodiscard]] LunaProgram *Program() noexcept;
@@ -68,6 +70,7 @@ class FrontendHarness final {
     LunaStringBuilder register_allocation_{};
     LunaStringBuilder instruction_rewrite_{};
     LunaStringBuilder assembly_{};
+    LunaStringBuilder object_{};
     bool ready_{false};
     bool has_interface_{false};
     bool parse_attempted_{false};
@@ -99,6 +102,7 @@ class CompilationHarness final {
     [[nodiscard]] bool EmitRegisterAllocation();
     [[nodiscard]] bool EmitInstructionRewrite();
     [[nodiscard]] bool EmitAssembly();
+    [[nodiscard]] bool EmitObject();
     [[nodiscard]] std::size_t ErrorCount() const noexcept;
     [[nodiscard]] std::string Diagnostics() const;
     [[nodiscard]] std::string MachineIr() const;
@@ -107,6 +111,7 @@ class CompilationHarness final {
     [[nodiscard]] std::string RegisterAllocation() const;
     [[nodiscard]] std::string InstructionRewrite() const;
     [[nodiscard]] std::string Assembly() const;
+    [[nodiscard]] std::string Object() const;
     [[nodiscard]] LunaIrModule *Module() noexcept;
 
   private:
@@ -122,6 +127,7 @@ class CompilationHarness final {
     LunaStringBuilder register_allocation_{};
     LunaStringBuilder instruction_rewrite_{};
     LunaStringBuilder assembly_{};
+    LunaStringBuilder object_{};
     bool ready_{false};
     bool parse_attempted_{false};
     bool parse_succeeded_{false};

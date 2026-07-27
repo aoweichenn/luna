@@ -1106,7 +1106,6 @@ def generate_module_import_case(
 
 def compile_and_run(
     compiler: pathlib.Path,
-    llvm_mc: str,
     linker: str,
     target_runner: list[str],
     source_text: str | tuple[str, ...],
@@ -1114,7 +1113,6 @@ def compile_and_run(
     case_index: int,
     work_dir: pathlib.Path,
 ) -> None:
-    assembly = work_dir / f"case_{case_index}.s"
     object_file = work_dir / f"case_{case_index}.o"
     executable = work_dir / f"case_{case_index}"
     if isinstance(source_text, str):
@@ -1142,10 +1140,8 @@ def compile_and_run(
         if not isinstance(source_text, str) and len(source_text) == 5:
             module_prefix = f"random.import_case{case_index}"
             core_metadata = work_dir / f"case_{case_index}_core.lmi"
-            core_assembly = work_dir / f"case_{case_index}_core.s"
             core_object = work_dir / f"case_{case_index}_core.o"
             math_metadata = work_dir / f"case_{case_index}_math.lmi"
-            math_assembly = work_dir / f"case_{case_index}_math.s"
             math_object = work_dir / f"case_{case_index}_math.o"
 
             run(
@@ -1175,9 +1171,9 @@ def compile_and_run(
                     "--compile-module",
                     f"{module_prefix}.core",
                     "--emit",
-                    "asm",
+                    "obj",
                     "-o",
-                    str(core_assembly),
+                    str(core_object),
                     str(core_metadata),
                     str(source_files[4]),
                 ]
@@ -1202,9 +1198,9 @@ def compile_and_run(
                     "--compile-module",
                     f"{module_prefix}.math",
                     "--emit",
-                    "asm",
+                    "obj",
                     "-o",
-                    str(math_assembly),
+                    str(math_object),
                     str(source_files[1]),
                     str(core_metadata),
                     str(math_metadata),
@@ -1214,29 +1210,14 @@ def compile_and_run(
                 [
                     str(compiler),
                     "--emit",
-                    "asm",
+                    "obj",
                     "-o",
-                    str(assembly),
+                    str(object_file),
                     str(math_metadata),
                     str(source_files[0]),
                     str(core_metadata),
                 ]
             )
-            for input_assembly, output_object in (
-                (core_assembly, core_object),
-                (math_assembly, math_object),
-                (assembly, object_file),
-            ):
-                run(
-                    [
-                        llvm_mc,
-                        "--triple=x86_64-unknown-linux-gnu",
-                        "--filetype=obj",
-                        "-o",
-                        str(output_object),
-                        str(input_assembly),
-                    ]
-                )
             run(
                 [
                     linker,
@@ -1260,20 +1241,10 @@ def compile_and_run(
             [
                 str(compiler),
                 "--emit",
-                "asm",
-                "-o",
-                str(assembly),
-                *(str(source) for source in source_units),
-            ]
-        )
-        run(
-            [
-                llvm_mc,
-                "--triple=x86_64-unknown-linux-gnu",
-                "--filetype=obj",
+                "obj",
                 "-o",
                 str(object_file),
-                str(assembly),
+                *(str(source) for source in source_units),
             ]
         )
         run(
@@ -1310,7 +1281,6 @@ def main() -> int:
     if arguments.cases <= 0:
         parser.error("--cases must be positive")
 
-    llvm_mc = require_tool("llvm-mc")
     linker = require_tool("ld.lld")
     target_runner = require_target_runner()
     arguments.work_dir.mkdir(parents=True, exist_ok=True)
@@ -1413,7 +1383,6 @@ def main() -> int:
             )
         compile_and_run(
             arguments.compiler,
-            llvm_mc,
             linker,
             target_runner,
             source,
