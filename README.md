@@ -52,7 +52,9 @@ The project is deliberately narrow at this stage:
   modules with structured diagnostics, stable indexed storage and
   independently verified Typed IR, with no target libc;
 - bootstrap host: conforming C23 with IEC 60559 binary32 and binary64 for
-  stage 0; freestanding Luna with direct Linux system calls for later stages;
+  stage 0; freestanding Luna with direct Linux system calls for later stages,
+  including exact no-libc decimal-to-binary32/binary64 conversion with direct
+  contextual rounding;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests,
   typed-IR, machine-IR, ABI, liveness, register-allocation and
   instruction-rewrite snapshots, full-opcode machine-IR-to-x86-64

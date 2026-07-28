@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import fractions
 import pathlib
+import random
 import re
 import shutil
 
@@ -65,6 +67,27 @@ class StageArtifacts:
     compiler: pathlib.Path
     assemblies: dict[str, pathlib.Path]
     objects: dict[str, pathlib.Path]
+
+
+@dataclasses.dataclass(frozen=True)
+class BinaryFloatFormat:
+    name: str
+    fraction_bits: int
+    exponent_bits: int
+    exponent_bias: int
+
+    @property
+    def maximum_bits(self) -> int:
+        exponent_mask = (1 << self.exponent_bits) - 1
+        return ((exponent_mask - 1) << self.fraction_bits) | (
+            (1 << self.fraction_bits) - 1
+        )
+
+
+BINARY_FLOAT_FORMATS = (
+    BinaryFloatFormat("f32", 23, 8, 127),
+    BinaryFloatFormat("f64", 52, 11, 1023),
+)
 
 
 def required_object(graph: dict[str, Module], key: str) -> pathlib.Path:
@@ -501,6 +524,385 @@ def run_fixed_point_probe(
     return output.read_bytes()
 
 
+def positive_float_fraction(
+    floating_format: BinaryFloatFormat,
+    bits: int,
+) -> fractions.Fraction:
+    if bits < 0 or bits > floating_format.maximum_bits:
+        raise AssertionError(
+            f"{floating_format.name} bits are not finite: {bits:#x}"
+        )
+    fraction_mask = (1 << floating_format.fraction_bits) - 1
+    fraction = bits & fraction_mask
+    exponent_field = bits >> floating_format.fraction_bits
+    if exponent_field == 0:
+        significand = fraction
+        binary_exponent = (
+            1
+            - floating_format.exponent_bias
+            - floating_format.fraction_bits
+        )
+    else:
+        significand = (1 << floating_format.fraction_bits) | fraction
+        binary_exponent = (
+            exponent_field
+            - floating_format.exponent_bias
+            - floating_format.fraction_bits
+        )
+    if binary_exponent >= 0:
+        return fractions.Fraction(significand << binary_exponent)
+    return fractions.Fraction(significand, 1 << -binary_exponent)
+
+
+def terminating_decimal(value: fractions.Fraction) -> str:
+    if value < 0:
+        raise AssertionError("floating probe only formats positive values")
+    denominator = value.denominator
+    power_of_two = 0
+    while denominator % 2 == 0:
+        denominator //= 2
+        power_of_two += 1
+    power_of_five = 0
+    while denominator % 5 == 0:
+        denominator //= 5
+        power_of_five += 1
+    if denominator != 1:
+        raise AssertionError(f"{value} has no terminating decimal form")
+
+    decimal_places = max(power_of_two, power_of_five)
+    scaled = value.numerator
+    scaled *= 2 ** (decimal_places - power_of_two)
+    scaled *= 5 ** (decimal_places - power_of_five)
+    digits = str(scaled)
+    if decimal_places == 0:
+        return f"{digits}.0"
+    if len(digits) <= decimal_places:
+        digits = "0" * (decimal_places + 1 - len(digits)) + digits
+    split = len(digits) - decimal_places
+    return f"{digits[:split]}.{digits[split:]}"
+
+
+def decimal_perturbation(literal: str) -> fractions.Fraction:
+    decimal_places = len(literal.partition(".")[2])
+    return fractions.Fraction(1, 10 ** (decimal_places + 4))
+
+
+def floating_probe_cases() -> list[tuple[BinaryFloatFormat, str, int]]:
+    cases: list[tuple[BinaryFloatFormat, str, int]] = []
+    generator = random.Random(0x4C554E41464C4F41)
+    for floating_format in BINARY_FLOAT_FORMATS:
+        fraction_mask = (1 << floating_format.fraction_bits) - 1
+        one_bits = floating_format.exponent_bias << (
+            floating_format.fraction_bits
+        )
+        fixed_lower_bits = {
+            0,
+            1,
+            2,
+            fraction_mask - 1,
+            fraction_mask,
+            fraction_mask + 1,
+            one_bits - 1,
+            one_bits,
+            one_bits + 1,
+            floating_format.maximum_bits - 1,
+        }
+        while len(fixed_lower_bits) < 16:
+            fixed_lower_bits.add(
+                generator.randrange(0, floating_format.maximum_bits)
+            )
+
+        for lower_bits in sorted(fixed_lower_bits):
+            lower = positive_float_fraction(floating_format, lower_bits)
+            upper = positive_float_fraction(
+                floating_format,
+                lower_bits + 1,
+            )
+            midpoint = (lower + upper) / 2
+            midpoint_literal = terminating_decimal(midpoint)
+            perturbation = decimal_perturbation(midpoint_literal)
+            cases.extend(
+                (
+                    (
+                        floating_format,
+                        terminating_decimal(midpoint - perturbation),
+                        lower_bits,
+                    ),
+                    (
+                        floating_format,
+                        midpoint_literal,
+                        (
+                            lower_bits
+                            if lower_bits & 1 == 0
+                            else lower_bits + 1
+                        ),
+                    ),
+                    (
+                        floating_format,
+                        terminating_decimal(midpoint + perturbation),
+                        lower_bits + 1,
+                    ),
+                )
+            )
+
+        for exact_bits in (
+            0,
+            1,
+            fraction_mask,
+            fraction_mask + 1,
+            one_bits,
+            floating_format.maximum_bits,
+        ):
+            cases.append(
+                (
+                    floating_format,
+                    terminating_decimal(
+                        positive_float_fraction(
+                            floating_format,
+                            exact_bits,
+                        )
+                    ),
+                    exact_bits,
+                )
+            )
+
+        maximum = positive_float_fraction(
+            floating_format,
+            floating_format.maximum_bits,
+        )
+        previous = positive_float_fraction(
+            floating_format,
+            floating_format.maximum_bits - 1,
+        )
+        overflow_midpoint = maximum + (maximum - previous) / 2
+        overflow_literal = terminating_decimal(overflow_midpoint)
+        cases.append(
+            (
+                floating_format,
+                terminating_decimal(
+                    overflow_midpoint
+                    - decimal_perturbation(overflow_literal)
+                ),
+                floating_format.maximum_bits,
+            )
+        )
+
+    cases.extend(
+        (
+            (
+                BINARY_FLOAT_FORMATS[0],
+                "1.0000000596046447753906251",
+                0x3F800001,
+            ),
+            (
+                BINARY_FLOAT_FORMATS[1],
+                "9007199254740993.0",
+                0x4340000000000000,
+            ),
+            (BINARY_FLOAT_FORMATS[0], "1_0.0_0e-1", 0x3F800000),
+            (BINARY_FLOAT_FORMATS[1], "1e-10000", 0),
+            (BINARY_FLOAT_FORMATS[1], "0e999999999999999999999", 0),
+        )
+    )
+
+    midpoint = terminating_decimal(
+        (
+            positive_float_fraction(
+                BINARY_FLOAT_FORMATS[1],
+                0x3FF0000000000000,
+            )
+            + positive_float_fraction(
+                BINARY_FLOAT_FORMATS[1],
+                0x3FF0000000000001,
+            )
+        )
+        / 2
+    )
+    significant_count = len(midpoint.replace(".", ""))
+    cases.append(
+        (
+            BINARY_FLOAT_FORMATS[1],
+            midpoint + "0" * (1300 - significant_count),
+            0x3FF0000000000000,
+        )
+    )
+    cases.append(
+        (
+            BINARY_FLOAT_FORMATS[1],
+            midpoint
+            + "0" * (1200 - significant_count)
+            + "1",
+            0x3FF0000000000001,
+        )
+    )
+    return cases
+
+
+def write_floating_probe(source: pathlib.Path) -> None:
+    lines = [
+        "module reproducibility.floating_probe;",
+        "fn f32_bits(value: f32) -> u32 {",
+        "    return *((&value) as *const f32 as *const u32);",
+        "}",
+        "fn f64_bits(value: f64) -> u64 {",
+        "    return *((&value) as *const f64 as *const u64);",
+        "}",
+        "fn main() -> i32 {",
+    ]
+    for case_index, (floating_format, literal, expected) in enumerate(
+        floating_probe_cases()
+    ):
+        failure_code = case_index + 1
+        if failure_code == 42:
+            failure_code = 242
+        lines.extend(
+            (
+                f"    let value_{case_index}: "
+                f"{floating_format.name} = {literal};",
+                f"    if ({floating_format.name}_bits("
+                f"value_{case_index}) != {expected}) {{",
+                f"        return {failure_code};",
+                "    }",
+            )
+        )
+    lines.extend(("    return 42;", "}", ""))
+    source.write_text("\n".join(lines), encoding="ascii")
+
+
+def compile_and_run_stage_zero_probe(
+    compiler: pathlib.Path,
+    linker: pathlib.Path,
+    runner: list[str],
+    read_elf: str,
+    source: pathlib.Path,
+    work_dir: pathlib.Path,
+) -> None:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    object_file = work_dir / "floating-probe.o"
+    executable = work_dir / "floating-probe"
+    run(
+        [
+            str(compiler),
+            "--emit",
+            "obj",
+            "-o",
+            str(object_file),
+            str(source),
+        ],
+        timeout=180,
+    )
+    verify_relocatable_object(read_elf, object_file, True)
+    link(linker, executable, [object_file])
+    verify_static_executable(read_elf, executable)
+    run(
+        [*runner, str(executable)],
+        expected_code=42,
+        timeout=120,
+        cwd=work_dir,
+    )
+
+
+def compile_and_run_self_hosted_probe(
+    compiler: pathlib.Path,
+    runner: list[str],
+    assembler: pathlib.Path,
+    linker: pathlib.Path,
+    read_elf: str,
+    source: pathlib.Path,
+    work_dir: pathlib.Path,
+) -> bytes:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    assembly = work_dir / "floating-probe.s"
+    invoke_stage_compiler(
+        compiler,
+        runner,
+        work_dir / "invocation",
+        True,
+        [source],
+        assembly,
+    )
+    object_file = work_dir / "floating-probe.o"
+    executable = work_dir / "floating-probe"
+    assemble(assembler, assembly, object_file)
+    verify_relocatable_object(read_elf, object_file, True)
+    link(linker, executable, [object_file])
+    verify_static_executable(read_elf, executable)
+    run(
+        [*runner, str(executable)],
+        expected_code=42,
+        timeout=120,
+        cwd=work_dir,
+    )
+    return assembly.read_bytes()
+
+
+def run_floating_overflow_tests(
+    stage_zero: pathlib.Path,
+    stage_two: pathlib.Path,
+    stage_three: pathlib.Path,
+    runner: list[str],
+    work_dir: pathlib.Path,
+) -> None:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    for floating_format in BINARY_FLOAT_FORMATS:
+        maximum = positive_float_fraction(
+            floating_format,
+            floating_format.maximum_bits,
+        )
+        previous = positive_float_fraction(
+            floating_format,
+            floating_format.maximum_bits - 1,
+        )
+        overflow_midpoint = maximum + (maximum - previous) / 2
+        source = work_dir / f"{floating_format.name}-overflow.luna"
+        source.write_text(
+            "module reproducibility."
+            f"{floating_format.name}_overflow;\n"
+            f"fn value() -> {floating_format.name} {{\n"
+            f"    return {terminating_decimal(overflow_midpoint)};\n"
+            "}\n"
+            "fn main() -> i32 { return 0; }\n",
+            encoding="ascii",
+        )
+        stage_zero_result = run(
+            [
+                str(stage_zero),
+                "--emit",
+                "obj",
+                "-o",
+                str(work_dir / f"{floating_format.name}-stage-zero.o"),
+                str(source),
+            ],
+            expected_code=1,
+            timeout=120,
+        )
+        if "does not fit" not in stage_zero_result.stderr:
+            raise AssertionError(
+                f"stage zero lost {floating_format.name} overflow diagnostic"
+            )
+        for stage_name, compiler in (
+            ("stage-two", stage_two),
+            ("stage-three", stage_three),
+        ):
+            invocation = work_dir / f"{floating_format.name}-{stage_name}"
+            prepare_invocation(invocation, True, [source])
+            result = run(
+                [*runner, str(compiler)],
+                expected_code=114,
+                timeout=(
+                    STAGE_EMULATED_TIMEOUT_SECONDS
+                    if runner
+                    else STAGE_NATIVE_TIMEOUT_SECONDS
+                ),
+                cwd=invocation,
+            )
+            if not result.stderr.startswith("semantic:50:0:"):
+                raise AssertionError(
+                    f"{stage_name} lost {floating_format.name} "
+                    f"overflow diagnostic: {result.stderr!r}"
+                )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--compiler", type=pathlib.Path, required=True)
@@ -597,6 +999,49 @@ def main() -> int:
         raise AssertionError(
             "stage-two and stage-three compilers disagree on probe assembly"
         )
+
+    floating_root = work_dir / "floating"
+    floating_root.mkdir(parents=True, exist_ok=True)
+    floating_source = floating_root / "floating-probe.luna"
+    write_floating_probe(floating_source)
+    compile_and_run_stage_zero_probe(
+        compiler,
+        linker,
+        runner,
+        read_elf,
+        floating_source,
+        floating_root / "stage-zero",
+    )
+    stage_two_floating = compile_and_run_self_hosted_probe(
+        stage_two.compiler,
+        runner,
+        assembler,
+        linker,
+        read_elf,
+        floating_source,
+        floating_root / "stage-two",
+    )
+    stage_three_floating = compile_and_run_self_hosted_probe(
+        stage_three.compiler,
+        runner,
+        assembler,
+        linker,
+        read_elf,
+        floating_source,
+        floating_root / "stage-three",
+    )
+    if stage_two_floating != stage_three_floating:
+        raise AssertionError(
+            "stage-two and stage-three compilers disagree on exact "
+            "floating-point literals"
+        )
+    run_floating_overflow_tests(
+        compiler,
+        stage_two.compiler,
+        stage_three.compiler,
+        runner,
+        floating_root / "overflow",
+    )
     return 0
 
 

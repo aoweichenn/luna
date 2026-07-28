@@ -841,7 +841,7 @@ if(BUILD_TESTING)
     set_tests_properties(
         integration.bootstrap_reproducibility
         PROPERTIES
-            LABELS "integration;bootstrap;reproducibility"
+            LABELS "integration;bootstrap;random;reproducibility"
             RESOURCE_LOCK "luna_sysroot"
             SKIP_RETURN_CODE 77
             TIMEOUT 3600
@@ -974,6 +974,7 @@ if(LUNA_BUILD_FUZZERS)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/narrow.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/pointer_sized.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/floating.luna"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/floating_boundaries.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/scalar_conversions.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/structured_control_flow.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/memory.luna"

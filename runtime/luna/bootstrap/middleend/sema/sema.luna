@@ -5,6 +5,9 @@ enum BootstrapSemanticLimit: usize {
     maximum_modules = 1024,
     maximum_scope_depth = 256,
     target_maximum_alignment = 8,
+    maximum_floating_digits = 1200,
+    maximum_floating_limbs = 128,
+    floating_exponent_margin = 2048,
 }
 
 enum BootstrapSemanticSymbolKind: usize {
@@ -97,6 +100,23 @@ struct BootstrapSemanticExpression {
     lvalue: bool;
     mutable_lvalue: bool;
     valid: bool;
+}
+
+struct BootstrapSemanticBigUnsigned {
+    limbs: [128]u64;
+    count: usize;
+}
+
+struct BootstrapSemanticSignedMagnitude {
+    magnitude: usize;
+    negative: bool;
+}
+
+struct BootstrapSemanticDecimalFloating {
+    coefficient: BootstrapSemanticBigUnsigned;
+    five_power: BootstrapSemanticBigUnsigned;
+    decimal_exponent: isize;
+    truncated_nonzero: bool;
 }
 
 struct BootstrapSemanticContext {
@@ -3855,10 +3875,450 @@ fn bootstrap_semantic_lower_integer_literal(
     );
 }
 
-fn bootstrap_semantic_parse_floating(
+fn bootstrap_semantic_big_set(
+    value: *BootstrapSemanticBigUnsigned,
+    small: u64
+) -> bool {
+    if (value == null) {
+        return false;
+    }
+    value->count = small == 0 ? 0 : 1;
+    value->limbs[0] = small;
+    return true;
+}
+
+fn bootstrap_semantic_big_copy(
+    destination: *BootstrapSemanticBigUnsigned,
+    source: *const BootstrapSemanticBigUnsigned
+) -> bool {
+    if (destination == null || source == null ||
+        source->count >
+            BootstrapSemanticLimit.maximum_floating_limbs as usize) {
+        return false;
+    }
+    destination->count = source->count;
+    var index: usize = 0;
+    while (index < source->count) {
+        destination->limbs[index] = source->limbs[index];
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_semantic_big_multiply_small(
+    value: *BootstrapSemanticBigUnsigned,
+    factor: u64
+) -> bool {
+    if (value == null || factor > 10 ||
+        value->count >
+            BootstrapSemanticLimit.maximum_floating_limbs as usize) {
+        return false;
+    }
+    if (factor == 0) {
+        value->count = 0;
+        return true;
+    }
+    let half_mask: u64 = 4294967295;
+    var carry: u64 = 0;
+    var index: usize = 0;
+    while (index < value->count) {
+        let limb: u64 = value->limbs[index];
+        let lower_product: u64 =
+            (limb & half_mask) * factor + carry;
+        let upper_product: u64 =
+            (limb >> 32) * factor +
+                (lower_product >> 32);
+        value->limbs[index] =
+            (upper_product << 32) |
+                (lower_product & half_mask);
+        carry = upper_product >> 32;
+        index += 1;
+    }
+    if (carry != 0) {
+        if (value->count >=
+            BootstrapSemanticLimit.maximum_floating_limbs as usize) {
+            return false;
+        }
+        value->limbs[value->count] = carry;
+        value->count += 1;
+    }
+    return true;
+}
+
+fn bootstrap_semantic_big_add_small(
+    value: *BootstrapSemanticBigUnsigned,
+    small: u64
+) -> bool {
+    if (value == null || small > 9 ||
+        value->count >
+            BootstrapSemanticLimit.maximum_floating_limbs as usize) {
+        return false;
+    }
+    var carry: u64 = small;
+    var index: usize = 0;
+    while (carry != 0 && index < value->count) {
+        let original: u64 = value->limbs[index];
+        let sum: u64 = original + carry;
+        value->limbs[index] = sum;
+        carry = sum < original ? 1 : 0;
+        index += 1;
+    }
+    if (carry != 0) {
+        if (value->count >=
+            BootstrapSemanticLimit.maximum_floating_limbs as usize) {
+            return false;
+        }
+        value->limbs[value->count] = carry;
+        value->count += 1;
+    }
+    return true;
+}
+
+fn bootstrap_semantic_big_add(
+    value: *BootstrapSemanticBigUnsigned,
+    added: *const BootstrapSemanticBigUnsigned
+) -> bool {
+    if (value == null || added == null ||
+        value->count >
+            BootstrapSemanticLimit.maximum_floating_limbs as usize ||
+        added->count >
+            BootstrapSemanticLimit.maximum_floating_limbs as usize) {
+        return false;
+    }
+    let maximum_count: usize =
+        value->count > added->count ?
+            value->count : added->count;
+    var carry: u64 = 0;
+    var index: usize = 0;
+    while (index < maximum_count) {
+        let left: u64 =
+            index < value->count ? value->limbs[index] : 0;
+        let right: u64 =
+            index < added->count ? added->limbs[index] : 0;
+        let partial: u64 = left + right;
+        let partial_overflow: bool = partial < left;
+        let sum: u64 = partial + carry;
+        let carry_overflow: bool = sum < partial;
+        value->limbs[index] = sum;
+        carry =
+            partial_overflow || carry_overflow ? 1 : 0;
+        index += 1;
+    }
+    value->count = maximum_count;
+    if (carry != 0) {
+        if (value->count >=
+            BootstrapSemanticLimit.maximum_floating_limbs as usize) {
+            return false;
+        }
+        value->limbs[value->count] = carry;
+        value->count += 1;
+    }
+    return true;
+}
+
+fn bootstrap_semantic_big_shift_left_one(
+    value: *BootstrapSemanticBigUnsigned
+) -> bool {
+    if (value == null ||
+        value->count >
+            BootstrapSemanticLimit.maximum_floating_limbs as usize) {
+        return false;
+    }
+    var carry: u64 = 0;
+    var index: usize = 0;
+    while (index < value->count) {
+        let limb: u64 = value->limbs[index];
+        value->limbs[index] = (limb << 1) | carry;
+        carry = limb >> 63;
+        index += 1;
+    }
+    if (carry != 0) {
+        if (value->count >=
+            BootstrapSemanticLimit.maximum_floating_limbs as usize) {
+            return false;
+        }
+        value->limbs[value->count] = carry;
+        value->count += 1;
+    }
+    return true;
+}
+
+fn bootstrap_semantic_big_multiply_u64(
+    source: *const BootstrapSemanticBigUnsigned,
+    multiplier: u64,
+    result: *BootstrapSemanticBigUnsigned
+) -> bool {
+    if (source == null || result == null ||
+        !bootstrap_semantic_big_set(result, 0)) {
+        return false;
+    }
+    if (multiplier == 0 || source->count == 0) {
+        return true;
+    }
+    var addend: BootstrapSemanticBigUnsigned = {};
+    if (!bootstrap_semantic_big_copy(&addend, source)) {
+        return false;
+    }
+    var remaining: u64 = multiplier;
+    while (remaining != 0) {
+        if ((remaining & 1) != 0 &&
+            !bootstrap_semantic_big_add(
+                result,
+                (&addend) as
+                    *const BootstrapSemanticBigUnsigned
+            )) {
+            return false;
+        }
+        remaining >>= 1;
+        if (remaining != 0 &&
+            !bootstrap_semantic_big_shift_left_one(&addend)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn bootstrap_semantic_big_bit_length(
+    value: *const BootstrapSemanticBigUnsigned
+) -> usize {
+    if (value == null || value->count == 0 ||
+        value->count >
+            BootstrapSemanticLimit.maximum_floating_limbs as usize) {
+        return 0;
+    }
+    var highest: u64 = value->limbs[value->count - 1];
+    var highest_bits: usize = 0;
+    while (highest != 0) {
+        highest >>= 1;
+        highest_bits += 1;
+    }
+    return (value->count - 1) * 64 + highest_bits;
+}
+
+fn bootstrap_semantic_big_bit(
+    value: *const BootstrapSemanticBigUnsigned,
+    bit_index: usize
+) -> bool {
+    if (value == null ||
+        bit_index / 64 >= value->count) {
+        return false;
+    }
+    return ((value->limbs[bit_index / 64] >>
+        ((bit_index % 64) as u64)) & 1) != 0;
+}
+
+fn bootstrap_semantic_big_compare_scaled(
+    left: *const BootstrapSemanticBigUnsigned,
+    left_exponent: isize,
+    right: *const BootstrapSemanticBigUnsigned,
+    right_exponent: isize
+) -> i32 {
+    let left_length: usize =
+        bootstrap_semantic_big_bit_length(left);
+    let right_length: usize =
+        bootstrap_semantic_big_bit_length(right);
+    if (left_length == 0 || right_length == 0) {
+        if (left_length == right_length) {
+            return 0;
+        }
+        return left_length == 0 ? -1 : 1;
+    }
+    let left_top: isize =
+        (left_length - 1) as isize + left_exponent;
+    let right_top: isize =
+        (right_length - 1) as isize + right_exponent;
+    if (left_top != right_top) {
+        return left_top < right_top ? -1 : 1;
+    }
+    let minimum_position: isize =
+        left_exponent < right_exponent ?
+            left_exponent : right_exponent;
+    var position: isize = left_top;
+    while (position >= minimum_position) {
+        var left_bit: bool = false;
+        if (position >= left_exponent) {
+            left_bit = bootstrap_semantic_big_bit(
+                left,
+                (position - left_exponent) as usize
+            );
+        }
+        var right_bit: bool = false;
+        if (position >= right_exponent) {
+            right_bit = bootstrap_semantic_big_bit(
+                right,
+                (position - right_exponent) as usize
+            );
+        }
+        if (left_bit != right_bit) {
+            return left_bit ? 1 : -1;
+        }
+        if (position == minimum_position) {
+            break;
+        }
+        position -= 1;
+    }
+    return 0;
+}
+
+fn bootstrap_semantic_signed_add(
+    left: *const BootstrapSemanticSignedMagnitude,
+    right: *const BootstrapSemanticSignedMagnitude,
+    limit: usize,
+    result: *BootstrapSemanticSignedMagnitude
+) -> bool {
+    if (left == null || right == null || result == null ||
+        left->magnitude > limit ||
+        right->magnitude > limit) {
+        return false;
+    }
+    if (left->magnitude == 0) {
+        *result = {
+            magnitude = right->magnitude,
+            negative =
+                right->magnitude != 0 && right->negative,
+        };
+        return true;
+    }
+    if (right->magnitude == 0) {
+        *result = *left;
+        return true;
+    }
+    if (left->negative == right->negative) {
+        let magnitude: usize =
+            left->magnitude > limit - right->magnitude ?
+                limit : left->magnitude + right->magnitude;
+        *result = {
+            magnitude = magnitude,
+            negative = left->negative,
+        };
+        return true;
+    }
+    if (left->magnitude >= right->magnitude) {
+        let magnitude: usize =
+            left->magnitude - right->magnitude;
+        *result = {
+            magnitude = magnitude,
+            negative = magnitude != 0 && left->negative,
+        };
+        return true;
+    }
+    *result = {
+        magnitude = right->magnitude - left->magnitude,
+        negative = right->negative,
+    };
+    return true;
+}
+
+fn bootstrap_semantic_float_components(
+    bits: u64,
+    single: bool,
+    significand: *u64,
+    binary_exponent: *isize
+) -> bool {
+    if (significand == null || binary_exponent == null) {
+        return false;
+    }
+    if (single) {
+        let fraction: u64 = bits & 8388607;
+        let exponent_field: u64 = (bits >> 23) & 255;
+        *significand =
+            exponent_field == 0 ?
+                fraction : 8388608 + fraction;
+        *binary_exponent =
+            exponent_field == 0 ?
+                -149 : exponent_field as isize - 150;
+        return true;
+    }
+    let fraction: u64 = bits & 4503599627370495;
+    let exponent_field: u64 = (bits >> 52) & 2047;
+    *significand =
+        exponent_field == 0 ?
+            fraction : 4503599627370496 + fraction;
+    *binary_exponent =
+        exponent_field == 0 ?
+            -1074 : exponent_field as isize - 1075;
+    return true;
+}
+
+fn bootstrap_semantic_compare_decimal_dyadic(
+    decimal: *const BootstrapSemanticDecimalFloating,
+    significand: u64,
+    binary_exponent: isize,
+    result: *i32
+) -> bool {
+    var candidate: BootstrapSemanticBigUnsigned = {};
+    if (decimal == null || result == null) {
+        return false;
+    }
+    var comparison: i32 = 0;
+    if (decimal->decimal_exponent >= 0) {
+        if (!bootstrap_semantic_big_set(
+                &candidate,
+                significand
+            )) {
+            return false;
+        }
+        comparison = bootstrap_semantic_big_compare_scaled(
+            &decimal->coefficient,
+            decimal->decimal_exponent,
+            (&candidate) as
+                *const BootstrapSemanticBigUnsigned,
+            binary_exponent
+        );
+    } else {
+        if (!bootstrap_semantic_big_multiply_u64(
+                &decimal->five_power,
+                significand,
+                &candidate
+            )) {
+            return false;
+        }
+        comparison = bootstrap_semantic_big_compare_scaled(
+            &decimal->coefficient,
+            0,
+            (&candidate) as
+                *const BootstrapSemanticBigUnsigned,
+            binary_exponent -
+                decimal->decimal_exponent
+        );
+    }
+    if (comparison == 0 && decimal->truncated_nonzero) {
+        comparison = 1;
+    }
+    *result = comparison;
+    return true;
+}
+
+fn bootstrap_semantic_compare_decimal_float(
+    decimal: *const BootstrapSemanticDecimalFloating,
+    bits: u64,
+    single: bool,
+    result: *i32
+) -> bool {
+    var significand: u64 = 0;
+    var binary_exponent: isize = 0;
+    if (!bootstrap_semantic_float_components(
+            bits,
+            single,
+            &significand,
+            &binary_exponent
+        )) {
+        return false;
+    }
+    return bootstrap_semantic_compare_decimal_dyadic(
+        decimal,
+        significand,
+        binary_exponent,
+        result
+    );
+}
+
+fn bootstrap_semantic_prepare_decimal_floating(
     context: *BootstrapSemanticContext,
     node: BootstrapSyntaxNode,
-    value: *f64
+    single: bool,
+    decimal: *BootstrapSemanticDecimalFloating,
+    zero: *bool
 ) -> bool {
     let unit: *const BootstrapSemanticUnit =
         bootstrap_semantic_input_unit(
@@ -3870,14 +4330,26 @@ fn bootstrap_semantic_parse_floating(
         context->current_unit,
         node.token_index
     );
-    if (value == null ||
+    if (decimal == null || zero == null ||
         token.kind != BootstrapTokenKind.floating) {
         return false;
     }
-    var result: f64 = 0.0;
-    var fraction_scale: f64 = 1.0;
-    var exponent: isize = 0;
+    let maximum: usize = bootstrap_semantic_no_id();
+    var exponent_limit: usize = maximum;
+    if (token.span.length <=
+        maximum -
+            (BootstrapSemanticLimit.floating_exponent_margin as usize)) {
+        exponent_limit = token.span.length +
+            (BootstrapSemanticLimit.floating_exponent_margin as usize);
+    }
+    var coefficient: BootstrapSemanticBigUnsigned = {};
+    var significant_digits: usize = 0;
+    var kept_digits: usize = 0;
+    var fractional_digits: usize = 0;
+    var exponent_magnitude: usize = 0;
     var exponent_negative: bool = false;
+    var truncated_nonzero: bool = false;
+    var seen_nonzero: bool = false;
     var after_decimal: bool = false;
     var in_exponent: bool = false;
     var index: usize = 0;
@@ -3911,30 +4383,247 @@ fn bootstrap_semantic_parse_floating(
         }
         let digit: usize = (byte - 48) as usize;
         if (in_exponent) {
-            if (exponent > 10000) {
+            if (exponent_magnitude >
+                (exponent_limit - digit) / 10) {
+                exponent_magnitude = exponent_limit;
+            } else {
+                exponent_magnitude =
+                    exponent_magnitude * 10 + digit;
+            }
+            index += 1;
+            continue;
+        }
+        if (after_decimal) {
+            if (fractional_digits == maximum) {
                 return false;
             }
-            exponent = exponent * 10 + digit as isize;
-        } else if (after_decimal) {
-            fraction_scale *= 0.1;
-            result += (digit as f64) * fraction_scale;
-        } else {
-            result = result * 10.0 + digit as f64;
+            fractional_digits += 1;
+        }
+        if (!seen_nonzero && digit == 0) {
+            index += 1;
+            continue;
+        }
+        seen_nonzero = true;
+        if (significant_digits == maximum) {
+            return false;
+        }
+        significant_digits += 1;
+        if (kept_digits <
+            BootstrapSemanticLimit.maximum_floating_digits as usize) {
+            if (!bootstrap_semantic_big_multiply_small(
+                    &coefficient,
+                    10
+                ) ||
+                !bootstrap_semantic_big_add_small(
+                    &coefficient,
+                    digit as u64
+                )) {
+                return false;
+            }
+            kept_digits += 1;
+        } else if (digit != 0) {
+            truncated_nonzero = true;
         }
         index += 1;
     }
-    if (exponent_negative) {
-        exponent = 0 - exponent;
+    if (!seen_nonzero) {
+        *zero = true;
+        return true;
     }
-    while (exponent > 0) {
-        result *= 10.0;
-        exponent -= 1;
+    if (fractional_digits == maximum) {
+        return false;
     }
-    while (exponent < 0) {
-        result *= 0.1;
-        exponent += 1;
+    let fractional_with_unit: usize =
+        fractional_digits + 1;
+    let digit_adjustment: BootstrapSemanticSignedMagnitude =
+        significant_digits >= fractional_with_unit ?
+            {
+                magnitude =
+                    significant_digits - fractional_with_unit,
+                negative = false,
+            } :
+            {
+                magnitude =
+                    fractional_with_unit - significant_digits,
+                negative = true,
+            };
+    let explicit_exponent: BootstrapSemanticSignedMagnitude = {
+        magnitude = exponent_magnitude,
+        negative =
+            exponent_magnitude != 0 && exponent_negative,
+    };
+    var adjusted: BootstrapSemanticSignedMagnitude = {};
+    if (!bootstrap_semantic_signed_add(
+            (&explicit_exponent) as
+                *const BootstrapSemanticSignedMagnitude,
+            (&digit_adjustment) as
+                *const BootstrapSemanticSignedMagnitude,
+            exponent_limit,
+            &adjusted
+        )) {
+        return false;
     }
-    *value = result;
+    let maximum_adjusted: usize = single ? 38 : 308;
+    let minimum_adjusted_magnitude: usize =
+        single ? 46 : 324;
+    if (!adjusted.negative &&
+        adjusted.magnitude > maximum_adjusted) {
+        return false;
+    }
+    if (adjusted.negative &&
+        adjusted.magnitude >
+            minimum_adjusted_magnitude) {
+        *zero = true;
+        return true;
+    }
+    let adjusted_exponent: isize =
+        adjusted.negative ?
+            0 - adjusted.magnitude as isize :
+            adjusted.magnitude as isize;
+    decimal->coefficient = coefficient;
+    decimal->decimal_exponent =
+        adjusted_exponent - kept_digits as isize + 1;
+    decimal->truncated_nonzero = truncated_nonzero;
+    bootstrap_semantic_big_set(&decimal->five_power, 1);
+    if (decimal->decimal_exponent >= 0) {
+        var power: isize = decimal->decimal_exponent;
+        while (power > 0) {
+            if (!bootstrap_semantic_big_multiply_small(
+                    &decimal->coefficient,
+                    5
+                )) {
+                return false;
+            }
+            power -= 1;
+        }
+    } else {
+        var power: isize =
+            0 - decimal->decimal_exponent;
+        while (power > 0) {
+            if (!bootstrap_semantic_big_multiply_small(
+                    &decimal->five_power,
+                    5
+                )) {
+                return false;
+            }
+            power -= 1;
+        }
+    }
+    *zero = false;
+    return true;
+}
+
+fn bootstrap_semantic_parse_floating_bits(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    single: bool,
+    bits: *u64
+) -> bool {
+    if (bits == null) {
+        return false;
+    }
+    var decimal: BootstrapSemanticDecimalFloating = {};
+    var zero: bool = false;
+    if (!bootstrap_semantic_prepare_decimal_floating(
+            context,
+            node,
+            single,
+            &decimal,
+            &zero
+        )) {
+        return false;
+    }
+    if (zero) {
+        *bits = 0;
+        return true;
+    }
+    let maximum_bits: u64 =
+        single ? 2139095039 : 9218868437227405311;
+    var lower: u64 = 0;
+    var upper: u64 = maximum_bits;
+    while (lower < upper) {
+        let middle: u64 =
+            lower + (upper - lower) / 2 + 1;
+        var comparison: i32 = 0;
+        if (!bootstrap_semantic_compare_decimal_float(
+                (&decimal) as
+                    *const BootstrapSemanticDecimalFloating,
+                middle,
+                single,
+                &comparison
+            )) {
+            return false;
+        }
+        if (comparison >= 0) {
+            lower = middle;
+        } else {
+            upper = middle - 1;
+        }
+    }
+    var lower_significand: u64 = 0;
+    var lower_exponent: isize = 0;
+    if (!bootstrap_semantic_float_components(
+            lower,
+            single,
+            &lower_significand,
+            &lower_exponent
+        )) {
+        return false;
+    }
+    let midpoint_significand: u64 =
+        lower_significand * 2 + 1;
+    var midpoint_comparison: i32 = 0;
+    if (!bootstrap_semantic_compare_decimal_dyadic(
+            (&decimal) as
+                *const BootstrapSemanticDecimalFloating,
+            midpoint_significand,
+            lower_exponent - 1,
+            &midpoint_comparison
+        )) {
+        return false;
+    }
+    if (lower == maximum_bits) {
+        if (midpoint_comparison >= 0) {
+            return false;
+        }
+        *bits = lower;
+        return true;
+    }
+    if (midpoint_comparison < 0 ||
+        (midpoint_comparison == 0 &&
+            (lower & 1) == 0)) {
+        *bits = lower;
+    } else {
+        *bits = lower + 1;
+    }
+    return true;
+}
+
+fn bootstrap_semantic_parse_floating(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    single: bool,
+    value: *f64
+) -> bool {
+    var bits: u64 = 0;
+    if (value == null ||
+        !bootstrap_semantic_parse_floating_bits(
+            context,
+            node,
+            single,
+            &bits
+        )) {
+        return false;
+    }
+    if (single) {
+        let single_bits: u32 = bits as u32;
+        *value =
+            (*((&single_bits) as *const u32 as *const f32))
+                as f64;
+    } else {
+        *value =
+            *((&bits) as *const u64 as *const f64);
+    }
     return true;
 }
 
@@ -3952,9 +4641,12 @@ fn bootstrap_semantic_lower_floating_literal(
         type_id = expected_type;
     }
     var value: f64 = 0.0;
+    let single: bool =
+        type_id == BootstrapBuiltinType.float_32 as usize;
     if (!bootstrap_semantic_parse_floating(
             context,
             node,
+            single,
             &value
         )) {
         bootstrap_semantic_add_diagnostic(
@@ -3967,9 +4659,6 @@ fn bootstrap_semantic_lower_floating_literal(
             type_id
         );
         return bootstrap_semantic_invalid_expression();
-    }
-    if (type_id == BootstrapBuiltinType.float_32 as usize) {
-        value = value as f32 as f64;
     }
     var instruction: BootstrapIrInstruction =
         bootstrap_semantic_instruction(

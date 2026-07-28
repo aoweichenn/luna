@@ -88,7 +88,15 @@ and dynamic-loader state.
    compiler executable;
 6. an additional recursive-program probe compiled independently by stage 2
    and stage 3, project-assembled, statically linked and executed with status
-   42.
+   42;
+7. 117 exact-rational binary32/binary64 cases generated independently from
+   IEEE encodings, covering deterministic random adjacent-value midpoints,
+   ties-to-even, both sides of each midpoint, subnormal/normal and binade
+   boundaries, exact extrema, huge exponents and more than 1200 significant
+   digits;
+8. execution of that floating-point probe through stage 0, stage 2 and stage
+   3, plus byte equality of stage-2/stage-3 output and stable rejection of the
+   maximum-finite/infinity midpoint for both widths.
 
 The regular middle-end and backend gates separately retain source-order,
 module-boundary, type-layout, IR-verifier, ABI, execution, random and fuzz

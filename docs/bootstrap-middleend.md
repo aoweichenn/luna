@@ -102,6 +102,30 @@ one selected field, and evaluates field expressions in source order before
 the final copy. String escapes are decoded into read-only IR globals with an
 explicit trailing zero byte.
 
+### Exact decimal floating-point literals
+
+The self-hosted semantic checker converts decimal literals directly to their
+contextual IEEE-754 binary32 or binary64 type. It does not use libc, a host
+floating-point parser, the host rounding mode, or an intermediate binary64
+value for binary32 literals.
+
+Conversion uses fixed-capacity unsigned multi-precision integers. The parser
+normalizes the decimal coefficient and exponent, retains 1200 significant
+digits plus a nonzero-tail sticky bit, and constructs the exact power-of-five
+rational. That bound conservatively exceeds the exact decimal length of every
+finite binary64 value and every adjacent-value midpoint, so discarded digits
+can only decide which side of an otherwise exact boundary the source occupies.
+The 128 64-bit limbs also cover the worst reachable coefficient and
+power-of-five products.
+
+The converter binary-searches the finite positive encoding space, compares
+the decimal rational against candidate dyadics exactly, and then compares
+against the exact midpoint to implement round-to-nearest, ties-to-even.
+Underflow may round to zero, including the zero/minimum-subnormal tie.
+The maximum-finite/infinity midpoint and larger values produce
+`floating_overflow`. A binary32 result is bit-cast and widened exactly only
+after binary32 rounding has completed.
+
 ## Typed control-flow IR
 
 The self-hosting IR is deliberately non-SSA. Mutable bindings and merge
@@ -178,6 +202,10 @@ The stage is guarded by:
    the semantic fuzz gate.
 7. Two byte-for-byte reproductions of every middle-end `.lmi` and `.o`, ELF
    symbol checks, unresolved-symbol checks and dynamic-loader exclusion.
+8. Exact-rational decimal probes at normal, subnormal, binade, underflow and
+   overflow boundaries, including deterministic random adjacent-value
+   midpoints, ties-to-even, values on both sides, long discarded tails and
+   stage-0/stage-2/stage-3 execution agreement.
 
 This completes the Luna type-checking and Typed IR item in M4. The verified
 `BootstrapTypedIr` is consumed by the

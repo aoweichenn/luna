@@ -68,6 +68,19 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] Luna implementation of correctness-first x86-64 backend
 - [x] stage 1, stage 2 and stage 3 reproducibility comparison
 
+## M5: correctness convergence
+
+- [x] exact no-libc decimal-to-binary32/binary64 conversion in the
+  self-hosted semantic checker
+- [x] direct contextual binary32 rounding without a binary64 double-rounding
+  path
+- [x] exact subnormal, midpoint, ties-to-even, underflow and overflow handling
+- [x] deterministic random and boundary differential execution across stage
+  0, stage 2 and stage 3
+- [ ] continue closing any remaining stage-0/self-host semantic differences
+- [ ] harden malformed-input and resource-limit behavior across the complete
+  self-hosted pipeline
+
 ## Explicitly deferred
 
 Optimization beyond local x86-64 improvements, general metaprogramming,
