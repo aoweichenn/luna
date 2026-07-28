@@ -211,6 +211,30 @@ set(LUNA_BOOTSTRAP_SEMA_METADATA
 set(LUNA_BOOTSTRAP_SEMA_OBJECT
     "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/bootstrap/middleend/sema.o"
 )
+set(LUNA_BOOTSTRAP_X86_64_TEXT_METADATA
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/bootstrap/backend/x86_64/text.lmi"
+)
+set(LUNA_BOOTSTRAP_X86_64_TEXT_OBJECT
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/bootstrap/backend/x86_64/text.o"
+)
+set(LUNA_BOOTSTRAP_X86_64_ABI_METADATA
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/bootstrap/backend/x86_64/abi.lmi"
+)
+set(LUNA_BOOTSTRAP_X86_64_ABI_OBJECT
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/bootstrap/backend/x86_64/abi.o"
+)
+set(LUNA_BOOTSTRAP_X86_64_FRAME_METADATA
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/bootstrap/backend/x86_64/frame.lmi"
+)
+set(LUNA_BOOTSTRAP_X86_64_FRAME_OBJECT
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/bootstrap/backend/x86_64/frame.o"
+)
+set(LUNA_BOOTSTRAP_X86_64_CODEGEN_METADATA
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/bootstrap/backend/x86_64/codegen.lmi"
+)
+set(LUNA_BOOTSTRAP_X86_64_CODEGEN_OBJECT
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/bootstrap/backend/x86_64/codegen.o"
+)
 add_custom_command(
     OUTPUT "${LUNA_SYSCALL_METADATA}"
     COMMAND
@@ -395,6 +419,61 @@ luna_add_sysroot_module(
     "${LUNA_BOOTSTRAP_TYPE_METADATA}"
     "${LUNA_BOOTSTRAP_IR_METADATA}"
 )
+luna_add_sysroot_module(
+    luna.bootstrap.backend.x86_64.text
+    runtime/luna/bootstrap/backend/x86_64/text/text.interface.luna
+    runtime/luna/bootstrap/backend/x86_64/text/text.luna
+    "${LUNA_BOOTSTRAP_X86_64_TEXT_METADATA}"
+    "${LUNA_BOOTSTRAP_X86_64_TEXT_OBJECT}"
+    "${LUNA_RUNTIME_METADATA}"
+    "${LUNA_STD_BYTES_METADATA}"
+    "${LUNA_STD_TEXT_METADATA}"
+)
+luna_add_sysroot_module(
+    luna.bootstrap.backend.x86_64.abi
+    runtime/luna/bootstrap/backend/x86_64/abi/abi.interface.luna
+    runtime/luna/bootstrap/backend/x86_64/abi/abi.luna
+    "${LUNA_BOOTSTRAP_X86_64_ABI_METADATA}"
+    "${LUNA_BOOTSTRAP_X86_64_ABI_OBJECT}"
+    "${LUNA_RUNTIME_METADATA}"
+    "${LUNA_STD_BYTES_METADATA}"
+    "${LUNA_STD_TEXT_METADATA}"
+    "${LUNA_BOOTSTRAP_LEXER_METADATA}"
+    "${LUNA_BOOTSTRAP_TYPE_METADATA}"
+    "${LUNA_BOOTSTRAP_IR_METADATA}"
+)
+luna_add_sysroot_module(
+    luna.bootstrap.backend.x86_64.frame
+    runtime/luna/bootstrap/backend/x86_64/frame/frame.interface.luna
+    runtime/luna/bootstrap/backend/x86_64/frame/frame.luna
+    "${LUNA_BOOTSTRAP_X86_64_FRAME_METADATA}"
+    "${LUNA_BOOTSTRAP_X86_64_FRAME_OBJECT}"
+    "${LUNA_RUNTIME_METADATA}"
+    "${LUNA_STD_BYTES_METADATA}"
+    "${LUNA_STD_TEXT_METADATA}"
+    "${LUNA_BOOTSTRAP_LEXER_METADATA}"
+    "${LUNA_BOOTSTRAP_TYPE_METADATA}"
+    "${LUNA_BOOTSTRAP_IR_METADATA}"
+    "${LUNA_BOOTSTRAP_X86_64_ABI_METADATA}"
+)
+luna_add_sysroot_module(
+    luna.bootstrap.backend.x86_64.codegen
+    runtime/luna/bootstrap/backend/x86_64/codegen/codegen.interface.luna
+    runtime/luna/bootstrap/backend/x86_64/codegen/codegen.luna
+    "${LUNA_BOOTSTRAP_X86_64_CODEGEN_METADATA}"
+    "${LUNA_BOOTSTRAP_X86_64_CODEGEN_OBJECT}"
+    "${LUNA_RUNTIME_METADATA}"
+    "${LUNA_STD_BYTES_METADATA}"
+    "${LUNA_STD_TEXT_METADATA}"
+    "${LUNA_BOOTSTRAP_LEXER_METADATA}"
+    "${LUNA_BOOTSTRAP_PARSER_METADATA}"
+    "${LUNA_BOOTSTRAP_TYPE_METADATA}"
+    "${LUNA_BOOTSTRAP_IR_METADATA}"
+    "${LUNA_BOOTSTRAP_SEMA_METADATA}"
+    "${LUNA_BOOTSTRAP_X86_64_TEXT_METADATA}"
+    "${LUNA_BOOTSTRAP_X86_64_ABI_METADATA}"
+    "${LUNA_BOOTSTRAP_X86_64_FRAME_METADATA}"
+)
 add_custom_target(
     luna_sysroot
     DEPENDS
@@ -421,6 +500,14 @@ add_custom_target(
         "${LUNA_BOOTSTRAP_IR_OBJECT}"
         "${LUNA_BOOTSTRAP_SEMA_METADATA}"
         "${LUNA_BOOTSTRAP_SEMA_OBJECT}"
+        "${LUNA_BOOTSTRAP_X86_64_TEXT_METADATA}"
+        "${LUNA_BOOTSTRAP_X86_64_TEXT_OBJECT}"
+        "${LUNA_BOOTSTRAP_X86_64_ABI_METADATA}"
+        "${LUNA_BOOTSTRAP_X86_64_ABI_OBJECT}"
+        "${LUNA_BOOTSTRAP_X86_64_FRAME_METADATA}"
+        "${LUNA_BOOTSTRAP_X86_64_FRAME_OBJECT}"
+        "${LUNA_BOOTSTRAP_X86_64_CODEGEN_METADATA}"
+        "${LUNA_BOOTSTRAP_X86_64_CODEGEN_OBJECT}"
 )
 
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
@@ -465,6 +552,11 @@ if(BUILD_TESTING)
     target_link_libraries(luna_test_support PUBLIC luna_compiler)
     target_include_directories(luna_test_support PUBLIC tests/unit/support)
 
+    add_executable(luna_bootstrap_assembler
+        tests/integration/bootstrap_assembler.cpp
+    )
+    target_link_libraries(luna_bootstrap_assembler PRIVATE luna_compiler)
+
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         target_compile_options(luna_test_support PRIVATE
             -Wall
@@ -481,6 +573,19 @@ if(BUILD_TESTING)
             -Wnon-virtual-dtor
             -Woverloaded-virtual
         )
+        target_compile_options(luna_bootstrap_assembler PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+            -Werror
+            -Wconversion
+            -Wsign-conversion
+            -Wshadow
+            -Wformat=2
+            -Wundef
+            -Wcast-qual
+            -Wold-style-cast
+        )
     endif()
 
     add_executable(luna_unit_tests
@@ -490,6 +595,7 @@ if(BUILD_TESTING)
         tests/unit/stdlib/minimum_standard_library_test.cpp
         tests/unit/bootstrap/frontend_test.cpp
         tests/unit/bootstrap/middleend_test.cpp
+        tests/unit/bootstrap/x86_64_backend_test.cpp
         tests/unit/support/arena_test.cpp
         tests/unit/support/buffer_test.cpp
         tests/unit/frontend/diagnostic/diagnostic_test.cpp
@@ -700,6 +806,26 @@ if(BUILD_TESTING)
             --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
             --work-dir "${CMAKE_CURRENT_BINARY_DIR}/bootstrap-middleend"
     )
+    add_test(
+        NAME integration.bootstrap_x86_64_backend
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/run_bootstrap_x86_64_backend.py"
+            --compiler "$<TARGET_FILE:lunac>"
+            --linker "$<TARGET_FILE:lunalink>"
+            --assembler "$<TARGET_FILE:luna_bootstrap_assembler>"
+            --sysroot "${CMAKE_CURRENT_BINARY_DIR}/sysroot"
+            --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --work-dir "${CMAKE_CURRENT_BINARY_DIR}/bootstrap-x86-64-backend"
+    )
+    set_tests_properties(
+        integration.bootstrap_x86_64_backend
+        PROPERTIES
+            LABELS "integration;random;fuzz"
+            RESOURCE_LOCK "luna_sysroot"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 300
+    )
     set_tests_properties(
         integration.bootstrap_middleend
         PROPERTIES
@@ -842,6 +968,7 @@ if(LUNA_BUILD_FUZZERS)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/minimum_standard_library.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/bootstrap_frontend.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/bootstrap_middleend.luna"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/bootstrap_x86_64_backend.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/object_assembly.s"
             DESTINATION "${LUNA_FUZZ_CORPUS_DIR}"
         )

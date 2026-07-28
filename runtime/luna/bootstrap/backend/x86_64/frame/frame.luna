@@ -1,0 +1,528 @@
+module luna.bootstrap.backend.x86_64.frame;
+
+enum BootstrapX8664FrameLimit: usize {
+    maximum_size = 18446744073709551615,
+    scalar_home_size = 8,
+    scalar_home_alignment = 8,
+    stack_alignment = 16,
+    maximum_frame_size = 2147483647,
+}
+
+fn bootstrap_x86_64_frame_no_id() -> usize {
+    return BootstrapX8664FrameLimit.maximum_size as usize;
+}
+
+fn bootstrap_x86_64_frame_plan_empty()
+    -> BootstrapX8664FramePlan {
+    return {
+        frames = std_byte_buffer_empty(),
+        frame_count = 0,
+        storage = std_byte_buffer_empty(),
+        storage_count = 0,
+        error = RuntimeError.none,
+    };
+}
+
+fn bootstrap_x86_64_frame_plan_storage_is_valid(
+    plan: BootstrapX8664FramePlan
+) -> bool {
+    return std_byte_buffer_is_valid(plan.frames) &&
+        std_byte_buffer_is_valid(plan.storage) &&
+        plan.frames.length % sizeof(BootstrapX8664Frame) == 0 &&
+        plan.storage.length % sizeof(BootstrapX8664Storage) == 0 &&
+        plan.frame_count ==
+            plan.frames.length / sizeof(BootstrapX8664Frame) &&
+        plan.storage_count ==
+            plan.storage.length / sizeof(BootstrapX8664Storage);
+}
+
+fn bootstrap_x86_64_frame_align_up(
+    value: usize,
+    alignment: usize
+) -> usize {
+    if (alignment == 0 ||
+        (alignment & (alignment - 1)) != 0 ||
+        value >
+            (BootstrapX8664FrameLimit.maximum_size as usize) -
+                (alignment - 1)) {
+        return bootstrap_x86_64_frame_no_id();
+    }
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
+fn bootstrap_x86_64_frame_append_storage(
+    plan: *BootstrapX8664FramePlan,
+    storage: BootstrapX8664Storage
+) -> bool {
+    if (plan == null || plan->error != RuntimeError.none) {
+        return false;
+    }
+    let appended: StdByteBufferResult =
+        std_byte_buffer_append(
+            plan->storage,
+            (&storage) as *const BootstrapX8664Storage
+                as *const u8,
+            sizeof(BootstrapX8664Storage)
+        );
+    plan->storage = appended.buffer;
+    plan->error = appended.error;
+    if (appended.error == RuntimeError.none) {
+        plan->storage_count += 1;
+        return true;
+    }
+    return false;
+}
+
+fn bootstrap_x86_64_frame_append_frame(
+    plan: *BootstrapX8664FramePlan,
+    frame: BootstrapX8664Frame
+) -> bool {
+    if (plan == null || plan->error != RuntimeError.none) {
+        return false;
+    }
+    let appended: StdByteBufferResult =
+        std_byte_buffer_append(
+            plan->frames,
+            (&frame) as *const BootstrapX8664Frame
+                as *const u8,
+            sizeof(BootstrapX8664Frame)
+        );
+    plan->frames = appended.buffer;
+    plan->error = appended.error;
+    if (appended.error == RuntimeError.none) {
+        plan->frame_count += 1;
+        return true;
+    }
+    return false;
+}
+
+fn bootstrap_x86_64_frame_add_storage(
+    plan: *BootstrapX8664FramePlan,
+    frame: *BootstrapX8664Frame,
+    function_id: usize,
+    kind: BootstrapX8664StorageKind,
+    source_id: usize,
+    type_id: usize,
+    size_bytes: usize,
+    alignment_bytes: usize,
+    current_offset: *usize
+) -> bool {
+    if (plan == null || frame == null ||
+        current_offset == null ||
+        size_bytes == 0 || alignment_bytes == 0 ||
+        *current_offset >
+            (BootstrapX8664FrameLimit.maximum_size as usize) -
+                size_bytes) {
+        return false;
+    }
+    let offset: usize = bootstrap_x86_64_frame_align_up(
+        *current_offset + size_bytes,
+        alignment_bytes
+    );
+    if (offset == bootstrap_x86_64_frame_no_id()) {
+        return false;
+    }
+    let storage: BootstrapX8664Storage = {
+        function_id = function_id,
+        kind = kind,
+        source_id = source_id,
+        type_id = type_id,
+        offset_bytes = offset,
+        size_bytes = size_bytes,
+        alignment_bytes = alignment_bytes,
+    };
+    if (!bootstrap_x86_64_frame_append_storage(
+            plan,
+            storage
+        )) {
+        return false;
+    }
+    *current_offset = offset;
+    frame->storage_count += 1;
+    return true;
+}
+
+fn bootstrap_x86_64_frame_add_slots(
+    plan: *BootstrapX8664FramePlan,
+    frame: *BootstrapX8664Frame,
+    ir: BootstrapTypedIr,
+    types: BootstrapTypeTable,
+    function_id: usize,
+    current_offset: *usize
+) -> bool {
+    let slots: *const BootstrapIrSlot =
+        ir.slots.data as *const BootstrapIrSlot;
+    let records: *const BootstrapTypeRecord =
+        types.types.data as *const BootstrapTypeRecord;
+    var slot_id: usize = 0;
+    while (slot_id < ir.slot_count) {
+        let slot: BootstrapIrSlot = slots[slot_id];
+        if (slot.function_id == function_id) {
+            let record: BootstrapTypeRecord =
+                records[slot.type_id];
+            let memory: bool =
+                bootstrap_type_is_memory(record.kind);
+            if (!bootstrap_x86_64_frame_add_storage(
+                    plan,
+                    frame,
+                    function_id,
+                    BootstrapX8664StorageKind.slot,
+                    slot_id,
+                    slot.type_id,
+                    memory ?
+                        record.size_bytes :
+                        BootstrapX8664FrameLimit.scalar_home_size
+                            as usize,
+                    memory ?
+                        record.alignment_bytes :
+                        BootstrapX8664FrameLimit
+                            .scalar_home_alignment as usize,
+                    current_offset
+                )) {
+                return false;
+            }
+        }
+        slot_id += 1;
+    }
+    return true;
+}
+
+fn bootstrap_x86_64_frame_add_values(
+    plan: *BootstrapX8664FramePlan,
+    frame: *BootstrapX8664Frame,
+    ir: BootstrapTypedIr,
+    function: BootstrapIrFunction,
+    function_id: usize,
+    current_offset: *usize
+) -> bool {
+    var index: usize = 0;
+    while (index < function.value_count) {
+        let value_id: usize = function.first_value + index;
+        let values: *const BootstrapIrValue =
+            ir.values.data as *const BootstrapIrValue;
+        if (!bootstrap_x86_64_frame_add_storage(
+                plan,
+                frame,
+                function_id,
+                BootstrapX8664StorageKind.value,
+                value_id,
+                values[value_id].type_id,
+                BootstrapX8664FrameLimit.scalar_home_size
+                    as usize,
+                BootstrapX8664FrameLimit.scalar_home_alignment
+                    as usize,
+                current_offset
+            )) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_x86_64_frame_add_call_results(
+    plan: *BootstrapX8664FramePlan,
+    frame: *BootstrapX8664Frame,
+    ir: BootstrapTypedIr,
+    types: BootstrapTypeTable,
+    function_id: usize,
+    current_offset: *usize
+) -> bool {
+    let instructions: *const BootstrapIrInstruction =
+        ir.instructions.data as *const BootstrapIrInstruction;
+    let blocks: *const BootstrapIrBlock =
+        ir.blocks.data as *const BootstrapIrBlock;
+    let records: *const BootstrapTypeRecord =
+        types.types.data as *const BootstrapTypeRecord;
+    var instruction_id: usize = 0;
+    while (instruction_id < ir.instruction_count) {
+        let instruction: BootstrapIrInstruction =
+            instructions[instruction_id];
+        if (blocks[instruction.block_id].function_id ==
+                function_id &&
+            instruction.opcode == BootstrapIrOpcode.call &&
+            instruction.result != bootstrap_ir_no_id() &&
+            bootstrap_type_is_memory(
+                records[instruction.type_id].kind
+            )) {
+            let record: BootstrapTypeRecord =
+                records[instruction.type_id];
+            if (!bootstrap_x86_64_frame_add_storage(
+                    plan,
+                    frame,
+                    function_id,
+                    BootstrapX8664StorageKind
+                        .aggregate_call_result,
+                    instruction.result,
+                    instruction.type_id,
+                    record.size_bytes,
+                    record.alignment_bytes,
+                    current_offset
+                )) {
+                return false;
+            }
+        }
+        instruction_id += 1;
+    }
+    return true;
+}
+
+fn bootstrap_x86_64_frame_plan_build(
+    ir: BootstrapTypedIr,
+    types: BootstrapTypeTable,
+    abi: BootstrapX8664Abi
+) -> BootstrapX8664FramePlanResult {
+    var plan: BootstrapX8664FramePlan =
+        bootstrap_x86_64_frame_plan_empty();
+    if (!bootstrap_ir_is_valid(ir, types) ||
+        !bootstrap_x86_64_abi_is_valid(abi, ir, types)) {
+        return {
+            plan = plan,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    let functions: *const BootstrapIrFunction =
+        ir.functions.data as *const BootstrapIrFunction;
+    let abi_functions: *const BootstrapX8664AbiFunction =
+        abi.functions.data as *const BootstrapX8664AbiFunction;
+    var function_id: usize = 0;
+    while (function_id < ir.function_count &&
+        plan.error == RuntimeError.none) {
+        let function: BootstrapIrFunction =
+            functions[function_id];
+        var frame: BootstrapX8664Frame = {
+            function_id = function_id,
+            first_storage = function.has_body ?
+                plan.storage_count :
+                bootstrap_x86_64_frame_no_id(),
+            storage_count = 0,
+            frame_size_bytes = 0,
+        };
+        var offset: usize = 0;
+        if (function.has_body &&
+            (!bootstrap_x86_64_frame_add_slots(
+                    &plan,
+                    &frame,
+                    ir,
+                    types,
+                    function_id,
+                    &offset
+                ) ||
+                !bootstrap_x86_64_frame_add_values(
+                    &plan,
+                    &frame,
+                    ir,
+                    function,
+                    function_id,
+                    &offset
+                ) ||
+                !bootstrap_x86_64_frame_add_call_results(
+                    &plan,
+                    &frame,
+                    ir,
+                    types,
+                    function_id,
+                    &offset
+                ))) {
+            if (plan.error == RuntimeError.none) {
+                plan.error = RuntimeError.invalid_argument;
+            }
+            break;
+        }
+        if (function.has_body &&
+            abi_functions[function_id].hidden_return_pointer &&
+            !bootstrap_x86_64_frame_add_storage(
+                &plan,
+                &frame,
+                function_id,
+                BootstrapX8664StorageKind
+                    .hidden_return_pointer,
+                function_id,
+                function.return_type,
+                8,
+                8,
+                &offset
+            )) {
+            if (plan.error == RuntimeError.none) {
+                plan.error = RuntimeError.invalid_argument;
+            }
+            break;
+        }
+        frame.frame_size_bytes =
+            bootstrap_x86_64_frame_align_up(
+                offset,
+                BootstrapX8664FrameLimit.stack_alignment
+                    as usize
+            );
+        if (frame.frame_size_bytes ==
+                bootstrap_x86_64_frame_no_id() ||
+            frame.frame_size_bytes >
+                BootstrapX8664FrameLimit.maximum_frame_size
+                    as usize ||
+            !bootstrap_x86_64_frame_append_frame(
+                &plan,
+                frame
+            )) {
+            if (plan.error == RuntimeError.none) {
+                plan.error = RuntimeError.invalid_argument;
+            }
+            break;
+        }
+        function_id += 1;
+    }
+    if (plan.error != RuntimeError.none) {
+        let error: RuntimeError = plan.error;
+        bootstrap_x86_64_frame_plan_release(plan);
+        return {
+            plan = bootstrap_x86_64_frame_plan_empty(),
+            error = error,
+        };
+    }
+    return {
+        plan = plan,
+        error = RuntimeError.none,
+    };
+}
+
+fn bootstrap_x86_64_frame_plan_equal(
+    left: BootstrapX8664FramePlan,
+    right: BootstrapX8664FramePlan
+) -> bool {
+    return left.error == right.error &&
+        left.frame_count == right.frame_count &&
+        left.storage_count == right.storage_count &&
+        std_byte_buffer_equal(
+            left.frames,
+            right.frames.data as *const u8,
+            right.frames.length
+        ) &&
+        std_byte_buffer_equal(
+            left.storage,
+            right.storage.data as *const u8,
+            right.storage.length
+        );
+}
+
+fn bootstrap_x86_64_frame_plan_is_valid(
+    plan: BootstrapX8664FramePlan,
+    ir: BootstrapTypedIr,
+    types: BootstrapTypeTable,
+    abi: BootstrapX8664Abi
+) -> bool {
+    if (plan.error != RuntimeError.none ||
+        !bootstrap_x86_64_frame_plan_storage_is_valid(plan)) {
+        return false;
+    }
+    let expected: BootstrapX8664FramePlanResult =
+        bootstrap_x86_64_frame_plan_build(
+            ir,
+            types,
+            abi
+        );
+    let valid: bool =
+        expected.error == RuntimeError.none &&
+        bootstrap_x86_64_frame_plan_equal(
+            plan,
+            expected.plan
+        );
+    bootstrap_x86_64_frame_plan_release(expected.plan);
+    return valid;
+}
+
+fn bootstrap_x86_64_frame_invalid()
+    -> BootstrapX8664Frame {
+    let none: usize = bootstrap_x86_64_frame_no_id();
+    return {
+        function_id = none,
+        first_storage = none,
+        storage_count = 0,
+        frame_size_bytes = 0,
+    };
+}
+
+fn bootstrap_x86_64_storage_invalid()
+    -> BootstrapX8664Storage {
+    let none: usize = bootstrap_x86_64_frame_no_id();
+    return {
+        function_id = none,
+        kind = BootstrapX8664StorageKind.invalid,
+        source_id = none,
+        type_id = none,
+        offset_bytes = 0,
+        size_bytes = 0,
+        alignment_bytes = 0,
+    };
+}
+
+fn bootstrap_x86_64_frame_get(
+    plan: BootstrapX8664FramePlan,
+    function_id: usize
+) -> BootstrapX8664FrameResult {
+    if (!bootstrap_x86_64_frame_plan_storage_is_valid(plan) ||
+        function_id >= plan.frame_count) {
+        return {
+            frame = bootstrap_x86_64_frame_invalid(),
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    return {
+        frame =
+            (plan.frames.data as
+                *const BootstrapX8664Frame)[function_id],
+        error = RuntimeError.none,
+    };
+}
+
+fn bootstrap_x86_64_storage_find(
+    plan: BootstrapX8664FramePlan,
+    function_id: usize,
+    kind: BootstrapX8664StorageKind,
+    source_id: usize
+) -> BootstrapX8664StorageResult {
+    if (!bootstrap_x86_64_frame_plan_storage_is_valid(plan) ||
+        function_id >= plan.frame_count ||
+        kind == BootstrapX8664StorageKind.invalid) {
+        return {
+            storage = bootstrap_x86_64_storage_invalid(),
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    let frame: BootstrapX8664Frame =
+        (plan.frames.data as
+            *const BootstrapX8664Frame)[function_id];
+    let storage: *const BootstrapX8664Storage =
+        plan.storage.data as *const BootstrapX8664Storage;
+    var index: usize = 0;
+    while (index < frame.storage_count) {
+        let candidate: BootstrapX8664Storage =
+            storage[frame.first_storage + index];
+        if (candidate.kind == kind &&
+            candidate.source_id == source_id) {
+            return {
+                storage = candidate,
+                error = RuntimeError.none,
+            };
+        }
+        index += 1;
+    }
+    return {
+        storage = bootstrap_x86_64_storage_invalid(),
+        error = RuntimeError.not_found,
+    };
+}
+
+fn bootstrap_x86_64_frame_plan_release(
+    plan: BootstrapX8664FramePlan
+) -> RuntimeError {
+    if (!bootstrap_x86_64_frame_plan_storage_is_valid(plan)) {
+        return RuntimeError.invalid_argument;
+    }
+    var error: RuntimeError =
+        std_byte_buffer_release(plan.frames);
+    let storage_error: RuntimeError =
+        std_byte_buffer_release(plan.storage);
+    if (error == RuntimeError.none) {
+        error = storage_error;
+    }
+    return error;
+}

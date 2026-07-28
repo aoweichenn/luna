@@ -65,7 +65,7 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] standard-library minimum built only on the freestanding runtime
 - [x] Luna implementation of lexer and parser
 - [x] Luna implementation of type checking and IR
-- [ ] Luna implementation of x86-64 backend
+- [x] Luna implementation of correctness-first x86-64 backend
 - [ ] stage 1, stage 2 and stage 3 reproducibility comparison
 
 ## Explicitly deferred

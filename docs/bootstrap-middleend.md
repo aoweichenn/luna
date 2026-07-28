@@ -164,6 +164,7 @@ The stage is guarded by:
 7. Two byte-for-byte reproductions of every middle-end `.lmi` and `.o`, ELF
    symbol checks, unresolved-symbol checks and dynamic-loader exclusion.
 
-This completes the Luna type-checking and Typed IR item in M4. The next
-self-hosting stage consumes only verified `BootstrapTypedIr` and implements
-the Luna x86-64 backend; stage reproducibility remains after that backend.
+This completes the Luna type-checking and Typed IR item in M4. The verified
+`BootstrapTypedIr` is now consumed by the
+[Luna bootstrap x86-64 backend](bootstrap-x86-64-backend.md); stage
+reproducibility remains after that backend.

@@ -1,0 +1,161 @@
+module tests.bootstrap_x86_64_backend_driver;
+
+import luna.runtime;
+import luna.std.bytes;
+import luna.std.text;
+import luna.std.path;
+import luna.std.io;
+import luna.bootstrap.frontend.lexer;
+import luna.bootstrap.frontend.parser;
+import luna.bootstrap.middleend.type;
+import luna.bootstrap.middleend.ir;
+import luna.bootstrap.middleend.sema;
+import luna.bootstrap.backend.x86_64.abi;
+import luna.bootstrap.backend.x86_64.frame;
+import luna.bootstrap.backend.x86_64.codegen;
+
+fn main() -> i32 {
+    let input_path: StdPathResult =
+        std_path_from_c_string("bootstrap-backend-input.luna", 32);
+    if (input_path.error != RuntimeError.none) {
+        return 1;
+    }
+    let source: StdByteBufferResult =
+        std_io_read_file(input_path.path);
+    let input_path_error: RuntimeError =
+        std_path_release(input_path.path);
+    if (source.error != RuntimeError.none ||
+        input_path_error != RuntimeError.none) {
+        return 2;
+    }
+    let view: StdTextViewResult = std_text_view(
+        source.buffer.data as *const u8,
+        source.buffer.length
+    );
+    if (view.error != RuntimeError.none) {
+        std_byte_buffer_release(source.buffer);
+        return 3;
+    }
+    let frontend: BootstrapFrontendResult =
+        bootstrap_frontend_parse(view.view);
+    if (frontend.error != RuntimeError.none ||
+        frontend.lex.diagnostics.count != 0 ||
+        frontend.parse.diagnostics.count != 0) {
+        bootstrap_frontend_result_release(frontend);
+        std_byte_buffer_release(source.buffer);
+        return 4;
+    }
+    var input: BootstrapSemanticInput =
+        bootstrap_semantic_input_empty(true);
+    if (!bootstrap_semantic_input_add(
+            &input,
+            {
+                source = view.view,
+                tokens = frontend.lex.tokens,
+                tree = frontend.parse.tree,
+            }
+        )) {
+        bootstrap_semantic_input_release(input);
+        bootstrap_frontend_result_release(frontend);
+        std_byte_buffer_release(source.buffer);
+        return 5;
+    }
+    let semantic: BootstrapSemanticResult =
+        bootstrap_semantic_check(input);
+    if (!bootstrap_semantic_result_is_success(semantic)) {
+        bootstrap_semantic_result_release(semantic);
+        bootstrap_semantic_input_release(input);
+        bootstrap_frontend_result_release(frontend);
+        std_byte_buffer_release(source.buffer);
+        return 6;
+    }
+    let backend: BootstrapX8664BackendResult =
+        bootstrap_x86_64_emit_assembly(
+            input,
+            semantic.ir,
+            semantic.types
+        );
+    var backend_valid: bool =
+        bootstrap_x86_64_backend_is_success(
+            backend,
+            input,
+            semantic.ir,
+            semantic.types
+        );
+    var corruption_rejected: bool = false;
+    if (backend_valid && backend.abi.function_count != 0 &&
+        backend.frames.frame_count != 0) {
+        let abi_functions: *BootstrapX8664AbiFunction =
+            backend.abi.functions.data as
+                *BootstrapX8664AbiFunction;
+        let saved_call_frame: usize =
+            abi_functions[0].call_frame_size_bytes;
+        abi_functions[0].call_frame_size_bytes += 16;
+        corruption_rejected =
+            !bootstrap_x86_64_backend_is_success(
+                backend,
+                input,
+                semantic.ir,
+                semantic.types
+            );
+        abi_functions[0].call_frame_size_bytes = saved_call_frame;
+
+        let frames: *BootstrapX8664Frame =
+            backend.frames.frames.data as *BootstrapX8664Frame;
+        let saved_frame_size: usize = frames[0].frame_size_bytes;
+        frames[0].frame_size_bytes += 16;
+        corruption_rejected = corruption_rejected &&
+            !bootstrap_x86_64_backend_is_success(
+                backend,
+                input,
+                semantic.ir,
+                semantic.types
+            );
+        frames[0].frame_size_bytes = saved_frame_size;
+        backend_valid = corruption_rejected &&
+            bootstrap_x86_64_backend_is_success(
+                backend,
+                input,
+                semantic.ir,
+                semantic.types
+            );
+    }
+    var write_error: RuntimeError = RuntimeError.invalid_argument;
+    if (backend_valid) {
+        let output_path: StdPathResult =
+            std_path_from_c_string("bootstrap-backend-output.s", 32);
+        if (output_path.error == RuntimeError.none) {
+            write_error = std_io_write_file(
+                output_path.path,
+                backend.assembly.data as *const u8,
+                backend.assembly.length
+            );
+            let output_path_error: RuntimeError =
+                std_path_release(output_path.path);
+            if (write_error == RuntimeError.none) {
+                write_error = output_path_error;
+            }
+        }
+    }
+    let backend_error: RuntimeError =
+        bootstrap_x86_64_backend_release(backend);
+    let semantic_error: RuntimeError =
+        bootstrap_semantic_result_release(semantic);
+    let input_error: RuntimeError =
+        bootstrap_semantic_input_release(input);
+    let frontend_error: RuntimeError =
+        bootstrap_frontend_result_release(frontend);
+    let source_error: RuntimeError =
+        std_byte_buffer_release(source.buffer);
+    if (!backend_valid || write_error != RuntimeError.none) {
+        return 7;
+    }
+    if (backend_error != RuntimeError.none ||
+        semantic_error != RuntimeError.none ||
+        input_error != RuntimeError.none ||
+        frontend_error != RuntimeError.none ||
+        source_error != RuntimeError.none) {
+        return 8;
+    }
+    return 42;
+}

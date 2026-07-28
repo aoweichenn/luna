@@ -2584,6 +2584,119 @@ fn bootstrap_semantic_collect_function_parameters(
     return context->error == RuntimeError.none;
 }
 
+fn bootstrap_semantic_external_name_is_reserved(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    token_index: usize
+) -> bool {
+    let token: BootstrapToken = bootstrap_semantic_token(
+        context,
+        unit_index,
+        token_index
+    );
+    let unit: *const BootstrapSemanticUnit =
+        bootstrap_semantic_input_unit(context, unit_index);
+    return bootstrap_semantic_token_equals_bytes(
+            context,
+            unit_index,
+            token_index,
+            "_start",
+            6
+        ) ||
+        (unit != null && token.span.length >= 2 &&
+            unit->source.data[token.span.offset] == 95 &&
+            unit->source.data[token.span.offset + 1] == 76);
+}
+
+fn bootstrap_semantic_validate_external_signature(
+    context: *BootstrapSemanticContext,
+    function_id: usize
+) -> bool {
+    let functions: *const BootstrapSemanticFunction =
+        context->functions.data as
+            *const BootstrapSemanticFunction;
+    let parameters: *const BootstrapSemanticParameter =
+        context->parameters.data as
+            *const BootstrapSemanticParameter;
+    let symbols: *const BootstrapSemanticSymbol =
+        context->symbols.data as
+            *const BootstrapSemanticSymbol;
+    let function: BootstrapSemanticFunction =
+        functions[function_id];
+    let symbol: BootstrapSemanticSymbol =
+        symbols[function.symbol_id];
+    if (bootstrap_semantic_external_name_is_reserved(
+            context,
+            symbol.declaration_unit,
+            symbol.name_token
+        )) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.invalid_external,
+            symbol.declaration_unit,
+            bootstrap_semantic_token(
+                context,
+                symbol.declaration_unit,
+                symbol.name_token
+            ).span,
+            bootstrap_semantic_no_id(),
+            bootstrap_semantic_empty_span(),
+            function_id
+        );
+    }
+    if (function.return_type != bootstrap_semantic_no_id() &&
+        bootstrap_semantic_type_record(
+            context,
+            function.return_type
+        ).kind == BootstrapTypeKind.array) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.invalid_external,
+            symbol.declaration_unit,
+            bootstrap_semantic_node(
+                context,
+                symbol.declaration_unit,
+                symbol.declaration_node
+            ).span,
+            bootstrap_semantic_no_id(),
+            bootstrap_semantic_empty_span(),
+            function.return_type
+        );
+    }
+    var index: usize = 0;
+    while (index < function.parameter_count) {
+        let parameter: BootstrapSemanticParameter =
+            parameters[function.first_parameter + index];
+        let record: BootstrapTypeRecord =
+            bootstrap_semantic_type_record(
+                context,
+                parameter.type_id
+            );
+        if (record.kind == BootstrapTypeKind.array) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind
+                    .invalid_external,
+                parameter.unit_index,
+                bootstrap_semantic_node(
+                    context,
+                    parameter.unit_index,
+                    parameter.declaration_node
+                ).span,
+                symbol.declaration_unit,
+                bootstrap_semantic_node(
+                    context,
+                    symbol.declaration_unit,
+                    symbol.declaration_node
+                ).span,
+                parameter.type_id
+            );
+        }
+        index += 1;
+    }
+    return context->error == RuntimeError.none;
+}
+
 fn bootstrap_semantic_find_module_function(
     context: *BootstrapSemanticContext,
     module_id: usize,
@@ -2731,6 +2844,12 @@ fn bootstrap_semantic_add_function_declaration(
         declaration,
         parameter_count
     );
+    if (external) {
+        bootstrap_semantic_validate_external_signature(
+            context,
+            function_id
+        );
+    }
     return function_id;
 }
 
@@ -4761,9 +4880,44 @@ fn bootstrap_semantic_lower_call(
                     context,
                     argument.type_id
                 );
-            let argument_value: usize =
-                bootstrap_type_is_memory(argument_type.kind) ?
-                    argument.address_id : argument.value_id;
+            var argument_value: usize = argument.value_id;
+            if (bootstrap_type_is_memory(argument_type.kind)) {
+                let snapshot_slot: usize = bootstrap_ir_add_slot(
+                    &context->ir,
+                    bootstrap_semantic_current_ir_function(context),
+                    argument.type_id,
+                    true
+                );
+                let snapshot_address: usize =
+                    bootstrap_semantic_address_of_slot(
+                        context,
+                        bootstrap_semantic_node(
+                            context,
+                            context->current_unit,
+                            child
+                        ),
+                        snapshot_slot,
+                        argument.type_id,
+                        false
+                    );
+                if (snapshot_slot == none ||
+                    snapshot_address == none ||
+                    !bootstrap_semantic_store_to_address(
+                        context,
+                        bootstrap_semantic_node(
+                            context,
+                            context->current_unit,
+                            child
+                        ),
+                        snapshot_address,
+                        argument.type_id,
+                        argument
+                    )) {
+                    context->error =
+                        RuntimeError.invalid_argument;
+                }
+                argument_value = snapshot_address;
+            }
             let appended: StdByteBufferResult =
                 std_byte_buffer_append(
                     argument_values,

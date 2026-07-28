@@ -216,6 +216,121 @@ def module_graph(
                 "bootstrap_ir",
             ),
         ),
+        "bootstrap_x86_64_text": Module(
+            "luna.bootstrap.backend.x86_64.text",
+            runtime_root
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "text"
+            / "text",
+            sysroot
+            / "luna"
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "text.lmi",
+            sysroot
+            / "luna"
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "text.o",
+            ("runtime", "bytes", "text"),
+        ),
+        "bootstrap_x86_64_abi": Module(
+            "luna.bootstrap.backend.x86_64.abi",
+            runtime_root
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "abi"
+            / "abi",
+            sysroot
+            / "luna"
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "abi.lmi",
+            sysroot
+            / "luna"
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "abi.o",
+            (
+                "runtime",
+                "bytes",
+                "text",
+                "bootstrap_lexer",
+                "bootstrap_type",
+                "bootstrap_ir",
+            ),
+        ),
+        "bootstrap_x86_64_frame": Module(
+            "luna.bootstrap.backend.x86_64.frame",
+            runtime_root
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "frame"
+            / "frame",
+            sysroot
+            / "luna"
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "frame.lmi",
+            sysroot
+            / "luna"
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "frame.o",
+            (
+                "runtime",
+                "bytes",
+                "text",
+                "bootstrap_lexer",
+                "bootstrap_type",
+                "bootstrap_ir",
+                "bootstrap_x86_64_abi",
+            ),
+        ),
+        "bootstrap_x86_64_codegen": Module(
+            "luna.bootstrap.backend.x86_64.codegen",
+            runtime_root
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "codegen"
+            / "codegen",
+            sysroot
+            / "luna"
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "codegen.lmi",
+            sysroot
+            / "luna"
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "codegen.o",
+            (
+                "runtime",
+                "bytes",
+                "text",
+                "bootstrap_lexer",
+                "bootstrap_parser",
+                "bootstrap_type",
+                "bootstrap_ir",
+                "bootstrap_sema",
+                "bootstrap_x86_64_text",
+                "bootstrap_x86_64_abi",
+                "bootstrap_x86_64_frame",
+            ),
+        ),
     }
 
 
@@ -252,6 +367,10 @@ def ensure_sysroot(
         "bootstrap_type",
         "bootstrap_ir",
         "bootstrap_sema",
+        "bootstrap_x86_64_text",
+        "bootstrap_x86_64_abi",
+        "bootstrap_x86_64_frame",
+        "bootstrap_x86_64_codegen",
     ):
         module = graph[key]
         dependencies = dependency_paths(graph, module)

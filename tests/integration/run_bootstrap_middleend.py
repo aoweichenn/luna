@@ -226,6 +226,20 @@ def run_corpus(
             b"fn main() -> i32 { let value: i32 = 1; }\n",
             64 + 45,
         ),
+        (
+            "reserved-external",
+            b"module negative.reserved_external;\n"
+            b"extern fn _start() -> i32;\n"
+            b"fn main() -> i32 { return 0; }\n",
+            64 + 24,
+        ),
+        (
+            "array-external",
+            b"module negative.array_external;\n"
+            b"extern fn consume(value: [2]i32) -> i32;\n"
+            b"fn main() -> i32 { return 0; }\n",
+            64 + 24,
+        ),
     ]
     for label, source, expected_code in fixed_cases:
         input_path.write_bytes(source)

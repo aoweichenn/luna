@@ -274,12 +274,15 @@ explicit API invariant until the language has a move or affine type system.
 
 It also builds the M4 frontend modules under
 `sysroot/luna/bootstrap/frontend/` and middle-end modules under
-`sysroot/luna/bootstrap/middleend/`. The Luna lexer owns token and structured
+`sysroot/luna/bootstrap/middleend/`, plus the correctness-first backend under
+`sysroot/luna/bootstrap/backend/x86_64/`. The Luna lexer owns token and structured
 diagnostic buffers; the recursive-descent parser owns an index-linked concrete
 syntax tree with verified parent/child relationships and bounded nesting.
 The Luna semantic modules consume borrowed parsed units, resolve complete
 source-module graphs and target layouts, and emit independently verified,
-non-SSA Typed IR. They all run freestanding on the x86-64 target.
+non-SSA Typed IR. The Luna backend recomputes System V ABI and stack-frame
+plans, then emits the project-owned x86-64 assembly dialect without
+optimization or C translation. They all run freestanding on the x86-64 target.
 
 The bootstrap compiler itself remains a hosted C23 development tool. Its host
 library use does not become a dependency of generated target programs.
@@ -299,6 +302,7 @@ See [the language draft](docs/language.md),
 [minimum standard library](docs/minimum-standard-library.md),
 [Luna bootstrap frontend](docs/bootstrap-frontend.md),
 [Luna bootstrap middle end](docs/bootstrap-middleend.md),
+[Luna bootstrap x86-64 backend](docs/bootstrap-x86-64-backend.md),
 [compiled module metadata format](docs/module-metadata.md),
 [bootstrap execution semantics](docs/execution-semantics.md), and the
 [implementation roadmap](docs/roadmap.md).
