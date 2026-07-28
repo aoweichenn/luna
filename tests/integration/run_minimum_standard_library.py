@@ -181,6 +181,41 @@ def module_graph(
             sysroot / "luna" / "bootstrap" / "frontend" / "parser.o",
             ("runtime", "bytes", "text", "bootstrap_lexer"),
         ),
+        "bootstrap_type": Module(
+            "luna.bootstrap.middleend.type",
+            runtime_root / "bootstrap" / "middleend" / "type" / "type",
+            sysroot / "luna" / "bootstrap" / "middleend" / "type.lmi",
+            sysroot / "luna" / "bootstrap" / "middleend" / "type.o",
+            ("runtime", "bytes", "text", "bootstrap_lexer"),
+        ),
+        "bootstrap_ir": Module(
+            "luna.bootstrap.middleend.ir",
+            runtime_root / "bootstrap" / "middleend" / "ir" / "ir",
+            sysroot / "luna" / "bootstrap" / "middleend" / "ir.lmi",
+            sysroot / "luna" / "bootstrap" / "middleend" / "ir.o",
+            (
+                "runtime",
+                "bytes",
+                "text",
+                "bootstrap_lexer",
+                "bootstrap_type",
+            ),
+        ),
+        "bootstrap_sema": Module(
+            "luna.bootstrap.middleend.sema",
+            runtime_root / "bootstrap" / "middleend" / "sema" / "sema",
+            sysroot / "luna" / "bootstrap" / "middleend" / "sema.lmi",
+            sysroot / "luna" / "bootstrap" / "middleend" / "sema.o",
+            (
+                "runtime",
+                "bytes",
+                "text",
+                "bootstrap_lexer",
+                "bootstrap_parser",
+                "bootstrap_type",
+                "bootstrap_ir",
+            ),
+        ),
     }
 
 
@@ -214,6 +249,9 @@ def ensure_sysroot(
         "io",
         "bootstrap_lexer",
         "bootstrap_parser",
+        "bootstrap_type",
+        "bootstrap_ir",
+        "bootstrap_sema",
     ):
         module = graph[key]
         dependencies = dependency_paths(graph, module)

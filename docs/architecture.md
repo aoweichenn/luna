@@ -97,14 +97,15 @@ Source locations are byte spans into immutable source files. Tokens and syntax
 nodes retain spans so every parser, type and IR error can point to the original
 text. The parser uses an arena and never owns isolated syntax nodes.
 
-M4 also provides separately compiled Luna lexer and parser modules for the
-self-hosting path. They use owned typed byte buffers and an indexed concrete
-syntax tree with explicit parent/child links, avoiding pointers into growable
-storage. Their structured lexer/parser diagnostics and recovery behavior are
-executable on the freestanding target; they do not call back into the hosted
-C23 frontend. The C23 arena AST remains stage 0, while the indexed Luna tree
-is the input contract for the upcoming Luna type checker. See the
-[bootstrap frontend contract](bootstrap-frontend.md).
+M4 also provides separately compiled Luna lexer, parser, type, IR and semantic
+modules for the self-hosting path. They use owned typed byte buffers and
+stable indices, avoiding pointers into growable storage. Their structured
+diagnostics and verification run on the freestanding target and never call
+back into the hosted C23 frontend or middle end. The C23 arena AST and IR
+remain stage 0; the indexed Luna tree and verified Luna Typed IR are the
+stage-1 frontend/middle-end contracts. See the
+[bootstrap frontend contract](bootstrap-frontend.md) and
+[bootstrap middle-end contract](bootstrap-middleend.md).
 
 The syntax tree represents `if`, all three loop forms and non-fallthrough
 switch arms directly. Semantic lowering uses one ordered control-frame stack:

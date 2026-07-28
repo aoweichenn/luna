@@ -1,0 +1,91 @@
+module tests.bootstrap_middleend_corpus_driver;
+
+import luna.runtime;
+import luna.std.bytes;
+import luna.std.text;
+import luna.std.path;
+import luna.std.io;
+import luna.bootstrap.frontend.lexer;
+import luna.bootstrap.frontend.parser;
+import luna.bootstrap.middleend.type;
+import luna.bootstrap.middleend.ir;
+import luna.bootstrap.middleend.sema;
+
+fn main() -> i32 {
+    let path: StdPathResult =
+        std_path_from_c_string("bootstrap-middleend-input.luna", 32);
+    if (path.error != RuntimeError.none) {
+        return 1;
+    }
+    let source: StdByteBufferResult =
+        std_io_read_file(path.path);
+    let path_error: RuntimeError =
+        std_path_release(path.path);
+    if (source.error != RuntimeError.none ||
+        path_error != RuntimeError.none) {
+        return 2;
+    }
+    let view: StdTextViewResult = std_text_view(
+        source.buffer.data as *const u8,
+        source.buffer.length
+    );
+    if (view.error != RuntimeError.none) {
+        std_byte_buffer_release(source.buffer);
+        return 3;
+    }
+    let frontend: BootstrapFrontendResult =
+        bootstrap_frontend_parse(view.view);
+    if (frontend.error != RuntimeError.none ||
+        frontend.lex.diagnostics.count != 0 ||
+        frontend.parse.diagnostics.count != 0) {
+        bootstrap_frontend_result_release(frontend);
+        std_byte_buffer_release(source.buffer);
+        return 4;
+    }
+
+    var input: BootstrapSemanticInput =
+        bootstrap_semantic_input_empty(true);
+    if (!bootstrap_semantic_input_add(
+            &input,
+            {
+                source = view.view,
+                tokens = frontend.lex.tokens,
+                tree = frontend.parse.tree,
+            }
+        )) {
+        bootstrap_semantic_input_release(input);
+        bootstrap_frontend_result_release(frontend);
+        std_byte_buffer_release(source.buffer);
+        return 5;
+    }
+    let result: BootstrapSemanticResult =
+        bootstrap_semantic_check(input);
+    var status: i32 = 42;
+    if (!bootstrap_semantic_result_is_success(result)) {
+        status = 6;
+        if (result.diagnostics.count != 0) {
+            let diagnostic: BootstrapSemanticDiagnosticResult =
+                bootstrap_semantic_diagnostic_get(
+                    result.diagnostics,
+                    0
+                );
+            status = 64 +
+                diagnostic.diagnostic.kind as usize as i32;
+        }
+    }
+    let result_error: RuntimeError =
+        bootstrap_semantic_result_release(result);
+    let input_error: RuntimeError =
+        bootstrap_semantic_input_release(input);
+    let frontend_error: RuntimeError =
+        bootstrap_frontend_result_release(frontend);
+    let source_error: RuntimeError =
+        std_byte_buffer_release(source.buffer);
+    if (result_error != RuntimeError.none ||
+        input_error != RuntimeError.none ||
+        frontend_error != RuntimeError.none ||
+        source_error != RuntimeError.none) {
+        return 7;
+    }
+    return status;
+}

@@ -1,0 +1,108 @@
+module tests.bootstrap_middleend_modules_driver;
+
+import luna.runtime;
+import luna.std.text;
+import luna.bootstrap.frontend.lexer;
+import luna.bootstrap.frontend.parser;
+import luna.bootstrap.middleend.type;
+import luna.bootstrap.middleend.ir;
+import luna.bootstrap.middleend.sema;
+
+fn main() -> i32 {
+    let interface_source: StdTextViewResult =
+        std_text_from_c_string(
+            "export module checked.core;\nexport struct Number { value: i32; }\nexport fn increment(number: Number) -> Number;\n",
+            160
+        );
+    let implementation_source: StdTextViewResult =
+        std_text_from_c_string(
+            "module checked.core;\nfn increment(number: Number) -> Number { return { value = number.value + 1 }; }\n",
+            160
+        );
+    let application_source: StdTextViewResult =
+        std_text_from_c_string(
+            "module checked.application;\nimport checked.core;\nfn main() -> i32 { let number: Number = increment({ value = 41 }); return number.value; }\n",
+            192
+        );
+    if (interface_source.error != RuntimeError.none ||
+        implementation_source.error != RuntimeError.none ||
+        application_source.error != RuntimeError.none) {
+        return 1;
+    }
+
+    let interface_frontend: BootstrapFrontendResult =
+        bootstrap_frontend_parse(interface_source.view);
+    let implementation_frontend: BootstrapFrontendResult =
+        bootstrap_frontend_parse(implementation_source.view);
+    let application_frontend: BootstrapFrontendResult =
+        bootstrap_frontend_parse(application_source.view);
+    if (interface_frontend.error != RuntimeError.none ||
+        implementation_frontend.error != RuntimeError.none ||
+        application_frontend.error != RuntimeError.none ||
+        interface_frontend.lex.diagnostics.count != 0 ||
+        interface_frontend.parse.diagnostics.count != 0 ||
+        implementation_frontend.lex.diagnostics.count != 0 ||
+        implementation_frontend.parse.diagnostics.count != 0 ||
+        application_frontend.lex.diagnostics.count != 0 ||
+        application_frontend.parse.diagnostics.count != 0) {
+        bootstrap_frontend_result_release(interface_frontend);
+        bootstrap_frontend_result_release(implementation_frontend);
+        bootstrap_frontend_result_release(application_frontend);
+        return 2;
+    }
+
+    var input: BootstrapSemanticInput =
+        bootstrap_semantic_input_empty(true);
+    let added: bool = bootstrap_semantic_input_add(
+        &input,
+        {
+            source = application_source.view,
+            tokens = application_frontend.lex.tokens,
+            tree = application_frontend.parse.tree,
+        }
+    ) && bootstrap_semantic_input_add(
+        &input,
+        {
+            source = implementation_source.view,
+            tokens = implementation_frontend.lex.tokens,
+            tree = implementation_frontend.parse.tree,
+        }
+    ) && bootstrap_semantic_input_add(
+        &input,
+        {
+            source = interface_source.view,
+            tokens = interface_frontend.lex.tokens,
+            tree = interface_frontend.parse.tree,
+        }
+    );
+    if (!added) {
+        bootstrap_semantic_input_release(input);
+        bootstrap_frontend_result_release(interface_frontend);
+        bootstrap_frontend_result_release(implementation_frontend);
+        bootstrap_frontend_result_release(application_frontend);
+        return 3;
+    }
+
+    let result: BootstrapSemanticResult =
+        bootstrap_semantic_check(input);
+    let accepted: bool =
+        bootstrap_semantic_result_is_success(result);
+    let result_error: RuntimeError =
+        bootstrap_semantic_result_release(result);
+    let input_error: RuntimeError =
+        bootstrap_semantic_input_release(input);
+    let interface_error: RuntimeError =
+        bootstrap_frontend_result_release(interface_frontend);
+    let implementation_error: RuntimeError =
+        bootstrap_frontend_result_release(implementation_frontend);
+    let application_error: RuntimeError =
+        bootstrap_frontend_result_release(application_frontend);
+    if (result_error != RuntimeError.none ||
+        input_error != RuntimeError.none ||
+        interface_error != RuntimeError.none ||
+        implementation_error != RuntimeError.none ||
+        application_error != RuntimeError.none) {
+        return 4;
+    }
+    return accepted ? 42 : 5;
+}

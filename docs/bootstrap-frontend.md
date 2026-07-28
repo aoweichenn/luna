@@ -122,6 +122,7 @@ The frontend is checked at independent boundaries:
    link failure, object symbols and absence of a dynamic loader.
 5. The bounded libFuzzer corpus contains a frontend-shaped full-syntax seed.
 
-This completes the lexer/parser item in M4. It does not claim a stage-1
-compiler: Luna type checking, typed IR construction, x86-64 lowering and
-stage reproducibility remain separate milestones.
+This completes the lexer/parser item in M4. The subsequent Luna type checker
+and Typed IR construction are documented in
+[the bootstrap middle-end contract](bootstrap-middleend.md). Luna x86-64
+lowering and stage reproducibility remain separate milestones.

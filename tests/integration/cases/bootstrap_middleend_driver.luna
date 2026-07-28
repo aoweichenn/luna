@@ -1,0 +1,114 @@
+module tests.bootstrap_middleend_driver;
+
+import luna.runtime;
+import luna.std.text;
+import luna.bootstrap.frontend.lexer;
+import luna.bootstrap.frontend.parser;
+import luna.bootstrap.middleend.type;
+import luna.bootstrap.middleend.ir;
+import luna.bootstrap.middleend.sema;
+
+fn main() -> i32 {
+    let source: StdTextViewResult = std_text_from_c_string(
+        "module checked.sample;\nstruct Pair { left: i32; right: i32; }\nunion Cell { integer: i64; real: f64; }\nenum Mode: u8 { idle, running = 4 }\nextern fn foreign_identity(value: i32) -> i32;\nfn sum(pair: Pair) -> i32 { return pair.left + pair.right; }\nfn make_pair() -> Pair { return { left = 5, right = 8 }; }\nfn main() -> i32 {\n    var pair: Pair = { left = 1, right = 2 };\n    var values: [3]i32 = {};\n    values[0 as usize] = 3;\n    var pointer: *i32 = &values[0 as usize];\n    *pointer += 1;\n    var index: i32 = 0;\n    while (index < 2) { index += 1; }\n    do { index -= 1; } while (index > 1);\n    for (var step: i32 = 0; step < 2; step += 1) { pair.left += step; }\n    let mode: Mode = Mode.running;\n    switch (mode) { case Mode.idle { pair.right = 0; } case Mode.running { pair.right += 1; } default { pair.right = 9; } }\n    let bytes: usize = sizeof(Pair) + alignof(Cell) + offsetof(Pair, right);\n    let selected: i32 = true ? pair.left : pair.right;\n    let temporary_member: i32 = make_pair().left;\n    let real: f64 = 1.25 + 2.5;\n    let message: *const u8 = \"ok\";\n    let absent: *i32 = null;\n    return sum(pair) + values[0 as usize] + selected + temporary_member + (bytes > 0 as usize ? 1 : 0);\n}\n",
+        2048
+    );
+    if (source.error != RuntimeError.none) {
+        return 1;
+    }
+    let frontend: BootstrapFrontendResult =
+        bootstrap_frontend_parse(source.view);
+    if (frontend.error != RuntimeError.none ||
+        frontend.lex.diagnostics.count != 0 ||
+        frontend.parse.diagnostics.count != 0) {
+        bootstrap_frontend_result_release(frontend);
+        return 2;
+    }
+    var input: BootstrapSemanticInput =
+        bootstrap_semantic_input_empty(true);
+    if (!bootstrap_semantic_input_add(
+            &input,
+            {
+                source = source.view,
+                tokens = frontend.lex.tokens,
+                tree = frontend.parse.tree,
+            }
+        )) {
+        bootstrap_semantic_input_release(input);
+        bootstrap_frontend_result_release(frontend);
+        return 3;
+    }
+    let result: BootstrapSemanticResult =
+        bootstrap_semantic_check(input);
+    let accepted: bool =
+        bootstrap_semantic_result_is_success(result);
+    var verifier_rejected_damage: bool =
+        accepted &&
+        bootstrap_type_table_is_valid(result.types, true) &&
+        bootstrap_ir_is_valid(result.ir, result.types) &&
+        result.ir.argument_count != 0 &&
+        result.ir.block_count != 0;
+    if (verifier_rejected_damage) {
+        let type_records: *BootstrapTypeRecord =
+            result.types.types.data as *BootstrapTypeRecord;
+        let saved_size: usize = type_records[
+            BootstrapBuiltinType.signed_32 as usize
+        ].size_bytes;
+        type_records[
+            BootstrapBuiltinType.signed_32 as usize
+        ].size_bytes = 3;
+        verifier_rejected_damage =
+            !bootstrap_type_table_is_valid(result.types, true);
+        type_records[
+            BootstrapBuiltinType.signed_32 as usize
+        ].size_bytes = saved_size;
+
+        let arguments: *BootstrapIrArgument =
+            result.ir.arguments.data as *BootstrapIrArgument;
+        let saved_value: usize = arguments[0].value_id;
+        arguments[0].value_id = bootstrap_ir_no_id();
+        verifier_rejected_damage =
+            verifier_rejected_damage &&
+            !bootstrap_ir_is_valid(result.ir, result.types);
+        arguments[0].value_id = saved_value;
+
+        let blocks: *BootstrapIrBlock =
+            result.ir.blocks.data as *BootstrapIrBlock;
+        let saved_predecessors: usize =
+            blocks[0].predecessor_count;
+        blocks[0].predecessor_count += 1;
+        verifier_rejected_damage =
+            verifier_rejected_damage &&
+            !bootstrap_ir_is_valid(result.ir, result.types);
+        blocks[0].predecessor_count = saved_predecessors;
+        verifier_rejected_damage =
+            verifier_rejected_damage &&
+            bootstrap_type_table_is_valid(result.types, true) &&
+            bootstrap_ir_is_valid(result.ir, result.types);
+    }
+    var failure_status: i32 = 5;
+    if (result.diagnostics.count != 0) {
+        let diagnostic: BootstrapSemanticDiagnosticResult =
+            bootstrap_semantic_diagnostic_get(
+                result.diagnostics,
+                0
+            );
+        failure_status =
+            10 + diagnostic.diagnostic.kind as usize as i32;
+    }
+    let result_error: RuntimeError =
+        bootstrap_semantic_result_release(result);
+    let input_error: RuntimeError =
+        bootstrap_semantic_input_release(input);
+    let frontend_error: RuntimeError =
+        bootstrap_frontend_result_release(frontend);
+    if (result_error != RuntimeError.none ||
+        input_error != RuntimeError.none ||
+        frontend_error != RuntimeError.none) {
+        return 4;
+    }
+    if (accepted && verifier_rejected_damage) {
+        return 42;
+    }
+    return failure_status;
+}

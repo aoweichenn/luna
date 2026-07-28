@@ -47,8 +47,9 @@ The project is deliberately narrow at this stage:
   wrappers generated and verified by the project assembler, with raw kernel
   error results, plus a Luna-implemented typed process/file/virtual-memory
   runtime and a Luna-implemented minimum memory/byte-buffer/UTF-8/path/I/O
-  standard library, plus separately compiled Luna lexer/parser modules with
-  structured diagnostics and an indexed syntax tree, with no target libc;
+  standard library, plus separately compiled Luna lexer/parser/type/IR/sema
+  modules with structured diagnostics, stable indexed storage and
+  independently verified Typed IR, with no target libc;
 - bootstrap host: conforming C23 with IEC 60559 binary32 and binary64;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests,
   typed-IR, machine-IR, ABI, liveness, register-allocation and
@@ -272,12 +273,13 @@ and is emitted as deterministic `.lmi` and `.o` artifacts. Ownership is an
 explicit API invariant until the language has a move or affine type system.
 
 It also builds the M4 frontend modules under
-`sysroot/luna/bootstrap/frontend/`. The Luna lexer owns token and structured
+`sysroot/luna/bootstrap/frontend/` and middle-end modules under
+`sysroot/luna/bootstrap/middleend/`. The Luna lexer owns token and structured
 diagnostic buffers; the recursive-descent parser owns an index-linked concrete
 syntax tree with verified parent/child relationships and bounded nesting.
-These modules parse the complete implemented syntax and run freestanding on
-the x86-64 target, but they are not yet a stage-1 compiler: name/type checking
-and typed IR construction are the next milestone.
+The Luna semantic modules consume borrowed parsed units, resolve complete
+source-module graphs and target layouts, and emit independently verified,
+non-SSA Typed IR. They all run freestanding on the x86-64 target.
 
 The bootstrap compiler itself remains a hosted C23 development tool. Its host
 library use does not become a dependency of generated target programs.
@@ -296,6 +298,7 @@ See [the language draft](docs/language.md),
 [freestanding runtime](docs/freestanding-runtime.md),
 [minimum standard library](docs/minimum-standard-library.md),
 [Luna bootstrap frontend](docs/bootstrap-frontend.md),
+[Luna bootstrap middle end](docs/bootstrap-middleend.md),
 [compiled module metadata format](docs/module-metadata.md),
 [bootstrap execution semantics](docs/execution-semantics.md), and the
 [implementation roadmap](docs/roadmap.md).
