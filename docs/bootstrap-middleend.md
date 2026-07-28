@@ -51,6 +51,8 @@ The bootstrap target is fixed to the accepted
 eight-byte natural alignment, one-byte `bool`, and exact fixed-width scalar
 layouts. Structure padding, union maximum size and nested-array
 multiplication are checked for overflow before a layout becomes complete.
+Every complete object is capped at the signed 32-bit displacement limit,
+matching the hosted compiler and correctness-first x86-64 backend.
 
 ## Modules and declarations
 
@@ -74,7 +76,9 @@ Declaration collection precedes resolution. Forward references therefore do
 not depend on source order. Field, enum-member, function, parameter and local
 duplicates carry both the primary and related source span in structured
 diagnostics. Enums require an exact integer underlying type; explicit and
-implicit values are range-checked in that width.
+implicit values are range-checked in that width. IR functions are emitted in
+canonical complete-module-name and function-name order, so reversing source
+unit order preserves generated assembly.
 
 ## Strong typing
 
@@ -85,6 +89,9 @@ truthiness:
 - scalar binary operands have one exact type;
 - integer and floating literals take their contextual type and otherwise use
   `i32` and `f64`;
+- a cast target supplies context to an otherwise untyped literal expression,
+  including the full unsigned 64-bit range;
+- unary minus accepts the exact minimum value of every signed integer width;
 - `null` requires a pointer context;
 - enums convert only to or from their exact underlying type;
 - pointer casts cannot remove read-only qualification;
@@ -98,9 +105,11 @@ truthiness:
 
 Named aggregate initialization allocates exact-layout temporary storage,
 zeroes the whole object, rejects unknown or repeated fields, limits a union to
-one selected field, and evaluates field expressions in source order before
-the final copy. String escapes are decoded into read-only IR globals with an
-explicit trailing zero byte.
+one selected field, and evaluates field expressions in source order only after
+the complete field set is valid. Scalar and enum `{}` initializers produce
+their exact typed zero value. Returned arrays remain address-backed immutable
+temporaries and support checked element reads. String escapes are decoded into
+read-only IR globals with an explicit trailing zero byte.
 
 ### Exact decimal floating-point literals
 
@@ -145,7 +154,10 @@ The instruction set records:
 
 `if`, `while`, `do`, `for`, non-fallthrough `switch`, `&&`, `||` and the
 conditional operator are all lowered to ordinary blocks and branches. There
-is no hidden structured-control opcode and no optimization pass.
+is no hidden structured-control opcode and no optimization pass. Missing
+return analysis traverses the completed CFG from the function entry instead
+of treating a detached block's local predecessor count as global
+reachability.
 
 `bootstrap_ir_is_valid` is independent of semantic construction. It checks
 all buffers and ranges, type IDs, function ownership, slot/parameter
@@ -207,11 +219,14 @@ The stage is guarded by:
 5. Exact negative diagnostics for recursive types, unknown types, duplicate
    locals, immutable writes, mismatches, invalid casts, invalid control flow,
    missing returns and by-value type-depth exhaustion.
-6. Fixed-seed valid and invalid random semantic programs, also registered as
+6. Stage-0/stage-2/stage-3 convergence for 23 fixed execution programs,
+   32 fixed-seed generated programs, reversed multi-module source order and
+   one rejection for every public semantic diagnostic kind from 1 through 50.
+7. Fixed-seed valid and invalid random semantic programs, also registered as
    the semantic fuzz gate.
-7. Two byte-for-byte reproductions of every middle-end `.lmi` and `.o`, ELF
+8. Two byte-for-byte reproductions of every middle-end `.lmi` and `.o`, ELF
    symbol checks, unresolved-symbol checks and dynamic-loader exclusion.
-8. Exact-rational decimal probes at normal, subnormal, binade, underflow and
+9. Exact-rational decimal probes at normal, subnormal, binade, underflow and
    overflow boundaries, including deterministic random adjacent-value
    midpoints, ties-to-even, values on both sides, long discarded tails and
    stage-0/stage-2/stage-3 execution agreement.

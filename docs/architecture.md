@@ -155,6 +155,12 @@ imports enter both interface and implementation scope; implementation-only
 imports never enter interface scope. Only exported declarations enter an
 importer's scope, and visibility is never transitive.
 
+The self-hosted middle end orders IR functions by complete module name and
+function name with an iterative heap sort. Function, parameter, slot, block
+and global construction therefore remains deterministic when source units are
+supplied in a different order, without introducing recursive sorting or
+quadratic behavior on large inputs.
+
 All modules in one invocation share canonical named-type and function records.
 This preserves type identity across module boundaries, rejects ambiguous
 unqualified imports and lets compatible repeated external declarations share

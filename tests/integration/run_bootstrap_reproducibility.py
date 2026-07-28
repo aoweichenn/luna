@@ -10,6 +10,14 @@ import random
 import re
 import shutil
 
+from bootstrap_semantic_convergence import (
+    ExecutionCase,
+    RejectionCase,
+    SourceUnit,
+    fixed_execution_cases,
+    generated_execution_cases,
+    rejection_cases,
+)
 from run_minimum_standard_library import (
     Module,
     ensure_sysroot,
@@ -714,6 +722,293 @@ def run_fixed_point_probe(
     return output.read_bytes()
 
 
+def materialize_convergence_units(
+    case_name: str,
+    units: tuple[SourceUnit, ...],
+    source_root: pathlib.Path,
+    generated_root: pathlib.Path,
+) -> list[pathlib.Path]:
+    materialized: list[pathlib.Path] = []
+    case_root = source_root / "tests" / "integration" / "cases"
+    output_root = generated_root / case_name
+    for unit_index, unit in enumerate(units):
+        if unit.content is None:
+            source = case_root / unit.name
+            if not source.is_file():
+                raise AssertionError(
+                    f"semantic convergence source is missing: {source}"
+                )
+        else:
+            output_root.mkdir(parents=True, exist_ok=True)
+            source = output_root / f"{unit_index}-{unit.name}"
+            source.write_bytes(unit.content)
+        materialized.append(source)
+    return materialized
+
+
+def run_quiet_executable(
+    executable: pathlib.Path,
+    runner: list[str],
+    expected_code: int,
+    work_dir: pathlib.Path,
+) -> None:
+    result = run(
+        [*runner, str(executable)],
+        expected_code=expected_code,
+        timeout=120,
+        cwd=work_dir,
+    )
+    if result.stdout or result.stderr:
+        raise AssertionError(
+            f"{executable.name} unexpectedly produced output"
+        )
+
+
+def run_stage_zero_execution_case(
+    case: ExecutionCase,
+    compiler: pathlib.Path,
+    linker: pathlib.Path,
+    runner: list[str],
+    sources: list[pathlib.Path],
+    work_dir: pathlib.Path,
+    suffix: str = "",
+) -> None:
+    case_root = work_dir / f"stage-zero{suffix}"
+    case_root.mkdir(parents=True, exist_ok=True)
+    object_file = case_root / f"{case.name}.o"
+    executable = case_root / case.name
+    run(
+        [
+            str(compiler),
+            "--emit",
+            "obj",
+            "-o",
+            str(object_file),
+            *(str(source) for source in sources),
+        ],
+        timeout=180,
+    )
+    link(linker, executable, [object_file])
+    run_quiet_executable(
+        executable,
+        runner,
+        case.expected_code,
+        case_root,
+    )
+
+
+def run_self_hosted_execution_case(
+    case: ExecutionCase,
+    stage_name: str,
+    compiler: pathlib.Path,
+    assembler: pathlib.Path,
+    linker: pathlib.Path,
+    read_elf: str,
+    runner: list[str],
+    sources: list[pathlib.Path],
+    work_dir: pathlib.Path,
+) -> pathlib.Path:
+    case_root = work_dir / stage_name
+    case_root.mkdir(parents=True, exist_ok=True)
+    assembly = case_root / f"{case.name}.s"
+    invoke_stage_compiler(
+        compiler,
+        runner,
+        case_root / f"{case.name}-invocation",
+        True,
+        sources,
+        assembly,
+    )
+    object_file = case_root / f"{case.name}.o"
+    executable = case_root / case.name
+    assemble(assembler, assembly, object_file)
+    verify_relocatable_object(read_elf, object_file, True)
+    link(linker, executable, [object_file])
+    verify_static_executable(read_elf, executable)
+    run_quiet_executable(
+        executable,
+        runner,
+        case.expected_code,
+        case_root,
+    )
+    return assembly
+
+
+def run_stage_zero_rejection_case(
+    case: RejectionCase,
+    compiler: pathlib.Path,
+    sources: list[pathlib.Path],
+) -> None:
+    run(
+        [
+            str(compiler),
+            "--emit",
+            "check",
+            *(str(source) for source in sources),
+        ],
+        expected_code=1,
+        timeout=120,
+    )
+
+
+def run_self_hosted_rejection_case(
+    case: RejectionCase,
+    stage_name: str,
+    compiler: pathlib.Path,
+    runner: list[str],
+    sources: list[pathlib.Path],
+    work_dir: pathlib.Path,
+) -> str:
+    invocation = work_dir / stage_name / case.name
+    prepare_invocation(invocation, True, sources)
+    result = run(
+        [*runner, str(compiler)],
+        expected_code=64 + case.diagnostic_kind,
+        timeout=(
+            STAGE_EMULATED_TIMEOUT_SECONDS
+            if runner
+            else STAGE_NATIVE_TIMEOUT_SECONDS
+        ),
+        cwd=invocation,
+    )
+    expected_prefix = f"semantic:{case.diagnostic_kind}:"
+    if not result.stderr.startswith(expected_prefix):
+        raise AssertionError(
+            f"{case.name} lost diagnostic {case.diagnostic_kind}: "
+            f"{result.stderr!r}"
+        )
+    if (
+        invocation / "bootstrap-stage-output.s"
+    ).exists():
+        raise AssertionError(
+            f"{case.name} emitted assembly after semantic rejection"
+        )
+    return result.stderr
+
+
+def run_semantic_convergence(
+    stage_zero: pathlib.Path,
+    stage_two: pathlib.Path,
+    stage_three: pathlib.Path,
+    assembler: pathlib.Path,
+    linker: pathlib.Path,
+    read_elf: str,
+    runner: list[str],
+    source_root: pathlib.Path,
+    work_dir: pathlib.Path,
+) -> None:
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    work_dir.mkdir(parents=True)
+    generated_root = work_dir / "sources"
+
+    execution_cases = (
+        *fixed_execution_cases(),
+        *generated_execution_cases(),
+    )
+    for case in execution_cases:
+        sources = materialize_convergence_units(
+            case.name,
+            case.units,
+            source_root,
+            generated_root,
+        )
+        case_root = work_dir / "execution" / case.name
+        run_stage_zero_execution_case(
+            case,
+            stage_zero,
+            linker,
+            runner,
+            sources,
+            case_root,
+        )
+        stage_two_assembly = run_self_hosted_execution_case(
+            case,
+            "stage-two",
+            stage_two,
+            assembler,
+            linker,
+            read_elf,
+            runner,
+            sources,
+            case_root,
+        )
+        stage_three_assembly = run_self_hosted_execution_case(
+            case,
+            "stage-three",
+            stage_three,
+            assembler,
+            linker,
+            read_elf,
+            runner,
+            sources,
+            case_root,
+        )
+        compare_files(
+            stage_two_assembly,
+            stage_three_assembly,
+            f"{case.name} semantic convergence assembly",
+        )
+
+        if case.verify_reversed_order:
+            reversed_sources = list(reversed(sources))
+            run_stage_zero_execution_case(
+                case,
+                stage_zero,
+                linker,
+                runner,
+                reversed_sources,
+                case_root,
+                "-reversed",
+            )
+            reversed_assembly = run_self_hosted_execution_case(
+                case,
+                "stage-two-reversed",
+                stage_two,
+                assembler,
+                linker,
+                read_elf,
+                runner,
+                reversed_sources,
+                case_root,
+            )
+            compare_files(
+                stage_two_assembly,
+                reversed_assembly,
+                f"{case.name} source-order-independent assembly",
+            )
+
+    for case in rejection_cases():
+        sources = materialize_convergence_units(
+            case.name,
+            case.units,
+            source_root,
+            generated_root,
+        )
+        run_stage_zero_rejection_case(case, stage_zero, sources)
+        stage_two_diagnostic = run_self_hosted_rejection_case(
+            case,
+            "stage-two",
+            stage_two,
+            runner,
+            sources,
+            work_dir / "rejection",
+        )
+        stage_three_diagnostic = run_self_hosted_rejection_case(
+            case,
+            "stage-three",
+            stage_three,
+            runner,
+            sources,
+            work_dir / "rejection",
+        )
+        if stage_two_diagnostic != stage_three_diagnostic:
+            raise AssertionError(
+                f"{case.name} diagnostic differs between stage two "
+                "and stage three"
+            )
+
+
 def positive_float_fraction(
     floating_format: BinaryFloatFormat,
     bits: int,
@@ -1189,6 +1484,18 @@ def main() -> int:
         raise AssertionError(
             "stage-two and stage-three compilers disagree on probe assembly"
         )
+
+    run_semantic_convergence(
+        compiler,
+        stage_two.compiler,
+        stage_three.compiler,
+        assembler,
+        linker,
+        read_elf,
+        runner,
+        source_root,
+        work_dir / "semantic-convergence",
+    )
 
     floating_root = work_dir / "floating"
     floating_root.mkdir(parents=True, exist_ok=True)

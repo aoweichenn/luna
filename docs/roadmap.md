@@ -77,7 +77,9 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] exact subnormal, midpoint, ties-to-even, underflow and overflow handling
 - [x] deterministic random and boundary differential execution across stage
   0, stage 2 and stage 3
-- [ ] continue closing any remaining stage-0/self-host semantic differences
+- [x] close stage-0/self-host semantic differences with exhaustive public
+  diagnostic coverage, deterministic combination programs and source-order
+  reversal
 - [x] harden malformed-input and resource-limit behavior across the complete
   self-hosted pipeline
 

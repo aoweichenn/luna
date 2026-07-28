@@ -96,15 +96,22 @@ and dynamic-loader state.
 6. an additional recursive-program probe compiled independently by stage 2
    and stage 3, project-assembled, statically linked and executed with status
    42;
-7. 117 exact-rational binary32/binary64 cases generated independently from
+7. 23 fixed semantic execution cases and 32 fixed-seed generated combination
+   cases compiled and executed through stage 0, stage 2 and stage 3, with
+   byte-identical stage-2/stage-3 assembly;
+8. reversed-order compilation of a complete interface/implementation import
+   graph, requiring identical self-hosted assembly and execution;
+9. one stage-0 rejection plus exact stage-2/stage-3 diagnostic agreement for
+   every public semantic diagnostic kind from 1 through 50;
+10. 117 exact-rational binary32/binary64 cases generated independently from
    IEEE encodings, covering deterministic random adjacent-value midpoints,
    ties-to-even, both sides of each midpoint, subnormal/normal and binade
    boundaries, exact extrema, huge exponents and more than 1200 significant
    digits;
-8. exact boundary and one-over tests for source bytes, total source bytes,
+11. exact boundary and one-over tests for source bytes, total source bytes,
    token length, token count, frontend and semantic diagnostic counts, parser
    nesting and semantic type-layout depth;
-9. execution of that floating-point probe through stage 0, stage 2 and stage
+12. execution of that floating-point probe through stage 0, stage 2 and stage
    3, plus byte equality of stage-2/stage-3 output and stable rejection of the
    maximum-finite/infinity midpoint for both widths.
 
