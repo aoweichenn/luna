@@ -417,6 +417,14 @@ def compare_stages(
     )
 
 
+def padded_module(name: str, size: int) -> bytes:
+    prefix = f"module {name};\n/*".encode("ascii")
+    suffix = b"*/"
+    if size < len(prefix) + len(suffix):
+        raise AssertionError("padded module size is too small")
+    return prefix + b"x" * (size - len(prefix) - len(suffix)) + suffix
+
+
 def run_negative_driver_tests(
     stage_one: pathlib.Path,
     runner: list[str],
@@ -445,11 +453,193 @@ def run_negative_driver_tests(
     (malformed / "bootstrap-stage-unit-0.luna").write_bytes(
         b"module negative.malformed;\nfn main( -> i32 {\n"
     )
-    run(
+    malformed_result = run(
         [*runner, str(stage_one)],
         expected_code=2,
         cwd=malformed,
     )
+    if not malformed_result.stderr.startswith("frontend:parse:"):
+        raise AssertionError(
+            "self-hosted parser diagnostic lost its stable encoding: "
+            f"{malformed_result.stderr!r}"
+        )
+
+    lexical = work_dir / "negative-lexical"
+    prepare_invocation(lexical, True, [])
+    (lexical / "bootstrap-stage-unit-0.luna").write_bytes(
+        b"@module negative.lexical;\nfn main() -> i32 { return 42; }\n"
+    )
+    lexical_result = run(
+        [*runner, str(stage_one)],
+        expected_code=2,
+        cwd=lexical,
+    )
+    if lexical_result.stderr != "frontend:lex:0:0:0\n":
+        raise AssertionError(
+            "self-hosted lexer diagnostic lost its stable encoding: "
+            f"{lexical_result.stderr!r}"
+        )
+
+    nesting = work_dir / "negative-nesting-limit"
+    prepare_invocation(nesting, True, [])
+    (nesting / "bootstrap-stage-unit-0.luna").write_bytes(
+        b"@module negative.nesting;\nfn main() -> i32 { return "
+        + b"(" * 300
+        + b"42"
+        + b")" * 300
+        + b"; }\n"
+    )
+    nesting_result = run(
+        [*runner, str(stage_one)],
+        expected_code=8,
+        cwd=nesting,
+    )
+    if not nesting_result.stderr.startswith("frontend:parse:12:"):
+        raise AssertionError(
+            "parser nesting limit lost its stable encoding: "
+            f"{nesting_result.stderr!r}"
+        )
+
+    token_length = work_dir / "negative-token-length"
+    prepare_invocation(token_length, False, [])
+    (token_length / "bootstrap-stage-unit-0.luna").write_bytes(
+        b"module " + b"a" * 65537 + b";\n"
+    )
+    token_length_result = run(
+        [*runner, str(stage_one)],
+        expected_code=8,
+        cwd=token_length,
+    )
+    if token_length_result.stderr != "frontend:lex:13:7:65536\n":
+        raise AssertionError(
+            "lexer token-length limit lost its stable encoding: "
+            f"{token_length_result.stderr!r}"
+        )
+
+    token_count = work_dir / "negative-token-count"
+    prepare_invocation(token_count, False, [])
+    (token_count / "bootstrap-stage-unit-0.luna").write_bytes(
+        b"module negative.tokens;\n" + b";" * 131072
+    )
+    token_count_result = run(
+        [*runner, str(stage_one)],
+        expected_code=8,
+        cwd=token_count,
+    )
+    if not (
+        token_count_result.stderr.startswith("frontend:lex:13:")
+        and token_count_result.stderr.endswith(":131072\n")
+    ):
+        raise AssertionError(
+            "lexer token-count limit lost its stable encoding: "
+            f"{token_count_result.stderr!r}"
+        )
+
+    diagnostics = work_dir / "negative-diagnostic-count"
+    prepare_invocation(diagnostics, False, [])
+    (diagnostics / "bootstrap-stage-unit-0.luna").write_bytes(
+        b"module negative.diagnostics;\n" + b"@" * 4097
+    )
+    diagnostics_result = run(
+        [*runner, str(stage_one)],
+        expected_code=8,
+        cwd=diagnostics,
+    )
+    if diagnostics_result.stderr != "resource:frontend:0:4096\n":
+        raise AssertionError(
+            "frontend diagnostic limit lost its stable encoding: "
+            f"{diagnostics_result.stderr!r}"
+        )
+
+    source_limit = work_dir / "negative-source-limit"
+    prepare_invocation(source_limit, False, [])
+    (source_limit / "bootstrap-stage-unit-0.luna").write_bytes(
+        b"x" * (8388608 + 1)
+    )
+    source_limit_result = run(
+        [*runner, str(stage_one)],
+        expected_code=8,
+        timeout=300,
+        cwd=source_limit,
+    )
+    if source_limit_result.stderr != "resource:source:0:8388608\n":
+        raise AssertionError(
+            "source-size limit lost its stable encoding: "
+            f"{source_limit_result.stderr!r}"
+        )
+
+    total_limit = work_dir / "negative-total-source-limit"
+    prepare_invocation(total_limit, False, [])
+    for index in range(5):
+        (total_limit / f"bootstrap-stage-unit-{index}.luna").write_bytes(
+            padded_module(f"negative.total_{index}", 8388608)
+        )
+    total_limit_result = run(
+        [*runner, str(stage_one)],
+        expected_code=8,
+        timeout=300,
+        cwd=total_limit,
+    )
+    if total_limit_result.stderr != "resource:total:4:33554432\n":
+        raise AssertionError(
+            "total source-size limit lost its stable encoding: "
+            f"{total_limit_result.stderr!r}"
+        )
+
+    type_depth = work_dir / "negative-type-depth"
+    prepare_invocation(type_depth, False, [])
+    type_lines = ["module negative.type_depth;"]
+    type_lines.extend(
+        f"struct Type{index} {{ value: Type{index + 1}; }}"
+        for index in range(256)
+    )
+    type_lines.append("struct Type256 { value: i32; }")
+    (type_depth / "bootstrap-stage-unit-0.luna").write_text(
+        "\n".join(type_lines) + "\n",
+        encoding="ascii",
+    )
+    type_depth_result = run(
+        [*runner, str(stage_one)],
+        expected_code=115,
+        cwd=type_depth,
+    )
+    if not (
+        type_depth_result.stderr.startswith("semantic:51:0:")
+        and type_depth_result.stderr.endswith(":256\n")
+    ):
+        raise AssertionError(
+            "semantic type-depth limit lost its stable encoding: "
+            f"{type_depth_result.stderr!r}"
+        )
+
+    semantic_diagnostics = work_dir / "negative-semantic-diagnostics"
+    prepare_invocation(semantic_diagnostics, False, [])
+    semantic_diagnostic_lines = [
+        "module negative.semantic_diagnostics;",
+        "struct Same { value: i32; }",
+    ]
+    semantic_diagnostic_lines.extend(
+        "struct Same { value: i32; }" for _ in range(4097)
+    )
+    (
+        semantic_diagnostics / "bootstrap-stage-unit-0.luna"
+    ).write_text(
+        "\n".join(semantic_diagnostic_lines) + "\n",
+        encoding="ascii",
+    )
+    semantic_diagnostics_result = run(
+        [*runner, str(stage_one)],
+        expected_code=8,
+        cwd=semantic_diagnostics,
+    )
+    if (
+        semantic_diagnostics_result.stderr
+        != "resource:semantic:0:4096\n"
+    ):
+        raise AssertionError(
+            "semantic diagnostic limit lost its stable encoding: "
+            f"{semantic_diagnostics_result.stderr!r}"
+        )
 
     semantic = work_dir / "negative-semantic"
     prepare_invocation(semantic, True, [])

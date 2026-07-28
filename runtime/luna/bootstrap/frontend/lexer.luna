@@ -2,6 +2,9 @@ module luna.bootstrap.frontend.lexer;
 
 enum BootstrapLexerLimit: usize {
     maximum_size = 18446744073709551615,
+    maximum_tokens = 131072,
+    maximum_diagnostics = 4096,
+    maximum_token_length = 65536,
 }
 
 struct BootstrapTokenBufferResult {
@@ -56,7 +59,9 @@ fn bootstrap_token_buffer_is_valid(
     buffer: BootstrapTokenBuffer
 ) -> bool {
     if (!std_byte_buffer_is_valid(buffer.storage) ||
-        buffer.storage.length % sizeof(BootstrapToken) != 0) {
+        buffer.storage.length % sizeof(BootstrapToken) != 0 ||
+        buffer.count >
+            BootstrapLexerLimit.maximum_tokens as usize) {
         return false;
     }
     return buffer.count ==
@@ -73,8 +78,8 @@ fn bootstrap_token_buffer_add(
             error = RuntimeError.invalid_argument,
         };
     }
-    if (buffer.count ==
-        BootstrapLexerLimit.maximum_size as usize) {
+    if (buffer.count >=
+        BootstrapLexerLimit.maximum_tokens as usize) {
         return {
             buffer = buffer,
             error = RuntimeError.out_of_memory,
@@ -139,7 +144,9 @@ fn bootstrap_diagnostic_buffer_is_valid(
     buffer: BootstrapDiagnosticBuffer
 ) -> bool {
     if (!std_byte_buffer_is_valid(buffer.storage) ||
-        buffer.storage.length % sizeof(BootstrapDiagnostic) != 0) {
+        buffer.storage.length % sizeof(BootstrapDiagnostic) != 0 ||
+        buffer.count >
+            BootstrapLexerLimit.maximum_diagnostics as usize) {
         return false;
     }
     return buffer.count ==
@@ -156,8 +163,8 @@ fn bootstrap_diagnostic_buffer_add(
             error = RuntimeError.invalid_argument,
         };
     }
-    if (buffer.count ==
-        BootstrapLexerLimit.maximum_size as usize) {
+    if (buffer.count >=
+        BootstrapLexerLimit.maximum_diagnostics as usize) {
         return {
             buffer = buffer,
             error = RuntimeError.out_of_memory,
@@ -272,7 +279,8 @@ fn bootstrap_lexer_span(
 fn bootstrap_lexer_add_diagnostic(
     state: *BootstrapLexerState,
     kind: BootstrapDiagnosticKind,
-    span: BootstrapSourceSpan
+    span: BootstrapSourceSpan,
+    detail: usize
 ) -> bool {
     if (state->error != RuntimeError.none) {
         return false;
@@ -285,7 +293,7 @@ fn bootstrap_lexer_add_diagnostic(
                 span = span,
                 expected = BootstrapTokenKind.invalid,
                 found = BootstrapTokenKind.invalid,
-                detail = 0,
+                detail = detail,
             }
         );
     state->diagnostics = added.buffer;
@@ -303,22 +311,39 @@ fn bootstrap_lexer_add_token(
     if (state->error != RuntimeError.none) {
         return false;
     }
+    let span: BootstrapSourceSpan = bootstrap_lexer_span(
+        state,
+        start_offset,
+        start_line,
+        start_column
+    );
+    let token_kind: BootstrapTokenKind =
+        span.length >
+            BootstrapLexerLimit.maximum_token_length as usize ?
+            BootstrapTokenKind.invalid : kind;
     let added: BootstrapTokenBufferResult =
         bootstrap_token_buffer_add(
             state->tokens,
             {
-                kind = kind,
-                span = bootstrap_lexer_span(
-                    state,
-                    start_offset,
-                    start_line,
-                    start_column
-                ),
+                kind = token_kind,
+                span = span,
             }
         );
     state->tokens = added.buffer;
     state->error = added.error;
-    return added.error == RuntimeError.none;
+    if (added.error != RuntimeError.none) {
+        return false;
+    }
+    if (span.length >
+        BootstrapLexerLimit.maximum_token_length as usize) {
+        return bootstrap_lexer_add_diagnostic(
+            state,
+            BootstrapDiagnosticKind.resource_limit,
+            span,
+            BootstrapLexerLimit.maximum_token_length as usize
+        );
+    }
+    return true;
 }
 
 fn bootstrap_is_ascii_letter(byte: u8) -> bool {
@@ -549,7 +574,8 @@ fn bootstrap_lexer_skip_trivia(
                     start_offset,
                     start_line,
                     start_column
-                )
+                ),
+                0
             );
             return;
         }
@@ -695,7 +721,8 @@ fn bootstrap_lexer_scan_quoted(
                 start_offset,
                 start_line,
                 start_column
-            )
+            ),
+            0
         );
     }
     return true;
@@ -719,6 +746,33 @@ fn bootstrap_lexer_scan_token(
             start_offset,
             start_line,
             start_column
+        );
+    }
+    if (state->tokens.count >=
+        (BootstrapLexerLimit.maximum_tokens as usize) - 1) {
+        let span: BootstrapSourceSpan = bootstrap_lexer_span(
+            state,
+            start_offset,
+            start_line,
+            start_column
+        );
+        if (!bootstrap_lexer_add_diagnostic(
+                state,
+                BootstrapDiagnosticKind.resource_limit,
+                span,
+                BootstrapLexerLimit.maximum_tokens as usize
+            )) {
+            return false;
+        }
+        while (!bootstrap_lexer_at_end(state)) {
+            bootstrap_lexer_advance(state);
+        }
+        return bootstrap_lexer_add_token(
+            state,
+            BootstrapTokenKind.end,
+            state->offset,
+            state->line,
+            state->column
         );
     }
 
@@ -898,7 +952,8 @@ fn bootstrap_lexer_scan_token(
                 start_offset,
                 start_line,
                 start_column
-            )
+            ),
+            0
         );
     }
     return true;

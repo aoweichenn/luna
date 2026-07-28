@@ -17,6 +17,10 @@ import luna.bootstrap.backend.x86_64.codegen;
 
 enum BootstrapStageLimit: usize {
     maximum_units = 64,
+    maximum_source_bytes = 8388608,
+    maximum_total_source_bytes = 33554432,
+    maximum_frontend_diagnostics = 4096,
+    maximum_semantic_diagnostics = 4096,
 }
 
 enum BootstrapStageStatus: i32 {
@@ -27,6 +31,7 @@ enum BootstrapStageStatus: i32 {
     backend_error = 5,
     output_error = 6,
     release_error = 7,
+    resource_limit = 8,
     semantic_diagnostic_base = 64,
     success = 42,
 }
@@ -100,7 +105,7 @@ fn bootstrap_stage_read_mode(
         return path.error;
     }
     let bytes: StdByteBufferResult =
-        std_io_read_file(path.path);
+        std_io_read_file_limited(path.path, 2);
     let path_error: RuntimeError =
         std_path_release(path.path);
     if (bytes.error != RuntimeError.none) {
@@ -176,7 +181,10 @@ fn bootstrap_stage_source_load(
         return path.error;
     }
     let source: StdByteBufferResult =
-        std_io_read_file(path.path);
+        std_io_read_file_limited(
+            path.path,
+            BootstrapStageLimit.maximum_source_bytes as usize
+        );
     let path_error: RuntimeError =
         std_path_release(path.path);
     if (source.error != RuntimeError.none) {
@@ -196,17 +204,203 @@ fn bootstrap_stage_source_load(
     }
     let frontend: BootstrapFrontendResult =
         bootstrap_frontend_parse(view.view);
-    if (frontend.error != RuntimeError.none ||
-        frontend.lex.diagnostics.count != 0 ||
-        frontend.parse.diagnostics.count != 0) {
-        bootstrap_frontend_result_release(frontend);
-        std_byte_buffer_release(source.buffer);
-        return frontend.error == RuntimeError.none ?
-            RuntimeError.invalid_argument : frontend.error;
-    }
     *result_source = source.buffer;
     *result_frontend = frontend;
     return RuntimeError.none;
+}
+
+fn bootstrap_stage_frontend_diagnostic(
+    frontend: BootstrapFrontendResult,
+    lexical: *bool
+) -> BootstrapDiagnosticResult {
+    if (lexical == null) {
+        return {
+            diagnostic = {},
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    var index: usize = 0;
+    while (index < frontend.lex.diagnostics.count) {
+        let diagnostic: BootstrapDiagnosticResult =
+            bootstrap_diagnostic_buffer_get(
+                frontend.lex.diagnostics,
+                index
+            );
+        if (diagnostic.error != RuntimeError.none ||
+            diagnostic.diagnostic.kind ==
+                BootstrapDiagnosticKind.nesting_limit ||
+            diagnostic.diagnostic.kind ==
+                BootstrapDiagnosticKind.resource_limit) {
+            *lexical = true;
+            return diagnostic;
+        }
+        index += 1;
+    }
+    index = 0;
+    while (index < frontend.parse.diagnostics.count) {
+        let diagnostic: BootstrapDiagnosticResult =
+            bootstrap_diagnostic_buffer_get(
+                frontend.parse.diagnostics,
+                index
+            );
+        if (diagnostic.error != RuntimeError.none ||
+            diagnostic.diagnostic.kind ==
+                BootstrapDiagnosticKind.nesting_limit ||
+            diagnostic.diagnostic.kind ==
+                BootstrapDiagnosticKind.resource_limit) {
+            *lexical = false;
+            return diagnostic;
+        }
+        index += 1;
+    }
+    if (frontend.lex.diagnostics.count != 0) {
+        *lexical = true;
+        return bootstrap_diagnostic_buffer_get(
+            frontend.lex.diagnostics,
+            0
+        );
+    }
+    if (frontend.parse.diagnostics.count != 0) {
+        *lexical = false;
+        return bootstrap_diagnostic_buffer_get(
+            frontend.parse.diagnostics,
+            0
+        );
+    }
+    return {
+        diagnostic = {},
+        error = RuntimeError.not_found,
+    };
+}
+
+fn bootstrap_stage_frontend_status(
+    frontend: BootstrapFrontendResult
+) -> i32 {
+    if (frontend.error == RuntimeError.out_of_memory) {
+        return BootstrapStageStatus.resource_limit as i32;
+    }
+    var lexical: bool = false;
+    let result: BootstrapDiagnosticResult =
+        bootstrap_stage_frontend_diagnostic(
+            frontend,
+            &lexical
+        );
+    if (result.error != RuntimeError.none) {
+        return BootstrapStageStatus.input_error as i32;
+    }
+    if (result.diagnostic.kind ==
+            BootstrapDiagnosticKind.nesting_limit ||
+        result.diagnostic.kind ==
+            BootstrapDiagnosticKind.resource_limit) {
+        return BootstrapStageStatus.resource_limit as i32;
+    }
+    return BootstrapStageStatus.input_error as i32;
+}
+
+fn bootstrap_stage_print_text(
+    text: *BootstrapX8664Text
+) -> RuntimeError {
+    if (text == null) {
+        return RuntimeError.invalid_argument;
+    }
+    let bytes: StdByteBufferResult =
+        bootstrap_x86_64_text_take(text);
+    if (bytes.error != RuntimeError.none) {
+        bootstrap_x86_64_text_release(*text);
+        return bytes.error;
+    }
+    let view: StdTextViewResult = std_text_view(
+        bytes.buffer.data as *const u8,
+        bytes.buffer.length
+    );
+    var error: RuntimeError = view.error;
+    if (error == RuntimeError.none) {
+        error = std_io_print_error(view.view);
+    }
+    let release_error: RuntimeError =
+        std_byte_buffer_release(bytes.buffer);
+    return error == RuntimeError.none ? release_error : error;
+}
+
+fn bootstrap_stage_report_frontend(
+    frontend: BootstrapFrontendResult
+) -> RuntimeError {
+    var lexical: bool = false;
+    let result: BootstrapDiagnosticResult =
+        bootstrap_stage_frontend_diagnostic(
+            frontend,
+            &lexical
+        );
+    if (result.error == RuntimeError.not_found) {
+        return RuntimeError.none;
+    }
+    if (result.error != RuntimeError.none) {
+        return result.error;
+    }
+    var text: BootstrapX8664Text =
+        bootstrap_x86_64_text_empty();
+    if (!bootstrap_x86_64_text_append_c_string(
+            &text,
+            lexical ? "frontend:lex:" : "frontend:parse:",
+            32
+        ) ||
+        !bootstrap_x86_64_text_append_usize(
+            &text,
+            result.diagnostic.kind as usize
+        ) ||
+        !bootstrap_x86_64_text_append_c_string(&text, ":", 2) ||
+        !bootstrap_x86_64_text_append_usize(
+            &text,
+            result.diagnostic.span.offset
+        ) ||
+        !bootstrap_x86_64_text_append_c_string(&text, ":", 2) ||
+        !bootstrap_x86_64_text_append_usize(
+            &text,
+            result.diagnostic.detail
+        ) ||
+        !bootstrap_x86_64_text_append_c_string(&text, "\n", 2)) {
+        let error: RuntimeError =
+            text.error == RuntimeError.none ?
+                RuntimeError.invalid_argument : text.error;
+        bootstrap_x86_64_text_release(text);
+        return error;
+    }
+    return bootstrap_stage_print_text(&text);
+}
+
+fn bootstrap_stage_report_resource(
+    label: *const u8,
+    label_maximum_length: usize,
+    unit_index: usize,
+    limit: usize
+) -> RuntimeError {
+    var text: BootstrapX8664Text =
+        bootstrap_x86_64_text_empty();
+    if (!bootstrap_x86_64_text_append_c_string(
+            &text,
+            "resource:",
+            16
+        ) ||
+        !bootstrap_x86_64_text_append_c_string(
+            &text,
+            label,
+            label_maximum_length
+        ) ||
+        !bootstrap_x86_64_text_append_c_string(&text, ":", 2) ||
+        !bootstrap_x86_64_text_append_usize(
+            &text,
+            unit_index
+        ) ||
+        !bootstrap_x86_64_text_append_c_string(&text, ":", 2) ||
+        !bootstrap_x86_64_text_append_usize(&text, limit) ||
+        !bootstrap_x86_64_text_append_c_string(&text, "\n", 2)) {
+        let error: RuntimeError =
+            text.error == RuntimeError.none ?
+                RuntimeError.invalid_argument : text.error;
+        bootstrap_x86_64_text_release(text);
+        return error;
+    }
+    return bootstrap_stage_print_text(&text);
 }
 
 fn bootstrap_stage_input_add(
@@ -235,6 +429,9 @@ fn bootstrap_stage_input_add(
 fn bootstrap_stage_semantic_status(
     semantic: BootstrapSemanticResult
 ) -> i32 {
+    if (semantic.error == RuntimeError.out_of_memory) {
+        return BootstrapStageStatus.resource_limit as i32;
+    }
     if (semantic.diagnostics.count == 0) {
         return BootstrapStageStatus.semantic_error as i32;
     }
@@ -326,6 +523,7 @@ fn main() -> i32 {
     var sources: [64]StdByteBuffer = {};
     var frontends: [64]BootstrapFrontendResult = {};
     var source_count: usize = 0;
+    var total_source_bytes: usize = 0;
     while (source_count <
         BootstrapStageLimit.maximum_units as usize) {
         let error: RuntimeError =
@@ -343,9 +541,73 @@ fn main() -> i32 {
                 &frontends[0],
                 source_count
             );
+            if (error == RuntimeError.out_of_memory) {
+                bootstrap_stage_report_resource(
+                    "source",
+                    8,
+                    source_count,
+                    BootstrapStageLimit.maximum_source_bytes as usize
+                );
+                return BootstrapStageStatus.resource_limit as i32;
+            }
             return BootstrapStageStatus.input_error as i32;
         }
         source_count += 1;
+        let source_length: usize =
+            sources[source_count - 1].length;
+        if (source_length >
+            (BootstrapStageLimit.maximum_total_source_bytes as usize) -
+                total_source_bytes) {
+            bootstrap_stage_report_resource(
+                "total",
+                8,
+                source_count - 1,
+                BootstrapStageLimit.maximum_total_source_bytes as usize
+            );
+            bootstrap_stage_sources_release(
+                &sources[0],
+                &frontends[0],
+                source_count
+            );
+            return BootstrapStageStatus.resource_limit as i32;
+        }
+        total_source_bytes += source_length;
+        let frontend: BootstrapFrontendResult =
+            frontends[source_count - 1];
+        if (frontend.error != RuntimeError.none ||
+            frontend.lex.diagnostics.count != 0 ||
+            frontend.parse.diagnostics.count != 0) {
+            let status: i32 =
+                bootstrap_stage_frontend_status(frontend);
+            var lexical: bool = false;
+            let diagnostic: BootstrapDiagnosticResult =
+                bootstrap_stage_frontend_diagnostic(
+                    frontend,
+                    &lexical
+                );
+            let has_resource_diagnostic: bool =
+                diagnostic.error == RuntimeError.none &&
+                diagnostic.diagnostic.kind ==
+                    BootstrapDiagnosticKind.resource_limit;
+            if (frontend.error == RuntimeError.out_of_memory &&
+                !has_resource_diagnostic) {
+                bootstrap_stage_report_resource(
+                    "frontend",
+                    16,
+                    source_count - 1,
+                    BootstrapStageLimit
+                        .maximum_frontend_diagnostics as usize
+                );
+            } else {
+                bootstrap_stage_report_frontend(frontend);
+            }
+            bootstrap_stage_sources_release(
+                &sources[0],
+                &frontends[0],
+                source_count
+            );
+            return status;
+        }
     }
     if (source_count == 0) {
         return BootstrapStageStatus.input_error as i32;
@@ -404,7 +666,17 @@ fn main() -> i32 {
     if (!bootstrap_semantic_result_is_success(semantic)) {
         let status: i32 =
             bootstrap_stage_semantic_status(semantic);
-        bootstrap_stage_report_semantic(semantic);
+        if (semantic.error == RuntimeError.out_of_memory) {
+            bootstrap_stage_report_resource(
+                "semantic",
+                16,
+                0,
+                BootstrapStageLimit
+                    .maximum_semantic_diagnostics as usize
+            );
+        } else {
+            bootstrap_stage_report_semantic(semantic);
+        }
         bootstrap_semantic_result_release(semantic);
         bootstrap_semantic_input_release(input);
         bootstrap_stage_sources_release(
@@ -426,6 +698,10 @@ fn main() -> i32 {
             semantic.ir,
             semantic.types
         )) {
+        let backend_status: i32 =
+            backend.error == RuntimeError.out_of_memory ?
+                BootstrapStageStatus.resource_limit as i32 :
+                BootstrapStageStatus.backend_error as i32;
         bootstrap_x86_64_backend_release(backend);
         bootstrap_semantic_result_release(semantic);
         bootstrap_semantic_input_release(input);
@@ -434,7 +710,7 @@ fn main() -> i32 {
             &frontends[0],
             source_count
         );
-        return BootstrapStageStatus.backend_error as i32;
+        return backend_status;
     }
 
     let output_path: StdPathResult =

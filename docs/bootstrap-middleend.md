@@ -167,6 +167,15 @@ kind, unit, primary span, optional related unit/span and numeric detail.
 Allocation or invariant failures use `RuntimeError` and never masquerade as a
 language diagnostic.
 
+Recursive semantic work has explicit stack contracts. Import traversal and
+reachability are limited to 256 module edges, by-value type-layout resolution
+to 256 types and lexical lowering to 256 active scopes. Semantic input accepts
+at most 2048 interface/implementation units and retains at most 4096
+diagnostics. Exceeding a contract produces `resource_limit` or a deterministic
+resource failure before work continues. A failed scope entry returns the
+absent-ID sentinel, so callers cannot accidentally leave a scope that was
+never entered or corrupt the active-scope count.
+
 ## Source-module compilation
 
 Unit zero identifies the root module for a semantic invocation. In library
@@ -196,8 +205,8 @@ The stage is guarded by:
    CFG predecessor counts, proving that the independent verifiers reject
    damage and accept the restored representation.
 5. Exact negative diagnostics for recursive types, unknown types, duplicate
-   locals, immutable writes, mismatches, invalid casts, invalid control flow
-   and missing returns.
+   locals, immutable writes, mismatches, invalid casts, invalid control flow,
+   missing returns and by-value type-depth exhaustion.
 6. Fixed-seed valid and invalid random semantic programs, also registered as
    the semantic fuzz gate.
 7. Two byte-for-byte reproductions of every middle-end `.lmi` and `.o`, ELF

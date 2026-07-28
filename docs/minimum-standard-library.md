@@ -150,6 +150,13 @@ returns an empty buffer. `std_io_write_file` gives a write error precedence
 over a later close error. `std_io_print` and `std_io_print_error` accept only
 validated text and borrow the standard descriptors.
 
+`std_io_read_to_end_limited` and `std_io_read_file_limited` add an explicit
+maximum byte length without trusting the input file size. Reaching the limit
+causes one bounded probe read: EOF at that point succeeds, while any excess
+byte reports `out_of_memory`. A caller-supplied buffer with spare capacity
+still cannot read past the declared maximum. The file helper releases partial
+storage on an over-limit result just like any other read failure.
+
 ## Deliberate limits
 
 This stage does not add formatting, generic containers, typed allocation,
@@ -169,7 +176,8 @@ The standard library is checked at these independent boundaries:
 2. Integration tests regenerate every `.lmi` and `.o` twice, compare them
    byte-for-byte with the sysroot, inspect symbols, require every module object
    at link time and execute file, allocation, buffer, UTF-8, path and I/O
-   behavior natively or through QEMU.
+   behavior natively or through QEMU, including exact-limit and one-byte-over
+   reads with both empty and pre-reserved buffers.
 3. A fixed-seed property test performs thousands of buffer growth and
    self-referential append operations and compares the result with an
    independent fixed-array model.

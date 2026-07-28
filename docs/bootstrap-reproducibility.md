@@ -35,9 +35,16 @@ bootstrap-stage-unit-1.luna
 
 The mode file is exactly `E\n` for an executable or `L\n` for a library.
 Source names are contiguous and ordered, with unit zero defining the module
-being compiled. At most 64 units are accepted. Successful compilation writes
-`bootstrap-stage-output.s` in the project-owned closed x86-64 assembly
-dialect and exits with status 42.
+being compiled. At most 64 units are accepted, each source is capped at
+8388608 bytes and their combined size is capped at 33554432 bytes. Successful
+compilation writes `bootstrap-stage-output.s` in the project-owned closed
+x86-64 assembly dialect and exits with status 42.
+
+Resource exhaustion exits with status 8. Frontend failures use the stable
+`frontend:<lex|parse>:<kind>:<offset>:<detail>` encoding. Driver-owned caps
+use `resource:<source|total|frontend|semantic>:<unit>:<limit>`. Ordinary
+semantic diagnostics retain their existing
+`semantic:<kind>:<unit>:<offset>:<detail>` encoding.
 
 The protocol makes every input explicit and avoids host argument, environment
 and library dependencies. It is a narrow bootstrap interface, not the future
@@ -79,8 +86,8 @@ and dynamic-loader state.
 `integration.bootstrap_reproducibility` performs:
 
 1. stage-1 driver construction through stage 0;
-2. missing-mode, missing-input, malformed-source, semantic-error and
-   65-unit-limit negative tests with stable exit statuses;
+2. missing-mode, missing-input, lexical, malformed-source, semantic-error and
+   65-unit-limit negative tests with stable exit statuses and encodings;
 3. independent compilation and assembly of all 15 runtime, standard-library,
    frontend, middle-end and x86-64 backend modules;
 4. stage-2 and stage-3 static compiler links;
@@ -94,7 +101,10 @@ and dynamic-loader state.
    ties-to-even, both sides of each midpoint, subnormal/normal and binade
    boundaries, exact extrema, huge exponents and more than 1200 significant
    digits;
-8. execution of that floating-point probe through stage 0, stage 2 and stage
+8. exact boundary and one-over tests for source bytes, total source bytes,
+   token length, token count, frontend and semantic diagnostic counts, parser
+   nesting and semantic type-layout depth;
+9. execution of that floating-point probe through stage 0, stage 2 and stage
    3, plus byte equality of stage-2/stage-3 output and stable rejection of the
    maximum-finite/infinity midpoint for both widths.
 

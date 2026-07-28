@@ -47,6 +47,21 @@ An unexpected byte or unterminated quoted literal produces an `invalid` token
 and a structured diagnostic. Invalid UTF-8, an embedded NUL, malformed public
 buffers and allocation failures use `RuntimeError`.
 
+The public buffers and lexer enforce deterministic resource contracts:
+
+| resource | maximum |
+| --- | ---: |
+| tokens, including the final `end` token | 131072 |
+| bytes in one token | 65536 |
+| lexical or parser diagnostics in one buffer | 4096 |
+| syntax-tree nodes | 262144 |
+
+An overlong token becomes `invalid` and carries a `resource_limit` diagnostic.
+When the token budget is exhausted, the lexer consumes the remaining borrowed
+source without allocating, emits the diagnostic and still appends one valid
+end token at the true source length. Buffer validators reject forged counts
+above these limits.
+
 ## Indexed syntax tree
 
 The parser produces a concrete, lossless-enough structural tree for the next
@@ -69,7 +84,9 @@ without retaining a pointer to the token buffer. `bootstrap_syntax_tree_is_valid
 checks storage shape, enum and flag bounds, span arithmetic, token indices,
 parent/child agreement, sibling-list lengths, unique ownership, root
 identity and reachability. The parser refuses more than 256 nested type or
-expression contexts so malformed input cannot exhaust the target stack.
+expression contexts so malformed input cannot exhaust the target stack. Node
+or diagnostic exhaustion preserves a structured resource diagnostic before
+propagating a runtime allocation-style failure.
 
 The representation is deliberately not the typed AST. It contains syntax and
 source identity only. Name binding, canonical types, layouts, constant values
@@ -113,7 +130,8 @@ The frontend is checked at independent boundaries:
    verified typed IR, assembly and object emission, checks strong-type
    rejection and enforces the freestanding source boundary.
 2. A target executable verifies exact token contracts, valid full-grammar
-   parsing, lexical recovery, syntax recovery and release behavior.
+   parsing, lexical recovery, syntax recovery, release behavior and the
+   token-length, token-count and diagnostic-count boundaries.
 3. The same x86-64 executable parses every syntactically valid integration
    source, every Luna runtime/sysroot source including the frontend itself,
    64 fixed-seed generated programs and 66 fixed-seed malformed/recovery

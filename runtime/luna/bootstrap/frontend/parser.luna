@@ -3,6 +3,7 @@ module luna.bootstrap.frontend.parser;
 enum BootstrapParserLimit: usize {
     maximum_size = 18446744073709551615,
     maximum_nesting = 256,
+    maximum_nodes = 262144,
 }
 
 struct BootstrapParserState {
@@ -65,7 +66,9 @@ fn bootstrap_syntax_tree_storage_is_valid(
     tree: BootstrapSyntaxTree
 ) -> bool {
     if (!std_byte_buffer_is_valid(tree.storage) ||
-        tree.storage.length % sizeof(BootstrapSyntaxNode) != 0) {
+        tree.storage.length % sizeof(BootstrapSyntaxNode) != 0 ||
+        tree.count >
+            BootstrapParserLimit.maximum_nodes as usize) {
         return false;
     }
     return tree.count ==
@@ -331,13 +334,24 @@ fn bootstrap_parser_new_node(
     token_index: usize
 ) -> usize {
     let none: usize = bootstrap_syntax_no_index();
-    if (state->error != RuntimeError.none ||
-        !bootstrap_syntax_tree_storage_is_valid(state->tree) ||
-        state->tree.count ==
-            BootstrapParserLimit.maximum_size as usize) {
-        if (state->error == RuntimeError.none) {
-            state->error = RuntimeError.out_of_memory;
-        }
+    if (state->error != RuntimeError.none) {
+        return none;
+    }
+    if (!bootstrap_syntax_tree_storage_is_valid(state->tree)) {
+        state->error = RuntimeError.invalid_argument;
+        return none;
+    }
+    if (state->tree.count >=
+        BootstrapParserLimit.maximum_nodes as usize) {
+        bootstrap_parser_add_diagnostic(
+            state,
+            BootstrapDiagnosticKind.resource_limit,
+            span,
+            BootstrapTokenKind.invalid,
+            state->current.kind,
+            BootstrapParserLimit.maximum_nodes as usize
+        );
+        state->error = RuntimeError.out_of_memory;
         return none;
     }
     let node: BootstrapSyntaxNode = {

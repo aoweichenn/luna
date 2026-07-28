@@ -471,6 +471,11 @@ Invalid user input must produce a diagnostic and a non-zero exit code, never a
 crash or assertion. Internal invariants are checked by the IR verifier.
 Allocation and I/O failures are propagated explicitly.
 
+The self-hosted path additionally caps source bytes, aggregate source bytes,
+tokens, token length, diagnostics, syntax nodes, module/type/scope recursion
+and generated assembly text. Boundary failures have stable machine-readable
+diagnostics and are exercised at the exact limit and immediately above it.
+
 ## Testing
 
 The quality gate contains:

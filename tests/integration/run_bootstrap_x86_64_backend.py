@@ -395,6 +395,38 @@ def main() -> int:
             *(required_object(graph, key) for key in object_keys),
         ],
     )
+    text_resource_object = work_dir / "text-resource.o"
+    text_resource = work_dir / "text-resource"
+    compile_driver(
+        compiler,
+        source_root
+        / "tests"
+        / "integration"
+        / "cases"
+        / "bootstrap_x86_64_text_resource.luna",
+        text_resource_object,
+        [
+            graph[key].metadata
+            for key in (
+                "runtime",
+                "bytes",
+                "text",
+                "bootstrap_x86_64_text",
+            )
+        ],
+    )
+    link(
+        linker,
+        text_resource,
+        [
+            text_resource_object,
+            required_object(graph, "runtime"),
+            required_object(graph, "memory"),
+            required_object(graph, "bytes"),
+            required_object(graph, "text"),
+            required_object(graph, "bootstrap_x86_64_text"),
+        ],
+    )
     support_assembly = work_dir / "foreign-support.s"
     support_object = work_dir / "foreign-support.o"
     support_assembly.write_text(
@@ -432,6 +464,14 @@ def main() -> int:
         ]
     )
     runner = target_runner()
+    text_resource_result = run(
+        [*runner, str(text_resource)],
+        expected_code=42,
+        cwd=work_dir,
+        timeout=120,
+    )
+    if text_resource_result.stdout or text_resource_result.stderr:
+        raise AssertionError("x86-64 text resource test produced output")
     cases = [
         scalar_program(),
         aggregate_program(),

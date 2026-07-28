@@ -46,6 +46,12 @@ recompute the complete plan from Typed IR and compare the records byte for
 byte. Code generation never accepts a merely well-shaped but stale or damaged
 plan.
 
+Assembly construction is capped at 8388608 bytes. Both bulk append and
+single-byte push check the remaining budget before allocation or copying and
+preserve the existing text on failure. Exceeding the cap reports
+`RuntimeError.out_of_memory`; the stage driver classifies that result as a
+resource-limit failure.
+
 ## System V boundary
 
 The ABI implementation handles:
@@ -123,7 +129,9 @@ The stage is guarded by:
    calculated independently of the backend;
 6. project-assembler, LLVM-MC, ELF verification, static linking and
    no-output execution checks for every corpus member;
-7. two byte-for-byte reproductions of every backend `.lmi` and `.o`, plus
+7. a target-side exact-boundary append followed by a one-byte-over rejection
+   for the assembly text owner;
+8. two byte-for-byte reproductions of every backend `.lmi` and `.o`, plus
    unresolved-symbol and dynamic-loader exclusion checks.
 
 This completes the Luna x86-64 backend item in M4. Its output now closes the

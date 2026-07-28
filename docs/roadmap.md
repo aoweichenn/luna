@@ -78,7 +78,7 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] deterministic random and boundary differential execution across stage
   0, stage 2 and stage 3
 - [ ] continue closing any remaining stage-0/self-host semantic differences
-- [ ] harden malformed-input and resource-limit behavior across the complete
+- [x] harden malformed-input and resource-limit behavior across the complete
   self-hosted pipeline
 
 ## Explicitly deferred

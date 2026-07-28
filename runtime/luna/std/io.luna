@@ -39,7 +39,20 @@ fn std_io_read_to_end(
     file: RuntimeFile,
     buffer: StdByteBuffer
 ) -> StdByteBufferResult {
-    if (!std_byte_buffer_is_valid(buffer)) {
+    return std_io_read_to_end_limited(
+        file,
+        buffer,
+        StdIoLimit.maximum_size as usize
+    );
+}
+
+fn std_io_read_to_end_limited(
+    file: RuntimeFile,
+    buffer: StdByteBuffer,
+    maximum_length: usize
+) -> StdByteBufferResult {
+    if (!std_byte_buffer_is_valid(buffer) ||
+        buffer.length > maximum_length) {
         return {
             buffer = buffer,
             error = RuntimeError.invalid_argument,
@@ -48,20 +61,41 @@ fn std_io_read_to_end(
 
     var result_buffer: StdByteBuffer = buffer;
     while (true) {
-        if (result_buffer.capacity == result_buffer.length) {
-            if (result_buffer.length >
-                (StdIoLimit.maximum_size as usize) -
-                    (StdIoLimit.read_chunk as usize)) {
+        if (result_buffer.length == maximum_length) {
+            var excess: u8 = 0;
+            let read: RuntimeIoResult = runtime_file_read(
+                file,
+                &excess,
+                1
+            );
+            if (read.error == RuntimeError.interrupted) {
+                continue;
+            }
+            if (read.error != RuntimeError.none) {
                 return {
                     buffer = result_buffer,
-                    error = RuntimeError.out_of_memory,
+                    error = read.error,
                 };
             }
+            return {
+                buffer = result_buffer,
+                error = read.count == 0 ?
+                    RuntimeError.none :
+                    RuntimeError.out_of_memory,
+            };
+        }
+        if (result_buffer.capacity == result_buffer.length) {
+            let remaining: usize =
+                maximum_length - result_buffer.length;
+            let growth: usize =
+                remaining <
+                    StdIoLimit.read_chunk as usize ?
+                    remaining :
+                    StdIoLimit.read_chunk as usize;
             let reserved: StdByteBufferResult =
                 std_byte_buffer_reserve(
                     result_buffer,
-                    result_buffer.length +
-                        (StdIoLimit.read_chunk as usize)
+                    result_buffer.length + growth
                 );
             if (reserved.error != RuntimeError.none) {
                 return reserved;
@@ -69,10 +103,16 @@ fn std_io_read_to_end(
             result_buffer = reserved.buffer;
         }
 
+        let writable: usize =
+            result_buffer.capacity - result_buffer.length;
+        let remaining: usize =
+            maximum_length - result_buffer.length;
+        let read_length: usize =
+            writable < remaining ? writable : remaining;
         let read: RuntimeIoResult = runtime_file_read(
             file,
             &result_buffer.data[result_buffer.length],
-            result_buffer.capacity - result_buffer.length
+            read_length
         );
         if (read.error == RuntimeError.interrupted) {
             continue;
@@ -98,6 +138,16 @@ fn std_io_read_to_end(
 }
 
 fn std_io_read_file(path: StdPath) -> StdByteBufferResult {
+    return std_io_read_file_limited(
+        path,
+        StdIoLimit.maximum_size as usize
+    );
+}
+
+fn std_io_read_file_limited(
+    path: StdPath,
+    maximum_length: usize
+) -> StdByteBufferResult {
     if (!std_path_is_valid(path)) {
         return {
             buffer = std_byte_buffer_empty(),
@@ -114,7 +164,11 @@ fn std_io_read_file(path: StdPath) -> StdByteBufferResult {
     }
 
     let read: StdByteBufferResult =
-        std_io_read_to_end(opened.file, std_byte_buffer_empty());
+        std_io_read_to_end_limited(
+            opened.file,
+            std_byte_buffer_empty(),
+            maximum_length
+        );
     let close_error: RuntimeError = runtime_file_close(opened.file);
     if (read.error != RuntimeError.none) {
         std_byte_buffer_release(read.buffer);

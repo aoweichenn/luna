@@ -1,6 +1,7 @@
 module tests.bootstrap_frontend_contract;
 
 import luna.runtime;
+import luna.std.bytes;
 import luna.std.text;
 import luna.bootstrap.frontend.lexer;
 import luna.bootstrap.frontend.parser;
@@ -154,6 +155,164 @@ fn token_contract_is_stable() -> bool {
         RuntimeError.none && stable;
 }
 
+fn oversized_token_is_bounded() -> bool {
+    let prefix: StdByteBufferResult =
+        std_byte_buffer_from("module ", 7);
+    if (prefix.error != RuntimeError.none) {
+        return false;
+    }
+    var source: StdByteBuffer = prefix.buffer;
+    var index: usize = 0;
+    while (index < 65537) {
+        let pushed: StdByteBufferResult =
+            std_byte_buffer_push(source, 97);
+        source = pushed.buffer;
+        if (pushed.error != RuntimeError.none) {
+            std_byte_buffer_release(source);
+            return false;
+        }
+        index += 1;
+    }
+    let terminated: StdByteBufferResult =
+        std_byte_buffer_append(source, ";\n", 2);
+    source = terminated.buffer;
+    if (terminated.error != RuntimeError.none) {
+        std_byte_buffer_release(source);
+        return false;
+    }
+    let view: StdTextViewResult =
+        std_text_view(source.data as *const u8, source.length);
+    if (view.error != RuntimeError.none) {
+        std_byte_buffer_release(source);
+        return false;
+    }
+    let result: BootstrapLexResult = bootstrap_lex(view.view);
+    let diagnostic: BootstrapDiagnosticResult =
+        bootstrap_diagnostic_buffer_get(result.diagnostics, 0);
+    let token: BootstrapTokenResult =
+        bootstrap_token_buffer_get(result.tokens, 1);
+    let bounded: bool =
+        result.error == RuntimeError.none &&
+        result.diagnostics.count == 1 &&
+        diagnostic.error == RuntimeError.none &&
+        diagnostic.diagnostic.kind ==
+            BootstrapDiagnosticKind.resource_limit &&
+        diagnostic.diagnostic.detail == 65536 &&
+        token.error == RuntimeError.none &&
+        token.token.kind == BootstrapTokenKind.invalid;
+    let lex_error: RuntimeError =
+        bootstrap_lex_result_release(result);
+    let source_error: RuntimeError =
+        std_byte_buffer_release(source);
+    return bounded &&
+        lex_error == RuntimeError.none &&
+        source_error == RuntimeError.none;
+}
+
+fn token_count_is_bounded() -> bool {
+    let prefix: StdByteBufferResult =
+        std_byte_buffer_from("module capacity;\n", 17);
+    if (prefix.error != RuntimeError.none) {
+        return false;
+    }
+    var source: StdByteBuffer = prefix.buffer;
+    var index: usize = 0;
+    while (index < 131072) {
+        let pushed: StdByteBufferResult =
+            std_byte_buffer_push(source, 59);
+        source = pushed.buffer;
+        if (pushed.error != RuntimeError.none) {
+            std_byte_buffer_release(source);
+            return false;
+        }
+        index += 1;
+    }
+    let view: StdTextViewResult =
+        std_text_view(source.data as *const u8, source.length);
+    if (view.error != RuntimeError.none) {
+        std_byte_buffer_release(source);
+        return false;
+    }
+    let result: BootstrapLexResult = bootstrap_lex(view.view);
+    let diagnostic: BootstrapDiagnosticResult =
+        bootstrap_diagnostic_buffer_get(result.diagnostics, 0);
+    let last: BootstrapTokenResult =
+        bootstrap_token_buffer_get(
+            result.tokens,
+            result.tokens.count - 1
+        );
+    let bounded: bool =
+        result.error == RuntimeError.none &&
+        result.tokens.count == 131072 &&
+        result.diagnostics.count == 1 &&
+        diagnostic.error == RuntimeError.none &&
+        diagnostic.diagnostic.kind ==
+            BootstrapDiagnosticKind.resource_limit &&
+        diagnostic.diagnostic.detail == 131072 &&
+        last.error == RuntimeError.none &&
+        last.token.kind == BootstrapTokenKind.end &&
+        last.token.span.offset == source.length;
+    let lex_error: RuntimeError =
+        bootstrap_lex_result_release(result);
+    let source_error: RuntimeError =
+        std_byte_buffer_release(source);
+    return bounded &&
+        lex_error == RuntimeError.none &&
+        source_error == RuntimeError.none;
+}
+
+fn diagnostic_count_is_bounded() -> bool {
+    var diagnostics: BootstrapDiagnosticBuffer =
+        bootstrap_diagnostic_buffer_empty();
+    var index: usize = 0;
+    while (index < 4096) {
+        let added: BootstrapDiagnosticBufferResult =
+            bootstrap_diagnostic_buffer_add(
+                diagnostics,
+                {
+                    kind = BootstrapDiagnosticKind
+                        .unexpected_character,
+                    span = {
+                        offset = index,
+                        length = 1,
+                        line = 1,
+                        column = index + 1,
+                    },
+                    expected = BootstrapTokenKind.invalid,
+                    found = BootstrapTokenKind.invalid,
+                    detail = 0,
+                }
+            );
+        diagnostics = added.buffer;
+        if (added.error != RuntimeError.none) {
+            bootstrap_diagnostic_buffer_release(diagnostics);
+            return false;
+        }
+        index += 1;
+    }
+    let rejected: BootstrapDiagnosticBufferResult =
+        bootstrap_diagnostic_buffer_add(
+            diagnostics,
+            {
+                kind = BootstrapDiagnosticKind.unexpected_character,
+                span = {
+                    offset = 4096,
+                    length = 1,
+                    line = 1,
+                    column = 4097,
+                },
+                expected = BootstrapTokenKind.invalid,
+                found = BootstrapTokenKind.invalid,
+                detail = 0,
+            }
+        );
+    let bounded: bool =
+        rejected.error == RuntimeError.out_of_memory &&
+        rejected.buffer.count == 4096;
+    return bootstrap_diagnostic_buffer_release(rejected.buffer) ==
+        RuntimeError.none && bounded;
+}
+
 fn main() -> i32 {
     if (!valid_source_is_accepted()) {
         return 1;
@@ -172,6 +331,15 @@ fn main() -> i32 {
     }
     if (!token_contract_is_stable()) {
         return 6;
+    }
+    if (!oversized_token_is_bounded()) {
+        return 7;
+    }
+    if (!token_count_is_bounded()) {
+        return 8;
+    }
+    if (!diagnostic_count_is_bounded()) {
+        return 9;
     }
     return 42;
 }
