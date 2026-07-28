@@ -17,6 +17,7 @@ import luna.bootstrap.backend.x86_64.codegen;
 
 enum BootstrapStageLimit: usize {
     maximum_units = 64,
+    maximum_path_bytes = 4096,
     maximum_source_bytes = 8388608,
     maximum_total_source_bytes = 33554432,
     maximum_frontend_diagnostics = 4096,
@@ -35,6 +36,7 @@ enum BootstrapStageStatus: i32 {
     version_error = 9,
     semantic_diagnostic_base = 64,
     success = 42,
+    cli_usage_error = 125,
 }
 
 fn bootstrap_stage_invalid_path_result(
@@ -197,30 +199,21 @@ fn bootstrap_stage_sources_release(
 }
 
 fn bootstrap_stage_source_load(
-    index: usize,
+    path: StdPath,
     result_source: *StdByteBuffer,
     result_frontend: *BootstrapFrontendResult
 ) -> RuntimeError {
-    if (result_source == null || result_frontend == null) {
+    if (!std_path_is_valid(path) ||
+        result_source == null || result_frontend == null) {
         return RuntimeError.invalid_argument;
-    }
-    let path: StdPathResult = bootstrap_stage_unit_path(index);
-    if (path.error != RuntimeError.none) {
-        return path.error;
     }
     let source: StdByteBufferResult =
         std_io_read_file_limited(
-            path.path,
+            path,
             BootstrapStageLimit.maximum_source_bytes as usize
         );
-    let path_error: RuntimeError =
-        std_path_release(path.path);
     if (source.error != RuntimeError.none) {
         return source.error;
-    }
-    if (path_error != RuntimeError.none) {
-        std_byte_buffer_release(source.buffer);
-        return path_error;
     }
     let view: StdTextViewResult = std_text_view(
         source.buffer.data as *const u8,
@@ -541,29 +534,63 @@ fn bootstrap_stage_report_semantic(
     return error == RuntimeError.none ? release_error : error;
 }
 
-fn main() -> i32 {
-    if (bootstrap_stage_read_version() != RuntimeError.none) {
-        return BootstrapStageStatus.version_error as i32;
+fn bootstrap_stage_run(
+    fixed_protocol: bool,
+    input_paths: *const StdPath,
+    input_count: usize,
+    executable: bool,
+    output_path: StdPath
+) -> i32 {
+    if ((!fixed_protocol &&
+            (input_paths == null || input_count == 0 ||
+                input_count >
+                    BootstrapStageLimit.maximum_units as usize)) ||
+        !std_path_is_valid(output_path)) {
+        return BootstrapStageStatus.input_error as i32;
     }
-    var executable: bool = false;
-    if (bootstrap_stage_read_mode(&executable) !=
-        RuntimeError.none) {
-        return BootstrapStageStatus.mode_error as i32;
-    }
-
     var sources: [64]StdByteBuffer = {};
     var frontends: [64]BootstrapFrontendResult = {};
     var source_count: usize = 0;
     var total_source_bytes: usize = 0;
-    while (source_count <
-        BootstrapStageLimit.maximum_units as usize) {
-        let error: RuntimeError =
+    let expected_count: usize = fixed_protocol ?
+        BootstrapStageLimit.maximum_units as usize : input_count;
+    while (source_count < expected_count) {
+        var path: StdPathResult =
+            bootstrap_stage_invalid_path_result(RuntimeError.none);
+        if (fixed_protocol) {
+            path = bootstrap_stage_unit_path(source_count);
+            if (path.error != RuntimeError.none) {
+                bootstrap_stage_sources_release(
+                    &sources[0],
+                    &frontends[0],
+                    source_count
+                );
+                return BootstrapStageStatus.input_error as i32;
+            }
+        }
+        let source_path: StdPath = fixed_protocol ?
+            path.path : input_paths[source_count];
+        var error: RuntimeError =
             bootstrap_stage_source_load(
-                source_count,
+                source_path,
                 &sources[source_count],
                 &frontends[source_count]
             );
-        if (error == RuntimeError.not_found) {
+        let source_loaded: bool = error == RuntimeError.none;
+        if (fixed_protocol) {
+            let path_error: RuntimeError =
+                std_path_release(path.path);
+            if (source_loaded &&
+                path_error != RuntimeError.none) {
+                bootstrap_stage_source_release(
+                    sources[source_count],
+                    frontends[source_count]
+                );
+                error = path_error;
+            }
+        }
+        if (fixed_protocol &&
+            error == RuntimeError.not_found) {
             break;
         }
         if (error != RuntimeError.none) {
@@ -643,24 +670,40 @@ fn main() -> i32 {
     if (source_count == 0) {
         return BootstrapStageStatus.input_error as i32;
     }
-    if (source_count ==
+    if (fixed_protocol && source_count ==
         BootstrapStageLimit.maximum_units as usize) {
         var excess_source: StdByteBuffer =
             std_byte_buffer_empty();
         var excess_frontend: BootstrapFrontendResult = {};
-        let excess_error: RuntimeError =
-            bootstrap_stage_source_load(
-                source_count,
-                &excess_source,
-                &excess_frontend
-            );
-        if (excess_error == RuntimeError.none) {
-            bootstrap_stage_source_release(
-                excess_source,
-                excess_frontend
-            );
+        let excess_path: StdPathResult =
+            bootstrap_stage_unit_path(source_count);
+        var excess_error: RuntimeError = excess_path.error;
+        var excess_present: bool = false;
+        if (excess_path.error == RuntimeError.none) {
+            excess_error = bootstrap_stage_source_load(
+                    excess_path.path,
+                    &excess_source,
+                    &excess_frontend
+                );
+            excess_present = excess_error == RuntimeError.none;
+            let path_error: RuntimeError =
+                std_path_release(excess_path.path);
+            if (excess_error == RuntimeError.none) {
+                excess_error = path_error;
+            }
         }
-        if (excess_error != RuntimeError.not_found) {
+        if (excess_present) {
+            let release_error: RuntimeError =
+                bootstrap_stage_source_release(
+                    excess_source,
+                    excess_frontend
+                );
+            if (excess_error == RuntimeError.none) {
+                excess_error = release_error;
+            }
+        }
+        if (excess_present ||
+            excess_error != RuntimeError.not_found) {
             bootstrap_stage_sources_release(
                 &sources[0],
                 &frontends[0],
@@ -744,21 +787,11 @@ fn main() -> i32 {
         return backend_status;
     }
 
-    let output_path: StdPathResult =
-        std_path_from_c_string("bootstrap-stage-output.s", 32);
-    var write_error: RuntimeError = output_path.error;
-    if (output_path.error == RuntimeError.none) {
-        write_error = std_io_write_file(
-            output_path.path,
-            backend.assembly.data as *const u8,
-            backend.assembly.length
-        );
-        let path_error: RuntimeError =
-            std_path_release(output_path.path);
-        if (write_error == RuntimeError.none) {
-            write_error = path_error;
-        }
-    }
+    let write_error: RuntimeError = std_io_write_file_atomic(
+        output_path,
+        backend.assembly.data as *const u8,
+        backend.assembly.length
+    );
 
     let backend_error: RuntimeError =
         bootstrap_x86_64_backend_release(backend);
@@ -782,4 +815,265 @@ fn main() -> i32 {
         return BootstrapStageStatus.release_error as i32;
     }
     return BootstrapStageStatus.success as i32;
+}
+
+fn bootstrap_stage_argument_equals(
+    argument: *const u8,
+    expected: *const u8,
+    length: usize
+) -> bool {
+    if (argument == null || expected == null) {
+        return false;
+    }
+    var index: usize = 0;
+    while (index < length) {
+        if (argument[index] != expected[index] ||
+            argument[index] == 0) {
+            return false;
+        }
+        index += 1;
+    }
+    return argument[length] == 0;
+}
+
+fn bootstrap_stage_print_c_string(
+    file: RuntimeFile,
+    data: *const u8
+) -> RuntimeError {
+    let text: StdTextViewResult =
+        std_text_from_c_string(data, 1024);
+    if (text.error != RuntimeError.none) {
+        return text.error;
+    }
+    return std_io_write_all(
+        file,
+        text.view.data,
+        text.view.length
+    );
+}
+
+fn bootstrap_stage_cli_usage() -> i32 {
+    bootstrap_stage_print_c_string(
+        runtime_standard_error(),
+        "usage: lunac [--executable|--library] -o <output.s> <input.luna>...\n"
+    );
+    return BootstrapStageStatus.cli_usage_error as i32;
+}
+
+fn bootstrap_stage_release_paths(
+    paths: *StdPath,
+    count: usize
+) -> RuntimeError {
+    if (paths == null ||
+        count > BootstrapStageLimit.maximum_units as usize) {
+        return RuntimeError.invalid_argument;
+    }
+    var error: RuntimeError = RuntimeError.none;
+    var index: usize = count;
+    while (index != 0) {
+        index -= 1;
+        let release_error: RuntimeError =
+            std_path_release(paths[index]);
+        if (error == RuntimeError.none) {
+            error = release_error;
+        }
+    }
+    return error;
+}
+
+fn bootstrap_stage_cli_main(
+    argc: usize,
+    argv: **const u8
+) -> i32 {
+    if (argv == null || argc < 2) {
+        return bootstrap_stage_cli_usage();
+    }
+    if (argc == 2 &&
+        bootstrap_stage_argument_equals(
+            argv[1],
+            "--help",
+            6
+        )) {
+        bootstrap_stage_print_c_string(
+            runtime_standard_output(),
+            "usage: lunac [--executable|--library] -o <output.s> <input.luna>...\n"
+        );
+        return 0;
+    }
+    if (argc == 2 &&
+        bootstrap_stage_argument_equals(
+            argv[1],
+            "--version",
+            9
+        )) {
+        bootstrap_stage_print_c_string(
+            runtime_standard_output(),
+            "lunac (self-hosted Luna 1) 0.1.0\n"
+        );
+        return 0;
+    }
+
+    var inputs: [64]StdPath = {};
+    var input_count: usize = 0;
+    var output: StdPath = {};
+    var has_output: bool = false;
+    var executable: bool = true;
+    var has_mode: bool = false;
+    var options_finished: bool = false;
+    var valid: bool = true;
+    var index: usize = 1;
+    while (index < argc && valid) {
+        let argument: *const u8 = argv[index];
+        if (!options_finished &&
+            bootstrap_stage_argument_equals(
+                argument,
+                "--",
+                2
+            )) {
+            options_finished = true;
+        } else if (!options_finished &&
+            bootstrap_stage_argument_equals(
+                argument,
+                "-o",
+                2
+            )) {
+            if (has_output || index + 1 >= argc) {
+                valid = false;
+            } else {
+                index += 1;
+                let path: StdPathResult =
+                    std_path_from_c_string(
+                        argv[index],
+                        BootstrapStageLimit
+                            .maximum_path_bytes as usize
+                    );
+                if (path.error != RuntimeError.none) {
+                    valid = false;
+                } else {
+                    output = path.path;
+                    has_output = true;
+                }
+            }
+        } else if (!options_finished &&
+            (bootstrap_stage_argument_equals(
+                    argument,
+                    "--library",
+                    9
+                ) ||
+                bootstrap_stage_argument_equals(
+                    argument,
+                    "--executable",
+                    12
+                ))) {
+            if (has_mode) {
+                valid = false;
+            } else {
+                executable =
+                    bootstrap_stage_argument_equals(
+                        argument,
+                        "--executable",
+                        12
+                    );
+                has_mode = true;
+            }
+        } else if (!options_finished &&
+            argument != null && argument[0] == 45) {
+            valid = false;
+        } else if (input_count ==
+            BootstrapStageLimit.maximum_units as usize) {
+            valid = false;
+        } else {
+            let path: StdPathResult =
+                std_path_from_c_string(
+                    argument,
+                    BootstrapStageLimit
+                        .maximum_path_bytes as usize
+                );
+            if (path.error != RuntimeError.none) {
+                valid = false;
+            } else {
+                inputs[input_count] = path.path;
+                input_count += 1;
+            }
+        }
+        index += 1;
+    }
+    if (!has_output || input_count == 0) {
+        valid = false;
+    }
+    if (valid) {
+        let output_text: StdTextViewResult =
+            std_path_text(output);
+        index = 0;
+        while (index < input_count && valid) {
+            let input_text: StdTextViewResult =
+                std_path_text(inputs[index]);
+            valid = output_text.error == RuntimeError.none &&
+                input_text.error == RuntimeError.none &&
+                !std_text_equal(output_text.view, input_text.view);
+            index += 1;
+        }
+    }
+
+    var status: i32 =
+        BootstrapStageStatus.cli_usage_error as i32;
+    if (valid) {
+        status = bootstrap_stage_run(
+            false,
+            &inputs[0] as *const StdPath,
+            input_count,
+            executable,
+            output
+        );
+        if (status == BootstrapStageStatus.success as i32) {
+            status = 0;
+        }
+    } else {
+        bootstrap_stage_cli_usage();
+    }
+    let input_release_error: RuntimeError =
+        bootstrap_stage_release_paths(&inputs[0], input_count);
+    var output_release_error: RuntimeError = RuntimeError.none;
+    if (has_output) {
+        output_release_error = std_path_release(output);
+    }
+    if (status == 0 &&
+        (input_release_error != RuntimeError.none ||
+            output_release_error != RuntimeError.none)) {
+        return BootstrapStageStatus.release_error as i32;
+    }
+    return status;
+}
+
+fn main(argc: usize, argv: **const u8) -> i32 {
+    if (argc != 1) {
+        return bootstrap_stage_cli_main(argc, argv);
+    }
+    if (bootstrap_stage_read_version() != RuntimeError.none) {
+        return BootstrapStageStatus.version_error as i32;
+    }
+    var executable: bool = false;
+    if (bootstrap_stage_read_mode(&executable) !=
+        RuntimeError.none) {
+        return BootstrapStageStatus.mode_error as i32;
+    }
+    let output: StdPathResult =
+        std_path_from_c_string("bootstrap-stage-output.s", 32);
+    if (output.error != RuntimeError.none) {
+        return BootstrapStageStatus.output_error as i32;
+    }
+    let status: i32 = bootstrap_stage_run(
+        true,
+        null,
+        0,
+        executable,
+        output.path
+    );
+    let release_error: RuntimeError =
+        std_path_release(output.path);
+    if (status == BootstrapStageStatus.success as i32 &&
+        release_error != RuntimeError.none) {
+        return BootstrapStageStatus.release_error as i32;
+    }
+    return status;
 }

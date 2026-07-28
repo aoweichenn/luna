@@ -2799,24 +2799,30 @@ bool luna_x86_64_machine_emit_assembly(
         return false;
     }
 
-    if (entry != NULL && (!luna_string_builder_append_c_string(
-                              output, "    .globl _start\n"
-                                      "    .type _start, @function\n"
-                                      "_start:\n"
-                                      "    xorl %ebp, %ebp\n"
-                                      "    andq $-16, %rsp\n"
-                                      "    subq $16, %rsp\n"
-                                      "    movl $0x1f80, (%rsp)\n"
-                                      "    ldmxcsr (%rsp)\n"
-                                      "    addq $16, %rsp\n"
-                                      "    call ") ||
-                          !luna_x86_64_append_symbol(output, entry) ||
-                          !luna_string_builder_append_c_string(
-                              output, "\n"
-                                      "    movl %eax, %edi\n"
-                                      "    movl $60, %eax\n"
-                                      "    syscall\n"
-                                      "    .size _start, .-_start\n\n"))) {
+    if (entry != NULL &&
+        (!luna_string_builder_append_c_string(output,
+                                              "    .globl _start\n"
+                                              "    .type _start, @function\n"
+                                              "_start:\n"
+                                              "    xorl %ebp, %ebp\n") ||
+         (entry->parameter_types.length == 2U &&
+          !luna_string_builder_append_c_string(output,
+                                               "    movq (%rsp), %rdi\n"
+                                               "    leaq 8(%rsp), %rsi\n")) ||
+         !luna_string_builder_append_c_string(output,
+                                              "    andq $-16, %rsp\n"
+                                              "    subq $16, %rsp\n"
+                                              "    movl $0x1f80, (%rsp)\n"
+                                              "    ldmxcsr (%rsp)\n"
+                                              "    addq $16, %rsp\n"
+                                              "    call ") ||
+         !luna_x86_64_append_symbol(output, entry) ||
+         !luna_string_builder_append_c_string(
+             output, "\n"
+                     "    movl %eax, %edi\n"
+                     "    movl $60, %eax\n"
+                     "    syscall\n"
+                     "    .size _start, .-_start\n\n"))) {
         luna_vector_destroy(&debug_files);
         luna_diagnostic_error_plain(
             diagnostics, "out of memory while emitting x86-64 entry point");

@@ -508,6 +508,8 @@ def build_stage(
     assembly_root.mkdir(parents=True)
     object_root.mkdir(parents=True)
     invocation_root.mkdir(parents=True)
+    binary_root = stage_root / "bin"
+    binary_root.mkdir(parents=True)
 
     assemblies: dict[str, pathlib.Path] = {}
     objects: dict[str, pathlib.Path] = {}
@@ -534,9 +536,9 @@ def build_stage(
 
     executables: dict[str, pathlib.Path] = {}
     executable_names = {
-        "stage_compiler": "luna-stage-compiler",
-        "stage_assembler": "luna-stage-assembler",
-        "stage_linker": "luna-stage-linker",
+        "stage_compiler": "lunac",
+        "stage_assembler": "luna-as",
+        "stage_linker": "luna-link",
     }
     for driver_name, metadata_keys in STAGE_DRIVERS.items():
         driver_assembly = assembly_root / f"{driver_name}.s"
@@ -562,7 +564,7 @@ def build_stage(
         verify_luna_object(driver_object, True)
         assemblies[driver_name] = driver_assembly
         objects[driver_name] = driver_object
-        executable = stage_root / executable_names[driver_name]
+        executable = binary_root / executable_names[driver_name]
         link_with_stage(
             producing_linker,
             runner,
@@ -632,6 +634,210 @@ def compare_stages(
         ("stage linker executable", stage_two.linker, stage_three.linker),
     ):
         compare_files(left, right, description)
+
+
+def run_command_line_tool_tests(
+    stage: StageArtifacts,
+    runner: list[str],
+    read_elf: str,
+    work_dir: pathlib.Path,
+) -> None:
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    work_dir.mkdir(parents=True)
+
+    for tool, expected_name in (
+        (stage.compiler, "lunac"),
+        (stage.assembler, "luna-as"),
+        (stage.linker, "luna-link"),
+    ):
+        help_result = run(
+            [*runner, str(tool), "--help"],
+            expected_code=0,
+            timeout=120,
+        )
+        if "usage:" not in help_result.stdout:
+            raise AssertionError(f"{expected_name} lost its help text")
+        version_result = run(
+            [*runner, str(tool), "--version"],
+            expected_code=0,
+            timeout=120,
+        )
+        if expected_name not in version_result.stdout:
+            raise AssertionError(f"{expected_name} lost its version identity")
+
+    source = work_dir / "command-line-entry.luna"
+    source.write_text(
+        "module cli.command_line_entry;\n"
+        "fn main(argc: usize, argv: **const u8) -> i32 {\n"
+        "    if (argc != 3) { return 1; }\n"
+        "    if (argv[0][0] == 0) { return 2; }\n"
+        "    if (argv[1][0] != 120 || argv[1][1] != 0) { return 3; }\n"
+        "    if (argv[2][0] != 121 || argv[2][1] != 122 ||\n"
+        "        argv[2][2] != 0) { return 4; }\n"
+        "    return 42;\n"
+        "}\n",
+        encoding="ascii",
+    )
+    assembly = work_dir / "command-line-entry.s"
+    object_file = work_dir / "command-line-entry.lo"
+    executable = work_dir / "command-line-entry"
+    run(
+        [
+            *runner,
+            str(stage.compiler),
+            "--executable",
+            "-o",
+            str(assembly),
+            str(source),
+        ],
+        expected_code=0,
+        timeout=STAGE_NATIVE_TIMEOUT_SECONDS,
+    )
+    run(
+        [
+            *runner,
+            str(stage.assembler),
+            "-o",
+            str(object_file),
+            str(assembly),
+        ],
+        expected_code=0,
+        timeout=STAGE_NATIVE_TIMEOUT_SECONDS,
+    )
+    verify_luna_object(object_file, True)
+    run(
+        [
+            *runner,
+            str(stage.linker),
+            "-o",
+            str(executable),
+            str(object_file),
+        ],
+        expected_code=0,
+        timeout=STAGE_NATIVE_TIMEOUT_SECONDS,
+    )
+    verify_static_executable(read_elf, executable)
+    run(
+        [*runner, str(executable), "x", "yz"],
+        expected_code=42,
+        timeout=120,
+    )
+
+    library_source = work_dir / "library.luna"
+    library_source.write_text(
+        "module cli.library;\n"
+        "fn answer() -> i32 { return 42; }\n",
+        encoding="ascii",
+    )
+    library_assembly = work_dir / "library.s"
+    library_object = work_dir / "library.lo"
+    run(
+        [
+            *runner,
+            str(stage.compiler),
+            "--library",
+            "-o",
+            str(library_assembly),
+            str(library_source),
+        ],
+        expected_code=0,
+        timeout=STAGE_NATIVE_TIMEOUT_SECONDS,
+    )
+    run(
+        [
+            *runner,
+            str(stage.assembler),
+            "-o",
+            str(library_object),
+            str(library_assembly),
+        ],
+        expected_code=0,
+        timeout=STAGE_NATIVE_TIMEOUT_SECONDS,
+    )
+    verify_luna_object(library_object, False)
+
+    preserved = b"preserved-output\n"
+    rejected_source = work_dir / "rejected.luna"
+    rejected_source.write_bytes(
+        b"module cli.rejected;\n"
+        b"fn main(argc: isize, argv: **const u8) -> i32 {\n"
+        b"    return argc as i32;\n"
+        b"}\n"
+    )
+    rejected_assembly = work_dir / "rejected.s"
+    rejected_assembly.write_bytes(preserved)
+    run(
+        [
+            *runner,
+            str(stage.compiler),
+            "-o",
+            str(rejected_assembly),
+            str(rejected_source),
+        ],
+        expected_code=87,
+        timeout=STAGE_NATIVE_TIMEOUT_SECONDS,
+    )
+    if rejected_assembly.read_bytes() != preserved:
+        raise AssertionError("lunac clobbered output after a semantic error")
+
+    malformed_assembly = work_dir / "malformed.s"
+    malformed_assembly.write_bytes(b"not-an-instruction\n")
+    rejected_object = work_dir / "rejected.lo"
+    rejected_object.write_bytes(preserved)
+    run(
+        [
+            *runner,
+            str(stage.assembler),
+            "-o",
+            str(rejected_object),
+            str(malformed_assembly),
+        ],
+        expected_code=2,
+        timeout=STAGE_NATIVE_TIMEOUT_SECONDS,
+    )
+    if rejected_object.read_bytes() != preserved:
+        raise AssertionError("luna-as clobbered output after an assembly error")
+
+    malformed_object = work_dir / "malformed.lo"
+    malformed_object.write_bytes(b"not-a-luna-object\n")
+    rejected_executable = work_dir / "rejected-executable"
+    rejected_executable.write_bytes(preserved)
+    run(
+        [
+            *runner,
+            str(stage.linker),
+            "-o",
+            str(rejected_executable),
+            str(malformed_object),
+        ],
+        expected_code=2,
+        timeout=STAGE_NATIVE_TIMEOUT_SECONDS,
+    )
+    if rejected_executable.read_bytes() != preserved:
+        raise AssertionError("luna-link clobbered output after an object error")
+
+    same_path = work_dir / "same-path.s"
+    same_path.write_bytes(b"    .text\n")
+    run(
+        [
+            *runner,
+            str(stage.assembler),
+            "-o",
+            str(same_path),
+            str(same_path),
+        ],
+        expected_code=125,
+        timeout=STAGE_NATIVE_TIMEOUT_SECONDS,
+    )
+    if same_path.read_bytes() != b"    .text\n":
+        raise AssertionError("luna-as accepted an input/output alias")
+
+    temporary_files = list(work_dir.glob("*.luna-tmp-*"))
+    if temporary_files:
+        raise AssertionError(
+            f"command-line tools leaked temporary outputs: {temporary_files}"
+        )
 
 
 def build_and_run_toolchain_unit_driver(
@@ -2111,15 +2317,17 @@ def main() -> int:
     if stage_one_root.exists():
         shutil.rmtree(stage_one_root)
     stage_one_root.mkdir(parents=True)
+    stage_one_binary_root = stage_one_root / "bin"
+    stage_one_binary_root.mkdir(parents=True)
     stage_one_executables: dict[str, pathlib.Path] = {}
     executable_names = {
-        "stage_compiler": "luna-stage-compiler",
-        "stage_assembler": "luna-stage-assembler",
-        "stage_linker": "luna-stage-linker",
+        "stage_compiler": "lunac",
+        "stage_assembler": "luna-as",
+        "stage_linker": "luna-link",
     }
     for driver_name, metadata_keys in STAGE_DRIVERS.items():
         driver_object = stage_one_root / f"{driver_name}.o"
-        executable = stage_one_root / executable_names[driver_name]
+        executable = stage_one_binary_root / executable_names[driver_name]
         compile_stage_one_driver(
             compiler,
             driver_sources_by_name[driver_name],
@@ -2177,6 +2385,12 @@ def main() -> int:
         work_dir,
     )
     compare_stages(stage_two, stage_three)
+    run_command_line_tool_tests(
+        stage_three,
+        runner,
+        read_elf,
+        work_dir / "command-line-tools",
+    )
 
     toolchain_unit_source = (
         source_root

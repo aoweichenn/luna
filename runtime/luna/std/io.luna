@@ -238,6 +238,177 @@ fn std_io_write_executable_file(
     return close_error;
 }
 
+fn std_io_invalid_path_result(
+    error: RuntimeError
+) -> StdPathResult {
+    return {
+        path = {
+            storage = std_byte_buffer_empty(),
+            length = 0,
+        },
+        error = error,
+    };
+}
+
+fn std_io_atomic_temporary_path(
+    path: StdPath
+) -> StdPathResult {
+    let path_text: StdTextViewResult = std_path_text(path);
+    if (path_text.error != RuntimeError.none) {
+        return std_io_invalid_path_result(path_text.error);
+    }
+    let process: RuntimeProcessIdResult = runtime_process_id();
+    if (process.error != RuntimeError.none) {
+        return std_io_invalid_path_result(process.error);
+    }
+    var bytes: StdByteBufferResult = std_byte_buffer_from(
+        path_text.view.data,
+        path_text.view.length
+    );
+    if (bytes.error != RuntimeError.none) {
+        return std_io_invalid_path_result(bytes.error);
+    }
+    bytes = std_byte_buffer_append(
+        bytes.buffer,
+        ".luna-tmp-",
+        10
+    );
+    if (bytes.error != RuntimeError.none) {
+        std_byte_buffer_release(bytes.buffer);
+        return std_io_invalid_path_result(bytes.error);
+    }
+    var digits: [16]u8 = {};
+    var index: usize = 16;
+    var value: usize = process.process_id;
+    while (index != 0) {
+        index -= 1;
+        let digit: usize = value & 15;
+        if (digit < 10) {
+            digits[index] =
+                ((48 as usize) + digit) as u8;
+        } else {
+            digits[index] =
+                ((87 as usize) + digit) as u8;
+        }
+        value >>= 4;
+    }
+    bytes = std_byte_buffer_append(
+        bytes.buffer,
+        &digits[0] as *const u8,
+        16
+    );
+    if (bytes.error != RuntimeError.none) {
+        std_byte_buffer_release(bytes.buffer);
+        return std_io_invalid_path_result(bytes.error);
+    }
+    let temporary_text: StdTextViewResult = std_text_view(
+        bytes.buffer.data as *const u8,
+        bytes.buffer.length
+    );
+    var result: StdPathResult =
+        std_io_invalid_path_result(temporary_text.error);
+    if (temporary_text.error == RuntimeError.none) {
+        result = std_path_from_text(temporary_text.view);
+    }
+    let release_error: RuntimeError =
+        std_byte_buffer_release(bytes.buffer);
+    if (result.error == RuntimeError.none &&
+        release_error != RuntimeError.none) {
+        std_path_release(result.path);
+        return std_io_invalid_path_result(release_error);
+    }
+    return result;
+}
+
+fn std_io_write_file_atomic_implementation(
+    path: StdPath,
+    data: *const u8,
+    length: usize,
+    executable: bool
+) -> RuntimeError {
+    if (!std_path_is_valid(path)) {
+        return RuntimeError.invalid_argument;
+    }
+    if (length != 0 && data == null) {
+        return RuntimeError.bad_address;
+    }
+    let temporary: StdPathResult =
+        std_io_atomic_temporary_path(path);
+    if (temporary.error != RuntimeError.none) {
+        return temporary.error;
+    }
+    var opened: RuntimeFileResult =
+        runtime_file_create_exclusive(
+            std_path_as_c_string(temporary.path)
+        );
+    if (opened.error == RuntimeError.exists) {
+        let remove_error: RuntimeError = runtime_path_remove(
+            std_path_as_c_string(temporary.path)
+        );
+        if (remove_error == RuntimeError.none ||
+            remove_error == RuntimeError.not_found) {
+            opened = runtime_file_create_exclusive(
+                std_path_as_c_string(temporary.path)
+            );
+        }
+    }
+    if (opened.error != RuntimeError.none) {
+        std_path_release(temporary.path);
+        return opened.error;
+    }
+
+    var error: RuntimeError =
+        std_io_write_all(opened.file, data, length);
+    if (error == RuntimeError.none && executable) {
+        error = runtime_file_make_executable(opened.file);
+    }
+    let close_error: RuntimeError =
+        runtime_file_close(opened.file);
+    if (error == RuntimeError.none) {
+        error = close_error;
+    }
+    if (error == RuntimeError.none) {
+        error = runtime_path_replace(
+            std_path_as_c_string(temporary.path),
+            std_path_as_c_string(path)
+        );
+    }
+    if (error != RuntimeError.none) {
+        runtime_path_remove(
+            std_path_as_c_string(temporary.path)
+        );
+    }
+    let release_error: RuntimeError =
+        std_path_release(temporary.path);
+    return error == RuntimeError.none ? release_error : error;
+}
+
+fn std_io_write_file_atomic(
+    path: StdPath,
+    data: *const u8,
+    length: usize
+) -> RuntimeError {
+    return std_io_write_file_atomic_implementation(
+        path,
+        data,
+        length,
+        false
+    );
+}
+
+fn std_io_write_executable_file_atomic(
+    path: StdPath,
+    data: *const u8,
+    length: usize
+) -> RuntimeError {
+    return std_io_write_file_atomic_implementation(
+        path,
+        data,
+        length,
+        true
+    );
+}
+
 fn std_io_print(text: StdTextView) -> RuntimeError {
     if (!std_text_is_valid_utf8(text)) {
         return RuntimeError.invalid_argument;

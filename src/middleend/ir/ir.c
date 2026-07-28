@@ -1552,13 +1552,25 @@ bool luna_ir_verify(const LunaIrModule *module, FILE *error_stream) {
 
         const LunaIrFunction *entry =
             luna_ir_module_function_const(module, module->entry_function);
+        bool entry_parameters_are_valid = entry->parameter_types.length == 0U;
+        if (entry->parameter_types.length == 2U) {
+            const LunaIrType *argument_count_type =
+                luna_vector_at_const(&entry->parameter_types, 0U);
+            const LunaIrType *argument_vector_type =
+                luna_vector_at_const(&entry->parameter_types, 1U);
+            entry_parameters_are_valid =
+                argument_count_type != NULL &&
+                *argument_count_type == LUNA_IR_TYPE_USIZE &&
+                argument_vector_type != NULL &&
+                *argument_vector_type == LUNA_IR_TYPE_POINTER;
+        }
         if (entry->linkage != LUNA_IR_LINKAGE_INTERNAL ||
             entry->return_type != LUNA_IR_TYPE_I32 ||
             entry->return_aggregate.is_aggregate ||
-            entry->parameter_types.length != 0U) {
+            !entry_parameters_are_valid) {
             (void)fputs(
                 "IR verification: entry function must be an internal fn() -> "
-                "i32\n",
+                "i32 or fn(usize, pointer) -> i32\n",
                 stream);
             return false;
         }

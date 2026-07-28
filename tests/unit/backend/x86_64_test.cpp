@@ -3,8 +3,38 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <string_view>
 
 namespace luna::test {
+
+TEST(X8664BackendTest, PreservesTheKernelCommandLineAtTheEntryBoundary) {
+    constexpr std::string_view LUNA_TEST_COMMAND_LINE_ENTRY_SOURCE{
+        "module test.command_line_codegen;\n"
+        "fn main(argc: usize, argv: **const u8) -> i32 {\n"
+        "    return argc == 2 && argv[1][0] == 120 ? 42 : 1;\n"
+        "}\n"};
+    constexpr std::string_view LUNA_TEST_ENTRY_ARGUMENT_COUNT_LOAD{
+        "movq (%rsp), %rdi"};
+    constexpr std::string_view LUNA_TEST_ENTRY_ARGUMENT_VECTOR_LOAD{
+        "leaq 8(%rsp), %rsi"};
+    constexpr std::string_view LUNA_TEST_ENTRY_STACK_ALIGNMENT{
+        "andq $-16, %rsp"};
+    FrontendHarness harness{LUNA_TEST_COMMAND_LINE_ENTRY_SOURCE};
+
+    ASSERT_TRUE(harness.EmitAssembly()) << harness.Diagnostics();
+    const std::string assembly = harness.Assembly();
+    const std::string::size_type load_argument_count =
+        assembly.find(LUNA_TEST_ENTRY_ARGUMENT_COUNT_LOAD);
+    const std::string::size_type load_argument_vector =
+        assembly.find(LUNA_TEST_ENTRY_ARGUMENT_VECTOR_LOAD);
+    const std::string::size_type align_stack =
+        assembly.find(LUNA_TEST_ENTRY_STACK_ALIGNMENT);
+    ASSERT_NE(load_argument_count, std::string::npos);
+    ASSERT_NE(load_argument_vector, std::string::npos);
+    ASSERT_NE(align_stack, std::string::npos);
+    EXPECT_LT(load_argument_count, align_stack);
+    EXPECT_LT(load_argument_vector, align_stack);
+}
 
 TEST(X8664BackendTest, EmitsDirectAssemblyForTypedIr) {
     FrontendHarness harness{"module test.codegen;\n"

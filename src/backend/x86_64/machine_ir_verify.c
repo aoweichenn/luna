@@ -922,13 +922,26 @@ bool luna_x86_64_machine_verify(const LunaX8664MachineModule *module,
         const LunaX8664MachineFunction *entry =
             luna_x86_64_machine_module_function_const(module,
                                                       module->entry_function);
+        bool entry_parameters_are_valid =
+            entry != NULL && entry->parameter_types.length == 0U;
+        if (entry != NULL && entry->parameter_types.length == 2U) {
+            const LunaX8664MachineType *argument_count_type =
+                luna_vector_at_const(&entry->parameter_types, 0U);
+            const LunaX8664MachineType *argument_vector_type =
+                luna_vector_at_const(&entry->parameter_types, 1U);
+            entry_parameters_are_valid =
+                argument_count_type != NULL &&
+                *argument_count_type == LUNA_X86_64_MACHINE_TYPE_U64 &&
+                argument_vector_type != NULL &&
+                *argument_vector_type == LUNA_X86_64_MACHINE_TYPE_POINTER;
+        }
         if (entry == NULL ||
             entry->linkage != LUNA_X86_64_MACHINE_LINKAGE_INTERNAL ||
             entry->return_type != LUNA_X86_64_MACHINE_TYPE_I32 ||
             entry->return_aggregate.is_aggregate ||
-            entry->parameter_types.length != 0U) {
+            !entry_parameters_are_valid) {
             (void)fputs("machine IR verification: executable entry must be an "
-                        "internal fn() -> i32\n",
+                        "internal fn() -> i32 or fn(u64, pointer) -> i32\n",
                         stream);
             return false;
         }

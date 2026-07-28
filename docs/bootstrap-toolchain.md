@@ -30,6 +30,36 @@ The test then requires byte equality for:
 Consequently a passing fixed point does not hide a hosted assembler or linker
 between the self-hosted stages.
 
+## Command-line tools
+
+The verified stage-3 directory contains the normal tools `lunac`, `luna-as`
+and `luna-link`. All three are the same Luna implementations used by the
+fixed protocol; they do not wrap the C23 seed:
+
+```sh
+cmake --build --preset debug --target luna_selfhost_toolchain
+
+TOOLS=build/debug/selfhost-bootstrap/stage-three/bin
+"$TOOLS/lunac" --executable -o app.s app.luna dependency.interface.luna \
+  dependency.luna
+"$TOOLS/luna-as" -o app.lo app.s
+"$TOOLS/luna-link" -o app app.lo
+```
+
+`lunac` accepts one to 64 Luna source units, defaults to `--executable`, uses
+`--library` to suppress `_start`, and emits only the owned assembly dialect.
+`luna-as` accepts exactly one assembly input and emits `LUNAOBJ1`.
+`luna-link` accepts one to 64 `LUNAOBJ1` inputs and emits one static x86-64
+Linux ELF64 executable. Every command requires `-o`, accepts `--` before
+dash-prefixed input paths, returns zero on command-line success, and provides
+`--help` and `--version`. Input and output paths may not alias.
+
+All command-line output is written through an exclusive same-directory
+temporary file and committed with `renameat`. A rejected input or failed
+write leaves an existing destination byte-for-byte unchanged. The no-argument
+form is reserved for the fixed stage protocol and retains its success status
+42.
+
 ## Bootstrap object format
 
 `LUNAOBJ1` is deliberately a small bootstrap format, not an approximation of
@@ -125,6 +155,10 @@ the complete three-tool fixed point, it:
 - checks malformed assembly, duplicate symbols, unresolved references,
   relocation overflows, non-text entry points and input limits;
 - runs fixed-seed accepted and rejected assembly cases;
+- runs the argument-driven compiler, assembler and linker through source,
+  owned assembly, `LUNAOBJ1`, static ELF and typed `argc`/`argv` execution;
+- verifies help/version behavior, library mode, input/output alias rejection,
+  atomic preservation of existing outputs and temporary-file cleanup;
 - runs deterministic truncation, extension, magic, version, alignment and
   reserved-field mutations against the object decoder;
 - checks unresolved and duplicate link definitions;

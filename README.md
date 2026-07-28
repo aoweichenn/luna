@@ -117,6 +117,42 @@ ctest --preset fuzz -L fuzz
 
 Native Linux CI additionally runs the same target with the `fuzz-asan` preset.
 
+## Build the self-hosted toolchain
+
+The correctness-gated target reconstructs stage 1 from the C23 seed, uses it
+to build stage 2, uses stage 2 to build stage 3, compares every stage-2 and
+stage-3 compiler/assembler/linker artifact byte-for-byte, and runs the
+Luna-owned toolchain tests:
+
+```sh
+cmake --build --preset debug --target luna_selfhost_toolchain
+```
+
+The resulting no-libc, statically linked x86-64 tools are:
+
+```text
+build/debug/selfhost-bootstrap/stage-three/bin/lunac
+build/debug/selfhost-bootstrap/stage-three/bin/luna-as
+build/debug/selfhost-bootstrap/stage-three/bin/luna-link
+```
+
+Their deliberately narrow command-line pipeline is:
+
+```sh
+SELFHOST=build/debug/selfhost-bootstrap/stage-three/bin
+
+"$SELFHOST/lunac" --executable -o hello.s examples/hello.luna
+"$SELFHOST/luna-as" -o hello.lo hello.s
+"$SELFHOST/luna-link" -o hello hello.lo
+./hello
+```
+
+Use `lunac --library` for source units that do not define `main`. This
+self-hosted compiler currently emits the project-owned assembly dialect; the
+separate assembler emits `LUNAOBJ1`, and the linker emits a static Linux
+ELF64 executable. The C23 seed compiler's broader ELF `.o`, `.lmi`, Debug IR
+and inspection commands remain reconstruction and development facilities.
+
 ## Compile
 
 ```sh

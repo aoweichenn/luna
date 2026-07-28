@@ -228,6 +228,20 @@ Parameters are passed by value and their bindings are immutable. Pointer
 parameters express mutation explicitly. There is no overloading, default
 argument or variadic Luna function.
 
+An executable entry point has one of exactly two signatures:
+
+```luna
+fn main() -> i32;
+fn main(argc: usize, argv: **const u8) -> i32;
+```
+
+For the command-line form, `argc` is the kernel-provided argument count,
+`argv[0]` through `argv[argc - 1]` are non-null NUL-terminated byte strings,
+and `argv[argc]` is null. The pointed-to command-line bytes are read-only.
+The x86-64 `_start` shim reads both values from the initial process stack
+before aligning that stack, passes them with the System V integer argument
+registers, and terminates the process with the returned `i32`.
+
 An `extern fn` is a declaration of one function implemented outside Luna. It
 has no body, must end in `;`, and names the exact C/ELF symbol to call:
 

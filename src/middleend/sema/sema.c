@@ -5664,11 +5664,35 @@ static bool luna_sema_find_entry(LunaSemaContext *context) {
         return false;
     }
 
-    if (entry->parameter_types.length != 0U ||
+    bool has_command_line_parameters = false;
+    if (entry->parameter_types.length == 2U) {
+        const LunaSemaTypeId *argument_count_type =
+            luna_vector_at_const(&entry->parameter_types, 0U);
+        const LunaSemaTypeId *argument_vector_type =
+            luna_vector_at_const(&entry->parameter_types, 1U);
+        const LunaSemaType *outer_pointer =
+            argument_vector_type == NULL
+                ? NULL
+                : luna_sema_type(context, *argument_vector_type);
+        const LunaSemaType *inner_pointer =
+            outer_pointer == NULL || outer_pointer->kind != LUNA_TYPE_POINTER
+                ? NULL
+                : luna_sema_type(context, outer_pointer->element_type);
+        has_command_line_parameters =
+            argument_count_type != NULL &&
+            *argument_count_type == LUNA_TYPE_USIZE && outer_pointer != NULL &&
+            !outer_pointer->is_read_only && inner_pointer != NULL &&
+            inner_pointer->kind == LUNA_TYPE_POINTER &&
+            inner_pointer->is_read_only &&
+            inner_pointer->element_type == LUNA_TYPE_U8;
+    }
+
+    if ((entry->parameter_types.length != 0U && !has_command_line_parameters) ||
         entry->return_type != LUNA_TYPE_I32) {
         luna_diagnostic_error(
             context->diagnostics, entry->syntax->span,
-            "bootstrap entry point must be 'fn main() -> i32'");
+            "entry point must be 'fn main() -> i32' or "
+            "'fn main(argc: usize, argv: **const u8) -> i32'");
         return false;
     }
 

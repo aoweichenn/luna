@@ -603,6 +603,25 @@ if(BUILD_TESTING)
     find_package(GTest 1.14 CONFIG REQUIRED)
     include(GoogleTest)
 
+    add_custom_target(
+        luna_selfhost_toolchain
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/run_bootstrap_reproducibility.py"
+            --compiler "$<TARGET_FILE:lunac>"
+            --linker "$<TARGET_FILE:lunalink>"
+            --sysroot "${CMAKE_CURRENT_BINARY_DIR}/sysroot"
+            --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --work-dir "${CMAKE_CURRENT_BINARY_DIR}/selfhost-bootstrap"
+        DEPENDS
+            lunac
+            lunalink
+            luna_sysroot
+        COMMENT
+            "Building and verifying the complete self-hosted Luna toolchain"
+        VERBATIM
+    )
+
     add_library(luna_test_support STATIC
         tests/unit/support/test_support.cpp
     )

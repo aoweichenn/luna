@@ -102,7 +102,9 @@ M0 supports enough language to compile arithmetic functions, local variables,
   assembler and linker, then compare all three tools byte-for-byte
 - [x] reject malformed assembly and bootstrap objects with deterministic
   direct-module, negative and mutation tests
-- [ ] add a normal argument-driven self-hosted compiler command
+- [x] add normal argument-driven self-hosted compiler, assembler and linker
+  commands with typed `argc`/`argv`, conventional success status and atomic
+  outputs while retaining the versioned fixed protocol
 - [ ] define reproducible distribution and verification of the versioned seed
 
 ## Explicitly deferred

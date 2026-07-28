@@ -11,6 +11,7 @@ import luna.bootstrap.backend.x86_64.linker;
 
 enum BootstrapLinkerDriverLimit: usize {
     maximum_inputs = 64,
+    maximum_path_bytes = 4096,
     maximum_object = 268435456,
 }
 
@@ -21,6 +22,7 @@ enum BootstrapLinkerDriverStatus: i32 {
     output_error = 4,
     release_error = 5,
     success = 42,
+    cli_usage_error = 125,
 }
 
 fn bootstrap_linker_driver_invalid_path(
@@ -99,28 +101,53 @@ fn bootstrap_linker_driver_release_objects(
     return error;
 }
 
-fn main() -> i32 {
+fn bootstrap_linker_driver_run(
+    fixed_protocol: bool,
+    input_paths: *const StdPath,
+    input_count: usize,
+    output_path: StdPath
+) -> i32 {
+    if ((!fixed_protocol &&
+            (input_paths == null || input_count == 0 ||
+                input_count >
+                    BootstrapLinkerDriverLimit
+                        .maximum_inputs as usize)) ||
+        !std_path_is_valid(output_path)) {
+        return BootstrapLinkerDriverStatus.input_error as i32;
+    }
     var objects: [64]BootstrapObject = {};
     var count: usize = 0;
-    while (count <
-        BootstrapLinkerDriverLimit.maximum_inputs as usize) {
-        let path: StdPathResult =
-            bootstrap_linker_driver_input_path(count);
-        if (path.error != RuntimeError.none) {
-            bootstrap_linker_driver_release_objects(
-                &objects[0],
-                count
+    let expected_count: usize = fixed_protocol ?
+        BootstrapLinkerDriverLimit.maximum_inputs as usize :
+        input_count;
+    while (count < expected_count) {
+        var path: StdPathResult =
+            bootstrap_linker_driver_invalid_path(
+                RuntimeError.none
             );
-            return BootstrapLinkerDriverStatus.input_error as i32;
+        if (fixed_protocol) {
+            path = bootstrap_linker_driver_input_path(count);
+            if (path.error != RuntimeError.none) {
+                bootstrap_linker_driver_release_objects(
+                    &objects[0],
+                    count
+                );
+                return BootstrapLinkerDriverStatus.input_error as i32;
+            }
         }
+        let input_path: StdPath = fixed_protocol ?
+            path.path : input_paths[count];
         let bytes: StdByteBufferResult =
             std_io_read_file_limited(
-                path.path,
+                input_path,
                 BootstrapLinkerDriverLimit.maximum_object as usize
             );
-        let path_error: RuntimeError =
-            std_path_release(path.path);
-        if (bytes.error == RuntimeError.not_found) {
+        var path_error: RuntimeError = RuntimeError.none;
+        if (fixed_protocol) {
+            path_error = std_path_release(path.path);
+        }
+        if (fixed_protocol &&
+            bytes.error == RuntimeError.not_found) {
             if (path_error != RuntimeError.none) {
                 bootstrap_linker_driver_release_objects(
                     &objects[0],
@@ -162,7 +189,7 @@ fn main() -> i32 {
         objects[count] = parsed.object;
         count += 1;
     }
-    if (count ==
+    if (fixed_protocol && count ==
         BootstrapLinkerDriverLimit.maximum_inputs as usize) {
         let excess_path: StdPathResult =
             bootstrap_linker_driver_input_path(count);
@@ -203,21 +230,12 @@ fn main() -> i32 {
         );
         return BootstrapLinkerDriverStatus.link_error as i32;
     }
-    let output_path: StdPathResult =
-        std_path_from_c_string("bootstrap-link-output", 22);
-    var write_error: RuntimeError = output_path.error;
-    if (output_path.error == RuntimeError.none) {
-        write_error = std_io_write_executable_file(
-            output_path.path,
+    let write_error: RuntimeError =
+        std_io_write_executable_file_atomic(
+            output_path,
             linked.executable.data as *const u8,
             linked.executable.length
         );
-        let path_error: RuntimeError =
-            std_path_release(output_path.path);
-        if (write_error == RuntimeError.none) {
-            write_error = path_error;
-        }
-    }
     let executable_error: RuntimeError =
         std_byte_buffer_release(linked.executable);
     let objects_error: RuntimeError =
@@ -233,4 +251,232 @@ fn main() -> i32 {
         return BootstrapLinkerDriverStatus.release_error as i32;
     }
     return BootstrapLinkerDriverStatus.success as i32;
+}
+
+fn bootstrap_linker_argument_equals(
+    argument: *const u8,
+    expected: *const u8,
+    length: usize
+) -> bool {
+    if (argument == null || expected == null) {
+        return false;
+    }
+    var index: usize = 0;
+    while (index < length) {
+        if (argument[index] != expected[index] ||
+            argument[index] == 0) {
+            return false;
+        }
+        index += 1;
+    }
+    return argument[length] == 0;
+}
+
+fn bootstrap_linker_print(
+    file: RuntimeFile,
+    data: *const u8
+) -> RuntimeError {
+    let text: StdTextViewResult =
+        std_text_from_c_string(data, 512);
+    if (text.error != RuntimeError.none) {
+        return text.error;
+    }
+    return std_io_write_all(
+        file,
+        text.view.data,
+        text.view.length
+    );
+}
+
+fn bootstrap_linker_usage() -> i32 {
+    bootstrap_linker_print(
+        runtime_standard_error(),
+        "usage: luna-link -o <executable> <input.lo>...\n"
+    );
+    return BootstrapLinkerDriverStatus.cli_usage_error as i32;
+}
+
+fn bootstrap_linker_release_paths(
+    paths: *StdPath,
+    count: usize
+) -> RuntimeError {
+    if (paths == null ||
+        count >
+            BootstrapLinkerDriverLimit.maximum_inputs as usize) {
+        return RuntimeError.invalid_argument;
+    }
+    var error: RuntimeError = RuntimeError.none;
+    var index: usize = count;
+    while (index != 0) {
+        index -= 1;
+        let release_error: RuntimeError =
+            std_path_release(paths[index]);
+        if (error == RuntimeError.none) {
+            error = release_error;
+        }
+    }
+    return error;
+}
+
+fn bootstrap_linker_cli_main(
+    argc: usize,
+    argv: **const u8
+) -> i32 {
+    if (argv == null || argc < 2) {
+        return bootstrap_linker_usage();
+    }
+    if (argc == 2 &&
+        bootstrap_linker_argument_equals(
+            argv[1],
+            "--help",
+            6
+        )) {
+        bootstrap_linker_print(
+            runtime_standard_output(),
+            "usage: luna-link -o <executable> <input.lo>...\n"
+        );
+        return 0;
+    }
+    if (argc == 2 &&
+        bootstrap_linker_argument_equals(
+            argv[1],
+            "--version",
+            9
+        )) {
+        bootstrap_linker_print(
+            runtime_standard_output(),
+            "luna-link (self-hosted Luna 1) 0.1.0\n"
+        );
+        return 0;
+    }
+
+    var inputs: [64]StdPath = {};
+    var input_count: usize = 0;
+    var output: StdPath = {};
+    var has_output: bool = false;
+    var options_finished: bool = false;
+    var valid: bool = true;
+    var index: usize = 1;
+    while (index < argc && valid) {
+        let argument: *const u8 = argv[index];
+        if (!options_finished &&
+            bootstrap_linker_argument_equals(
+                argument,
+                "--",
+                2
+            )) {
+            options_finished = true;
+        } else if (!options_finished &&
+            bootstrap_linker_argument_equals(
+                argument,
+                "-o",
+                2
+            )) {
+            if (has_output || index + 1 >= argc) {
+                valid = false;
+            } else {
+                index += 1;
+                let path: StdPathResult =
+                    std_path_from_c_string(
+                        argv[index],
+                        BootstrapLinkerDriverLimit
+                            .maximum_path_bytes as usize
+                    );
+                if (path.error != RuntimeError.none) {
+                    valid = false;
+                } else {
+                    output = path.path;
+                    has_output = true;
+                }
+            }
+        } else if (!options_finished &&
+            argument != null && argument[0] == 45) {
+            valid = false;
+        } else if (input_count ==
+            BootstrapLinkerDriverLimit.maximum_inputs as usize) {
+            valid = false;
+        } else {
+            let path: StdPathResult =
+                std_path_from_c_string(
+                    argument,
+                    BootstrapLinkerDriverLimit
+                        .maximum_path_bytes as usize
+                );
+            if (path.error != RuntimeError.none) {
+                valid = false;
+            } else {
+                inputs[input_count] = path.path;
+                input_count += 1;
+            }
+        }
+        index += 1;
+    }
+    if (!has_output || input_count == 0) {
+        valid = false;
+    }
+    if (valid) {
+        let output_text: StdTextViewResult =
+            std_path_text(output);
+        index = 0;
+        while (index < input_count && valid) {
+            let input_text: StdTextViewResult =
+                std_path_text(inputs[index]);
+            valid = output_text.error == RuntimeError.none &&
+                input_text.error == RuntimeError.none &&
+                !std_text_equal(output_text.view, input_text.view);
+            index += 1;
+        }
+    }
+
+    var status: i32 =
+        BootstrapLinkerDriverStatus.cli_usage_error as i32;
+    if (valid) {
+        status = bootstrap_linker_driver_run(
+            false,
+            &inputs[0] as *const StdPath,
+            input_count,
+            output
+        );
+        if (status == BootstrapLinkerDriverStatus.success as i32) {
+            status = 0;
+        }
+    } else {
+        bootstrap_linker_usage();
+    }
+    let input_error: RuntimeError =
+        bootstrap_linker_release_paths(&inputs[0], input_count);
+    var output_error: RuntimeError = RuntimeError.none;
+    if (has_output) {
+        output_error = std_path_release(output);
+    }
+    if (status == 0 &&
+        (input_error != RuntimeError.none ||
+            output_error != RuntimeError.none)) {
+        return BootstrapLinkerDriverStatus.release_error as i32;
+    }
+    return status;
+}
+
+fn main(argc: usize, argv: **const u8) -> i32 {
+    if (argc != 1) {
+        return bootstrap_linker_cli_main(argc, argv);
+    }
+    let output: StdPathResult =
+        std_path_from_c_string("bootstrap-link-output", 22);
+    if (output.error != RuntimeError.none) {
+        return BootstrapLinkerDriverStatus.output_error as i32;
+    }
+    let status: i32 = bootstrap_linker_driver_run(
+        true,
+        null,
+        0,
+        output.path
+    );
+    let release_error: RuntimeError =
+        std_path_release(output.path);
+    if (status == BootstrapLinkerDriverStatus.success as i32 &&
+        release_error != RuntimeError.none) {
+        return BootstrapLinkerDriverStatus.release_error as i32;
+    }
+    return status;
 }

@@ -11,6 +11,42 @@
 
 namespace luna::test {
 
+TEST(SemaTest, AcceptsOnlyTheTypedCommandLineEntrySignature) {
+    constexpr std::string_view LUNA_TEST_COMMAND_LINE_ENTRY_SOURCE{
+        "module test.command_line_entry;\n"
+        "fn main(argc: usize, argv: **const u8) -> i32 {\n"
+        "    return argc == 2 && argv[1][0] == 120 ? 42 : 1;\n"
+        "}\n"};
+    constexpr std::string_view LUNA_TEST_MUTABLE_ARGUMENT_STRINGS_SOURCE{
+        "module test.mutable_command_line_strings;\n"
+        "fn main(argc: usize, argv: **u8) -> i32 { return argc as i32; }\n"};
+    constexpr std::string_view LUNA_TEST_SIGNED_ARGUMENT_COUNT_SOURCE{
+        "module test.signed_command_line_count;\n"
+        "fn main(argc: isize, argv: **const u8) -> i32 {\n"
+        "    return argc as i32;\n"
+        "}\n"};
+    constexpr std::string_view LUNA_TEST_COMMAND_LINE_ENTRY_DIAGNOSTIC{
+        "fn main(argc: usize, argv: **const u8) -> i32"};
+
+    FrontendHarness command_line_entry{LUNA_TEST_COMMAND_LINE_ENTRY_SOURCE};
+    ASSERT_TRUE(command_line_entry.ParseAndLower())
+        << command_line_entry.Diagnostics();
+    ASSERT_TRUE(command_line_entry.Verify())
+        << command_line_entry.Diagnostics();
+
+    FrontendHarness mutable_strings{LUNA_TEST_MUTABLE_ARGUMENT_STRINGS_SOURCE};
+    EXPECT_FALSE(mutable_strings.ParseAndLower());
+    EXPECT_NE(mutable_strings.Diagnostics().find(
+                  LUNA_TEST_COMMAND_LINE_ENTRY_DIAGNOSTIC),
+              std::string::npos);
+
+    FrontendHarness signed_count{LUNA_TEST_SIGNED_ARGUMENT_COUNT_SOURCE};
+    EXPECT_FALSE(signed_count.ParseAndLower());
+    EXPECT_NE(signed_count.Diagnostics().find(
+                  LUNA_TEST_COMMAND_LINE_ENTRY_DIAGNOSTIC),
+              std::string::npos);
+}
+
 TEST(SemaTest, LowersExternalDeclarationsAndCallsToTypedIr) {
     FrontendHarness harness{
         "module test.external_sema;\n"

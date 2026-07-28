@@ -26,8 +26,8 @@ all three statically linked tool executables byte-for-byte.
 
 ## Freestanding driver protocol
 
-The stage driver deliberately has no command-line parser. Each invocation has
-an isolated working directory containing:
+An invocation with no user arguments deliberately selects the versioned fixed
+protocol. It has an isolated working directory containing:
 
 ```text
 bootstrap-stage-version
@@ -53,8 +53,11 @@ semantic diagnostics retain their existing
 `semantic:<kind>:<unit>:<offset>:<detail>` encoding.
 
 The protocol makes every input explicit and avoids host argument, environment
-and library dependencies. It is a narrow bootstrap interface, not the future
-user-facing compiler CLI.
+and library dependencies. The same executable also exposes the normal
+argument-driven interface documented in
+[the complete bootstrap toolchain contract](bootstrap-toolchain.md); the
+fixed-point gate continues to use this narrower protocol so CLI policy cannot
+silently alter reconstruction inputs.
 
 ## Separate module compilation
 
