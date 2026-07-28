@@ -105,7 +105,14 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] add normal argument-driven self-hosted compiler, assembler and linker
   commands with typed `argc`/`argv`, conventional success status and atomic
   outputs while retaining the versioned fixed protocol
-- [ ] define reproducible distribution and verification of the versioned seed
+- [x] define a canonical versioned seed containing the fixed-point tools and
+  complete Luna reconstruction source graph
+- [x] verify the seed manifest, archive representation, static ELF contract,
+  external checksum, mutation rejection and byte-identical offline rebuild
+
+M7 closes the planned compiler and bootstrap implementation. Freezing a
+release tag and publishing its already-versioned seed are release operations,
+not an additional compiler milestone.
 
 ## Explicitly deferred
 

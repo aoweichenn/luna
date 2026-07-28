@@ -143,6 +143,10 @@ driver protocols and deliberately narrow linker contract are documented in
 15. execution of that floating-point probe through stage 0, stage 2 and stage
    3, plus byte equality of stage-2/stage-3 output and stable rejection of the
    maximum-finite/infinity midpoint for both widths.
+16. two independent canonical seed creations, the tracked external checksum,
+    strict manifest/tar/static-ELF verification, payload/checksum/truncation/
+    trailing-data/path-traversal mutations, and a complete offline rebuild
+    from packaged tools and packaged sources with byte-identical results.
 
 The regular middle-end and backend gates separately retain source-order,
 module-boundary, type-layout, IR-verifier, ABI, execution, random and fuzz

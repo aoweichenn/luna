@@ -1,8 +1,14 @@
 cmake_minimum_required(VERSION 3.25)
 
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" LUNA_PROJECT_VERSION)
+string(STRIP "${LUNA_PROJECT_VERSION}" LUNA_PROJECT_VERSION)
+if(NOT LUNA_PROJECT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "VERSION must contain a semantic release version")
+endif()
+
 project(
     luna
-    VERSION 0.1.0
+    VERSION "${LUNA_PROJECT_VERSION}"
     DESCRIPTION "A small C23-bootstrapped systems language"
     LANGUAGES C
 )
@@ -619,6 +625,43 @@ if(BUILD_TESTING)
             luna_sysroot
         COMMENT
             "Building and verifying the complete self-hosted Luna toolchain"
+        VERBATIM
+    )
+
+    set(
+        LUNA_BOOTSTRAP_SEED_NAME
+        "luna-bootstrap-seed-${PROJECT_VERSION}-x86_64-unknown-linux-gnu.tar"
+    )
+    set(
+        LUNA_BOOTSTRAP_SEED_ARCHIVE
+        "${CMAKE_CURRENT_BINARY_DIR}/selfhost-bootstrap/dist/${LUNA_BOOTSTRAP_SEED_NAME}"
+    )
+    set(
+        LUNA_BOOTSTRAP_SEED_CHECKSUM
+        "${LUNA_BOOTSTRAP_SEED_ARCHIVE}.sha256"
+    )
+    set(
+        LUNA_BOOTSTRAP_SEED_EXPECTED_CHECKSUM
+        "${CMAKE_CURRENT_SOURCE_DIR}/release/seeds/${LUNA_BOOTSTRAP_SEED_NAME}.sha256"
+    )
+    add_custom_target(
+        luna_bootstrap_seed
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/release/bootstrap_seed.py"
+            verify
+            "${LUNA_BOOTSTRAP_SEED_ARCHIVE}"
+            --checksum-file "${LUNA_BOOTSTRAP_SEED_CHECKSUM}"
+            --expected-version "${PROJECT_VERSION}"
+            --expected-target "x86_64-unknown-linux-gnu"
+        COMMAND
+            "${CMAKE_COMMAND}" -E compare_files
+            "${LUNA_BOOTSTRAP_SEED_CHECKSUM}"
+            "${LUNA_BOOTSTRAP_SEED_EXPECTED_CHECKSUM}"
+        DEPENDS
+            luna_selfhost_toolchain
+        COMMENT
+            "Verifying the versioned reproducible Luna bootstrap seed"
         VERBATIM
     )
 

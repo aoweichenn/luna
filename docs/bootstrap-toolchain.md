@@ -30,6 +30,10 @@ The test then requires byte equality for:
 Consequently a passing fixed point does not hide a hosted assembler or linker
 between the self-hosted stages.
 
+The distributable fixed point is the canonical versioned seed described in
+[the bootstrap seed contract](bootstrap-seed.md). It binds the three tools to
+the complete Luna source graph and proves an offline byte-identical rebuild.
+
 ## Command-line tools
 
 The verified stage-3 directory contains the normal tools `lunac`, `luna-as`

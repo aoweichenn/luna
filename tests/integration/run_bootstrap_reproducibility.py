@@ -5,10 +5,14 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import fractions
+import io
 import pathlib
 import random
 import re
 import shutil
+import subprocess
+import sys
+import tarfile
 
 from bootstrap_semantic_convergence import (
     ExecutionCase,
@@ -106,6 +110,8 @@ STAGE_DRIVERS = {
 
 STAGE_NATIVE_TIMEOUT_SECONDS = 300
 STAGE_EMULATED_TIMEOUT_SECONDS = 1200
+BOOTSTRAP_SEED_TARGET = "x86_64-unknown-linux-gnu"
+BOOTSTRAP_SEED_TAR_RECORD_BYTES = 10240
 
 
 @dataclasses.dataclass(frozen=True)
@@ -634,6 +640,314 @@ def compare_stages(
         ("stage linker executable", stage_two.linker, stage_three.linker),
     ):
         compare_files(left, right, description)
+
+
+def project_version(source_root: pathlib.Path) -> str:
+    version_bytes = (source_root / "VERSION").read_bytes()
+    if (
+        not version_bytes.endswith(b"\n")
+        or version_bytes.count(b"\n") != 1
+    ):
+        raise AssertionError("VERSION is not one newline-terminated value")
+    try:
+        version = version_bytes[:-1].decode("ascii")
+    except UnicodeDecodeError as error:
+        raise AssertionError("VERSION is not ASCII") from error
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+        raise AssertionError(f"VERSION is not semantic: {version!r}")
+    return version
+
+
+def require_seed_rejection(
+    result: subprocess.CompletedProcess[str],
+    description: str,
+) -> None:
+    if not result.stderr.startswith("bootstrap seed:"):
+        raise AssertionError(
+            f"{description} lost the stable seed rejection diagnostic"
+        )
+
+
+def mutate_seed_member(
+    archive: pathlib.Path,
+    output: pathlib.Path,
+    member_suffix: str,
+) -> None:
+    data = bytearray(archive.read_bytes())
+    with tarfile.open(archive, mode="r:") as seed_tar:
+        matching = [
+            member
+            for member in seed_tar.getmembers()
+            if member.name.endswith(member_suffix)
+        ]
+    if len(matching) != 1 or matching[0].size == 0:
+        raise AssertionError(
+            f"cannot locate one seed member ending in {member_suffix}"
+        )
+    member = matching[0]
+    mutation_offset = member.offset_data + min(64, member.size - 1)
+    data[mutation_offset] ^= 1
+    output.write_bytes(data)
+
+
+def run_bootstrap_seed_distribution_tests(
+    stage: StageArtifacts,
+    source_root: pathlib.Path,
+    runner: list[str],
+    work_dir: pathlib.Path,
+) -> None:
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    first_root = work_dir
+    second_root = work_dir / "second"
+    mutation_root = work_dir / "mutations"
+    first_root.mkdir(parents=True)
+    second_root.mkdir(parents=True)
+    mutation_root.mkdir(parents=True)
+
+    version = project_version(source_root)
+    archive_name = (
+        f"luna-bootstrap-seed-{version}-{BOOTSTRAP_SEED_TARGET}.tar"
+    )
+    seed_tool = source_root / "tools" / "release" / "bootstrap_seed.py"
+    first_archive = first_root / archive_name
+    second_archive = second_root / archive_name
+    first_checksum = first_archive.with_name(
+        f"{first_archive.name}.sha256"
+    )
+    second_checksum = second_archive.with_name(
+        f"{second_archive.name}.sha256"
+    )
+    expected_checksum = (
+        source_root
+        / "release"
+        / "seeds"
+        / f"{archive_name}.sha256"
+    )
+    for output in (first_archive, second_archive):
+        run(
+            [
+                sys.executable,
+                str(seed_tool),
+                "create",
+                "--source-root",
+                str(source_root),
+                "--tool-dir",
+                str(stage.root / "bin"),
+                "--output",
+                str(output),
+                "--target",
+                BOOTSTRAP_SEED_TARGET,
+            ],
+            timeout=120,
+        )
+    compare_files(
+        first_archive,
+        second_archive,
+        "independent bootstrap seed archives",
+    )
+    compare_files(
+        first_checksum,
+        second_checksum,
+        "independent bootstrap seed checksums",
+    )
+    if not expected_checksum.is_file():
+        raise AssertionError(
+            f"versioned seed checksum is not tracked: {expected_checksum}"
+        )
+    compare_files(
+        first_checksum,
+        expected_checksum,
+        "tracked bootstrap seed checksum",
+    )
+    run(
+        [
+            sys.executable,
+            str(seed_tool),
+            "verify",
+            str(first_archive),
+            "--checksum-file",
+            str(first_checksum),
+            "--expected-version",
+            version,
+            "--expected-target",
+            BOOTSTRAP_SEED_TARGET,
+        ],
+        timeout=120,
+    )
+    extracted_root = work_dir / "verified-extraction"
+    run(
+        [
+            sys.executable,
+            str(seed_tool),
+            "verify",
+            str(first_archive),
+            "--checksum-file",
+            str(first_checksum),
+            "--extract-dir",
+            str(extracted_root),
+        ],
+        timeout=120,
+    )
+    extracted_seed = (
+        extracted_root
+        / f"luna-bootstrap-seed-{version}-{BOOTSTRAP_SEED_TARGET}"
+    )
+    for required in (
+        extracted_seed / "manifest.json",
+        extracted_seed / "bin" / "lunac",
+        extracted_seed / "bin" / "luna-as",
+        extracted_seed / "bin" / "luna-link",
+    ):
+        if not required.is_file():
+            raise AssertionError(f"safe seed extraction omitted {required}")
+    result = run(
+        [
+            sys.executable,
+            str(seed_tool),
+            "verify",
+            str(first_archive),
+            "--extract-dir",
+            str(extracted_root),
+        ],
+        expected_code=1,
+        timeout=120,
+    )
+    require_seed_rejection(result, "existing extraction destination")
+
+    rebuild_root = work_dir / "offline-rebuild"
+    run(
+        [
+            sys.executable,
+            str(seed_tool),
+            "rebuild",
+            str(first_archive),
+            "--checksum-file",
+            str(first_checksum),
+            "--expected-version",
+            version,
+            "--expected-target",
+            BOOTSTRAP_SEED_TARGET,
+            "--work-dir",
+            str(rebuild_root),
+        ],
+        timeout=(
+            STAGE_EMULATED_TIMEOUT_SECONDS
+            if runner
+            else STAGE_NATIVE_TIMEOUT_SECONDS
+        ),
+    )
+    for tool_name, original in (
+        ("lunac", stage.compiler),
+        ("luna-as", stage.assembler),
+        ("luna-link", stage.linker),
+    ):
+        compare_files(
+            original,
+            rebuild_root / "rebuild" / "bin" / tool_name,
+            f"offline rebuilt {tool_name}",
+        )
+
+    corrupted_payload = mutation_root / archive_name
+    mutate_seed_member(
+        first_archive,
+        corrupted_payload,
+        "/bin/lunac",
+    )
+    result = run(
+        [
+            sys.executable,
+            str(seed_tool),
+            "verify",
+            str(corrupted_payload),
+        ],
+        expected_code=1,
+        timeout=120,
+    )
+    require_seed_rejection(result, "payload mutation")
+
+    trailing_archive = mutation_root / f"trailing-{archive_name}"
+    trailing_archive.write_bytes(first_archive.read_bytes() + b"x")
+    result = run(
+        [
+            sys.executable,
+            str(seed_tool),
+            "verify",
+            str(trailing_archive),
+        ],
+        expected_code=1,
+        timeout=120,
+    )
+    require_seed_rejection(result, "trailing archive bytes")
+
+    archive_bytes = first_archive.read_bytes()
+    truncated_archive = mutation_root / f"truncated-{archive_name}"
+    truncated_archive.write_bytes(
+        archive_bytes[:-BOOTSTRAP_SEED_TAR_RECORD_BYTES]
+    )
+    result = run(
+        [
+            sys.executable,
+            str(seed_tool),
+            "verify",
+            str(truncated_archive),
+        ],
+        expected_code=1,
+        timeout=120,
+    )
+    require_seed_rejection(result, "truncated archive")
+
+    bad_checksum = mutation_root / f"{archive_name}.sha256"
+    bad_checksum.write_text(
+        f"{'0' * 64}  {archive_name}\n",
+        encoding="ascii",
+    )
+    result = run(
+        [
+            sys.executable,
+            str(seed_tool),
+            "verify",
+            str(first_archive),
+            "--checksum-file",
+            str(bad_checksum),
+        ],
+        expected_code=1,
+        timeout=120,
+    )
+    require_seed_rejection(result, "checksum mutation")
+
+    result = run(
+        [
+            sys.executable,
+            str(seed_tool),
+            "verify",
+            str(first_archive),
+            "--expected-version",
+            "999.0.0",
+        ],
+        expected_code=1,
+        timeout=120,
+    )
+    require_seed_rejection(result, "version mismatch")
+
+    traversal_archive = mutation_root / "path-traversal.tar"
+    with tarfile.open(traversal_archive, mode="w") as malicious:
+        information = tarfile.TarInfo("../escaped")
+        information.size = 1
+        malicious.addfile(information, io.BytesIO(b"x"))
+    result = run(
+        [
+            sys.executable,
+            str(seed_tool),
+            "verify",
+            str(traversal_archive),
+        ],
+        expected_code=1,
+        timeout=120,
+    )
+    require_seed_rejection(result, "path traversal")
+    if (work_dir / "escaped").exists():
+        raise AssertionError("seed verifier extracted a traversal member")
 
 
 def run_command_line_tool_tests(
@@ -2390,6 +2704,12 @@ def main() -> int:
         runner,
         read_elf,
         work_dir / "command-line-tools",
+    )
+    run_bootstrap_seed_distribution_tests(
+        stage_three,
+        source_root,
+        runner,
+        work_dir / "dist",
     )
 
     toolchain_unit_source = (

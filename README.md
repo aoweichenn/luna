@@ -153,6 +153,25 @@ separate assembler emits `LUNAOBJ1`, and the linker emits a static Linux
 ELF64 executable. The C23 seed compiler's broader ELF `.o`, `.lmi`, Debug IR
 and inspection commands remain reconstruction and development facilities.
 
+## Build the versioned bootstrap seed
+
+The final distribution target packages the fixed-point tools together with
+the complete pure-Luna reconstruction source graph, writes a canonical
+SHA-256 file, verifies the bounded archive and rebuilds all three tools from
+the package without a hosted compiler, assembler or linker:
+
+```sh
+cmake --preset release
+cmake --build --preset release --target luna_bootstrap_seed
+```
+
+The release artifact is written below
+`build/release/selfhost-bootstrap/dist/`. Its checksum must match the
+versioned identity under `release/seeds/`. The archive format, offline
+verification command, byte-identical rebuild requirement and trust boundary
+are documented in
+[`docs/bootstrap-seed.md`](docs/bootstrap-seed.md).
+
 ## Compile
 
 ```sh
@@ -363,6 +382,7 @@ See [the language draft](docs/language.md),
 [Luna bootstrap middle end](docs/bootstrap-middleend.md),
 [Luna bootstrap x86-64 backend](docs/bootstrap-x86-64-backend.md),
 [complete Luna-owned bootstrap toolchain](docs/bootstrap-toolchain.md),
+[versioned bootstrap seed](docs/bootstrap-seed.md),
 [bootstrap reproducibility](docs/bootstrap-reproducibility.md),
 [compiled module metadata format](docs/module-metadata.md),
 [bootstrap execution semantics](docs/execution-semantics.md), and the

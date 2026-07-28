@@ -71,12 +71,16 @@ bootstrap gate proves that the C23 seed rejects the Luna 1 probe, the
 seed-built stage 1 accepts it, all three self-hosted stages produce identical
 probe assembly, and the linked probe executes successfully.
 
-## Remaining trusted tools
+## Reconstruction and distribution boundary
 
-Language authority transfer does not claim that the complete build toolchain
-is already written in Luna. The first seed is still built by the hosted C23
-compiler, and the current bootstrap fixed-point harness still uses the
-project-owned C implementations of the closed x86-64 assembler and static
-ELF64 linker. Those are explicit later migration boundaries; they do not
-participate in parsing, typing, IR construction or code generation decisions
-for Luna 1.
+The hosted C23 compiler reconstructs stage 1 only. Stage 1 and later use the
+Luna-owned assembler and static ELF64 linker; no hosted assembler or linker
+remains inside the fixed-point loop.
+
+The released reconstruction input is
+`LUNA-BOOTSTRAP-SEED/1`: the fixed-point Luna compiler, assembler and linker
+plus their complete Luna source graph. Its standalone offline gate verifies
+the canonical archive and rebuilds all three packaged tools byte-for-byte.
+The C23 implementation remains a reviewable alternative reconstruction path
+and Luna 0 differential oracle, not a hidden dependency of the distributed
+Luna 1 toolchain.
