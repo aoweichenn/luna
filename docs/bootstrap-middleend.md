@@ -143,6 +143,20 @@ kind, unit, primary span, optional related unit/span and numeric detail.
 Allocation or invariant failures use `RuntimeError` and never masquerade as a
 language diagnostic.
 
+## Source-module compilation
+
+Unit zero identifies the root module for a semantic invocation. In library
+mode, the root implementation must satisfy its interface, while reachable
+imported modules may be supplied as interfaces without implementation bodies.
+In executable mode, reachability starts at the module containing the selected
+entry point. Any supplied module outside that closure is rejected.
+
+Record field type IDs are resolved before any field records for that owner are
+appended. Recursive dependency layout can therefore add its own fields without
+interleaving them into the owner's contiguous field range. This invariant is
+checked by the type-table verifier and by a library-mode regression containing
+an imported aggregate followed by another root field.
+
 ## Verification
 
 The stage is guarded by:
@@ -152,7 +166,8 @@ The stage is guarded by:
 2. Target x86-64 executions covering the complete scalar, aggregate, pointer,
    layout-query and structured-control surface, including aggregate
    temporaries and external declarations.
-3. A source-order-independent interface/implementation/import execution.
+3. Source-order-independent executable graphs and separate library-module
+   compilation with interface-only dependencies.
 4. Deliberate in-memory corruption of built-in layouts, call arguments and
    CFG predecessor counts, proving that the independent verifiers reject
    damage and accept the restored representation.
@@ -165,6 +180,7 @@ The stage is guarded by:
    symbol checks, unresolved-symbol checks and dynamic-loader exclusion.
 
 This completes the Luna type-checking and Typed IR item in M4. The verified
-`BootstrapTypedIr` is now consumed by the
-[Luna bootstrap x86-64 backend](bootstrap-x86-64-backend.md); stage
-reproducibility remains after that backend.
+`BootstrapTypedIr` is consumed by the
+[Luna bootstrap x86-64 backend](bootstrap-x86-64-backend.md) and the complete
+source-module graph participates in the
+[stage reproducibility gate](bootstrap-reproducibility.md).

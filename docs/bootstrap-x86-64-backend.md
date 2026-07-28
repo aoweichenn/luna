@@ -86,6 +86,11 @@ No optimization, liveness analysis or physical register allocation occurs in
 this stage. Those concerns cannot change language behavior while the
 self-hosted path is being proven.
 
+Scaled-pointer address instructions consume the element-size scale already
+verified in Typed IR. The backend does not infer a second scale from the
+pointer expression's surface type; this is required for indexing an array
+lvalue, whose expression type is the complete array rather than one element.
+
 ## Assembly and linking
 
 Luna symbols use `_L<hex-module>_<hex-function>`; external C symbols remain
@@ -121,5 +126,5 @@ The stage is guarded by:
 7. two byte-for-byte reproductions of every backend `.lmi` and `.o`, plus
    unresolved-symbol and dynamic-loader exclusion checks.
 
-This completes the Luna x86-64 backend item in M4. The remaining bootstrap
-milestone is the stage 1/stage 2/stage 3 reproducibility comparison.
+This completes the Luna x86-64 backend item in M4. Its output now closes the
+[stage 1/stage 2/stage 3 reproducibility comparison](bootstrap-reproducibility.md).

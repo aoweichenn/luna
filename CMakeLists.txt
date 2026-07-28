@@ -826,6 +826,26 @@ if(BUILD_TESTING)
             SKIP_RETURN_CODE 77
             TIMEOUT 300
     )
+    add_test(
+        NAME integration.bootstrap_reproducibility
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/run_bootstrap_reproducibility.py"
+            --compiler "$<TARGET_FILE:lunac>"
+            --linker "$<TARGET_FILE:lunalink>"
+            --assembler "$<TARGET_FILE:luna_bootstrap_assembler>"
+            --sysroot "${CMAKE_CURRENT_BINARY_DIR}/sysroot"
+            --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --work-dir "${CMAKE_CURRENT_BINARY_DIR}/bootstrap-reproducibility"
+    )
+    set_tests_properties(
+        integration.bootstrap_reproducibility
+        PROPERTIES
+            LABELS "integration;bootstrap;reproducibility"
+            RESOURCE_LOCK "luna_sysroot"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 3600
+    )
     set_tests_properties(
         integration.bootstrap_middleend
         PROPERTIES
@@ -969,6 +989,7 @@ if(LUNA_BUILD_FUZZERS)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/bootstrap_frontend.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/bootstrap_middleend.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/bootstrap_x86_64_backend.luna"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/bootstrap/stage_compiler.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/object_assembly.s"
             DESTINATION "${LUNA_FUZZ_CORPUS_DIR}"
         )

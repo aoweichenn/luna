@@ -1877,11 +1877,59 @@ fn bootstrap_semantic_field_name_exists(
     return bootstrap_semantic_no_id();
 }
 
+fn bootstrap_semantic_resolve_record_field_types(
+    context: *BootstrapSemanticContext,
+    record: BootstrapTypeRecord
+) -> bool {
+    let declaration: BootstrapSyntaxNode =
+        bootstrap_semantic_node(
+            context,
+            record.declaration_unit,
+            record.declaration_node
+        );
+    var field_node: usize = declaration.first_child;
+    while (field_node != bootstrap_semantic_no_id() &&
+        context->error == RuntimeError.none) {
+        let field_declaration: BootstrapSyntaxNode =
+            bootstrap_semantic_node(
+                context,
+                record.declaration_unit,
+                field_node
+            );
+        if (field_declaration.kind !=
+                BootstrapSyntaxKind.field_declaration ||
+            field_declaration.child_count != 1) {
+            context->error = RuntimeError.invalid_argument;
+            return false;
+        }
+        let field_type: usize =
+            bootstrap_semantic_resolve_type_node(
+                context,
+                record.declaration_unit,
+                field_declaration.first_child
+            );
+        if (field_type != bootstrap_semantic_no_id()) {
+            bootstrap_semantic_require_complete_type(
+                context,
+                field_type
+            );
+        }
+        field_node = field_declaration.next_sibling;
+    }
+    return context->error == RuntimeError.none;
+}
+
 fn bootstrap_semantic_resolve_record_layout(
     context: *BootstrapSemanticContext,
     type_id: usize,
     record: BootstrapTypeRecord
 ) -> bool {
+    if (!bootstrap_semantic_resolve_record_field_types(
+            context,
+            record
+        )) {
+        return false;
+    }
     let declaration: BootstrapSyntaxNode =
         bootstrap_semantic_node(
             context,
@@ -3080,18 +3128,21 @@ fn bootstrap_semantic_collect_functions(
     let symbols: *const BootstrapSemanticSymbol =
         context->symbols.data as
             *const BootstrapSemanticSymbol;
+    let root_module: usize =
+        bootstrap_semantic_unit_module(context, 0);
     var function_id: usize = 0;
     while (function_id < context->function_count) {
         let function: BootstrapSemanticFunction =
             functions[function_id];
+        let symbol: BootstrapSemanticSymbol =
+            symbols[function.symbol_id];
         if (function.interface_unit !=
                 bootstrap_semantic_no_id() &&
             function.implementation_unit ==
                 bootstrap_semantic_no_id() &&
+            symbol.module_id == root_module &&
             (function.flags &
                 (BootstrapSemanticSymbolFlag.external as usize)) == 0) {
-            let symbol: BootstrapSemanticSymbol =
-                symbols[function.symbol_id];
             bootstrap_semantic_add_diagnostic(
                 context,
                 BootstrapSemanticDiagnosticKind.missing_definition,
@@ -7557,11 +7608,48 @@ fn bootstrap_semantic_mark_reachable(
     return true;
 }
 
+fn bootstrap_semantic_validate_reachability(
+    context: *BootstrapSemanticContext,
+    root_module: usize
+) -> bool {
+    if (root_module >= context->module_count) {
+        return false;
+    }
+    bootstrap_semantic_mark_reachable(context, root_module);
+    let modules: *const BootstrapSemanticModule =
+        context->modules.data as
+            *const BootstrapSemanticModule;
+    var module_id: usize = 0;
+    while (module_id < context->module_count) {
+        if (!modules[module_id].reachable) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind
+                    .unreachable_module,
+                modules[module_id].name_unit,
+                bootstrap_semantic_node(
+                    context,
+                    modules[module_id].name_unit,
+                    modules[module_id].name_node
+                ).span,
+                bootstrap_semantic_no_id(),
+                bootstrap_semantic_empty_span(),
+                module_id
+            );
+        }
+        module_id += 1;
+    }
+    return true;
+}
+
 fn bootstrap_semantic_select_entry(
     context: *BootstrapSemanticContext
 ) -> bool {
     if (!context->input.executable) {
-        return true;
+        return bootstrap_semantic_validate_reachability(
+            context,
+            bootstrap_semantic_unit_module(context, 0)
+        );
     }
     let none: usize = bootstrap_semantic_no_id();
     let functions: *const BootstrapSemanticFunction =
@@ -7652,37 +7740,13 @@ fn bootstrap_semantic_select_entry(
         &context->ir,
         entry_function.ir_function
     );
-    bootstrap_semantic_mark_reachable(
+    return bootstrap_semantic_validate_reachability(
         context,
         bootstrap_semantic_unit_module(
             context,
             entry_function.implementation_unit
         )
     );
-    let modules: *const BootstrapSemanticModule =
-        context->modules.data as
-            *const BootstrapSemanticModule;
-    var module_id: usize = 0;
-    while (module_id < context->module_count) {
-        if (!modules[module_id].reachable) {
-            bootstrap_semantic_add_diagnostic(
-                context,
-                BootstrapSemanticDiagnosticKind
-                    .unreachable_module,
-                modules[module_id].name_unit,
-                bootstrap_semantic_node(
-                    context,
-                    modules[module_id].name_unit,
-                    modules[module_id].name_node
-                ).span,
-                none,
-                bootstrap_semantic_empty_span(),
-                module_id
-            );
-        }
-        module_id += 1;
-    }
-    return true;
 }
 
 fn bootstrap_semantic_public_type_is_valid(

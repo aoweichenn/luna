@@ -8,6 +8,103 @@ import luna.bootstrap.middleend.type;
 import luna.bootstrap.middleend.ir;
 import luna.bootstrap.middleend.sema;
 
+fn check_library_module_boundary() -> bool {
+    let implementation_source: StdTextViewResult =
+        std_text_from_c_string(
+            "module checked.library;\nfn preserve(value: Envelope) -> Envelope { return value; }\n",
+            128
+        );
+    let interface_source: StdTextViewResult =
+        std_text_from_c_string(
+            "export module checked.library;\nimport checked.dependency;\nexport struct Envelope { dependency: Dependency; tail: i32; }\nexport fn preserve(value: Envelope) -> Envelope;\n",
+            224
+        );
+    let dependency_source: StdTextViewResult =
+        std_text_from_c_string(
+            "export module checked.dependency;\nexport struct Dependency { first: i32; wide: i64; last: i32; }\n",
+            160
+        );
+    if (implementation_source.error != RuntimeError.none ||
+        interface_source.error != RuntimeError.none ||
+        dependency_source.error != RuntimeError.none) {
+        return false;
+    }
+
+    let implementation_frontend: BootstrapFrontendResult =
+        bootstrap_frontend_parse(implementation_source.view);
+    let interface_frontend: BootstrapFrontendResult =
+        bootstrap_frontend_parse(interface_source.view);
+    let dependency_frontend: BootstrapFrontendResult =
+        bootstrap_frontend_parse(dependency_source.view);
+    if (implementation_frontend.error != RuntimeError.none ||
+        interface_frontend.error != RuntimeError.none ||
+        dependency_frontend.error != RuntimeError.none ||
+        implementation_frontend.lex.diagnostics.count != 0 ||
+        implementation_frontend.parse.diagnostics.count != 0 ||
+        interface_frontend.lex.diagnostics.count != 0 ||
+        interface_frontend.parse.diagnostics.count != 0 ||
+        dependency_frontend.lex.diagnostics.count != 0 ||
+        dependency_frontend.parse.diagnostics.count != 0) {
+        bootstrap_frontend_result_release(implementation_frontend);
+        bootstrap_frontend_result_release(interface_frontend);
+        bootstrap_frontend_result_release(dependency_frontend);
+        return false;
+    }
+
+    var input: BootstrapSemanticInput =
+        bootstrap_semantic_input_empty(false);
+    let added: bool = bootstrap_semantic_input_add(
+        &input,
+        {
+            source = implementation_source.view,
+            tokens = implementation_frontend.lex.tokens,
+            tree = implementation_frontend.parse.tree,
+        }
+    ) && bootstrap_semantic_input_add(
+        &input,
+        {
+            source = interface_source.view,
+            tokens = interface_frontend.lex.tokens,
+            tree = interface_frontend.parse.tree,
+        }
+    ) && bootstrap_semantic_input_add(
+        &input,
+        {
+            source = dependency_source.view,
+            tokens = dependency_frontend.lex.tokens,
+            tree = dependency_frontend.parse.tree,
+        }
+    );
+    if (!added) {
+        bootstrap_semantic_input_release(input);
+        bootstrap_frontend_result_release(implementation_frontend);
+        bootstrap_frontend_result_release(interface_frontend);
+        bootstrap_frontend_result_release(dependency_frontend);
+        return false;
+    }
+
+    let result: BootstrapSemanticResult =
+        bootstrap_semantic_check(input);
+    let accepted: bool =
+        bootstrap_semantic_result_is_success(result);
+    let result_error: RuntimeError =
+        bootstrap_semantic_result_release(result);
+    let input_error: RuntimeError =
+        bootstrap_semantic_input_release(input);
+    let implementation_error: RuntimeError =
+        bootstrap_frontend_result_release(implementation_frontend);
+    let interface_error: RuntimeError =
+        bootstrap_frontend_result_release(interface_frontend);
+    let dependency_error: RuntimeError =
+        bootstrap_frontend_result_release(dependency_frontend);
+    return accepted &&
+        result_error == RuntimeError.none &&
+        input_error == RuntimeError.none &&
+        implementation_error == RuntimeError.none &&
+        interface_error == RuntimeError.none &&
+        dependency_error == RuntimeError.none;
+}
+
 fn main() -> i32 {
     let interface_source: StdTextViewResult =
         std_text_from_c_string(
@@ -104,5 +201,5 @@ fn main() -> i32 {
         application_error != RuntimeError.none) {
         return 4;
     }
-    return accepted ? 42 : 5;
+    return accepted && check_library_module_boundary() ? 42 : 5;
 }

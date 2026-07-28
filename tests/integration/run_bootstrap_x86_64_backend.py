@@ -164,8 +164,12 @@ def memory_program() -> tuple[bytes, int]:
         b"    var second: Pair = {};\n"
         b"    second = first;\n"
         b"    let message: *const u8 = \"A\";\n"
-        b"    return second.left + second.right + "
+        b"    let contiguous: bool = "
+        b"((&values[1 as usize]) as usize - "
+        b"(&values[0 as usize]) as usize) == sizeof(i32);\n"
+        b"    let result: i32 = second.left + second.right + "
         b"message[0 as usize] as i32 - 44;\n"
+        b"    return contiguous ? result : 1;\n"
         b"}\n",
         42,
     )
@@ -180,6 +184,8 @@ def numeric_program() -> tuple[bytes, int]:
         b"    let real: f64 = narrow as f64;\n"
         b"    let round_trip: i8 = real as i8;\n"
         b"    let shifted: i8 = (-8 as i8) >> 2;\n"
+        b"    let shifted_left_32: i32 = 3 << 5;\n"
+        b"    let shifted_left_64: u64 = 3 as u64 << 5 as u64;\n"
         b"    let nan: f64 = 0.0 / 0.0;\n"
         b"    let maximum: u64 = 18446744073709551615;\n"
         b"    let high_real: f64 = maximum as f64;\n"
@@ -191,7 +197,8 @@ def numeric_program() -> tuple[bytes, int]:
         b"    var status: i32 = 0;\n"
         b"    if (widened == -7) { status += 1; }\n"
         b"    if (round_trip == -7) { status += 2; }\n"
-        b"    if (shifted == -2) { status += 4; }\n"
+        b"    if (shifted == -2 && shifted_left_32 == 96 && "
+        b"shifted_left_64 == 96 as u64) { status += 4; }\n"
         b"    if (nan != nan) { status += 8; }\n"
         b"    if (high_real > 0.0) { status += 16; }\n"
         b"    if (high_integer == 9223372036854775808) { status += 32; }\n"

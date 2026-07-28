@@ -2,13 +2,15 @@
 
 ## Non-negotiable boundaries
 
-The bootstrap compiler is C23. Luna source is never translated to C. The
-initial target is exactly `x86_64-unknown-linux-gnu`: x86-64 instructions,
-System V calling convention and ELF64 objects or executables.
+Stage 0 is C23; the fixed-point compiler is Luna. Luna source is never
+translated to C. The initial target is exactly
+`x86_64-unknown-linux-gnu`: x86-64 instructions, System V calling convention
+and ELF64 objects or executables.
 
-Generated target programs are freestanding and never depend on libc. The
-bootstrap compiler is a hosted C23 tool, but host-library use is confined to
-the compiler process. The project-owned x86-64 Linux system-call ABI layer
+Generated target programs are freestanding and never depend on libc. Stage 0
+is a hosted C23 tool, but its host-library use is confined to that compiler
+process. Later compiler stages are themselves freestanding Luna executables.
+The project-owned x86-64 Linux system-call ABI layer
 converts System V calls with zero to six arguments to the kernel register ABI
 and invokes `syscall` directly. The Luna runtime and standard library must be
 built only on that layer. Optional caller-supplied external objects are an
@@ -107,7 +109,8 @@ recomputed System V ABI plan and stack-homed x86-64 emission are the stage-1
 contracts. See the
 [bootstrap frontend contract](bootstrap-frontend.md) and
 [bootstrap middle-end contract](bootstrap-middleend.md), followed by the
-[bootstrap x86-64 backend contract](bootstrap-x86-64-backend.md).
+[bootstrap x86-64 backend contract](bootstrap-x86-64-backend.md) and the
+[stage reproducibility contract](bootstrap-reproducibility.md).
 
 The syntax tree represents `if`, all three loop forms and non-fallthrough
 switch arms directly. Semantic lowering uses one ordered control-frame stack:

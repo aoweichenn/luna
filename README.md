@@ -1,10 +1,11 @@
 # Luna
 
 Luna is a small, strongly typed systems language derived from the procedural
-core of C23. The bootstrap compiler is written in C23 and lowers Luna directly
-to a typed control-flow IR, an x86-64 machine IR, native x86-64 instructions,
-ELF64 relocatable objects and static ELF64 executables. It does not transpile
-through C or C++.
+core of C23. Stage 0 is written in C23 and lowers Luna directly to a typed
+control-flow IR, an x86-64 machine IR, native x86-64 instructions, ELF64
+relocatable objects and static ELF64 executables. The self-hosting compiler is
+written in Luna and reaches a stage-2/stage-3 byte-for-byte fixed point. No
+stage transpiles through C or C++.
 
 The project is deliberately narrow at this stage:
 
@@ -50,12 +51,14 @@ The project is deliberately narrow at this stage:
   standard library, plus separately compiled Luna lexer/parser/type/IR/sema
   modules with structured diagnostics, stable indexed storage and
   independently verified Typed IR, with no target libc;
-- bootstrap host: conforming C23 with IEC 60559 binary32 and binary64;
+- bootstrap host: conforming C23 with IEC 60559 binary32 and binary64 for
+  stage 0; freestanding Luna with direct Linux system calls for later stages;
 - quality gate: warnings-as-errors, GoogleTest unit tests, negative tests,
   typed-IR, machine-IR, ABI, liveness, register-allocation and
   instruction-rewrite snapshots, full-opcode machine-IR-to-x86-64
-  differential execution, differential random programs, libFuzzer and
-  executable cross-target tests.
+  differential execution, differential random programs, libFuzzer,
+  executable cross-target tests and complete stage-2/stage-3 artifact
+  comparison.
 
 The language and compiler are under active construction. Implemented syntax is
 tracked separately from accepted language design so that documentation never
@@ -284,8 +287,11 @@ non-SSA Typed IR. The Luna backend recomputes System V ABI and stack-frame
 plans, then emits the project-owned x86-64 assembly dialect without
 optimization or C translation. They all run freestanding on the x86-64 target.
 
-The bootstrap compiler itself remains a hosted C23 development tool. Its host
-library use does not become a dependency of generated target programs.
+The stage-0 compiler remains a hosted C23 development tool. The Luna stage
+compiler is freestanding, compiles each module from source to verified Typed
+IR and x86-64 assembly, and is assembled and statically linked with the
+project-owned tools and runtime modules. Host-library use never becomes a
+dependency of generated target programs.
 
 See [the language draft](docs/language.md),
 [compiler architecture](docs/architecture.md),
@@ -303,6 +309,7 @@ See [the language draft](docs/language.md),
 [Luna bootstrap frontend](docs/bootstrap-frontend.md),
 [Luna bootstrap middle end](docs/bootstrap-middleend.md),
 [Luna bootstrap x86-64 backend](docs/bootstrap-x86-64-backend.md),
+[bootstrap reproducibility](docs/bootstrap-reproducibility.md),
 [compiled module metadata format](docs/module-metadata.md),
 [bootstrap execution semantics](docs/execution-semantics.md), and the
 [implementation roadmap](docs/roadmap.md).
