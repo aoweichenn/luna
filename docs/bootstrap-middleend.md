@@ -152,9 +152,11 @@ The instruction set records:
 - direct typed calls with separately owned argument records;
 - jumps, branches and typed returns.
 
-`if`, `while`, `do`, `for`, non-fallthrough `switch`, `&&`, `||` and the
-conditional operator are all lowered to ordinary blocks and branches. There
-is no hidden structured-control opcode and no optimization pass. Missing
+`if`, `while`, `do`, `for`, Luna 1 `loop`, non-fallthrough `switch`, `&&`,
+`||` and the conditional operator are all lowered to ordinary blocks and
+branches. `loop` has no condition block; normal completion and `continue`
+return directly to its body entry, while `break` targets its exit. There is
+no hidden structured-control opcode and no optimization pass. Missing
 return analysis traverses the completed CFG from the function entry instead
 of treating a detached block's local predecessor count as global
 reachability.

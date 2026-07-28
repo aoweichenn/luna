@@ -7,6 +7,12 @@ translated to C. The initial target is exactly
 `x86_64-unknown-linux-gnu`: x86-64 instructions, System V calling convention
 and ELF64 objects or executables.
 
+Stage 0 is authoritative only for the frozen Luna 0 reconstruction language.
+Luna 1 semantics are owned by the self-hosted compiler and are introduced
+with a versioned stage protocol and a two-step bootstrap before compiler
+sources may use them. This boundary is defined in
+[the bootstrap language version contract](bootstrap-language-versions.md).
+
 Generated target programs are freestanding and never depend on libc. Stage 0
 is a hosted C23 tool, but its host-library use is confined to that compiler
 process. Later compiler stages are themselves freestanding Luna executables.
@@ -112,8 +118,9 @@ contracts. See the
 [bootstrap x86-64 backend contract](bootstrap-x86-64-backend.md) and the
 [stage reproducibility contract](bootstrap-reproducibility.md).
 
-The syntax tree represents `if`, all three loop forms and non-fallthrough
-switch arms directly. Semantic lowering uses one ordered control-frame stack:
+The syntax tree represents `if`, the three conditional loop forms, Luna 1
+unconditional `loop` and non-fallthrough switch arms directly. Semantic
+lowering uses one ordered control-frame stack:
 `break` selects its innermost loop or switch frame, while `continue` searches
 for the innermost loop frame. This preserves nesting semantics without adding
 target-specific control constructs.

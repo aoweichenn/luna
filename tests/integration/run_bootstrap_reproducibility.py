@@ -259,6 +259,9 @@ def prepare_invocation(
     if invocation_root.exists():
         shutil.rmtree(invocation_root)
     invocation_root.mkdir(parents=True)
+    (invocation_root / "bootstrap-stage-version").write_bytes(
+        b"LUNA-STAGE/1 LUNA/1\n"
+    )
     (invocation_root / "bootstrap-stage-mode").write_bytes(
         b"E\n" if executable else b"L\n"
     )
@@ -438,10 +441,39 @@ def run_negative_driver_tests(
     runner: list[str],
     work_dir: pathlib.Path,
 ) -> None:
+    missing_version = work_dir / "negative-missing-version"
+    if missing_version.exists():
+        shutil.rmtree(missing_version)
+    missing_version.mkdir(parents=True)
+    run(
+        [*runner, str(stage_one)],
+        expected_code=9,
+        cwd=missing_version,
+    )
+
+    for name, version in (
+        ("mismatched", b"LUNA-STAGE/1 LUNA/0\n"),
+        ("truncated", b"LUNA-STAGE/1 LUNA/1"),
+        ("extended", b"LUNA-STAGE/1 LUNA/1\nx"),
+    ):
+        invalid_version = work_dir / f"negative-{name}-version"
+        if invalid_version.exists():
+            shutil.rmtree(invalid_version)
+        invalid_version.mkdir(parents=True)
+        (invalid_version / "bootstrap-stage-version").write_bytes(version)
+        run(
+            [*runner, str(stage_one)],
+            expected_code=9,
+            cwd=invalid_version,
+        )
+
     missing_mode = work_dir / "negative-missing-mode"
     if missing_mode.exists():
         shutil.rmtree(missing_mode)
     missing_mode.mkdir(parents=True)
+    (missing_mode / "bootstrap-stage-version").write_bytes(
+        b"LUNA-STAGE/1 LUNA/1\n"
+    )
     run(
         [*runner, str(stage_one)],
         expected_code=1,
@@ -720,6 +752,121 @@ def run_fixed_point_probe(
         cwd=work_dir,
     )
     return output.read_bytes()
+
+
+def run_luna_one_language_probe(
+    stage_zero: pathlib.Path,
+    stage_one: pathlib.Path,
+    stage_two: pathlib.Path,
+    stage_three: pathlib.Path,
+    assembler: pathlib.Path,
+    linker: pathlib.Path,
+    read_elf: str,
+    runner: list[str],
+    source_root: pathlib.Path,
+    work_dir: pathlib.Path,
+) -> None:
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    work_dir.mkdir(parents=True)
+    source = (
+        source_root
+        / "tests"
+        / "integration"
+        / "cases"
+        / "luna_one_loop.luna"
+    )
+    if not source.is_file():
+        raise AssertionError(f"Luna 1 loop probe is missing: {source}")
+    stage_zero_result = run(
+        [
+            str(stage_zero),
+            "--emit",
+            "check",
+            str(source),
+        ],
+        expected_code=1,
+        timeout=120,
+    )
+    if "loop" not in stage_zero_result.stderr:
+        raise AssertionError(
+            "the Luna 0 seed unexpectedly accepted the Luna 1 loop "
+            f"statement: {stage_zero_result.stderr!r}"
+        )
+
+    case = ExecutionCase(
+        "luna-one-loop",
+        (SourceUnit(source.name),),
+        42,
+        frozenset(("control-flow",)),
+    )
+    assemblies: list[pathlib.Path] = []
+    for stage_name, compiler in (
+        ("stage-one", stage_one),
+        ("stage-two", stage_two),
+        ("stage-three", stage_three),
+    ):
+        assemblies.append(
+            run_self_hosted_execution_case(
+                case,
+                stage_name,
+                compiler,
+                assembler,
+                linker,
+                read_elf,
+                runner,
+                [source],
+                work_dir,
+            )
+        )
+    compare_files(
+        assemblies[0],
+        assemblies[1],
+        "Luna 1 stage-one/stage-two loop assembly",
+    )
+    compare_files(
+        assemblies[1],
+        assemblies[2],
+        "Luna 1 stage-two/stage-three loop assembly",
+    )
+
+    malformed = work_dir / "luna-one-malformed-loop.luna"
+    malformed.write_bytes(
+        b"module reproducibility.luna_one_malformed_loop;\n"
+        b"fn main() -> i32 { loop; return 42; }\n"
+    )
+    diagnostics: list[str] = []
+    for stage_name, compiler in (
+        ("stage-one", stage_one),
+        ("stage-two", stage_two),
+        ("stage-three", stage_three),
+    ):
+        invocation = work_dir / f"{stage_name}-malformed"
+        prepare_invocation(invocation, True, [malformed])
+        result = run(
+            [*runner, str(compiler)],
+            expected_code=2,
+            timeout=(
+                STAGE_EMULATED_TIMEOUT_SECONDS
+                if runner
+                else STAGE_NATIVE_TIMEOUT_SECONDS
+            ),
+            cwd=invocation,
+        )
+        if not result.stderr.startswith("frontend:parse:"):
+            raise AssertionError(
+                f"{stage_name} lost malformed loop diagnostic: "
+                f"{result.stderr!r}"
+            )
+        if (invocation / "bootstrap-stage-output.s").exists():
+            raise AssertionError(
+                f"{stage_name} emitted assembly for malformed loop"
+            )
+        diagnostics.append(result.stderr)
+    if len(set(diagnostics)) != 1:
+        raise AssertionError(
+            "self-hosted stages disagree on malformed loop diagnostic"
+        )
 
 
 def materialize_convergence_units(
@@ -1484,6 +1631,19 @@ def main() -> int:
         raise AssertionError(
             "stage-two and stage-three compilers disagree on probe assembly"
         )
+
+    run_luna_one_language_probe(
+        compiler,
+        stage_one,
+        stage_two.compiler,
+        stage_three.compiler,
+        assembler,
+        linker,
+        read_elf,
+        runner,
+        source_root,
+        work_dir / "luna-one-language",
+    )
 
     run_semantic_convergence(
         compiler,

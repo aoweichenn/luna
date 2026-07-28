@@ -7,6 +7,12 @@ relocatable objects and static ELF64 executables. The self-hosting compiler is
 written in Luna and reaches a stage-2/stage-3 byte-for-byte fixed point. No
 stage transpiles through C or C++.
 
+Luna 0 is frozen as the reconstruction seed language. Luna 1 is owned by the
+self-hosted compiler and can add features without duplicating them in the C23
+seed; its first such feature is the unconditional `loop` statement. The
+versioned bootstrap contract is documented in
+[`docs/bootstrap-language-versions.md`](docs/bootstrap-language-versions.md).
+
 The project is deliberately narrow at this stage:
 
 - target: x86-64 Linux, System V ABI, ELF64;

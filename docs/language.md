@@ -1,8 +1,10 @@
-# Luna 0 language draft
+# Luna language
 
-This document records the accepted first-stage surface design. It is broader
-than the currently implemented compiler subset; implementation status is
-tracked in `roadmap.md`.
+This document records the accepted surface design. Luna 0 is the frozen C23
+bootstrap language; Luna 1 and later versions are owned by the self-hosted
+compiler. The authority and upgrade rules are defined in
+`bootstrap-language-versions.md`. Implementation status is tracked in
+`roadmap.md`.
 
 ## Source units and modules
 
@@ -282,6 +284,13 @@ while (running) {
     step();
 }
 
+loop {
+    step();
+    if (finished) {
+        break;
+    }
+}
+
 do {
     step();
 } while (running);
@@ -290,6 +299,10 @@ for (var index: usize = 0; index < count; index += 1) {
     process(index);
 }
 ```
+
+`loop` is a Luna 1 unconditional loop and requires a block body. `continue`
+restarts the body and `break` exits the loop. A `loop` with no reachable
+`break` has no reachable successor.
 
 The three `for` clauses are independently optional. The initializer is either
 a `let`/`var` declaration, an assignment statement or an expression

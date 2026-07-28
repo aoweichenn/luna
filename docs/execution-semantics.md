@@ -39,6 +39,11 @@ order. An omitted condition behaves as `true`; omitted initializer and update
 clauses perform no work. The scope introduced by `for` includes all three
 clauses and the body.
 
+A Luna 1 `loop` statement enters its body unconditionally. Normal completion
+and `continue` both start the next iteration. `break` is its only ordinary
+successor edge; when no reachable `break` exists, control after the loop is
+unreachable.
+
 A switch evaluates its integer or scoped-enum controlling expression once and
 compares it against case values in source order. Enum cases must name a member
 of the exact controlling enum. It executes exactly one matching case, the

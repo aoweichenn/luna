@@ -33,9 +33,9 @@ required standard-library objects.
 `BootstrapSourceSpan` records a byte offset, byte length, one-based line and
 one-based byte column. A source is a borrowed `StdTextView`; it must be valid
 UTF-8 and contain no embedded NUL byte. The lexer recognizes the complete
-currently implemented Luna keyword, punctuation and operator set. Identifiers
-remain deliberately ASCII until the language defines Unicode identifier
-normalization.
+currently implemented Luna keyword, punctuation and operator set, including
+the Luna 1 `loop` keyword. Identifiers remain deliberately ASCII until the
+language defines Unicode identifier normalization.
 
 Tokens retain source spans rather than owning lexeme copies. The final token
 is exactly one zero-length `end` token at the source length. The parser

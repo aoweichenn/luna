@@ -83,6 +83,24 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] harden malformed-input and resource-limit behavior across the complete
   self-hosted pipeline
 
+## M6: self-hosted language authority
+
+- [x] freeze Luna 0 as the C23 reconstruction seed language
+- [x] version the self-hosted stage protocol and requested language
+- [x] make the Luna compiler the sole implementation authority for Luna 1
+- [x] add the Luna 1 unconditional `loop` statement without a C23
+  implementation
+- [x] prove stage-0 rejection, stage-1 acceptance, stage-1/stage-2/stage-3
+  agreement, control-flow correctness and executable behavior
+
+## M7: complete Luna-owned toolchain
+
+- [ ] replace the bootstrap closed-dialect assembler with a Luna
+  implementation
+- [ ] replace the bootstrap static ELF64 linker with a Luna implementation
+- [ ] add a normal argument-driven self-hosted compiler command
+- [ ] define reproducible distribution and verification of the versioned seed
+
 ## Explicitly deferred
 
 Optimization beyond local x86-64 improvements, general metaprogramming,

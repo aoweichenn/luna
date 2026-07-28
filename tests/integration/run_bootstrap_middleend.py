@@ -175,6 +175,21 @@ def run_corpus(
     input_path = work_dir / "bootstrap-middleend-input.luna"
     fixed_cases: list[tuple[str, bytes, int]] = [
         (
+            "luna-one-loop",
+            b"module positive.luna_one_loop;\n"
+            b"fn never_returns() -> i32 { loop {} }\n"
+            b"fn main() -> i32 {\n"
+            b"    var value: i32 = 0;\n"
+            b"    loop {\n"
+            b"        value += 1;\n"
+            b"        if (value < 7) { continue; }\n"
+            b"        break;\n"
+            b"    }\n"
+            b"    return value * 6;\n"
+            b"}\n",
+            42,
+        ),
+        (
             "unknown-type",
             b"module negative.unknown_type;\n"
             b"fn main() -> i32 { let value: Missing = {}; return 0; }\n",
