@@ -44,11 +44,14 @@ STAGE_LIBRARY_KEYS = (
     "bootstrap_x86_64_abi",
     "bootstrap_x86_64_frame",
     "bootstrap_x86_64_codegen",
+    "bootstrap_x86_64_object",
+    "bootstrap_x86_64_assembler",
+    "bootstrap_x86_64_linker",
 )
 
 STAGE_INTERFACE_KEYS = ("syscall", *STAGE_LIBRARY_KEYS)
 
-STAGE_DRIVER_METADATA_KEYS = (
+STAGE_COMPILER_DRIVER_METADATA_KEYS = (
     "runtime",
     "bytes",
     "text",
@@ -65,6 +68,42 @@ STAGE_DRIVER_METADATA_KEYS = (
     "bootstrap_x86_64_codegen",
 )
 
+STAGE_ASSEMBLER_DRIVER_METADATA_KEYS = (
+    "runtime",
+    "bytes",
+    "text",
+    "path",
+    "io",
+    "bootstrap_x86_64_object",
+    "bootstrap_x86_64_assembler",
+)
+
+STAGE_LINKER_DRIVER_METADATA_KEYS = (
+    "runtime",
+    "bytes",
+    "text",
+    "path",
+    "io",
+    "bootstrap_x86_64_text",
+    "bootstrap_x86_64_object",
+    "bootstrap_x86_64_linker",
+)
+
+TOOLCHAIN_UNIT_DRIVER_METADATA_KEYS = (
+    "runtime",
+    "bytes",
+    "text",
+    "bootstrap_x86_64_object",
+    "bootstrap_x86_64_assembler",
+    "bootstrap_x86_64_linker",
+)
+
+STAGE_DRIVERS = {
+    "stage_compiler": STAGE_COMPILER_DRIVER_METADATA_KEYS,
+    "stage_assembler": STAGE_ASSEMBLER_DRIVER_METADATA_KEYS,
+    "stage_linker": STAGE_LINKER_DRIVER_METADATA_KEYS,
+}
+
 STAGE_NATIVE_TIMEOUT_SECONDS = 300
 STAGE_EMULATED_TIMEOUT_SECONDS = 1200
 
@@ -73,6 +112,8 @@ STAGE_EMULATED_TIMEOUT_SECONDS = 1200
 class StageArtifacts:
     root: pathlib.Path
     compiler: pathlib.Path
+    assembler: pathlib.Path
+    linker: pathlib.Path
     assemblies: dict[str, pathlib.Path]
     objects: dict[str, pathlib.Path]
 
@@ -110,6 +151,7 @@ def compile_stage_one_driver(
     source: pathlib.Path,
     output: pathlib.Path,
     graph: dict[str, Module],
+    metadata_keys: tuple[str, ...],
 ) -> None:
     run(
         [
@@ -121,7 +163,7 @@ def compile_stage_one_driver(
             str(source),
             *(
                 str(graph[key].metadata)
-                for key in STAGE_DRIVER_METADATA_KEYS
+                for key in metadata_keys
             ),
         ],
         timeout=120,
@@ -175,6 +217,88 @@ def verify_relocatable_object(
         timeout=60,
     ).stdout
     has_entry = re.search(r"\b_start\b", symbols) is not None
+    if has_entry != defines_entry:
+        expectation = "define" if defines_entry else "not define"
+        raise AssertionError(
+            f"{object_file} must {expectation} the bootstrap entry point"
+        )
+
+
+def read_u64_le(data: bytes, offset: int) -> int:
+    if offset < 0 or offset + 8 > len(data):
+        raise AssertionError("truncated little-endian u64")
+    return int.from_bytes(data[offset : offset + 8], "little")
+
+
+def verify_luna_object(
+    object_file: pathlib.Path,
+    defines_entry: bool,
+) -> None:
+    data = object_file.read_bytes()
+    if len(data) < 112 or data[:8] != b"LUNAOBJ1":
+        raise AssertionError(f"{object_file} is not a Luna object")
+    if int.from_bytes(data[8:12], "little") != 1:
+        raise AssertionError(f"{object_file} has an unknown object version")
+    if int.from_bytes(data[12:16], "little") != 112:
+        raise AssertionError(f"{object_file} has an invalid object header")
+    (
+        text_size,
+        rodata_size,
+        data_size,
+        _bss_size,
+        name_size,
+        symbol_count,
+        relocation_count,
+        text_alignment,
+        rodata_alignment,
+        data_alignment,
+        bss_alignment,
+        reserved,
+    ) = tuple(read_u64_le(data, 16 + index * 8) for index in range(12))
+    expected_size = (
+        112
+        + text_size
+        + rodata_size
+        + data_size
+        + name_size
+        + symbol_count * 56
+        + relocation_count * 40
+    )
+    if expected_size != len(data) or reserved != 0:
+        raise AssertionError(f"{object_file} has an invalid object extent")
+    for alignment in (
+        text_alignment,
+        rodata_alignment,
+        data_alignment,
+        bss_alignment,
+    ):
+        if (
+            alignment == 0
+            or alignment > 4096
+            or alignment & (alignment - 1)
+        ):
+            raise AssertionError(
+                f"{object_file} has an invalid section alignment"
+            )
+    names_offset = 112 + text_size + rodata_size + data_size
+    symbols_offset = names_offset + name_size
+    has_entry = False
+    for symbol_index in range(symbol_count):
+        record = symbols_offset + symbol_index * 56
+        name_offset = read_u64_le(data, record)
+        symbol_name_size = read_u64_le(data, record + 8)
+        if (
+            name_offset > name_size
+            or symbol_name_size > name_size - name_offset
+        ):
+            raise AssertionError(f"{object_file} has an invalid symbol name")
+        name = data[
+            names_offset + name_offset :
+            names_offset + name_offset + symbol_name_size
+        ]
+        flags = read_u64_le(data, record + 40)
+        if name == b"_start" and flags & 1:
+            has_entry = True
     if has_entry != defines_entry:
         expectation = "define" if defines_entry else "not define"
         raise AssertionError(
@@ -241,12 +365,13 @@ def module_sources(
 def driver_sources(
     driver_source: pathlib.Path,
     graph: dict[str, Module],
+    metadata_keys: tuple[str, ...],
 ) -> list[pathlib.Path]:
     return [
         driver_source,
         *(
             graph[key].source_stem.with_suffix(".interface.luna")
-            for key in STAGE_DRIVER_METADATA_KEYS
+            for key in metadata_keys
         ),
     ]
 
@@ -300,26 +425,78 @@ def invoke_stage_compiler(
     output.write_bytes(generated.read_bytes())
 
 
-def assemble(
+def assemble_with_stage(
     assembler: pathlib.Path,
+    runner: list[str],
     assembly: pathlib.Path,
     output: pathlib.Path,
 ) -> None:
-    run(
-        [str(assembler), str(assembly), str(output)],
-        timeout=180,
+    invocation_root = output.parent / f".{output.name}-assemble"
+    if invocation_root.exists():
+        shutil.rmtree(invocation_root)
+    invocation_root.mkdir(parents=True)
+    (invocation_root / "bootstrap-assembly-input.s").write_bytes(
+        assembly.read_bytes()
     )
+    run(
+        [*runner, str(assembler)],
+        expected_code=42,
+        timeout=(
+            STAGE_EMULATED_TIMEOUT_SECONDS
+            if runner
+            else STAGE_NATIVE_TIMEOUT_SECONDS
+        ),
+        cwd=invocation_root,
+    )
+    generated = invocation_root / "bootstrap-object-output.lo"
+    if not generated.is_file() or not generated.read_bytes():
+        raise AssertionError(f"{assembler} produced no object for {assembly}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(generated.read_bytes())
+
+
+def link_with_stage(
+    linker: pathlib.Path,
+    runner: list[str],
+    output: pathlib.Path,
+    objects: list[pathlib.Path],
+) -> None:
+    invocation_root = output.parent / f".{output.name}-link"
+    if invocation_root.exists():
+        shutil.rmtree(invocation_root)
+    invocation_root.mkdir(parents=True)
+    for index, object_file in enumerate(objects):
+        (invocation_root / f"bootstrap-link-input-{index}.lo").write_bytes(
+            object_file.read_bytes()
+        )
+    run(
+        [*runner, str(linker)],
+        expected_code=42,
+        timeout=(
+            STAGE_EMULATED_TIMEOUT_SECONDS
+            if runner
+            else STAGE_NATIVE_TIMEOUT_SECONDS
+        ),
+        cwd=invocation_root,
+    )
+    generated = invocation_root / "bootstrap-link-output"
+    if not generated.is_file() or not generated.read_bytes():
+        raise AssertionError(f"{linker} produced no executable for {output}")
+    if generated.stat().st_mode & 0o111 == 0:
+        raise AssertionError(f"{linker} did not mark its output executable")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(generated, output)
 
 
 def build_stage(
     stage_name: str,
     producing_compiler: pathlib.Path,
+    producing_assembler: pathlib.Path,
+    producing_linker: pathlib.Path,
     runner: list[str],
-    assembler: pathlib.Path,
-    linker: pathlib.Path,
     read_elf: str,
     graph: dict[str, Module],
-    driver_source: pathlib.Path,
+    driver_sources_by_name: dict[str, pathlib.Path],
     work_dir: pathlib.Path,
 ) -> StageArtifacts:
     stage_root = work_dir / stage_name
@@ -336,7 +513,7 @@ def build_stage(
     objects: dict[str, pathlib.Path] = {}
     for key in STAGE_LIBRARY_KEYS:
         assembly = assembly_root / f"{key}.s"
-        object_file = object_root / f"{key}.o"
+        object_file = object_root / f"{key}.lo"
         invoke_stage_compiler(
             producing_compiler,
             runner,
@@ -345,39 +522,63 @@ def build_stage(
             module_sources(graph, key),
             assembly,
         )
-        assemble(assembler, assembly, object_file)
-        verify_relocatable_object(read_elf, object_file, False)
+        assemble_with_stage(
+            producing_assembler,
+            runner,
+            assembly,
+            object_file,
+        )
+        verify_luna_object(object_file, False)
         assemblies[key] = assembly
         objects[key] = object_file
 
-    driver_assembly = assembly_root / "stage_compiler.s"
-    driver_object = object_root / "stage_compiler.o"
-    invoke_stage_compiler(
-        producing_compiler,
-        runner,
-        invocation_root / "stage_compiler",
-        True,
-        driver_sources(driver_source, graph),
-        driver_assembly,
-    )
-    assemble(assembler, driver_assembly, driver_object)
-    verify_relocatable_object(read_elf, driver_object, True)
-    assemblies["stage_compiler"] = driver_assembly
-    objects["stage_compiler"] = driver_object
-
-    stage_compiler = stage_root / "luna-stage-compiler"
-    link(
-        linker,
-        stage_compiler,
-        [
+    executables: dict[str, pathlib.Path] = {}
+    executable_names = {
+        "stage_compiler": "luna-stage-compiler",
+        "stage_assembler": "luna-stage-assembler",
+        "stage_linker": "luna-stage-linker",
+    }
+    for driver_name, metadata_keys in STAGE_DRIVERS.items():
+        driver_assembly = assembly_root / f"{driver_name}.s"
+        driver_object = object_root / f"{driver_name}.lo"
+        invoke_stage_compiler(
+            producing_compiler,
+            runner,
+            invocation_root / driver_name,
+            True,
+            driver_sources(
+                driver_sources_by_name[driver_name],
+                graph,
+                metadata_keys,
+            ),
+            driver_assembly,
+        )
+        assemble_with_stage(
+            producing_assembler,
+            runner,
+            driver_assembly,
             driver_object,
-            *(objects[key] for key in STAGE_LIBRARY_KEYS),
-        ],
-    )
-    verify_static_executable(read_elf, stage_compiler)
+        )
+        verify_luna_object(driver_object, True)
+        assemblies[driver_name] = driver_assembly
+        objects[driver_name] = driver_object
+        executable = stage_root / executable_names[driver_name]
+        link_with_stage(
+            producing_linker,
+            runner,
+            executable,
+            [
+                driver_object,
+                *(objects[key] for key in STAGE_LIBRARY_KEYS),
+            ],
+        )
+        verify_static_executable(read_elf, executable)
+        executables[driver_name] = executable
     return StageArtifacts(
         root=stage_root,
-        compiler=stage_compiler,
+        compiler=executables["stage_compiler"],
+        assembler=executables["stage_assembler"],
+        linker=executables["stage_linker"],
         assemblies=assemblies,
         objects=objects,
     )
@@ -410,7 +611,7 @@ def compare_stages(
     stage_two: StageArtifacts,
     stage_three: StageArtifacts,
 ) -> None:
-    for key in (*STAGE_LIBRARY_KEYS, "stage_compiler"):
+    for key in (*STAGE_LIBRARY_KEYS, *STAGE_DRIVERS):
         compare_files(
             stage_two.assemblies[key],
             stage_three.assemblies[key],
@@ -419,12 +620,352 @@ def compare_stages(
         compare_files(
             stage_two.objects[key],
             stage_three.objects[key],
-            f"{key} ELF object",
+            f"{key} Luna object",
         )
-    compare_files(
-        stage_two.compiler,
-        stage_three.compiler,
-        "stage compiler executable",
+    for description, left, right in (
+        ("stage compiler executable", stage_two.compiler, stage_three.compiler),
+        (
+            "stage assembler executable",
+            stage_two.assembler,
+            stage_three.assembler,
+        ),
+        ("stage linker executable", stage_two.linker, stage_three.linker),
+    ):
+        compare_files(left, right, description)
+
+
+def build_and_run_toolchain_unit_driver(
+    stage: StageArtifacts,
+    runner: list[str],
+    read_elf: str,
+    graph: dict[str, Module],
+    source: pathlib.Path,
+    work_dir: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    work_dir.mkdir(parents=True)
+    assembly = work_dir / "bootstrap-toolchain-unit.s"
+    object_file = work_dir / "bootstrap-toolchain-unit.lo"
+    executable = work_dir / "bootstrap-toolchain-unit"
+    invoke_stage_compiler(
+        stage.compiler,
+        runner,
+        work_dir / "compile",
+        True,
+        driver_sources(
+            source,
+            graph,
+            TOOLCHAIN_UNIT_DRIVER_METADATA_KEYS,
+        ),
+        assembly,
+    )
+    assemble_with_stage(
+        stage.assembler,
+        runner,
+        assembly,
+        object_file,
+    )
+    verify_luna_object(object_file, True)
+    link_with_stage(
+        stage.linker,
+        runner,
+        executable,
+        [
+            object_file,
+            *(stage.objects[key] for key in STAGE_LIBRARY_KEYS),
+        ],
+    )
+    verify_static_executable(read_elf, executable)
+    run(
+        [*runner, str(executable)],
+        expected_code=42,
+        timeout=(
+            STAGE_EMULATED_TIMEOUT_SECONDS
+            if runner
+            else STAGE_NATIVE_TIMEOUT_SECONDS
+        ),
+    )
+    return assembly, object_file, executable
+
+
+def invoke_toolchain_assembler_case(
+    assembler: pathlib.Path,
+    runner: list[str],
+    work_dir: pathlib.Path,
+    source: bytes,
+    expected_code: int,
+) -> pathlib.Path:
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    work_dir.mkdir(parents=True)
+    (work_dir / "bootstrap-assembly-input.s").write_bytes(source)
+    result = run(
+        [*runner, str(assembler)],
+        expected_code=expected_code,
+        timeout=(
+            STAGE_EMULATED_TIMEOUT_SECONDS
+            if runner
+            else STAGE_NATIVE_TIMEOUT_SECONDS
+        ),
+        cwd=work_dir,
+    )
+    output = work_dir / "bootstrap-object-output.lo"
+    if expected_code == 42:
+        if not output.is_file() or not output.read_bytes():
+            raise AssertionError("pure Luna assembler produced no object")
+    elif output.exists():
+        raise AssertionError(
+            "pure Luna assembler retained output after rejected input"
+        )
+    if expected_code == 2 and not result.stderr.startswith("assembler:"):
+        raise AssertionError(
+            "pure Luna assembler lost its stable diagnostic: "
+            f"{result.stderr!r}"
+        )
+    return output
+
+
+def invoke_toolchain_linker_case(
+    linker: pathlib.Path,
+    runner: list[str],
+    work_dir: pathlib.Path,
+    objects: list[bytes],
+    expected_code: int,
+) -> pathlib.Path:
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    work_dir.mkdir(parents=True)
+    for index, contents in enumerate(objects):
+        (work_dir / f"bootstrap-link-input-{index}.lo").write_bytes(
+            contents
+        )
+    run(
+        [*runner, str(linker)],
+        expected_code=expected_code,
+        timeout=(
+            STAGE_EMULATED_TIMEOUT_SECONDS
+            if runner
+            else STAGE_NATIVE_TIMEOUT_SECONDS
+        ),
+        cwd=work_dir,
+    )
+    output = work_dir / "bootstrap-link-output"
+    if expected_code == 42:
+        if not output.is_file() or not output.read_bytes():
+            raise AssertionError("pure Luna linker produced no executable")
+    elif output.exists():
+        raise AssertionError(
+            "pure Luna linker retained output after rejected input"
+        )
+    return output
+
+
+def mutate_object_header(
+    original: bytes,
+    mutation: str,
+    value: int,
+) -> bytes:
+    data = bytearray(original)
+    if mutation == "magic":
+        data[value % 8] ^= 0x80
+    elif mutation == "version":
+        data[8:12] = (value | 2).to_bytes(4, "little")
+    elif mutation == "alignment":
+        field = 7 + value % 4
+        data[16 + field * 8 : 24 + field * 8] = (3).to_bytes(
+            8, "little"
+        )
+    elif mutation == "reserved":
+        data[104:112] = (value | 1).to_bytes(8, "little")
+    elif mutation == "append":
+        data.append(value & 0xFF)
+    elif mutation == "truncate":
+        del data[-(1 + value % min(32, len(data) - 1)) :]
+    else:
+        raise AssertionError(f"unknown object mutation {mutation}")
+    return bytes(data)
+
+
+def run_toolchain_negative_and_random_tests(
+    stage: StageArtifacts,
+    runner: list[str],
+    work_dir: pathlib.Path,
+) -> None:
+    invalid_assembly_cases = (
+        (
+            "unknown-instruction",
+            b"    .text\n    impossible %rax\n",
+            2,
+        ),
+        (
+            "duplicate-symbol",
+            b"    .text\nsame:\nsame:\n    ret\n",
+            2,
+        ),
+        (
+            "unresolved-numeric-label",
+            b"    .text\n    jmp 1f\n",
+            2,
+        ),
+        (
+            "positive-i32-overflow",
+            b"    .text\n    movq 0xffffffff(%rax), %rbx\n",
+            2,
+        ),
+        (
+            "negative-alignment",
+            b"    .text\n    .p2align -1\n",
+            2,
+        ),
+        ("invalid-utf8", b"    .text\n\xff\n", 1),
+    )
+    for name, source, expected_code in invalid_assembly_cases:
+        invoke_toolchain_assembler_case(
+            stage.assembler,
+            runner,
+            work_dir / "assembler-negative" / name,
+            source,
+            expected_code,
+        )
+
+    generator = random.Random(0x4C554E41)
+    for index in range(24):
+        token = "".join(
+            chr(ord("a") + generator.randrange(26))
+            for _ in range(1 + generator.randrange(31))
+        )
+        invoke_toolchain_assembler_case(
+            stage.assembler,
+            runner,
+            work_dir / "assembler-random-rejection" / str(index),
+            f"    .text\n    invalid_{token} %rax\n".encode("ascii"),
+            2,
+        )
+    for index in range(16):
+        immediate = generator.randrange(-(1 << 31), 1 << 31)
+        object_file = invoke_toolchain_assembler_case(
+            stage.assembler,
+            runner,
+            work_dir / "assembler-random-acceptance" / str(index),
+            (
+                "    .text\n"
+                "    .globl _start\n"
+                "    .type _start, @function\n"
+                "_start:\n"
+                f"    movl ${immediate}, %edi\n"
+                "    movl $60, %eax\n"
+                "    syscall\n"
+                "    .size _start, .-_start\n"
+            ).encode("ascii"),
+            42,
+        )
+        verify_luna_object(object_file, True)
+
+    original = stage.objects["stage_compiler"].read_bytes()
+    mutations = (
+        "magic",
+        "version",
+        "alignment",
+        "reserved",
+        "append",
+        "truncate",
+    )
+    for index in range(48):
+        mutation = mutations[generator.randrange(len(mutations))]
+        value = generator.randrange(1, 1 << 16)
+        malformed = mutate_object_header(original, mutation, value)
+        invoke_toolchain_linker_case(
+            stage.linker,
+            runner,
+            work_dir / "object-mutation" / str(index),
+            [malformed],
+            2,
+        )
+
+    invoke_toolchain_linker_case(
+        stage.linker,
+        runner,
+        work_dir / "linker-no-input",
+        [],
+        1,
+    )
+    unresolved_object = invoke_toolchain_assembler_case(
+        stage.assembler,
+        runner,
+        work_dir / "linker-unresolved-assembly",
+        (
+            b"    .text\n    .globl _start\n"
+            b"_start:\n    call missing_symbol\n"
+        ),
+        42,
+    ).read_bytes()
+    invoke_toolchain_linker_case(
+        stage.linker,
+        runner,
+        work_dir / "linker-unresolved",
+        [unresolved_object],
+        3,
+    )
+    provider_object = invoke_toolchain_assembler_case(
+        stage.assembler,
+        runner,
+        work_dir / "linker-provider-assembly",
+        (
+            b"    .text\n    .globl missing_symbol\n"
+            b"    .type missing_symbol, @function\n"
+            b"missing_symbol:\n    ret\n"
+            b"    .size missing_symbol, .-missing_symbol\n"
+        ),
+        42,
+    ).read_bytes()
+    overflow = bytearray(unresolved_object)
+    relocation_count = read_u64_le(overflow, 64)
+    if relocation_count != 1:
+        raise AssertionError("overflow probe has unexpected relocations")
+    relocation_offset = (
+        112
+        + read_u64_le(overflow, 16)
+        + read_u64_le(overflow, 24)
+        + read_u64_le(overflow, 32)
+        + read_u64_le(overflow, 48)
+        + read_u64_le(overflow, 56) * 56
+    )
+    overflow[relocation_offset + 32 : relocation_offset + 40] = (
+        (1 << 63) - 1
+    ).to_bytes(8, "little")
+    invoke_toolchain_linker_case(
+        stage.linker,
+        runner,
+        work_dir / "linker-relocation-overflow",
+        [bytes(overflow), provider_object],
+        3,
+    )
+    non_text_entry = invoke_toolchain_assembler_case(
+        stage.assembler,
+        runner,
+        work_dir / "linker-non-text-entry-assembly",
+        (
+            b"    .section .rodata\n    .globl _start\n"
+            b"    .type _start, @object\n"
+            b"_start:\n    .byte 0\n"
+            b"    .size _start, .-_start\n"
+        ),
+        42,
+    ).read_bytes()
+    invoke_toolchain_linker_case(
+        stage.linker,
+        runner,
+        work_dir / "linker-non-text-entry",
+        [non_text_entry],
+        3,
+    )
+    invoke_toolchain_linker_case(
+        stage.linker,
+        runner,
+        work_dir / "linker-input-limit",
+        [original] * 65,
+        1,
     )
 
 
@@ -739,11 +1280,11 @@ def run_fixed_point_probe(
         [probe],
         output,
     )
-    object_file = work_dir / "fixed-point-probe.o"
+    object_file = work_dir / "fixed-point-probe.lo"
     executable = work_dir / "fixed-point-probe"
-    assemble(assembler, output, object_file)
-    verify_relocatable_object(read_elf, object_file, True)
-    link(linker, executable, [object_file])
+    assemble_with_stage(assembler, runner, output, object_file)
+    verify_luna_object(object_file, True)
+    link_with_stage(linker, runner, executable, [object_file])
     verify_static_executable(read_elf, executable)
     run(
         [*runner, str(executable)],
@@ -966,11 +1507,11 @@ def run_self_hosted_execution_case(
         sources,
         assembly,
     )
-    object_file = case_root / f"{case.name}.o"
+    object_file = case_root / f"{case.name}.lo"
     executable = case_root / case.name
-    assemble(assembler, assembly, object_file)
-    verify_relocatable_object(read_elf, object_file, True)
-    link(linker, executable, [object_file])
+    assemble_with_stage(assembler, runner, assembly, object_file)
+    verify_luna_object(object_file, True)
+    link_with_stage(linker, runner, executable, [object_file])
     verify_static_executable(read_elf, executable)
     run_quiet_executable(
         executable,
@@ -1037,6 +1578,7 @@ def run_semantic_convergence(
     stage_zero: pathlib.Path,
     stage_two: pathlib.Path,
     stage_three: pathlib.Path,
+    host_linker: pathlib.Path,
     assembler: pathlib.Path,
     linker: pathlib.Path,
     read_elf: str,
@@ -1064,7 +1606,7 @@ def run_semantic_convergence(
         run_stage_zero_execution_case(
             case,
             stage_zero,
-            linker,
+            host_linker,
             runner,
             sources,
             case_root,
@@ -1102,7 +1644,7 @@ def run_semantic_convergence(
             run_stage_zero_execution_case(
                 case,
                 stage_zero,
-                linker,
+                host_linker,
                 runner,
                 reversed_sources,
                 case_root,
@@ -1453,11 +1995,11 @@ def compile_and_run_self_hosted_probe(
         [source],
         assembly,
     )
-    object_file = work_dir / "floating-probe.o"
+    object_file = work_dir / "floating-probe.lo"
     executable = work_dir / "floating-probe"
-    assemble(assembler, assembly, object_file)
-    verify_relocatable_object(read_elf, object_file, True)
-    link(linker, executable, [object_file])
+    assemble_with_stage(assembler, runner, assembly, object_file)
+    verify_luna_object(object_file, True)
+    link_with_stage(linker, runner, executable, [object_file])
     verify_static_executable(read_elf, executable)
     run(
         [*runner, str(executable)],
@@ -1539,91 +2081,157 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--compiler", type=pathlib.Path, required=True)
     parser.add_argument("--linker", type=pathlib.Path, required=True)
-    parser.add_argument("--assembler", type=pathlib.Path, required=True)
     parser.add_argument("--sysroot", type=pathlib.Path, required=True)
     parser.add_argument("--source-root", type=pathlib.Path, required=True)
     parser.add_argument("--work-dir", type=pathlib.Path, required=True)
     arguments = parser.parse_args()
 
     compiler = arguments.compiler.resolve()
-    linker = arguments.linker.resolve()
-    assembler = arguments.assembler.resolve()
+    host_linker = arguments.linker.resolve()
     sysroot = arguments.sysroot.resolve()
     source_root = arguments.source_root.resolve()
     work_dir = arguments.work_dir.resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
-    driver_source = (
-        source_root / "tools" / "bootstrap" / "stage_compiler.luna"
-    )
+    driver_sources_by_name = {
+        driver_name: (
+            source_root
+            / "tools"
+            / "bootstrap"
+            / f"{driver_name}.luna"
+        )
+        for driver_name in STAGE_DRIVERS
+    }
 
     read_elf = require_tool("llvm-readelf")
     graph = module_graph(source_root, sysroot)
     ensure_sysroot(compiler, graph)
     runner = target_runner()
 
-    stage_one_object = work_dir / "stage-one-compiler.o"
-    stage_one = work_dir / "stage-one-compiler"
-    compile_stage_one_driver(
-        compiler,
-        driver_source,
-        stage_one_object,
-        graph,
+    stage_one_root = work_dir / "stage-one"
+    if stage_one_root.exists():
+        shutil.rmtree(stage_one_root)
+    stage_one_root.mkdir(parents=True)
+    stage_one_executables: dict[str, pathlib.Path] = {}
+    executable_names = {
+        "stage_compiler": "luna-stage-compiler",
+        "stage_assembler": "luna-stage-assembler",
+        "stage_linker": "luna-stage-linker",
+    }
+    for driver_name, metadata_keys in STAGE_DRIVERS.items():
+        driver_object = stage_one_root / f"{driver_name}.o"
+        executable = stage_one_root / executable_names[driver_name]
+        compile_stage_one_driver(
+            compiler,
+            driver_sources_by_name[driver_name],
+            driver_object,
+            graph,
+            metadata_keys,
+        )
+        link(
+            host_linker,
+            executable,
+            [
+                driver_object,
+                *(
+                    required_object(graph, key)
+                    for key in STAGE_LIBRARY_KEYS
+                ),
+            ],
+        )
+        verify_static_executable(read_elf, executable)
+        stage_one_executables[driver_name] = executable
+    stage_one = StageArtifacts(
+        root=stage_one_root,
+        compiler=stage_one_executables["stage_compiler"],
+        assembler=stage_one_executables["stage_assembler"],
+        linker=stage_one_executables["stage_linker"],
+        assemblies={},
+        objects={},
     )
-    link(
-        linker,
-        stage_one,
-        [
-            stage_one_object,
-            *(
-                required_object(graph, key)
-                for key in STAGE_LIBRARY_KEYS
-            ),
-        ],
-    )
-    verify_static_executable(read_elf, stage_one)
     run_negative_driver_tests(
-        stage_one,
+        stage_one.compiler,
         runner,
         work_dir / "negative",
     )
 
     stage_two = build_stage(
         "stage-two",
-        stage_one,
+        stage_one.compiler,
+        stage_one.assembler,
+        stage_one.linker,
         runner,
-        assembler,
-        linker,
         read_elf,
         graph,
-        driver_source,
+        driver_sources_by_name,
         work_dir,
     )
     stage_three = build_stage(
         "stage-three",
         stage_two.compiler,
+        stage_two.assembler,
+        stage_two.linker,
         runner,
-        assembler,
-        linker,
         read_elf,
         graph,
-        driver_source,
+        driver_sources_by_name,
         work_dir,
     )
     compare_stages(stage_two, stage_three)
 
+    toolchain_unit_source = (
+        source_root
+        / "tests"
+        / "integration"
+        / "cases"
+        / "bootstrap_toolchain_unit_driver.luna"
+    )
+    stage_two_toolchain_unit = build_and_run_toolchain_unit_driver(
+        stage_two,
+        runner,
+        read_elf,
+        graph,
+        toolchain_unit_source,
+        work_dir / "toolchain-unit" / "stage-two",
+    )
+    stage_three_toolchain_unit = build_and_run_toolchain_unit_driver(
+        stage_three,
+        runner,
+        read_elf,
+        graph,
+        toolchain_unit_source,
+        work_dir / "toolchain-unit" / "stage-three",
+    )
+    for index, description in enumerate(
+        (
+            "toolchain unit assembly",
+            "toolchain unit Luna object",
+            "toolchain unit executable",
+        )
+    ):
+        compare_files(
+            stage_two_toolchain_unit[index],
+            stage_three_toolchain_unit[index],
+            description,
+        )
+    run_toolchain_negative_and_random_tests(
+        stage_three,
+        runner,
+        work_dir / "toolchain-negative-and-random",
+    )
+
     stage_two_probe = run_fixed_point_probe(
         stage_two.compiler,
         runner,
-        assembler,
-        linker,
+        stage_two.assembler,
+        stage_two.linker,
         read_elf,
         work_dir / "stage-two-probe",
     )
     stage_three_probe = run_fixed_point_probe(
         stage_three.compiler,
         runner,
-        assembler,
-        linker,
+        stage_three.assembler,
+        stage_three.linker,
         read_elf,
         work_dir / "stage-three-probe",
     )
@@ -1634,11 +2242,11 @@ def main() -> int:
 
     run_luna_one_language_probe(
         compiler,
-        stage_one,
+        stage_one.compiler,
         stage_two.compiler,
         stage_three.compiler,
-        assembler,
-        linker,
+        stage_three.assembler,
+        stage_three.linker,
         read_elf,
         runner,
         source_root,
@@ -1649,8 +2257,9 @@ def main() -> int:
         compiler,
         stage_two.compiler,
         stage_three.compiler,
-        assembler,
-        linker,
+        host_linker,
+        stage_three.assembler,
+        stage_three.linker,
         read_elf,
         runner,
         source_root,
@@ -1663,7 +2272,7 @@ def main() -> int:
     write_floating_probe(floating_source)
     compile_and_run_stage_zero_probe(
         compiler,
-        linker,
+        host_linker,
         runner,
         read_elf,
         floating_source,
@@ -1672,8 +2281,8 @@ def main() -> int:
     stage_two_floating = compile_and_run_self_hosted_probe(
         stage_two.compiler,
         runner,
-        assembler,
-        linker,
+        stage_two.assembler,
+        stage_two.linker,
         read_elf,
         floating_source,
         floating_root / "stage-two",
@@ -1681,8 +2290,8 @@ def main() -> int:
     stage_three_floating = compile_and_run_self_hosted_probe(
         stage_three.compiler,
         runner,
-        assembler,
-        linker,
+        stage_three.assembler,
+        stage_three.linker,
         read_elf,
         floating_source,
         floating_root / "stage-three",

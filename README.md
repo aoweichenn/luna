@@ -3,9 +3,10 @@
 Luna is a small, strongly typed systems language derived from the procedural
 core of C23. Stage 0 is written in C23 and lowers Luna directly to a typed
 control-flow IR, an x86-64 machine IR, native x86-64 instructions, ELF64
-relocatable objects and static ELF64 executables. The self-hosting compiler is
-written in Luna and reaches a stage-2/stage-3 byte-for-byte fixed point. No
-stage transpiles through C or C++.
+relocatable objects and static ELF64 executables. The self-hosting compiler,
+closed-dialect assembler and static linker are all written in Luna and reach
+a stage-2/stage-3 byte-for-byte fixed point together. No stage transpiles
+through C or C++.
 
 Luna 0 is frozen as the reconstruction seed language. Luna 1 is owned by the
 self-hosted compiler and can add features without duplicating them in the C23
@@ -50,6 +51,10 @@ The project is deliberately narrow at this stage:
   native x86-64 encoding, symbols and explicit PC-relative relocations;
 - static linker: deterministic, self-verified x86-64 ELF64 executables with
   project-owned section layout, symbol resolution and relocation application;
+- self-hosted toolchain: a strict Luna-owned bootstrap object format, a
+  Luna-owned closed-dialect x86-64 assembler and a Luna-owned static ELF64
+  linker; after the C23 reconstruction seed creates stage 1, no hosted
+  assembler or linker participates in stage 2 or stage 3;
 - runtime boundary: canonical zero-to-six-argument Linux x86-64 system-call
   wrappers generated and verified by the project assembler, with raw kernel
   error results, plus a Luna-implemented typed process/file/virtual-memory
@@ -65,8 +70,8 @@ The project is deliberately narrow at this stage:
   typed-IR, machine-IR, ABI, liveness, register-allocation and
   instruction-rewrite snapshots, full-opcode machine-IR-to-x86-64
   differential execution, differential random programs, libFuzzer,
-  executable cross-target tests and complete stage-2/stage-3 artifact
-  comparison.
+  executable cross-target tests, malformed-object mutation tests and complete
+  compiler/assembler/linker stage-2/stage-3 artifact comparison.
 
 The language and compiler are under active construction. Implemented syntax is
 tracked separately from accepted language design so that documentation never
@@ -286,20 +291,24 @@ explicit API invariant until the language has a move or affine type system.
 It also builds the M4 frontend modules under
 `sysroot/luna/bootstrap/frontend/` and middle-end modules under
 `sysroot/luna/bootstrap/middleend/`, plus the correctness-first backend under
-`sysroot/luna/bootstrap/backend/x86_64/`. The Luna lexer owns token and structured
-diagnostic buffers; the recursive-descent parser owns an index-linked concrete
-syntax tree with verified parent/child relationships and bounded nesting.
+`sysroot/luna/bootstrap/backend/x86_64/`. The Luna lexer owns token and
+structured diagnostic buffers; the recursive-descent parser owns an
+index-linked concrete syntax tree with verified parent/child relationships
+and bounded nesting.
 The Luna semantic modules consume borrowed parsed units, resolve complete
 source-module graphs and target layouts, and emit independently verified,
 non-SSA Typed IR. The Luna backend recomputes System V ABI and stack-frame
 plans, then emits the project-owned x86-64 assembly dialect without
-optimization or C translation. They all run freestanding on the x86-64 target.
+optimization or C translation. The Luna object, assembler and linker modules
+consume that dialect and write a static ELF64 executable directly. They all
+run freestanding on the x86-64 target.
 
 The stage-0 compiler remains a hosted C23 development tool. The Luna stage
-compiler is freestanding, compiles each module from source to verified Typed
-IR and x86-64 assembly, and is assembled and statically linked with the
-project-owned tools and runtime modules. Host-library use never becomes a
-dependency of generated target programs.
+compiler, assembler and linker are freestanding. Stage 1 is reconstructed by
+the C23 seed; stage 1 builds all stage-2 modules and all three stage-2 tools,
+and stage 2 does the same for stage 3. Stage 2 and stage 3 assemblies, Luna
+objects and tool executables must be byte-identical. Host-library use never
+becomes a dependency of generated target programs.
 
 See [the language draft](docs/language.md),
 [compiler architecture](docs/architecture.md),
@@ -317,6 +326,7 @@ See [the language draft](docs/language.md),
 [Luna bootstrap frontend](docs/bootstrap-frontend.md),
 [Luna bootstrap middle end](docs/bootstrap-middleend.md),
 [Luna bootstrap x86-64 backend](docs/bootstrap-x86-64-backend.md),
+[complete Luna-owned bootstrap toolchain](docs/bootstrap-toolchain.md),
 [bootstrap reproducibility](docs/bootstrap-reproducibility.md),
 [compiled module metadata format](docs/module-metadata.md),
 [bootstrap execution semantics](docs/execution-semantics.md), and the

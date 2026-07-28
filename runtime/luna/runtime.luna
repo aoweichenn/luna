@@ -9,6 +9,7 @@ enum LinuxSystemCall: usize {
     map_memory = 9,
     unmap_memory = 11,
     process_id = 39,
+    change_file_mode = 91,
     exit_group = 231,
     open_at = 257,
 }
@@ -28,6 +29,7 @@ enum LinuxOpenFlags: usize {
 
 enum LinuxFileMode: usize {
     readable_writable = 438,
+    executable = 493,
 }
 
 enum LinuxMemoryProtection: usize {
@@ -200,6 +202,54 @@ fn runtime_file_create(path: *const u8) -> RuntimeFileResult {
         LinuxFileMode.readable_writable as usize
     );
     return runtime_file_result_from_raw(result);
+}
+
+fn runtime_file_make_executable(
+    file: RuntimeFile
+) -> RuntimeError {
+    if (file.descriptor < 0) {
+        return RuntimeError.bad_descriptor;
+    }
+    return runtime_error_from_raw(
+        luna_linux_syscall2(
+            LinuxSystemCall.change_file_mode as usize,
+            file.descriptor as usize,
+            LinuxFileMode.executable as usize
+        )
+    );
+}
+
+fn runtime_file_create_executable(
+    path: *const u8
+) -> RuntimeFileResult {
+    if (path == null) {
+        return {
+            file = runtime_invalid_file(),
+            error = RuntimeError.bad_address,
+        };
+    }
+    let result: isize = luna_linux_syscall4(
+        LinuxSystemCall.open_at as usize,
+        LinuxDescriptor.current_directory as isize as usize,
+        path as usize,
+        LinuxOpenFlags.create_write_truncate_close_on_exec as usize,
+        LinuxFileMode.executable as usize
+    );
+    let opened: RuntimeFileResult =
+        runtime_file_result_from_raw(result);
+    if (opened.error != RuntimeError.none) {
+        return opened;
+    }
+    let mode_error: RuntimeError =
+        runtime_file_make_executable(opened.file);
+    if (mode_error != RuntimeError.none) {
+        runtime_file_close(opened.file);
+        return {
+            file = runtime_invalid_file(),
+            error = mode_error,
+        };
+    }
+    return opened;
 }
 
 fn runtime_file_close(file: RuntimeFile) -> RuntimeError {

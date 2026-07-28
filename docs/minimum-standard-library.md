@@ -147,8 +147,11 @@ to the caller.
 its result owns the bytes read so far. `std_io_read_file` opens and closes the
 file on every path; on read or close failure it releases partial storage and
 returns an empty buffer. `std_io_write_file` gives a write error precedence
-over a later close error. `std_io_print` and `std_io_print_error` accept only
-validated text and borrow the standard descriptors.
+over a later close error. `std_io_write_executable_file` uses the runtime's
+direct-system-call executable-file path with the same complete-write and
+error-precedence rules; the self-hosted linker uses it for final ELF output.
+`std_io_print` and `std_io_print_error` accept only validated text and borrow
+the standard descriptors.
 
 `std_io_read_to_end_limited` and `std_io_read_file_limited` add an explicit
 maximum byte length without trusting the input file size. Reaching the limit

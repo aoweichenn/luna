@@ -1,25 +1,28 @@
 # Bootstrap reproducibility
 
-M4 closes its self-hosting loop with a freestanding Luna compiler driver and
-a stage 1/stage 2/stage 3 fixed-point test. The compiler path is Luna source
-to the indexed syntax tree, verified Typed IR and the correctness-first
-x86-64 backend. It never translates through C or C++, invokes libc, or runs an
-optimization pass.
+Luna closes its self-hosting loop with freestanding Luna compiler, assembler
+and linker drivers and a stage 1/stage 2/stage 3 fixed-point test. The path is
+Luna source to the indexed syntax tree, verified Typed IR, the
+correctness-first x86-64 backend, `LUNAOBJ1` bootstrap objects and a static
+ELF64 executable. It never translates through C or C++, invokes target libc,
+or runs an optimization pass.
 
 ## Stage definitions
 
 - Stage 0 is the hosted C23 compiler used to establish the first trusted Luna
   executable.
-- Stage 1 is `tools/bootstrap/stage_compiler.luna` compiled by stage 0 and
-  statically linked with the Luna bootstrap modules.
-- Stage 2 is the complete compiler source graph compiled by stage 1.
-- Stage 3 is the same ordered source graph compiled by stage 2.
+- Stage 1 is the compiler, assembler and linker drivers compiled by stage 0
+  and statically linked with the Luna bootstrap modules.
+- Stage 2 is the complete source graph and all three drivers compiled by the
+  stage-1 compiler, assembled by the stage-1 assembler and linked by the
+  stage-1 linker.
+- Stage 3 is the same graph compiled, assembled and linked by the three
+  stage-2 tools.
 
 Stage 1 and stage 2 use different code generators, so their bytes are not
 expected to match. The fixed point is stage 2 equal to stage 3. The test
-compares every generated assembly file, every project-assembled ELF64
-relocatable object and the final statically linked compiler executable
-byte-for-byte.
+compares every generated assembly file, every serialized `LUNAOBJ1` object and
+all three statically linked tool executables byte-for-byte.
 
 ## Freestanding driver protocol
 
@@ -75,50 +78,66 @@ stages compile a deterministic source graph directly.
 ## Assembly and linking
 
 The Luna backend emits the closed assembly representation already owned by
-the project. `luna_bootstrap_assembler` converts it to verified ELF64
-relocatable objects, and `lunalink` produces the static compiler executable.
-Neither GNU `as`, LLVM MC, a system linker, LLD nor libc participates in the
-production bootstrap chain.
+the project. Stage 1 and later use
+`luna.bootstrap.backend.x86_64.assembler` to produce validated `LUNAOBJ1`
+objects and `luna.bootstrap.backend.x86_64.linker` to produce the static ELF64
+tools. The linker builds its direct-syscall wrapper object with that same Luna
+assembler.
 
-Every library object is checked not to define `_start`; the driver object must
-define it. Final executables are checked for unresolved symbols, `PT_INTERP`
-and dynamic-loader state.
+The hosted C23 compiler and `lunalink` create stage 1 only. After that seed
+boundary, neither the hosted assembler, hosted linker, GNU `as`, LLVM MC, GNU
+`ld`, LLD nor libc participates. The CTest invocation no longer accepts a
+seed-assembler argument, so accidentally restoring one is visible in the test
+contract.
+
+Every library object is checked not to define `_start`; each driver object
+must define it. Final executables are checked for unresolved symbols,
+`PT_INTERP` and dynamic-loader state. The precise object format, fixed-file
+driver protocols and deliberately narrow linker contract are documented in
+[the complete bootstrap toolchain contract](bootstrap-toolchain.md).
 
 ## Verification
 
 `integration.bootstrap_reproducibility` performs:
 
-1. stage-1 driver construction through stage 0;
+1. construction of the stage-1 compiler, assembler and linker through the
+   stage-0 seed;
 2. missing/mismatched version, missing mode, missing input, lexical,
    malformed-source, semantic-error and 65-unit-limit negative tests with
    stable exit statuses and encodings;
-3. independent compilation and assembly of all 15 runtime, standard-library,
-   frontend, middle-end and x86-64 backend modules;
-4. stage-2 and stage-3 static compiler links;
-5. byte-for-byte comparison of 16 assembly files, 16 ELF objects and the
-   compiler executable;
-6. an additional recursive-program probe compiled independently by stage 2
+3. independent compilation and Luna assembly of all 18 runtime,
+   standard-library, frontend, middle-end, x86-64 backend, object, assembler
+   and linker modules;
+4. pure Luna static links of the stage-2 and stage-3 compiler, assembler and
+   linker;
+5. byte-for-byte comparison of 21 assembly files, 21 `LUNAOBJ1` objects and
+   all three tool executables;
+6. direct execution of Luna object/assembler/linker APIs, including object
+   round-trip, a cross-object link, duplicate and unresolved symbol behavior;
+7. fixed-seed accepted/rejected assembly cases, 48 malformed-object mutations
+   and exact assembler/linker input-limit behavior;
+8. an additional recursive-program probe compiled independently by stage 2
    and stage 3, project-assembled, statically linked and executed with status
    42;
-7. a Luna 1 authority-transfer probe rejected by stage 0 but accepted and
+9. a Luna 1 authority-transfer probe rejected by stage 0 but accepted and
    executed identically by stages 1, 2 and 3, including `break`, `continue`
    and a non-returning unconditional loop;
-8. 23 fixed semantic execution cases and 32 fixed-seed generated combination
+10. 23 fixed semantic execution cases and 32 fixed-seed generated combination
    cases compiled and executed through stage 0, stage 2 and stage 3, with
    byte-identical stage-2/stage-3 assembly;
-9. reversed-order compilation of a complete interface/implementation import
+11. reversed-order compilation of a complete interface/implementation import
    graph, requiring identical self-hosted assembly and execution;
-10. one stage-0 rejection plus exact stage-2/stage-3 diagnostic agreement for
+12. one stage-0 rejection plus exact stage-2/stage-3 diagnostic agreement for
    every public semantic diagnostic kind from 1 through 50;
-11. 117 exact-rational binary32/binary64 cases generated independently from
+13. 117 exact-rational binary32/binary64 cases generated independently from
    IEEE encodings, covering deterministic random adjacent-value midpoints,
    ties-to-even, both sides of each midpoint, subnormal/normal and binade
    boundaries, exact extrema, huge exponents and more than 1200 significant
    digits;
-12. exact boundary and one-over tests for source bytes, total source bytes,
+14. exact boundary and one-over tests for source bytes, total source bytes,
    token length, token count, frontend and semantic diagnostic counts, parser
    nesting and semantic type-layout depth;
-13. execution of that floating-point probe through stage 0, stage 2 and stage
+15. execution of that floating-point probe through stage 0, stage 2 and stage
    3, plus byte equality of stage-2/stage-3 output and stable rejection of the
    maximum-finite/infinity midpoint for both widths.
 

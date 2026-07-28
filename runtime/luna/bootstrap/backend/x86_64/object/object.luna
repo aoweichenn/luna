@@ -1,0 +1,1274 @@
+module luna.bootstrap.backend.x86_64.object;
+
+enum BootstrapObjectFormat: usize {
+    header_size = 112,
+    symbol_size = 56,
+    relocation_size = 40,
+    version = 1,
+    maximum_payload = 67108864,
+    maximum_records = 65536,
+    maximum_name = 4096,
+    maximum_alignment = 4096,
+}
+
+enum BootstrapObjectSymbolFlag: usize {
+    defined = 1,
+    global = 2,
+    external = 4,
+    function = 8,
+    object = 16,
+}
+
+fn bootstrap_object_fail(
+    object: *BootstrapObject,
+    error: RuntimeError
+) -> bool {
+    if (object != null && object->error == RuntimeError.none) {
+        object->error = error;
+    }
+    return false;
+}
+
+fn bootstrap_object_invalid_symbol() -> BootstrapObjectSymbol {
+    return {
+        name_offset = 0,
+        name_length = 0,
+        section = BootstrapObjectSection.undefined,
+        value = 0,
+        size = 0,
+        kind = BootstrapObjectSymbolKind.none,
+        defined = false,
+        global = false,
+        external = false,
+    };
+}
+
+fn bootstrap_object_empty() -> BootstrapObject {
+    return {
+        text = std_byte_buffer_empty(),
+        rodata = std_byte_buffer_empty(),
+        data = std_byte_buffer_empty(),
+        names = std_byte_buffer_empty(),
+        symbols = std_byte_buffer_empty(),
+        relocations = std_byte_buffer_empty(),
+        bss_size = 0,
+        text_alignment = 1,
+        rodata_alignment = 1,
+        data_alignment = 1,
+        bss_alignment = 1,
+        error = RuntimeError.none,
+    };
+}
+
+fn bootstrap_object_power_of_two(value: usize) -> bool {
+    return value != 0 && (value & (value - 1)) == 0;
+}
+
+fn bootstrap_object_section_is_valid(
+    section: BootstrapObjectSection
+) -> bool {
+    return section == BootstrapObjectSection.text ||
+        section == BootstrapObjectSection.rodata ||
+        section == BootstrapObjectSection.data ||
+        section == BootstrapObjectSection.bss;
+}
+
+fn bootstrap_object_relocation_section_is_valid(
+    section: BootstrapObjectSection
+) -> bool {
+    return section == BootstrapObjectSection.text ||
+        section == BootstrapObjectSection.rodata ||
+        section == BootstrapObjectSection.data;
+}
+
+fn bootstrap_object_alignment_is_valid(alignment: usize) -> bool {
+    return bootstrap_object_power_of_two(alignment) &&
+        alignment <= BootstrapObjectFormat.maximum_alignment as usize;
+}
+
+fn bootstrap_object_storage_is_valid(
+    buffer: StdByteBuffer,
+    record_size: usize
+) -> bool {
+    return std_byte_buffer_is_valid(buffer) &&
+        record_size != 0 &&
+        buffer.length % record_size == 0;
+}
+
+fn bootstrap_object_symbol_count(
+    object: BootstrapObject
+) -> usize {
+    if (!bootstrap_object_storage_is_valid(
+            object.symbols,
+            sizeof(BootstrapObjectSymbol)
+        )) {
+        return 0;
+    }
+    return object.symbols.length / sizeof(BootstrapObjectSymbol);
+}
+
+fn bootstrap_object_relocation_count(
+    object: BootstrapObject
+) -> usize {
+    if (!bootstrap_object_storage_is_valid(
+            object.relocations,
+            sizeof(BootstrapObjectRelocation)
+        )) {
+        return 0;
+    }
+    return object.relocations.length /
+        sizeof(BootstrapObjectRelocation);
+}
+
+fn bootstrap_object_section_length(
+    object: BootstrapObject,
+    section: BootstrapObjectSection
+) -> usize {
+    if (section == BootstrapObjectSection.text) {
+        return object.text.length;
+    }
+    if (section == BootstrapObjectSection.rodata) {
+        return object.rodata.length;
+    }
+    if (section == BootstrapObjectSection.data) {
+        return object.data.length;
+    }
+    if (section == BootstrapObjectSection.bss) {
+        return object.bss_size;
+    }
+    return 0;
+}
+
+fn bootstrap_object_symbol_is_valid(
+    object: BootstrapObject,
+    symbol: BootstrapObjectSymbol
+) -> bool {
+    if (symbol.name_length == 0 ||
+        symbol.name_length >
+            BootstrapObjectFormat.maximum_name as usize ||
+        symbol.name_offset > object.names.length ||
+        symbol.name_length >
+            object.names.length - symbol.name_offset) {
+        return false;
+    }
+    let name: StdTextViewResult = std_text_view(
+        &object.names.data[symbol.name_offset] as *const u8,
+        symbol.name_length
+    );
+    if (name.error != RuntimeError.none) {
+        return false;
+    }
+    if (symbol.kind != BootstrapObjectSymbolKind.none &&
+        symbol.kind != BootstrapObjectSymbolKind.function &&
+        symbol.kind != BootstrapObjectSymbolKind.object) {
+        return false;
+    }
+    if (symbol.defined) {
+        if (!bootstrap_object_section_is_valid(symbol.section) ||
+            symbol.value >
+                bootstrap_object_section_length(
+                    object,
+                    symbol.section
+                ) ||
+            symbol.size >
+                bootstrap_object_section_length(
+                    object,
+                    symbol.section
+                ) - symbol.value ||
+            symbol.external) {
+            return false;
+        }
+    } else if (symbol.section != BootstrapObjectSection.undefined ||
+        symbol.value != 0 || symbol.size != 0 ||
+        (!symbol.global && !symbol.external)) {
+        return false;
+    }
+    return true;
+}
+
+fn bootstrap_object_relocation_is_valid(
+    object: BootstrapObject,
+    relocation: BootstrapObjectRelocation
+) -> bool {
+    if (!bootstrap_object_relocation_section_is_valid(
+            relocation.section
+        ) ||
+        relocation.symbol_index >=
+            bootstrap_object_symbol_count(object) ||
+        (relocation.kind != BootstrapObjectRelocationKind.pc32 &&
+         relocation.kind != BootstrapObjectRelocationKind.plt32 &&
+         relocation.kind !=
+            BootstrapObjectRelocationKind.absolute64)) {
+        return false;
+    }
+    let width: usize =
+        relocation.kind ==
+            BootstrapObjectRelocationKind.absolute64 ? 8 : 4;
+    let section_length: usize = bootstrap_object_section_length(
+        object,
+        relocation.section
+    );
+    return relocation.offset <= section_length &&
+        width <= section_length - relocation.offset;
+}
+
+fn bootstrap_object_is_valid(
+    object: BootstrapObject
+) -> bool {
+    if (object.error != RuntimeError.none ||
+        !std_byte_buffer_is_valid(object.text) ||
+        !std_byte_buffer_is_valid(object.rodata) ||
+        !std_byte_buffer_is_valid(object.data) ||
+        !std_byte_buffer_is_valid(object.names) ||
+        !bootstrap_object_storage_is_valid(
+            object.symbols,
+            sizeof(BootstrapObjectSymbol)
+        ) ||
+        !bootstrap_object_storage_is_valid(
+            object.relocations,
+            sizeof(BootstrapObjectRelocation)
+        ) ||
+        object.text.length >
+            BootstrapObjectFormat.maximum_payload as usize ||
+        object.rodata.length >
+            BootstrapObjectFormat.maximum_payload as usize ||
+        object.data.length >
+            BootstrapObjectFormat.maximum_payload as usize ||
+        object.bss_size >
+            BootstrapObjectFormat.maximum_payload as usize ||
+        object.names.length >
+            BootstrapObjectFormat.maximum_payload as usize ||
+        bootstrap_object_symbol_count(object) >
+            BootstrapObjectFormat.maximum_records as usize ||
+        bootstrap_object_relocation_count(object) >
+            BootstrapObjectFormat.maximum_records as usize ||
+        !bootstrap_object_alignment_is_valid(object.text_alignment) ||
+        !bootstrap_object_alignment_is_valid(object.rodata_alignment) ||
+        !bootstrap_object_alignment_is_valid(object.data_alignment) ||
+        !bootstrap_object_alignment_is_valid(object.bss_alignment)) {
+        return false;
+    }
+    let symbols: *const BootstrapObjectSymbol =
+        object.symbols.data as *const BootstrapObjectSymbol;
+    var symbol_index: usize = 0;
+    while (symbol_index < bootstrap_object_symbol_count(object)) {
+        if (!bootstrap_object_symbol_is_valid(
+                object,
+                symbols[symbol_index]
+            )) {
+            return false;
+        }
+        symbol_index += 1;
+    }
+    let relocations: *const BootstrapObjectRelocation =
+        object.relocations.data as *const BootstrapObjectRelocation;
+    var relocation_index: usize = 0;
+    while (relocation_index <
+        bootstrap_object_relocation_count(object)) {
+        if (!bootstrap_object_relocation_is_valid(
+                object,
+                relocations[relocation_index]
+            )) {
+            return false;
+        }
+        relocation_index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_object_release(
+    object: BootstrapObject
+) -> RuntimeError {
+    var error: RuntimeError =
+        std_byte_buffer_release(object.relocations);
+    let symbols_error: RuntimeError =
+        std_byte_buffer_release(object.symbols);
+    let names_error: RuntimeError =
+        std_byte_buffer_release(object.names);
+    let data_error: RuntimeError =
+        std_byte_buffer_release(object.data);
+    let rodata_error: RuntimeError =
+        std_byte_buffer_release(object.rodata);
+    let text_error: RuntimeError =
+        std_byte_buffer_release(object.text);
+    if (error == RuntimeError.none) {
+        error = symbols_error;
+    }
+    if (error == RuntimeError.none) {
+        error = names_error;
+    }
+    if (error == RuntimeError.none) {
+        error = data_error;
+    }
+    if (error == RuntimeError.none) {
+        error = rodata_error;
+    }
+    if (error == RuntimeError.none) {
+        error = text_error;
+    }
+    return error;
+}
+
+fn bootstrap_object_section_buffer(
+    object: *BootstrapObject,
+    section: BootstrapObjectSection
+) -> *StdByteBuffer {
+    if (object == null) {
+        return null;
+    }
+    if (section == BootstrapObjectSection.text) {
+        return &object->text;
+    }
+    if (section == BootstrapObjectSection.rodata) {
+        return &object->rodata;
+    }
+    if (section == BootstrapObjectSection.data) {
+        return &object->data;
+    }
+    return null;
+}
+
+fn bootstrap_object_set_alignment(
+    object: *BootstrapObject,
+    section: BootstrapObjectSection,
+    alignment: usize
+) -> bool {
+    if (object == null ||
+        !bootstrap_object_alignment_is_valid(alignment)) {
+        return bootstrap_object_fail(
+            object,
+            RuntimeError.invalid_argument
+        );
+    }
+    if (section == BootstrapObjectSection.text) {
+        if (object->text_alignment < alignment) {
+            object->text_alignment = alignment;
+        }
+        return true;
+    }
+    if (section == BootstrapObjectSection.rodata) {
+        if (object->rodata_alignment < alignment) {
+            object->rodata_alignment = alignment;
+        }
+        return true;
+    }
+    if (section == BootstrapObjectSection.data) {
+        if (object->data_alignment < alignment) {
+            object->data_alignment = alignment;
+        }
+        return true;
+    }
+    if (section == BootstrapObjectSection.bss) {
+        if (object->bss_alignment < alignment) {
+            object->bss_alignment = alignment;
+        }
+        return true;
+    }
+    return bootstrap_object_fail(
+        object,
+        RuntimeError.invalid_argument
+    );
+}
+
+fn bootstrap_object_append_u8(
+    object: *BootstrapObject,
+    section: BootstrapObjectSection,
+    value: u8
+) -> bool {
+    let buffer: *StdByteBuffer =
+        bootstrap_object_section_buffer(object, section);
+    if (buffer == null || object->error != RuntimeError.none) {
+        return bootstrap_object_fail(
+            object,
+            RuntimeError.invalid_argument
+        );
+    }
+    let appended: StdByteBufferResult =
+        std_byte_buffer_push(*buffer, value);
+    *buffer = appended.buffer;
+    if (appended.error != RuntimeError.none) {
+        return bootstrap_object_fail(object, appended.error);
+    }
+    return true;
+}
+
+fn bootstrap_object_append_u16(
+    object: *BootstrapObject,
+    section: BootstrapObjectSection,
+    value: u16
+) -> bool {
+    return bootstrap_object_append_u8(
+            object,
+            section,
+            (value & 255) as u8
+        ) &&
+        bootstrap_object_append_u8(
+            object,
+            section,
+            ((value >> 8) & 255) as u8
+        );
+}
+
+fn bootstrap_object_append_u32(
+    object: *BootstrapObject,
+    section: BootstrapObjectSection,
+    value: u32
+) -> bool {
+    var index: usize = 0;
+    while (index < 4) {
+        if (!bootstrap_object_append_u8(
+                object,
+                section,
+                ((value >> ((index * 8) as u32)) & 255) as u8
+            )) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_object_append_u64(
+    object: *BootstrapObject,
+    section: BootstrapObjectSection,
+    value: u64
+) -> bool {
+    var index: usize = 0;
+    while (index < 8) {
+        if (!bootstrap_object_append_u8(
+                object,
+                section,
+                ((value >> ((index * 8) as u64)) & 255) as u8
+            )) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_object_symbol_name(
+    object: BootstrapObject,
+    symbol: BootstrapObjectSymbol
+) -> StdTextViewResult {
+    if (symbol.name_offset > object.names.length ||
+        symbol.name_length >
+            object.names.length - symbol.name_offset) {
+        return {
+            view = { data = null, length = 0, },
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    return std_text_view(
+        symbol.name_length == 0 ?
+            null as *const u8 :
+            &object.names.data[symbol.name_offset] as *const u8,
+        symbol.name_length
+    );
+}
+
+fn bootstrap_object_get_symbol(
+    object: BootstrapObject,
+    index: usize
+) -> BootstrapObjectSymbolResult {
+    if (!bootstrap_object_storage_is_valid(
+            object.symbols,
+            sizeof(BootstrapObjectSymbol)
+        ) ||
+        index >= bootstrap_object_symbol_count(object)) {
+        return {
+            symbol = bootstrap_object_invalid_symbol(),
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    let symbols: *const BootstrapObjectSymbol =
+        object.symbols.data as *const BootstrapObjectSymbol;
+    return {
+        symbol = symbols[index],
+        error = RuntimeError.none,
+    };
+}
+
+fn bootstrap_object_symbol_mut(
+    object: *BootstrapObject,
+    index: usize
+) -> *BootstrapObjectSymbol {
+    if (object == null ||
+        !bootstrap_object_storage_is_valid(
+            object->symbols,
+            sizeof(BootstrapObjectSymbol)
+        ) ||
+        index >= bootstrap_object_symbol_count(*object)) {
+        return null;
+    }
+    let symbols: *BootstrapObjectSymbol =
+        object->symbols.data as *BootstrapObjectSymbol;
+    return &symbols[index];
+}
+
+fn bootstrap_object_find_symbol(
+    object: BootstrapObject,
+    name: StdTextView
+) -> BootstrapObjectIndexResult {
+    if (!std_text_is_valid_utf8(name) || name.length == 0 ||
+        !bootstrap_object_storage_is_valid(
+            object.symbols,
+            sizeof(BootstrapObjectSymbol)
+        )) {
+        return {
+            index = 0,
+            found = false,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    let symbols: *const BootstrapObjectSymbol =
+        object.symbols.data as *const BootstrapObjectSymbol;
+    var index: usize = 0;
+    while (index < bootstrap_object_symbol_count(object)) {
+        let candidate: StdTextViewResult =
+            bootstrap_object_symbol_name(object, symbols[index]);
+        if (candidate.error != RuntimeError.none) {
+            return {
+                index = 0,
+                found = false,
+                error = candidate.error,
+            };
+        }
+        if (std_text_equal(candidate.view, name)) {
+            return {
+                index = index,
+                found = true,
+                error = RuntimeError.none,
+            };
+        }
+        index += 1;
+    }
+    return {
+        index = 0,
+        found = false,
+        error = RuntimeError.none,
+    };
+}
+
+fn bootstrap_object_add_symbol(
+    object: *BootstrapObject,
+    name: StdTextView
+) -> BootstrapObjectIndexResult {
+    if (object == null || object->error != RuntimeError.none ||
+        !std_text_is_valid_utf8(name) || name.length == 0 ||
+        name.length >
+            BootstrapObjectFormat.maximum_name as usize) {
+        bootstrap_object_fail(object, RuntimeError.invalid_argument);
+        return {
+            index = 0,
+            found = false,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    let existing: BootstrapObjectIndexResult =
+        bootstrap_object_find_symbol(*object, name);
+    if (existing.error != RuntimeError.none || existing.found) {
+        return existing;
+    }
+    let count: usize = bootstrap_object_symbol_count(*object);
+    if (count >= BootstrapObjectFormat.maximum_records as usize ||
+        name.length >
+            (BootstrapObjectFormat.maximum_payload as usize) -
+                object->names.length) {
+        bootstrap_object_fail(object, RuntimeError.out_of_memory);
+        return {
+            index = 0,
+            found = false,
+            error = RuntimeError.out_of_memory,
+        };
+    }
+    let name_offset: usize = object->names.length;
+    let appended_name: StdByteBufferResult =
+        std_byte_buffer_append(
+            object->names,
+            name.data,
+            name.length
+        );
+    object->names = appended_name.buffer;
+    if (appended_name.error != RuntimeError.none) {
+        bootstrap_object_fail(object, appended_name.error);
+        return {
+            index = 0,
+            found = false,
+            error = appended_name.error,
+        };
+    }
+    var symbol: BootstrapObjectSymbol =
+        bootstrap_object_invalid_symbol();
+    symbol.name_offset = name_offset;
+    symbol.name_length = name.length;
+    let appended_symbol: StdByteBufferResult =
+        std_byte_buffer_append(
+            object->symbols,
+            (&symbol) as *const BootstrapObjectSymbol as *const u8,
+            sizeof(BootstrapObjectSymbol)
+        );
+    object->symbols = appended_symbol.buffer;
+    if (appended_symbol.error != RuntimeError.none) {
+        let truncated: StdByteBufferResult =
+            std_byte_buffer_truncate(object->names, name_offset);
+        object->names = truncated.buffer;
+        bootstrap_object_fail(object, appended_symbol.error);
+        return {
+            index = 0,
+            found = false,
+            error = appended_symbol.error,
+        };
+    }
+    return {
+        index = count,
+        found = false,
+        error = RuntimeError.none,
+    };
+}
+
+fn bootstrap_object_add_relocation(
+    object: *BootstrapObject,
+    relocation: BootstrapObjectRelocation
+) -> bool {
+    if (object == null || object->error != RuntimeError.none ||
+        bootstrap_object_relocation_count(*object) >=
+            BootstrapObjectFormat.maximum_records as usize ||
+        !bootstrap_object_relocation_is_valid(*object, relocation)) {
+        return bootstrap_object_fail(
+            object,
+            RuntimeError.invalid_argument
+        );
+    }
+    let appended: StdByteBufferResult = std_byte_buffer_append(
+        object->relocations,
+        (&relocation) as *const BootstrapObjectRelocation as *const u8,
+        sizeof(BootstrapObjectRelocation)
+    );
+    object->relocations = appended.buffer;
+    if (appended.error != RuntimeError.none) {
+        return bootstrap_object_fail(object, appended.error);
+    }
+    return true;
+}
+
+fn bootstrap_object_get_relocation(
+    object: BootstrapObject,
+    index: usize
+) -> BootstrapObjectRelocationResult {
+    if (!bootstrap_object_storage_is_valid(
+            object.relocations,
+            sizeof(BootstrapObjectRelocation)
+        ) ||
+        index >= bootstrap_object_relocation_count(object)) {
+        return {
+            relocation = {
+                section = BootstrapObjectSection.undefined,
+                offset = 0,
+                symbol_index = 0,
+                kind = BootstrapObjectRelocationKind.pc32,
+                addend = 0,
+            },
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    let relocations: *const BootstrapObjectRelocation =
+        object.relocations.data as *const BootstrapObjectRelocation;
+    return {
+        relocation = relocations[index],
+        error = RuntimeError.none,
+    };
+}
+
+fn bootstrap_object_output_u8(
+    output: *StdByteBuffer,
+    value: u8
+) -> bool {
+    if (output == null) {
+        return false;
+    }
+    let appended: StdByteBufferResult =
+        std_byte_buffer_push(*output, value);
+    *output = appended.buffer;
+    return appended.error == RuntimeError.none;
+}
+
+fn bootstrap_object_output_u32(
+    output: *StdByteBuffer,
+    value: u32
+) -> bool {
+    var index: usize = 0;
+    while (index < 4) {
+        if (!bootstrap_object_output_u8(
+                output,
+                ((value >> ((index * 8) as u32)) & 255) as u8
+            )) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_object_output_u64(
+    output: *StdByteBuffer,
+    value: u64
+) -> bool {
+    var index: usize = 0;
+    while (index < 8) {
+        if (!bootstrap_object_output_u8(
+                output,
+                ((value >> ((index * 8) as u64)) & 255) as u8
+            )) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_object_output_append(
+    output: *StdByteBuffer,
+    data: *const u8,
+    length: usize
+) -> bool {
+    if (output == null) {
+        return false;
+    }
+    let appended: StdByteBufferResult =
+        std_byte_buffer_append(*output, data, length);
+    *output = appended.buffer;
+    return appended.error == RuntimeError.none;
+}
+
+fn bootstrap_object_symbol_flags(
+    symbol: BootstrapObjectSymbol
+) -> usize {
+    var flags: usize = 0;
+    if (symbol.defined) {
+        flags |= BootstrapObjectSymbolFlag.defined as usize;
+    }
+    if (symbol.global) {
+        flags |= BootstrapObjectSymbolFlag.global as usize;
+    }
+    if (symbol.external) {
+        flags |= BootstrapObjectSymbolFlag.external as usize;
+    }
+    if (symbol.kind == BootstrapObjectSymbolKind.function) {
+        flags |= BootstrapObjectSymbolFlag.function as usize;
+    } else if (symbol.kind == BootstrapObjectSymbolKind.object) {
+        flags |= BootstrapObjectSymbolFlag.object as usize;
+    }
+    return flags;
+}
+
+fn bootstrap_object_serialize(
+    object: BootstrapObject
+) -> StdByteBufferResult {
+    var output: StdByteBuffer = std_byte_buffer_empty();
+    if (!bootstrap_object_is_valid(object)) {
+        return {
+            buffer = output,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    let total_payload: usize =
+        object.text.length + object.rodata.length +
+        object.data.length + object.names.length;
+    let reserve_size: usize =
+        BootstrapObjectFormat.header_size as usize +
+        total_payload +
+        bootstrap_object_symbol_count(object) *
+            (BootstrapObjectFormat.symbol_size as usize) +
+        bootstrap_object_relocation_count(object) *
+            (BootstrapObjectFormat.relocation_size as usize);
+    let reserved: StdByteBufferResult =
+        std_byte_buffer_with_capacity(reserve_size);
+    if (reserved.error != RuntimeError.none) {
+        return reserved;
+    }
+    output = reserved.buffer;
+    var success: bool =
+        bootstrap_object_output_append(&output, "LUNAOBJ1", 8) &&
+        bootstrap_object_output_u32(
+            &output,
+            (BootstrapObjectFormat.version as usize) as u32
+        ) &&
+        bootstrap_object_output_u32(
+            &output,
+            (BootstrapObjectFormat.header_size as usize) as u32
+        ) &&
+        bootstrap_object_output_u64(&output, object.text.length as u64) &&
+        bootstrap_object_output_u64(&output, object.rodata.length as u64) &&
+        bootstrap_object_output_u64(&output, object.data.length as u64) &&
+        bootstrap_object_output_u64(&output, object.bss_size as u64) &&
+        bootstrap_object_output_u64(&output, object.names.length as u64) &&
+        bootstrap_object_output_u64(
+            &output,
+            bootstrap_object_symbol_count(object) as u64
+        ) &&
+        bootstrap_object_output_u64(
+            &output,
+            bootstrap_object_relocation_count(object) as u64
+        ) &&
+        bootstrap_object_output_u64(
+            &output,
+            object.text_alignment as u64
+        ) &&
+        bootstrap_object_output_u64(
+            &output,
+            object.rodata_alignment as u64
+        ) &&
+        bootstrap_object_output_u64(
+            &output,
+            object.data_alignment as u64
+        ) &&
+        bootstrap_object_output_u64(
+            &output,
+            object.bss_alignment as u64
+        ) &&
+        bootstrap_object_output_u64(&output, 0);
+    if (success) {
+        success =
+            bootstrap_object_output_append(
+                &output,
+                object.text.data as *const u8,
+                object.text.length
+            ) &&
+            bootstrap_object_output_append(
+                &output,
+                object.rodata.data as *const u8,
+                object.rodata.length
+            ) &&
+            bootstrap_object_output_append(
+                &output,
+                object.data.data as *const u8,
+                object.data.length
+            ) &&
+            bootstrap_object_output_append(
+                &output,
+                object.names.data as *const u8,
+                object.names.length
+            );
+    }
+    let symbols: *const BootstrapObjectSymbol =
+        object.symbols.data as *const BootstrapObjectSymbol;
+    var symbol_index: usize = 0;
+    while (success &&
+        symbol_index < bootstrap_object_symbol_count(object)) {
+        let symbol: BootstrapObjectSymbol = symbols[symbol_index];
+        success =
+            bootstrap_object_output_u64(
+                &output,
+                symbol.name_offset as u64
+            ) &&
+            bootstrap_object_output_u64(
+                &output,
+                symbol.name_length as u64
+            ) &&
+            bootstrap_object_output_u64(
+                &output,
+                symbol.section as usize as u64
+            ) &&
+            bootstrap_object_output_u64(
+                &output,
+                symbol.value as u64
+            ) &&
+            bootstrap_object_output_u64(
+                &output,
+                symbol.size as u64
+            ) &&
+            bootstrap_object_output_u64(
+                &output,
+                bootstrap_object_symbol_flags(symbol) as u64
+            ) &&
+            bootstrap_object_output_u64(&output, 0);
+        symbol_index += 1;
+    }
+    let relocations: *const BootstrapObjectRelocation =
+        object.relocations.data as *const BootstrapObjectRelocation;
+    var relocation_index: usize = 0;
+    while (success &&
+        relocation_index <
+            bootstrap_object_relocation_count(object)) {
+        let relocation: BootstrapObjectRelocation =
+            relocations[relocation_index];
+        success =
+            bootstrap_object_output_u64(
+                &output,
+                relocation.section as usize as u64
+            ) &&
+            bootstrap_object_output_u64(
+                &output,
+                relocation.offset as u64
+            ) &&
+            bootstrap_object_output_u64(
+                &output,
+                relocation.symbol_index as u64
+            ) &&
+            bootstrap_object_output_u64(
+                &output,
+                relocation.kind as usize as u64
+            ) &&
+            bootstrap_object_output_u64(
+                &output,
+                relocation.addend as u64
+            );
+        relocation_index += 1;
+    }
+    if (!success) {
+        std_byte_buffer_release(output);
+        return {
+            buffer = std_byte_buffer_empty(),
+            error = RuntimeError.out_of_memory,
+        };
+    }
+    return {
+        buffer = output,
+        error = RuntimeError.none,
+    };
+}
+
+fn bootstrap_object_range_valid(
+    offset: usize,
+    size: usize,
+    length: usize
+) -> bool {
+    return offset <= length && size <= length - offset;
+}
+
+fn bootstrap_object_read_u32(
+    bytes: *const u8,
+    length: usize,
+    offset: usize,
+    value: *u32
+) -> bool {
+    if (bytes == null || value == null ||
+        !bootstrap_object_range_valid(offset, 4, length)) {
+        return false;
+    }
+    var result: u32 = 0;
+    var index: usize = 0;
+    while (index < 4) {
+        result |= (bytes[offset + index] as u32) <<
+            ((index * 8) as u32);
+        index += 1;
+    }
+    *value = result;
+    return true;
+}
+
+fn bootstrap_object_read_u64(
+    bytes: *const u8,
+    length: usize,
+    offset: usize,
+    value: *u64
+) -> bool {
+    if (bytes == null || value == null ||
+        !bootstrap_object_range_valid(offset, 8, length)) {
+        return false;
+    }
+    var result: u64 = 0;
+    var index: usize = 0;
+    while (index < 8) {
+        result |= (bytes[offset + index] as u64) <<
+            ((index * 8) as u64);
+        index += 1;
+    }
+    *value = result;
+    return true;
+}
+
+fn bootstrap_object_u64_to_usize(
+    value: u64,
+    result: *usize
+) -> bool {
+    if (result == null || value > 18446744073709551615 as u64) {
+        return false;
+    }
+    *result = value as usize;
+    return true;
+}
+
+fn bootstrap_object_copy_range(
+    bytes: *const u8,
+    length: usize,
+    cursor: *usize,
+    size: usize,
+    destination: *StdByteBuffer
+) -> bool {
+    if (cursor == null || destination == null ||
+        !bootstrap_object_range_valid(*cursor, size, length)) {
+        return false;
+    }
+    let copied: StdByteBufferResult =
+        std_byte_buffer_from(
+            size == 0 ? null as *const u8 : &bytes[*cursor],
+            size
+        );
+    if (copied.error != RuntimeError.none) {
+        return false;
+    }
+    *destination = copied.buffer;
+    *cursor += size;
+    return true;
+}
+
+fn bootstrap_object_deserialize_fail(
+    object: BootstrapObject,
+    error: RuntimeError
+) -> BootstrapObjectResult {
+    bootstrap_object_release(object);
+    return {
+        object = bootstrap_object_empty(),
+        error = error,
+    };
+}
+
+fn bootstrap_object_deserialize(
+    bytes: *const u8,
+    length: usize
+) -> BootstrapObjectResult {
+    var object: BootstrapObject = bootstrap_object_empty();
+    if (bytes == null ||
+        length < BootstrapObjectFormat.header_size as usize) {
+        return {
+            object = object,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    if (bytes[0] != 76 || bytes[1] != 85 ||
+        bytes[2] != 78 || bytes[3] != 65 ||
+        bytes[4] != 79 || bytes[5] != 66 ||
+        bytes[6] != 74 || bytes[7] != 49) {
+        return {
+            object = object,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    var version: u32 = 0;
+    var header_size: u32 = 0;
+    var fields: [12]u64 = {};
+    if (!bootstrap_object_read_u32(bytes, length, 8, &version) ||
+        !bootstrap_object_read_u32(bytes, length, 12, &header_size) ||
+        version !=
+            (BootstrapObjectFormat.version as usize) as u32 ||
+        header_size !=
+            (BootstrapObjectFormat.header_size as usize) as u32) {
+        return {
+            object = object,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    var field_index: usize = 0;
+    while (field_index < 12) {
+        if (!bootstrap_object_read_u64(
+                bytes,
+                length,
+                16 + field_index * 8,
+                &fields[field_index]
+            )) {
+            return {
+                object = object,
+                error = RuntimeError.invalid_argument,
+            };
+        }
+        field_index += 1;
+    }
+    var text_size: usize = 0;
+    var rodata_size: usize = 0;
+    var data_size: usize = 0;
+    var names_size: usize = 0;
+    var symbol_count: usize = 0;
+    var relocation_count: usize = 0;
+    if (!bootstrap_object_u64_to_usize(fields[0], &text_size) ||
+        !bootstrap_object_u64_to_usize(fields[1], &rodata_size) ||
+        !bootstrap_object_u64_to_usize(fields[2], &data_size) ||
+        !bootstrap_object_u64_to_usize(fields[4], &names_size) ||
+        !bootstrap_object_u64_to_usize(fields[5], &symbol_count) ||
+        !bootstrap_object_u64_to_usize(fields[6], &relocation_count) ||
+        fields[11] != 0 ||
+        text_size > BootstrapObjectFormat.maximum_payload as usize ||
+        rodata_size >
+            BootstrapObjectFormat.maximum_payload as usize ||
+        data_size > BootstrapObjectFormat.maximum_payload as usize ||
+        fields[3] >
+            (BootstrapObjectFormat.maximum_payload as usize) as u64 ||
+        names_size > BootstrapObjectFormat.maximum_payload as usize ||
+        symbol_count > BootstrapObjectFormat.maximum_records as usize ||
+        relocation_count >
+            BootstrapObjectFormat.maximum_records as usize) {
+        return {
+            object = object,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    object.bss_size = fields[3] as usize;
+    object.text_alignment = fields[7] as usize;
+    object.rodata_alignment = fields[8] as usize;
+    object.data_alignment = fields[9] as usize;
+    object.bss_alignment = fields[10] as usize;
+    if (!bootstrap_object_alignment_is_valid(object.text_alignment) ||
+        !bootstrap_object_alignment_is_valid(object.rodata_alignment) ||
+        !bootstrap_object_alignment_is_valid(object.data_alignment) ||
+        !bootstrap_object_alignment_is_valid(object.bss_alignment)) {
+        return {
+            object = object,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    let expected: usize =
+        BootstrapObjectFormat.header_size as usize +
+        text_size + rodata_size + data_size + names_size +
+        symbol_count * (BootstrapObjectFormat.symbol_size as usize) +
+        relocation_count *
+            (BootstrapObjectFormat.relocation_size as usize);
+    if (expected != length) {
+        return {
+            object = object,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    var cursor: usize = BootstrapObjectFormat.header_size as usize;
+    if (!bootstrap_object_copy_range(
+            bytes, length, &cursor, text_size, &object.text
+        ) ||
+        !bootstrap_object_copy_range(
+            bytes, length, &cursor, rodata_size, &object.rodata
+        ) ||
+        !bootstrap_object_copy_range(
+            bytes, length, &cursor, data_size, &object.data
+        ) ||
+        !bootstrap_object_copy_range(
+            bytes, length, &cursor, names_size, &object.names
+        )) {
+        return bootstrap_object_deserialize_fail(
+            object,
+            RuntimeError.out_of_memory
+        );
+    }
+    var index: usize = 0;
+    while (index < symbol_count) {
+        var record: [7]u64 = {};
+        var record_index: usize = 0;
+        while (record_index < 7) {
+            if (!bootstrap_object_read_u64(
+                    bytes,
+                    length,
+                    cursor + record_index * 8,
+                    &record[record_index]
+                )) {
+                return bootstrap_object_deserialize_fail(
+                    object,
+                    RuntimeError.invalid_argument
+                );
+            }
+            record_index += 1;
+        }
+        cursor += BootstrapObjectFormat.symbol_size as usize;
+        if (record[6] != 0) {
+            return bootstrap_object_deserialize_fail(
+                object,
+                RuntimeError.invalid_argument
+            );
+        }
+        let flags: usize = record[5] as usize;
+        let kind: BootstrapObjectSymbolKind =
+            (flags & (BootstrapObjectSymbolFlag.function as usize)) != 0 ?
+                BootstrapObjectSymbolKind.function :
+            (flags & (BootstrapObjectSymbolFlag.object as usize)) != 0 ?
+                BootstrapObjectSymbolKind.object :
+                BootstrapObjectSymbolKind.none;
+        if ((flags & (31 as usize)) != flags ||
+            (flags &
+                (BootstrapObjectSymbolFlag.function as usize)) != 0 &&
+            (flags &
+                (BootstrapObjectSymbolFlag.object as usize)) != 0) {
+            return bootstrap_object_deserialize_fail(
+                object,
+                RuntimeError.invalid_argument
+            );
+        }
+        let symbol: BootstrapObjectSymbol = {
+            name_offset = record[0] as usize,
+            name_length = record[1] as usize,
+            section = record[2] as usize as BootstrapObjectSection,
+            value = record[3] as usize,
+            size = record[4] as usize,
+            kind = kind,
+            defined =
+                (flags &
+                    (BootstrapObjectSymbolFlag.defined as usize)) != 0,
+            global =
+                (flags &
+                    (BootstrapObjectSymbolFlag.global as usize)) != 0,
+            external =
+                (flags &
+                    (BootstrapObjectSymbolFlag.external as usize)) != 0,
+        };
+        let appended: StdByteBufferResult = std_byte_buffer_append(
+            object.symbols,
+            (&symbol) as *const BootstrapObjectSymbol as *const u8,
+            sizeof(BootstrapObjectSymbol)
+        );
+        object.symbols = appended.buffer;
+        if (appended.error != RuntimeError.none) {
+            return bootstrap_object_deserialize_fail(
+                object,
+                appended.error
+            );
+        }
+        index += 1;
+    }
+    index = 0;
+    while (index < relocation_count) {
+        var record: [5]u64 = {};
+        var record_index: usize = 0;
+        while (record_index < 5) {
+            if (!bootstrap_object_read_u64(
+                    bytes,
+                    length,
+                    cursor + record_index * 8,
+                    &record[record_index]
+                )) {
+                return bootstrap_object_deserialize_fail(
+                    object,
+                    RuntimeError.invalid_argument
+                );
+            }
+            record_index += 1;
+        }
+        cursor += BootstrapObjectFormat.relocation_size as usize;
+        let relocation: BootstrapObjectRelocation = {
+            section = record[0] as usize as BootstrapObjectSection,
+            offset = record[1] as usize,
+            symbol_index = record[2] as usize,
+            kind =
+                record[3] as usize as BootstrapObjectRelocationKind,
+            addend = record[4] as isize,
+        };
+        let appended: StdByteBufferResult = std_byte_buffer_append(
+            object.relocations,
+            (&relocation) as *const BootstrapObjectRelocation as *const u8,
+            sizeof(BootstrapObjectRelocation)
+        );
+        object.relocations = appended.buffer;
+        if (appended.error != RuntimeError.none) {
+            return bootstrap_object_deserialize_fail(
+                object,
+                appended.error
+            );
+        }
+        index += 1;
+    }
+    if (cursor != length || !bootstrap_object_is_valid(object)) {
+        return bootstrap_object_deserialize_fail(
+            object,
+            RuntimeError.invalid_argument
+        );
+    }
+    return {
+        object = object,
+        error = RuntimeError.none,
+    };
+}

@@ -1,0 +1,132 @@
+module luna.tools.bootstrap.stage_assembler;
+
+import luna.runtime;
+import luna.std.bytes;
+import luna.std.text;
+import luna.std.path;
+import luna.std.io;
+import luna.bootstrap.backend.x86_64.object;
+import luna.bootstrap.backend.x86_64.assembler;
+
+enum BootstrapAssemblerDriverLimit: usize {
+    maximum_input = 67108864,
+}
+
+enum BootstrapAssemblerDriverStatus: i32 {
+    input_error = 1,
+    assembly_error = 2,
+    serialization_error = 3,
+    output_error = 4,
+    release_error = 5,
+    success = 42,
+}
+
+fn bootstrap_assembler_driver_report(
+    line: usize
+) -> RuntimeError {
+    var digits: [20]u8 = {};
+    var cursor: usize = 20;
+    var value: usize = line;
+    if (value == 0) {
+        cursor -= 1;
+        digits[cursor] = 48;
+    }
+    while (value != 0) {
+        cursor -= 1;
+        digits[cursor] = ((48 as usize) + value % 10) as u8;
+        value /= 10;
+    }
+    var error: RuntimeError = std_io_write_all(
+        runtime_standard_error(),
+        "assembler:",
+        10
+    );
+    if (error == RuntimeError.none) {
+        error = std_io_write_all(
+            runtime_standard_error(),
+            &digits[cursor] as *const u8,
+            20 - cursor
+        );
+    }
+    if (error == RuntimeError.none) {
+        error = std_io_write_all(
+            runtime_standard_error(),
+            "\n",
+            1
+        );
+    }
+    return error;
+}
+
+fn main() -> i32 {
+    let input_path: StdPathResult =
+        std_path_from_c_string("bootstrap-assembly-input.s", 27);
+    if (input_path.error != RuntimeError.none) {
+        return BootstrapAssemblerDriverStatus.input_error as i32;
+    }
+    let input: StdByteBufferResult = std_io_read_file_limited(
+        input_path.path,
+        BootstrapAssemblerDriverLimit.maximum_input as usize
+    );
+    let input_path_error: RuntimeError =
+        std_path_release(input_path.path);
+    if (input.error != RuntimeError.none ||
+        input_path_error != RuntimeError.none) {
+        if (input.error == RuntimeError.none) {
+            std_byte_buffer_release(input.buffer);
+        }
+        return BootstrapAssemblerDriverStatus.input_error as i32;
+    }
+    let view: StdTextViewResult = std_text_view(
+        input.buffer.data as *const u8,
+        input.buffer.length
+    );
+    if (view.error != RuntimeError.none) {
+        std_byte_buffer_release(input.buffer);
+        return BootstrapAssemblerDriverStatus.input_error as i32;
+    }
+    let assembled: BootstrapAssemblerResult =
+        bootstrap_x86_64_assemble(view.view);
+    if (assembled.error != RuntimeError.none) {
+        bootstrap_assembler_driver_report(assembled.line);
+        std_byte_buffer_release(input.buffer);
+        return BootstrapAssemblerDriverStatus.assembly_error as i32;
+    }
+    let serialized: StdByteBufferResult =
+        bootstrap_object_serialize(assembled.object);
+    if (serialized.error != RuntimeError.none) {
+        bootstrap_object_release(assembled.object);
+        std_byte_buffer_release(input.buffer);
+        return BootstrapAssemblerDriverStatus.serialization_error as i32;
+    }
+    let output_path: StdPathResult =
+        std_path_from_c_string("bootstrap-object-output.lo", 27);
+    var write_error: RuntimeError = output_path.error;
+    if (output_path.error == RuntimeError.none) {
+        write_error = std_io_write_file(
+            output_path.path,
+            serialized.buffer.data as *const u8,
+            serialized.buffer.length
+        );
+        let output_path_error: RuntimeError =
+            std_path_release(output_path.path);
+        if (write_error == RuntimeError.none) {
+            write_error = output_path_error;
+        }
+    }
+    let serialized_error: RuntimeError =
+        std_byte_buffer_release(serialized.buffer);
+    let object_error: RuntimeError =
+        bootstrap_object_release(assembled.object);
+    let input_error: RuntimeError =
+        std_byte_buffer_release(input.buffer);
+    if (write_error != RuntimeError.none) {
+        return BootstrapAssemblerDriverStatus.output_error as i32;
+    }
+    if (serialized_error != RuntimeError.none ||
+        object_error != RuntimeError.none ||
+        input_error != RuntimeError.none) {
+        return BootstrapAssemblerDriverStatus.release_error as i32;
+    }
+    return BootstrapAssemblerDriverStatus.success as i32;
+}

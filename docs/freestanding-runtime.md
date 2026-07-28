@@ -85,6 +85,8 @@ descriptor `-1`; the descriptor is usable only when its accompanying error is
 | `runtime_standard_error` | Returns borrowed descriptor 2. |
 | `runtime_file_open_read` | Opens a NUL-terminated path read-only with `O_CLOEXEC`. |
 | `runtime_file_create` | Opens a NUL-terminated path write-only with create, truncate and close-on-exec flags; requested mode is `0666` before the process umask. |
+| `runtime_file_create_executable` | Creates a truncated write-only file and enforces mode `0755` with direct `openat` and `fchmod` system calls. |
+| `runtime_file_make_executable` | Applies mode `0755` to an open nonnegative descriptor with direct `fchmod`. |
 | `runtime_file_read` | Performs one `read` and returns its byte count or error. |
 | `runtime_file_write` | Performs one `write` and returns its byte count or error. |
 | `runtime_file_close` | Performs one `close` for a nonnegative descriptor. |

@@ -331,6 +331,83 @@ def module_graph(
                 "bootstrap_x86_64_frame",
             ),
         ),
+        "bootstrap_x86_64_object": Module(
+            "luna.bootstrap.backend.x86_64.object",
+            runtime_root
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "object"
+            / "object",
+            sysroot
+            / "luna"
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "object.lmi",
+            sysroot
+            / "luna"
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "object.o",
+            ("runtime", "bytes", "text"),
+        ),
+        "bootstrap_x86_64_assembler": Module(
+            "luna.bootstrap.backend.x86_64.assembler",
+            runtime_root
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "assembler"
+            / "assembler",
+            sysroot
+            / "luna"
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "assembler.lmi",
+            sysroot
+            / "luna"
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "assembler.o",
+            (
+                "runtime",
+                "bytes",
+                "text",
+                "bootstrap_x86_64_object",
+            ),
+        ),
+        "bootstrap_x86_64_linker": Module(
+            "luna.bootstrap.backend.x86_64.linker",
+            runtime_root
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "linker"
+            / "linker",
+            sysroot
+            / "luna"
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "linker.lmi",
+            sysroot
+            / "luna"
+            / "bootstrap"
+            / "backend"
+            / "x86_64"
+            / "linker.o",
+            (
+                "runtime",
+                "bytes",
+                "text",
+                "bootstrap_x86_64_object",
+                "bootstrap_x86_64_assembler",
+            ),
+        ),
     }
 
 

@@ -22,12 +22,13 @@ and invokes `syscall` directly. The Luna runtime and standard library must be
 built only on that layer. Optional caller-supplied external objects are an
 explicit FFI boundary, not a runtime dependency.
 
-The compiler owns the language semantics. Luna now encodes its x86-64
-instructions and writes ELF64 relocatable objects directly. LLVM MC remains
-only an independent test oracle. The project-owned `lunalink` resolves symbols,
-applies static relocations and writes ELF64 executables directly. LLD remains
-only an independent final-link oracle in differential tests. Neither external
-tool is used by the production compiler or linker path.
+The compiler owns the language semantics. The hosted stage-0 path encodes
+x86-64 instructions into ELF64 relocatable objects directly. The self-hosted
+path emits the same closed instruction dialect, assembles it into the strict
+`LUNAOBJ1` bootstrap format and links that format into a static ELF64
+executable. Its assembler and linker are Luna modules. LLVM MC and LLD remain
+independent test oracles only; neither is used by a production or bootstrap
+toolchain stage.
 
 External C functions are represented directly throughout the pipeline; Luna
 never generates a C translation unit. The final ELF link may combine a
@@ -94,10 +95,13 @@ lexer -> parser -> syntax tree
 ```
 
 Assembly is a closed output encoding of the x86-64 backend, not a user-facing
-intermediate language. During bootstrap, native object emission renders this
-same closed dialect in memory and consumes it with Luna's internal assembler.
-It never invokes an external assembler and rejects forms the backend does not
-own. See [the ELF object contract](elf-object.md).
+intermediate language. During bootstrap, the Luna assembler consumes this
+dialect and emits a validated Luna bootstrap object. The Luna linker consumes
+those objects and emits the final static ELF64 image. Both reject forms or
+records outside their versioned contracts. See
+[the complete bootstrap toolchain contract](bootstrap-toolchain.md); the
+hosted path's native format is covered by
+[the ELF object contract](elf-object.md).
 
 ## Frontend
 

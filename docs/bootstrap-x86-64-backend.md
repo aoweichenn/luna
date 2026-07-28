@@ -16,8 +16,11 @@ the project-owned assembler.
 | `luna.bootstrap.backend.x86_64.frame` | deterministic homes for slots, values, aggregate call results and hidden return pointers |
 | `luna.bootstrap.backend.x86_64.text` | checked, owned assembly-byte construction |
 | `luna.bootstrap.backend.x86_64.codegen` | complete Typed IR instruction selection, function/call lowering, symbols, globals and entry-point emission |
+| `luna.bootstrap.backend.x86_64.object` | versioned, validated bootstrap sections, symbols, relocations and deterministic serialization |
+| `luna.bootstrap.backend.x86_64.assembler` | strict encoding of the compiler-owned GNU-style x86-64 dialect |
+| `luna.bootstrap.backend.x86_64.linker` | symbol resolution, relocation, W^X layout and direct static ELF64 serialization |
 
-`luna_sysroot` builds deterministic `.lmi` and `.o` files for all four modules
+`luna_sysroot` builds deterministic `.lmi` and `.o` files for all seven modules
 under:
 
 ```text
@@ -105,13 +108,22 @@ unmangled. Globals are module-local labels. Executables define a freestanding
 Linux syscall 60. Generated programs contain no dynamic loader or libc
 dependency.
 
-The integration gate sends every generated assembly file through both:
+The self-hosted integration gate sends every generated assembly file through
+the Luna assembler, validates its `LUNAOBJ1` object, then sends the complete
+object graph through the Luna linker. The resulting executable is static,
+contains only W^X `PT_LOAD` segments and has neither an interpreter nor a
+dynamic section. The linker constructs its direct-syscall wrapper object with
+the same Luna assembler.
+
+The broader backend differential gate also sends generated assembly through:
 
 1. the project-owned closed assembler and native ELF64 object verifier; and
 2. LLVM MC as an independent syntax/encoding oracle.
 
-The object produced by the project assembler is linked by `lunalink` and
-executed. LLVM is test-only and is not part of the compiler or target runtime.
+Those hosted objects are linked by `lunalink` and executed. LLVM is test-only
+and is not part of the compiler, self-hosted assembler, linker or target
+runtime. The formats and seed boundary are specified in
+[the bootstrap toolchain contract](bootstrap-toolchain.md).
 
 ## Verification
 

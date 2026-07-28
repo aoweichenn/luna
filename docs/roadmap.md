@@ -95,9 +95,13 @@ M0 supports enough language to compile arithmetic functions, local variables,
 
 ## M7: complete Luna-owned toolchain
 
-- [ ] replace the bootstrap closed-dialect assembler with a Luna
+- [x] replace the bootstrap closed-dialect assembler with a Luna
   implementation
-- [ ] replace the bootstrap static ELF64 linker with a Luna implementation
+- [x] replace the bootstrap static ELF64 linker with a Luna implementation
+- [x] build stage 2 and stage 3 solely with the preceding Luna compiler,
+  assembler and linker, then compare all three tools byte-for-byte
+- [x] reject malformed assembly and bootstrap objects with deterministic
+  direct-module, negative and mutation tests
 - [ ] add a normal argument-driven self-hosted compiler command
 - [ ] define reproducible distribution and verification of the versioned seed
 
