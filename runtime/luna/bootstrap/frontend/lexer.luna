@@ -1,0 +1,974 @@
+module luna.bootstrap.frontend.lexer;
+
+enum BootstrapLexerLimit: usize {
+    maximum_size = 18446744073709551615,
+}
+
+struct BootstrapTokenBufferResult {
+    buffer: BootstrapTokenBuffer;
+    error: RuntimeError;
+}
+
+struct BootstrapLexerState {
+    source: StdTextView;
+    offset: usize;
+    line: usize;
+    column: usize;
+    tokens: BootstrapTokenBuffer;
+    diagnostics: BootstrapDiagnosticBuffer;
+    error: RuntimeError;
+}
+
+fn bootstrap_empty_span() -> BootstrapSourceSpan {
+    return {
+        offset = 0,
+        length = 0,
+        line = 0,
+        column = 0,
+    };
+}
+
+fn bootstrap_invalid_token() -> BootstrapToken {
+    return {
+        kind = BootstrapTokenKind.invalid,
+        span = bootstrap_empty_span(),
+    };
+}
+
+fn bootstrap_invalid_diagnostic() -> BootstrapDiagnostic {
+    return {
+        kind = BootstrapDiagnosticKind.unexpected_character,
+        span = bootstrap_empty_span(),
+        expected = BootstrapTokenKind.invalid,
+        found = BootstrapTokenKind.invalid,
+        detail = 0,
+    };
+}
+
+fn bootstrap_token_buffer_empty() -> BootstrapTokenBuffer {
+    return {
+        storage = std_byte_buffer_empty(),
+        count = 0,
+    };
+}
+
+fn bootstrap_token_buffer_is_valid(
+    buffer: BootstrapTokenBuffer
+) -> bool {
+    if (!std_byte_buffer_is_valid(buffer.storage) ||
+        buffer.storage.length % sizeof(BootstrapToken) != 0) {
+        return false;
+    }
+    return buffer.count ==
+        buffer.storage.length / sizeof(BootstrapToken);
+}
+
+fn bootstrap_token_buffer_add(
+    buffer: BootstrapTokenBuffer,
+    token: BootstrapToken
+) -> BootstrapTokenBufferResult {
+    if (!bootstrap_token_buffer_is_valid(buffer)) {
+        return {
+            buffer = buffer,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    if (buffer.count ==
+        BootstrapLexerLimit.maximum_size as usize) {
+        return {
+            buffer = buffer,
+            error = RuntimeError.out_of_memory,
+        };
+    }
+
+    let appended: StdByteBufferResult = std_byte_buffer_append(
+        buffer.storage,
+        (&token) as *const BootstrapToken as *const u8,
+        sizeof(BootstrapToken)
+    );
+    var result: BootstrapTokenBuffer = {
+        storage = appended.buffer,
+        count = buffer.count,
+    };
+    if (appended.error == RuntimeError.none) {
+        result.count += 1;
+    }
+    return {
+        buffer = result,
+        error = appended.error,
+    };
+}
+
+fn bootstrap_token_buffer_get(
+    buffer: BootstrapTokenBuffer,
+    index: usize
+) -> BootstrapTokenResult {
+    if (!bootstrap_token_buffer_is_valid(buffer) ||
+        index >= buffer.count) {
+        return {
+            token = bootstrap_invalid_token(),
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    let tokens: *const BootstrapToken =
+        buffer.storage.data as *const BootstrapToken;
+    return {
+        token = tokens[index],
+        error = RuntimeError.none,
+    };
+}
+
+fn bootstrap_token_buffer_release(
+    buffer: BootstrapTokenBuffer
+) -> RuntimeError {
+    if (!bootstrap_token_buffer_is_valid(buffer)) {
+        return RuntimeError.invalid_argument;
+    }
+    return std_byte_buffer_release(buffer.storage);
+}
+
+fn bootstrap_diagnostic_buffer_empty()
+    -> BootstrapDiagnosticBuffer {
+    return {
+        storage = std_byte_buffer_empty(),
+        count = 0,
+    };
+}
+
+fn bootstrap_diagnostic_buffer_is_valid(
+    buffer: BootstrapDiagnosticBuffer
+) -> bool {
+    if (!std_byte_buffer_is_valid(buffer.storage) ||
+        buffer.storage.length % sizeof(BootstrapDiagnostic) != 0) {
+        return false;
+    }
+    return buffer.count ==
+        buffer.storage.length / sizeof(BootstrapDiagnostic);
+}
+
+fn bootstrap_diagnostic_buffer_add(
+    buffer: BootstrapDiagnosticBuffer,
+    diagnostic: BootstrapDiagnostic
+) -> BootstrapDiagnosticBufferResult {
+    if (!bootstrap_diagnostic_buffer_is_valid(buffer)) {
+        return {
+            buffer = buffer,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    if (buffer.count ==
+        BootstrapLexerLimit.maximum_size as usize) {
+        return {
+            buffer = buffer,
+            error = RuntimeError.out_of_memory,
+        };
+    }
+
+    let appended: StdByteBufferResult = std_byte_buffer_append(
+        buffer.storage,
+        (&diagnostic) as *const BootstrapDiagnostic as *const u8,
+        sizeof(BootstrapDiagnostic)
+    );
+    var result: BootstrapDiagnosticBuffer = {
+        storage = appended.buffer,
+        count = buffer.count,
+    };
+    if (appended.error == RuntimeError.none) {
+        result.count += 1;
+    }
+    return {
+        buffer = result,
+        error = appended.error,
+    };
+}
+
+fn bootstrap_diagnostic_buffer_get(
+    buffer: BootstrapDiagnosticBuffer,
+    index: usize
+) -> BootstrapDiagnosticResult {
+    if (!bootstrap_diagnostic_buffer_is_valid(buffer) ||
+        index >= buffer.count) {
+        return {
+            diagnostic = bootstrap_invalid_diagnostic(),
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    let diagnostics: *const BootstrapDiagnostic =
+        buffer.storage.data as *const BootstrapDiagnostic;
+    return {
+        diagnostic = diagnostics[index],
+        error = RuntimeError.none,
+    };
+}
+
+fn bootstrap_diagnostic_buffer_release(
+    buffer: BootstrapDiagnosticBuffer
+) -> RuntimeError {
+    if (!bootstrap_diagnostic_buffer_is_valid(buffer)) {
+        return RuntimeError.invalid_argument;
+    }
+    return std_byte_buffer_release(buffer.storage);
+}
+
+fn bootstrap_lexer_at_end(state: *BootstrapLexerState) -> bool {
+    return state->offset >= state->source.length;
+}
+
+fn bootstrap_lexer_peek(state: *BootstrapLexerState) -> u8 {
+    if (bootstrap_lexer_at_end(state)) {
+        return 0;
+    }
+    return state->source.data[state->offset];
+}
+
+fn bootstrap_lexer_peek_next(state: *BootstrapLexerState) -> u8 {
+    if (state->offset == state->source.length ||
+        state->source.length - state->offset < 2) {
+        return 0;
+    }
+    return state->source.data[state->offset + 1];
+}
+
+fn bootstrap_lexer_advance(state: *BootstrapLexerState) -> u8 {
+    if (bootstrap_lexer_at_end(state)) {
+        return 0;
+    }
+    let byte: u8 = state->source.data[state->offset];
+    state->offset += 1;
+    if (byte == 10) {
+        state->line += 1;
+        state->column = 1;
+    } else {
+        state->column += 1;
+    }
+    return byte;
+}
+
+fn bootstrap_lexer_match(
+    state: *BootstrapLexerState,
+    expected: u8
+) -> bool {
+    if (bootstrap_lexer_peek(state) != expected) {
+        return false;
+    }
+    bootstrap_lexer_advance(state);
+    return true;
+}
+
+fn bootstrap_lexer_span(
+    state: *BootstrapLexerState,
+    start_offset: usize,
+    start_line: usize,
+    start_column: usize
+) -> BootstrapSourceSpan {
+    return {
+        offset = start_offset,
+        length = state->offset - start_offset,
+        line = start_line,
+        column = start_column,
+    };
+}
+
+fn bootstrap_lexer_add_diagnostic(
+    state: *BootstrapLexerState,
+    kind: BootstrapDiagnosticKind,
+    span: BootstrapSourceSpan
+) -> bool {
+    if (state->error != RuntimeError.none) {
+        return false;
+    }
+    let added: BootstrapDiagnosticBufferResult =
+        bootstrap_diagnostic_buffer_add(
+            state->diagnostics,
+            {
+                kind = kind,
+                span = span,
+                expected = BootstrapTokenKind.invalid,
+                found = BootstrapTokenKind.invalid,
+                detail = 0,
+            }
+        );
+    state->diagnostics = added.buffer;
+    state->error = added.error;
+    return added.error == RuntimeError.none;
+}
+
+fn bootstrap_lexer_add_token(
+    state: *BootstrapLexerState,
+    kind: BootstrapTokenKind,
+    start_offset: usize,
+    start_line: usize,
+    start_column: usize
+) -> bool {
+    if (state->error != RuntimeError.none) {
+        return false;
+    }
+    let added: BootstrapTokenBufferResult =
+        bootstrap_token_buffer_add(
+            state->tokens,
+            {
+                kind = kind,
+                span = bootstrap_lexer_span(
+                    state,
+                    start_offset,
+                    start_line,
+                    start_column
+                ),
+            }
+        );
+    state->tokens = added.buffer;
+    state->error = added.error;
+    return added.error == RuntimeError.none;
+}
+
+fn bootstrap_is_ascii_letter(byte: u8) -> bool {
+    return (byte >= 65 && byte <= 90) ||
+        (byte >= 97 && byte <= 122);
+}
+
+fn bootstrap_is_decimal_digit(byte: u8) -> bool {
+    return byte >= 48 && byte <= 57;
+}
+
+fn bootstrap_is_hex_digit(byte: u8) -> bool {
+    return bootstrap_is_decimal_digit(byte) ||
+        (byte >= 65 && byte <= 70) ||
+        (byte >= 97 && byte <= 102);
+}
+
+fn bootstrap_digit_matches_base(byte: u8, base: usize) -> bool {
+    if (base == 2) {
+        return byte == 48 || byte == 49;
+    }
+    if (base == 8) {
+        return byte >= 48 && byte <= 55;
+    }
+    if (base == 10) {
+        return bootstrap_is_decimal_digit(byte);
+    }
+    if (base == 16) {
+        return bootstrap_is_hex_digit(byte);
+    }
+    return false;
+}
+
+fn bootstrap_lexer_text_equals(
+    state: *BootstrapLexerState,
+    start: usize,
+    length: usize,
+    expected: *const u8,
+    expected_length: usize
+) -> bool {
+    if (length != expected_length) {
+        return false;
+    }
+    var index: usize = 0;
+    while (index < length) {
+        if (state->source.data[start + index] != expected[index]) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_lexer_identifier_kind(
+    state: *BootstrapLexerState,
+    start: usize,
+    length: usize
+) -> BootstrapTokenKind {
+    if (bootstrap_lexer_text_equals(state, start, length, "as", 2)) {
+        return BootstrapTokenKind.keyword_as;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "do", 2)) {
+        return BootstrapTokenKind.keyword_do;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "fn", 2)) {
+        return BootstrapTokenKind.keyword_fn;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "i8", 2)) {
+        return BootstrapTokenKind.keyword_i8;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "u8", 2)) {
+        return BootstrapTokenKind.keyword_u8;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "f32", 3)) {
+        return BootstrapTokenKind.keyword_f32;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "f64", 3)) {
+        return BootstrapTokenKind.keyword_f64;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "for", 3)) {
+        return BootstrapTokenKind.keyword_for;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "i16", 3)) {
+        return BootstrapTokenKind.keyword_i16;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "i32", 3)) {
+        return BootstrapTokenKind.keyword_i32;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "i64", 3)) {
+        return BootstrapTokenKind.keyword_i64;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "let", 3)) {
+        return BootstrapTokenKind.keyword_let;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "u16", 3)) {
+        return BootstrapTokenKind.keyword_u16;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "u32", 3)) {
+        return BootstrapTokenKind.keyword_u32;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "u64", 3)) {
+        return BootstrapTokenKind.keyword_u64;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "var", 3)) {
+        return BootstrapTokenKind.keyword_var;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "bool", 4)) {
+        return BootstrapTokenKind.keyword_bool;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "case", 4)) {
+        return BootstrapTokenKind.keyword_case;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "else", 4)) {
+        return BootstrapTokenKind.keyword_else;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "enum", 4)) {
+        return BootstrapTokenKind.keyword_enum;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "false", 5)) {
+        return BootstrapTokenKind.keyword_false;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "isize", 5)) {
+        return BootstrapTokenKind.keyword_isize;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "null", 4)) {
+        return BootstrapTokenKind.keyword_null;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "true", 4)) {
+        return BootstrapTokenKind.keyword_true;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "union", 5)) {
+        return BootstrapTokenKind.keyword_union;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "usize", 5)) {
+        return BootstrapTokenKind.keyword_usize;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "void", 4)) {
+        return BootstrapTokenKind.keyword_void;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "alignof", 7)) {
+        return BootstrapTokenKind.keyword_alignof;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "break", 5)) {
+        return BootstrapTokenKind.keyword_break;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "const", 5)) {
+        return BootstrapTokenKind.keyword_const;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "continue", 8)) {
+        return BootstrapTokenKind.keyword_continue;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "default", 7)) {
+        return BootstrapTokenKind.keyword_default;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "export", 6)) {
+        return BootstrapTokenKind.keyword_export;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "extern", 6)) {
+        return BootstrapTokenKind.keyword_extern;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "if", 2)) {
+        return BootstrapTokenKind.keyword_if;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "import", 6)) {
+        return BootstrapTokenKind.keyword_import;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "module", 6)) {
+        return BootstrapTokenKind.keyword_module;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "offsetof", 8)) {
+        return BootstrapTokenKind.keyword_offsetof;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "return", 6)) {
+        return BootstrapTokenKind.keyword_return;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "sizeof", 6)) {
+        return BootstrapTokenKind.keyword_sizeof;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "struct", 6)) {
+        return BootstrapTokenKind.keyword_struct;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "switch", 6)) {
+        return BootstrapTokenKind.keyword_switch;
+    }
+    if (bootstrap_lexer_text_equals(state, start, length, "while", 5)) {
+        return BootstrapTokenKind.keyword_while;
+    }
+    return BootstrapTokenKind.identifier;
+}
+
+fn bootstrap_lexer_skip_trivia(
+    state: *BootstrapLexerState
+) -> void {
+    while (!bootstrap_lexer_at_end(state) &&
+        state->error == RuntimeError.none) {
+        let byte: u8 = bootstrap_lexer_peek(state);
+        if (byte == 32 || byte == 9 || byte == 13 || byte == 10) {
+            bootstrap_lexer_advance(state);
+            continue;
+        }
+        if (byte == 47 && bootstrap_lexer_peek_next(state) == 47) {
+            while (!bootstrap_lexer_at_end(state) &&
+                bootstrap_lexer_peek(state) != 10) {
+                bootstrap_lexer_advance(state);
+            }
+            continue;
+        }
+        if (byte != 47 || bootstrap_lexer_peek_next(state) != 42) {
+            return;
+        }
+
+        let start_offset: usize = state->offset;
+        let start_line: usize = state->line;
+        let start_column: usize = state->column;
+        bootstrap_lexer_advance(state);
+        bootstrap_lexer_advance(state);
+        while (!bootstrap_lexer_at_end(state) &&
+            !(bootstrap_lexer_peek(state) == 42 &&
+                bootstrap_lexer_peek_next(state) == 47)) {
+            bootstrap_lexer_advance(state);
+        }
+        if (bootstrap_lexer_at_end(state)) {
+            bootstrap_lexer_add_diagnostic(
+                state,
+                BootstrapDiagnosticKind.unterminated_block_comment,
+                bootstrap_lexer_span(
+                    state,
+                    start_offset,
+                    start_line,
+                    start_column
+                )
+            );
+            return;
+        }
+        bootstrap_lexer_advance(state);
+        bootstrap_lexer_advance(state);
+    }
+}
+
+fn bootstrap_lexer_scan_identifier(
+    state: *BootstrapLexerState,
+    start_offset: usize,
+    start_line: usize,
+    start_column: usize
+) -> bool {
+    while (bootstrap_is_ascii_letter(bootstrap_lexer_peek(state)) ||
+        bootstrap_is_decimal_digit(bootstrap_lexer_peek(state)) ||
+        bootstrap_lexer_peek(state) == 95) {
+        bootstrap_lexer_advance(state);
+    }
+    return bootstrap_lexer_add_token(
+        state,
+        bootstrap_lexer_identifier_kind(
+            state,
+            start_offset,
+            state->offset - start_offset
+        ),
+        start_offset,
+        start_line,
+        start_column
+    );
+}
+
+fn bootstrap_lexer_scan_number(
+    state: *BootstrapLexerState,
+    start_offset: usize,
+    start_line: usize,
+    start_column: usize
+) -> bool {
+    var base: usize = 10;
+    var is_floating: bool = false;
+    if (state->source.data[start_offset] == 48 &&
+        (bootstrap_lexer_peek(state) == 98 ||
+            bootstrap_lexer_peek(state) == 66)) {
+        base = 2;
+        bootstrap_lexer_advance(state);
+    } else if (state->source.data[start_offset] == 48 &&
+        (bootstrap_lexer_peek(state) == 111 ||
+            bootstrap_lexer_peek(state) == 79)) {
+        base = 8;
+        bootstrap_lexer_advance(state);
+    } else if (state->source.data[start_offset] == 48 &&
+        (bootstrap_lexer_peek(state) == 120 ||
+            bootstrap_lexer_peek(state) == 88)) {
+        base = 16;
+        bootstrap_lexer_advance(state);
+    }
+
+    while (bootstrap_digit_matches_base(
+            bootstrap_lexer_peek(state),
+            base
+        ) || bootstrap_lexer_peek(state) == 95) {
+        bootstrap_lexer_advance(state);
+    }
+    if (base == 10 && bootstrap_lexer_peek(state) == 46 &&
+        bootstrap_is_decimal_digit(
+            bootstrap_lexer_peek_next(state)
+        )) {
+        is_floating = true;
+        bootstrap_lexer_advance(state);
+        while (bootstrap_is_decimal_digit(
+                bootstrap_lexer_peek(state)
+            ) || bootstrap_lexer_peek(state) == 95) {
+            bootstrap_lexer_advance(state);
+        }
+    }
+    if (base == 10 &&
+        (bootstrap_lexer_peek(state) == 101 ||
+            bootstrap_lexer_peek(state) == 69)) {
+        is_floating = true;
+        bootstrap_lexer_advance(state);
+        if (bootstrap_lexer_peek(state) == 43 ||
+            bootstrap_lexer_peek(state) == 45) {
+            bootstrap_lexer_advance(state);
+        }
+        while (bootstrap_is_decimal_digit(
+                bootstrap_lexer_peek(state)
+            ) || bootstrap_lexer_peek(state) == 95) {
+            bootstrap_lexer_advance(state);
+        }
+    }
+    return bootstrap_lexer_add_token(
+        state,
+        is_floating ? BootstrapTokenKind.floating :
+            BootstrapTokenKind.integer,
+        start_offset,
+        start_line,
+        start_column
+    );
+}
+
+fn bootstrap_lexer_scan_quoted(
+    state: *BootstrapLexerState,
+    quote: u8,
+    kind: BootstrapTokenKind,
+    diagnostic_kind: BootstrapDiagnosticKind,
+    start_offset: usize,
+    start_line: usize,
+    start_column: usize
+) -> bool {
+    var terminated: bool = false;
+    while (!bootstrap_lexer_at_end(state)) {
+        let byte: u8 = bootstrap_lexer_advance(state);
+        if (byte == quote) {
+            terminated = true;
+            break;
+        }
+        if (byte == 92 && !bootstrap_lexer_at_end(state)) {
+            bootstrap_lexer_advance(state);
+            continue;
+        }
+        if (byte == 10) {
+            break;
+        }
+    }
+
+    let token_kind: BootstrapTokenKind = terminated ?
+        kind : BootstrapTokenKind.invalid;
+    if (!bootstrap_lexer_add_token(
+            state,
+            token_kind,
+            start_offset,
+            start_line,
+            start_column
+        )) {
+        return false;
+    }
+    if (!terminated) {
+        return bootstrap_lexer_add_diagnostic(
+            state,
+            diagnostic_kind,
+            bootstrap_lexer_span(
+                state,
+                start_offset,
+                start_line,
+                start_column
+            )
+        );
+    }
+    return true;
+}
+
+fn bootstrap_lexer_scan_token(
+    state: *BootstrapLexerState
+) -> bool {
+    bootstrap_lexer_skip_trivia(state);
+    if (state->error != RuntimeError.none) {
+        return false;
+    }
+
+    let start_offset: usize = state->offset;
+    let start_line: usize = state->line;
+    let start_column: usize = state->column;
+    if (bootstrap_lexer_at_end(state)) {
+        return bootstrap_lexer_add_token(
+            state,
+            BootstrapTokenKind.end,
+            start_offset,
+            start_line,
+            start_column
+        );
+    }
+
+    let byte: u8 = bootstrap_lexer_advance(state);
+    if (bootstrap_is_ascii_letter(byte) || byte == 95) {
+        return bootstrap_lexer_scan_identifier(
+            state,
+            start_offset,
+            start_line,
+            start_column
+        );
+    }
+    if (bootstrap_is_decimal_digit(byte)) {
+        return bootstrap_lexer_scan_number(
+            state,
+            start_offset,
+            start_line,
+            start_column
+        );
+    }
+
+    var kind: BootstrapTokenKind = BootstrapTokenKind.invalid;
+    switch (byte) {
+    case 40 {
+        kind = BootstrapTokenKind.left_parenthesis;
+    }
+    case 41 {
+        kind = BootstrapTokenKind.right_parenthesis;
+    }
+    case 123 {
+        kind = BootstrapTokenKind.left_brace;
+    }
+    case 125 {
+        kind = BootstrapTokenKind.right_brace;
+    }
+    case 91 {
+        kind = BootstrapTokenKind.left_bracket;
+    }
+    case 93 {
+        kind = BootstrapTokenKind.right_bracket;
+    }
+    case 44 {
+        kind = BootstrapTokenKind.comma;
+    }
+    case 46 {
+        kind = BootstrapTokenKind.dot;
+    }
+    case 59 {
+        kind = BootstrapTokenKind.semicolon;
+    }
+    case 58 {
+        kind = BootstrapTokenKind.colon;
+    }
+    case 63 {
+        kind = BootstrapTokenKind.question;
+    }
+    case 126 {
+        kind = BootstrapTokenKind.tilde;
+    }
+    case 43 {
+        kind = bootstrap_lexer_match(state, 61) ?
+            BootstrapTokenKind.plus_equal : BootstrapTokenKind.plus;
+    }
+    case 45 {
+        if (bootstrap_lexer_match(state, 62)) {
+            kind = BootstrapTokenKind.arrow;
+        } else {
+            kind = bootstrap_lexer_match(state, 61) ?
+                BootstrapTokenKind.minus_equal :
+                BootstrapTokenKind.minus;
+        }
+    }
+    case 42 {
+        kind = bootstrap_lexer_match(state, 61) ?
+            BootstrapTokenKind.star_equal : BootstrapTokenKind.star;
+    }
+    case 47 {
+        kind = bootstrap_lexer_match(state, 61) ?
+            BootstrapTokenKind.slash_equal : BootstrapTokenKind.slash;
+    }
+    case 37 {
+        kind = bootstrap_lexer_match(state, 61) ?
+            BootstrapTokenKind.percent_equal :
+            BootstrapTokenKind.percent;
+    }
+    case 38 {
+        if (bootstrap_lexer_match(state, 38)) {
+            kind = BootstrapTokenKind.logical_and;
+        } else {
+            kind = bootstrap_lexer_match(state, 61) ?
+                BootstrapTokenKind.ampersand_equal :
+                BootstrapTokenKind.ampersand;
+        }
+    }
+    case 124 {
+        if (bootstrap_lexer_match(state, 124)) {
+            kind = BootstrapTokenKind.logical_or;
+        } else {
+            kind = bootstrap_lexer_match(state, 61) ?
+                BootstrapTokenKind.pipe_equal : BootstrapTokenKind.pipe;
+        }
+    }
+    case 94 {
+        kind = bootstrap_lexer_match(state, 61) ?
+            BootstrapTokenKind.caret_equal : BootstrapTokenKind.caret;
+    }
+    case 33 {
+        kind = bootstrap_lexer_match(state, 61) ?
+            BootstrapTokenKind.bang_equal : BootstrapTokenKind.bang;
+    }
+    case 61 {
+        kind = bootstrap_lexer_match(state, 61) ?
+            BootstrapTokenKind.equal_equal : BootstrapTokenKind.equal;
+    }
+    case 60 {
+        if (bootstrap_lexer_match(state, 60)) {
+            kind = bootstrap_lexer_match(state, 61) ?
+                BootstrapTokenKind.shift_left_equal :
+                BootstrapTokenKind.shift_left;
+        } else {
+            kind = bootstrap_lexer_match(state, 61) ?
+                BootstrapTokenKind.less_equal : BootstrapTokenKind.less;
+        }
+    }
+    case 62 {
+        if (bootstrap_lexer_match(state, 62)) {
+            kind = bootstrap_lexer_match(state, 61) ?
+                BootstrapTokenKind.shift_right_equal :
+                BootstrapTokenKind.shift_right;
+        } else {
+            kind = bootstrap_lexer_match(state, 61) ?
+                BootstrapTokenKind.greater_equal :
+                BootstrapTokenKind.greater;
+        }
+    }
+    case 34 {
+        return bootstrap_lexer_scan_quoted(
+            state,
+            34,
+            BootstrapTokenKind.string,
+            BootstrapDiagnosticKind.unterminated_string,
+            start_offset,
+            start_line,
+            start_column
+        );
+    }
+    case 39 {
+        return bootstrap_lexer_scan_quoted(
+            state,
+            39,
+            BootstrapTokenKind.character,
+            BootstrapDiagnosticKind.unterminated_character,
+            start_offset,
+            start_line,
+            start_column
+        );
+    }
+    default {
+    }
+    }
+
+    if (!bootstrap_lexer_add_token(
+            state,
+            kind,
+            start_offset,
+            start_line,
+            start_column
+        )) {
+        return false;
+    }
+    if (kind == BootstrapTokenKind.invalid) {
+        return bootstrap_lexer_add_diagnostic(
+            state,
+            BootstrapDiagnosticKind.unexpected_character,
+            bootstrap_lexer_span(
+                state,
+                start_offset,
+                start_line,
+                start_column
+            )
+        );
+    }
+    return true;
+}
+
+fn bootstrap_source_is_valid(source: StdTextView) -> bool {
+    if (!std_text_is_valid_utf8(source)) {
+        return false;
+    }
+    var index: usize = 0;
+    while (index < source.length) {
+        if (source.data[index] == 0) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_lex(source: StdTextView) -> BootstrapLexResult {
+    if (!bootstrap_source_is_valid(source)) {
+        return {
+            tokens = bootstrap_token_buffer_empty(),
+            diagnostics = bootstrap_diagnostic_buffer_empty(),
+            error = RuntimeError.invalid_argument,
+        };
+    }
+
+    var state: BootstrapLexerState = {
+        source = source,
+        offset = 0,
+        line = 1,
+        column = 1,
+        tokens = bootstrap_token_buffer_empty(),
+        diagnostics = bootstrap_diagnostic_buffer_empty(),
+        error = RuntimeError.none,
+    };
+    while (state.error == RuntimeError.none) {
+        if (!bootstrap_lexer_scan_token(&state)) {
+            break;
+        }
+        let last: BootstrapTokenResult =
+            bootstrap_token_buffer_get(
+                state.tokens,
+                state.tokens.count - 1
+            );
+        if (last.error != RuntimeError.none) {
+            state.error = last.error;
+            break;
+        }
+        if (last.token.kind == BootstrapTokenKind.end) {
+            break;
+        }
+    }
+    return {
+        tokens = state.tokens,
+        diagnostics = state.diagnostics,
+        error = state.error,
+    };
+}
+
+fn bootstrap_lex_result_release(
+    result: BootstrapLexResult
+) -> RuntimeError {
+    let token_error: RuntimeError =
+        bootstrap_token_buffer_release(result.tokens);
+    let diagnostic_error: RuntimeError =
+        bootstrap_diagnostic_buffer_release(result.diagnostics);
+    if (token_error != RuntimeError.none) {
+        return token_error;
+    }
+    return diagnostic_error;
+}

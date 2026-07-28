@@ -154,9 +154,10 @@ validated text and borrow the standard descriptors.
 
 This stage does not add formatting, generic containers, typed allocation,
 filesystem traversal, buffered streams, asynchronous I/O, threads, locks,
-environment access or optimization. Those facilities are not needed to start
-the Luna lexer and parser. Adding them now would enlarge the trusted bootstrap
-surface without improving reproducibility.
+environment access or optimization. Those facilities are not needed for the
+Luna frontend or the upcoming type checker and typed IR builder. Adding them
+now would enlarge the trusted bootstrap surface without improving
+reproducibility.
 
 ## Correctness gates
 

@@ -63,7 +63,7 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] project-owned x86-64 Linux system-call ABI layer using direct `syscall`
 - [x] freestanding runtime with no libc dependency
 - [x] standard-library minimum built only on the freestanding runtime
-- [ ] Luna implementation of lexer and parser
+- [x] Luna implementation of lexer and parser
 - [ ] Luna implementation of type checking and IR
 - [ ] Luna implementation of x86-64 backend
 - [ ] stage 1, stage 2 and stage 3 reproducibility comparison

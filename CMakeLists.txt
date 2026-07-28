@@ -181,6 +181,18 @@ set(LUNA_STD_IO_METADATA
 set(LUNA_STD_IO_OBJECT
     "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/std/io.o"
 )
+set(LUNA_BOOTSTRAP_LEXER_METADATA
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/bootstrap/frontend/lexer.lmi"
+)
+set(LUNA_BOOTSTRAP_LEXER_OBJECT
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/bootstrap/frontend/lexer.o"
+)
+set(LUNA_BOOTSTRAP_PARSER_METADATA
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/bootstrap/frontend/parser.lmi"
+)
+set(LUNA_BOOTSTRAP_PARSER_OBJECT
+    "${CMAKE_CURRENT_BINARY_DIR}/sysroot/luna/bootstrap/frontend/parser.o"
+)
 add_custom_command(
     OUTPUT "${LUNA_SYSCALL_METADATA}"
     COMMAND
@@ -307,6 +319,27 @@ luna_add_sysroot_module(
     "${LUNA_STD_TEXT_METADATA}"
     "${LUNA_STD_PATH_METADATA}"
 )
+luna_add_sysroot_module(
+    luna.bootstrap.frontend.lexer
+    runtime/luna/bootstrap/frontend/lexer.interface.luna
+    runtime/luna/bootstrap/frontend/lexer.luna
+    "${LUNA_BOOTSTRAP_LEXER_METADATA}"
+    "${LUNA_BOOTSTRAP_LEXER_OBJECT}"
+    "${LUNA_RUNTIME_METADATA}"
+    "${LUNA_STD_BYTES_METADATA}"
+    "${LUNA_STD_TEXT_METADATA}"
+)
+luna_add_sysroot_module(
+    luna.bootstrap.frontend.parser
+    runtime/luna/bootstrap/frontend/parser.interface.luna
+    runtime/luna/bootstrap/frontend/parser.luna
+    "${LUNA_BOOTSTRAP_PARSER_METADATA}"
+    "${LUNA_BOOTSTRAP_PARSER_OBJECT}"
+    "${LUNA_RUNTIME_METADATA}"
+    "${LUNA_STD_BYTES_METADATA}"
+    "${LUNA_STD_TEXT_METADATA}"
+    "${LUNA_BOOTSTRAP_LEXER_METADATA}"
+)
 add_custom_target(
     luna_sysroot
     DEPENDS
@@ -323,6 +356,10 @@ add_custom_target(
         "${LUNA_STD_PATH_OBJECT}"
         "${LUNA_STD_IO_METADATA}"
         "${LUNA_STD_IO_OBJECT}"
+        "${LUNA_BOOTSTRAP_LEXER_METADATA}"
+        "${LUNA_BOOTSTRAP_LEXER_OBJECT}"
+        "${LUNA_BOOTSTRAP_PARSER_METADATA}"
+        "${LUNA_BOOTSTRAP_PARSER_OBJECT}"
 )
 
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
@@ -390,6 +427,7 @@ if(BUILD_TESTING)
         tests/unit/runtime/linux_syscall_test.cpp
         tests/unit/runtime/freestanding_runtime_test.cpp
         tests/unit/stdlib/minimum_standard_library_test.cpp
+        tests/unit/bootstrap/frontend_test.cpp
         tests/unit/support/arena_test.cpp
         tests/unit/support/buffer_test.cpp
         tests/unit/frontend/diagnostic/diagnostic_test.cpp
@@ -578,6 +616,26 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME integration.bootstrap_frontend
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/run_bootstrap_frontend.py"
+            --compiler "$<TARGET_FILE:lunac>"
+            --linker "$<TARGET_FILE:lunalink>"
+            --sysroot "${CMAKE_CURRENT_BINARY_DIR}/sysroot"
+            --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --work-dir "${CMAKE_CURRENT_BINARY_DIR}/bootstrap-frontend"
+    )
+    set_tests_properties(
+        integration.bootstrap_frontend
+        PROPERTIES
+            LABELS "integration;random"
+            RESOURCE_LOCK "luna_sysroot"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 180
+    )
+
+    add_test(
         NAME unit.machine_ir_reference
         COMMAND
             "${Python3_EXECUTABLE}"
@@ -700,6 +758,7 @@ if(LUNA_BUILD_FUZZERS)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/linux_syscall.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/freestanding_runtime.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/minimum_standard_library.luna"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/bootstrap_frontend.luna"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/object_assembly.s"
             DESTINATION "${LUNA_FUZZ_CORPUS_DIR}"
         )

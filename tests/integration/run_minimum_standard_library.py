@@ -167,6 +167,20 @@ def module_graph(
             sysroot / "luna" / "std" / "io.o",
             ("runtime", "bytes", "text", "path"),
         ),
+        "bootstrap_lexer": Module(
+            "luna.bootstrap.frontend.lexer",
+            runtime_root / "bootstrap" / "frontend" / "lexer",
+            sysroot / "luna" / "bootstrap" / "frontend" / "lexer.lmi",
+            sysroot / "luna" / "bootstrap" / "frontend" / "lexer.o",
+            ("runtime", "bytes", "text"),
+        ),
+        "bootstrap_parser": Module(
+            "luna.bootstrap.frontend.parser",
+            runtime_root / "bootstrap" / "frontend" / "parser",
+            sysroot / "luna" / "bootstrap" / "frontend" / "parser.lmi",
+            sysroot / "luna" / "bootstrap" / "frontend" / "parser.o",
+            ("runtime", "bytes", "text", "bootstrap_lexer"),
+        ),
     }
 
 
@@ -190,7 +204,17 @@ def ensure_sysroot(
     compiler: pathlib.Path,
     graph: dict[str, Module],
 ) -> None:
-    for key in ("syscall", "runtime", "memory", "bytes", "text", "path", "io"):
+    for key in (
+        "syscall",
+        "runtime",
+        "memory",
+        "bytes",
+        "text",
+        "path",
+        "io",
+        "bootstrap_lexer",
+        "bootstrap_parser",
+    ):
         module = graph[key]
         dependencies = dependency_paths(graph, module)
         if not module.metadata.is_file():

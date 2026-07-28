@@ -1,0 +1,177 @@
+module tests.bootstrap_frontend_contract;
+
+import luna.runtime;
+import luna.std.text;
+import luna.bootstrap.frontend.lexer;
+import luna.bootstrap.frontend.parser;
+
+fn valid_source_is_accepted() -> bool {
+    let view: StdTextViewResult = std_text_from_c_string(
+        "module contract.sample;\nimport luna.runtime;\nstruct Pair { left: i32; right: i32; }\nenum Choice: u8 { first = 1, second, }\nfn compute(value: i32, data: *const Pair) -> i32 {\n  var total: i32 = value;\n  for (var index: i32 = 0; index < 3; index += 1) {\n    if (index == 1) { continue; } else { total += index; }\n  }\n  switch (total) { case 0, 1 { total = data->left; } default { total = data->right; } }\n  do { total -= 1; } while (total > 42);\n  return total > 0 ? total as i32 : sizeof(Pair) as i32;\n}\n",
+        1024
+    );
+    if (view.error != RuntimeError.none) {
+        return false;
+    }
+    let result: BootstrapFrontendResult =
+        bootstrap_frontend_parse(view.view);
+    let root: BootstrapSyntaxNodeResult =
+        bootstrap_syntax_tree_get(
+            result.parse.tree,
+            result.parse.tree.root
+        );
+    let accepted: bool =
+        result.error == RuntimeError.none &&
+        result.lex.diagnostics.count == 0 &&
+        result.parse.diagnostics.count == 0 &&
+        bootstrap_syntax_tree_is_valid(result.parse.tree) &&
+        result.parse.tree.token_count == result.lex.tokens.count &&
+        root.error == RuntimeError.none &&
+        root.node.kind == BootstrapSyntaxKind.program &&
+        root.node.parent == bootstrap_syntax_no_index() &&
+        root.node.child_count >= 5;
+    return bootstrap_frontend_result_release(result) ==
+        RuntimeError.none && accepted;
+}
+
+fn lexical_errors_are_recoverable() -> bool {
+    let view: StdTextViewResult = std_text_from_c_string(
+        "module bad;\nfn main() -> i32 { return \"unterminated;\n",
+        128
+    );
+    if (view.error != RuntimeError.none) {
+        return false;
+    }
+    let result: BootstrapFrontendResult =
+        bootstrap_frontend_parse(view.view);
+    let diagnostic: BootstrapDiagnosticResult =
+        bootstrap_diagnostic_buffer_get(result.lex.diagnostics, 0);
+    let diagnosed: bool =
+        result.error == RuntimeError.none &&
+        result.lex.diagnostics.count != 0 &&
+        result.parse.diagnostics.count != 0 &&
+        diagnostic.error == RuntimeError.none &&
+        diagnostic.diagnostic.kind ==
+            BootstrapDiagnosticKind.unterminated_string &&
+        diagnostic.diagnostic.span.line == 2 &&
+        bootstrap_syntax_tree_is_valid(result.parse.tree);
+    return bootstrap_frontend_result_release(result) ==
+        RuntimeError.none && diagnosed;
+}
+
+fn syntax_errors_are_recoverable() -> bool {
+    let view: StdTextViewResult = std_text_from_c_string(
+        "module bad\nfn broken(value i32) -> i32 { let x: i32 = 0x_; if ( { return 1 } return x; }\n",
+        256
+    );
+    if (view.error != RuntimeError.none) {
+        return false;
+    }
+    let result: BootstrapFrontendResult =
+        bootstrap_frontend_parse(view.view);
+    let diagnosed: bool =
+        result.error == RuntimeError.none &&
+        result.parse.diagnostics.count >= 3 &&
+        bootstrap_syntax_tree_is_valid(result.parse.tree);
+    return bootstrap_frontend_result_release(result) ==
+        RuntimeError.none && diagnosed;
+}
+
+fn invalid_source_is_rejected() -> bool {
+    let view: StdTextViewResult = std_text_view("a\0b", 3);
+    if (view.error != RuntimeError.none) {
+        return false;
+    }
+    let result: BootstrapLexResult = bootstrap_lex(view.view);
+    let rejected: bool =
+        result.error == RuntimeError.invalid_argument &&
+        result.tokens.count == 0 &&
+        result.diagnostics.count == 0;
+    return bootstrap_lex_result_release(result) ==
+        RuntimeError.none && rejected;
+}
+
+fn forged_token_position_is_rejected() -> bool {
+    let view: StdTextViewResult =
+        std_text_from_c_string("module forged;\n", 32);
+    if (view.error != RuntimeError.none) {
+        return false;
+    }
+    let lex: BootstrapLexResult = bootstrap_lex(view.view);
+    if (lex.error != RuntimeError.none || lex.tokens.count == 0) {
+        bootstrap_lex_result_release(lex);
+        return false;
+    }
+    let tokens: *BootstrapToken =
+        lex.tokens.storage.data as *BootstrapToken;
+    tokens[0].span.line = 2;
+    let parse: BootstrapParseResult =
+        bootstrap_parse(view.view, lex.tokens);
+    let rejected: bool =
+        parse.error == RuntimeError.invalid_argument &&
+        parse.tree.count == 0 &&
+        parse.diagnostics.count == 0;
+    let parse_error: RuntimeError =
+        bootstrap_parse_result_release(parse);
+    let lex_error: RuntimeError = bootstrap_lex_result_release(lex);
+    return rejected &&
+        parse_error == RuntimeError.none &&
+        lex_error == RuntimeError.none;
+}
+
+fn token_contract_is_stable() -> bool {
+    let view: StdTextViewResult = std_text_from_c_string(
+        "module a; fn f() -> i32 { return 1 + 2; }\n",
+        64
+    );
+    if (view.error != RuntimeError.none) {
+        return false;
+    }
+    let result: BootstrapLexResult = bootstrap_lex(view.view);
+    if (result.error != RuntimeError.none ||
+        result.diagnostics.count != 0 ||
+        result.tokens.count != 17) {
+        bootstrap_lex_result_release(result);
+        return false;
+    }
+    let first: BootstrapTokenResult =
+        bootstrap_token_buffer_get(result.tokens, 0);
+    let last: BootstrapTokenResult =
+        bootstrap_token_buffer_get(
+            result.tokens,
+            result.tokens.count - 1
+        );
+    let stable: bool =
+        first.error == RuntimeError.none &&
+        first.token.kind == BootstrapTokenKind.keyword_module &&
+        first.token.span.line == 1 &&
+        first.token.span.column == 1 &&
+        last.error == RuntimeError.none &&
+        last.token.kind == BootstrapTokenKind.end &&
+        last.token.span.line == 2 &&
+        last.token.span.column == 1;
+    return bootstrap_lex_result_release(result) ==
+        RuntimeError.none && stable;
+}
+
+fn main() -> i32 {
+    if (!valid_source_is_accepted()) {
+        return 1;
+    }
+    if (!lexical_errors_are_recoverable()) {
+        return 2;
+    }
+    if (!syntax_errors_are_recoverable()) {
+        return 3;
+    }
+    if (!invalid_source_is_rejected()) {
+        return 4;
+    }
+    if (!forged_token_position_is_rejected()) {
+        return 5;
+    }
+    if (!token_contract_is_stable()) {
+        return 6;
+    }
+    return 42;
+}
