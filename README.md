@@ -64,4 +64,6 @@ Development follows one rule: **the previous compiler builds the next one**.
 
 Version 0.1.0 closed the full bootstrap (see the `m0` branch and
 `docs/roadmap.md`). This branch reorganizes the project around pure-Luna
-development; new language work happens here, in Luna.
+development; new language work happens here, in Luna. The accepted syntax
+completion direction and its milestone order are recorded in
+[`docs/syntax-plan.md`](docs/syntax-plan.md).
