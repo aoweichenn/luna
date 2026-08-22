@@ -45,7 +45,12 @@ add_library(luna_compiler STATIC
     src/middleend/module/module.c
     src/frontend/lexer/lexer.c
     src/frontend/parser/parser.c
-    src/middleend/sema/sema.c
+    src/middleend/sema/sema_emit.c
+    src/middleend/sema/sema_expr.c
+    src/middleend/sema/sema_module.c
+    src/middleend/sema/sema_scope.c
+    src/middleend/sema/sema_stmt.c
+    src/middleend/sema/sema_types.c
     src/frontend/source/source.c
     src/frontend/support/string_view.c
     src/frontend/token/token.c

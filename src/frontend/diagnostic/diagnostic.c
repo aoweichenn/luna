@@ -56,12 +56,17 @@ void luna_diagnostic_init(LunaDiagnosticEngine *diagnostics, FILE *stream) {
 
 void luna_diagnostic_error(LunaDiagnosticEngine *diagnostics,
                            LunaSourceSpan span, const char *format, ...) {
-    diagnostics->error_count += 1U;
-
     va_list arguments;
     va_start(arguments, format);
-    luna_diagnostic_message(diagnostics, span, "error", format, arguments);
+    luna_diagnostic_error_v(diagnostics, span, format, arguments);
     va_end(arguments);
+}
+
+void luna_diagnostic_error_v(LunaDiagnosticEngine *diagnostics,
+                             LunaSourceSpan span, const char *format,
+                             va_list arguments) {
+    diagnostics->error_count += 1U;
+    luna_diagnostic_message(diagnostics, span, "error", format, arguments);
 }
 
 static void luna_diagnostic_message(LunaDiagnosticEngine *diagnostics,
@@ -81,13 +86,18 @@ static void luna_diagnostic_message(LunaDiagnosticEngine *diagnostics,
 
 void luna_diagnostic_error_plain(LunaDiagnosticEngine *diagnostics,
                                  const char *format, ...) {
+    va_list arguments;
+    va_start(arguments, format);
+    luna_diagnostic_error_plain_v(diagnostics, format, arguments);
+    va_end(arguments);
+}
+
+void luna_diagnostic_error_plain_v(LunaDiagnosticEngine *diagnostics,
+                                   const char *format, va_list arguments) {
     diagnostics->error_count += 1U;
     (void)fputs("error: ", diagnostics->stream);
 
-    va_list arguments;
-    va_start(arguments, format);
     (void)vfprintf(diagnostics->stream, format, arguments);
-    va_end(arguments);
     (void)fputc('\n', diagnostics->stream);
 }
 
