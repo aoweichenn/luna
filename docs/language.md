@@ -134,6 +134,27 @@ An enum converts explicitly only to and from its exact underlying integer
 type. Distinct enum types remain incompatible even when their underlying
 types and values match.
 
+## Attributes
+
+Declarations may carry attributes in the `@` namespace:
+
+```luna
+@inline fn clamp(value: i32, low: i32, high: i32) -> i32 {
+    return value < low ? low : value > high ? high : value;
+}
+```
+
+An attribute is `@name` or `@name(argument-list)`, written after any
+`export`/`extern` modifiers and before the declaration keyword. Attributes
+mount on module-scope declarations, structure and union fields, and local
+variable declarations. Every attribute has a fixed set of legal mount
+points and a fixed argument shape; an unknown name, an illegal mount or an
+unexpected argument list is a compile-time error.
+
+`@inline` mounts on function declarations and takes no arguments. It
+records an inlining hint on the semantic function record. Nothing consumes
+the hint yet; it is metadata for a future optimizer.
+
 ## Types
 
 ```text

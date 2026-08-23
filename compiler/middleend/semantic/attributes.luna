@@ -1,0 +1,221 @@
+module luna.bootstrap.middleend.semantic.attributes;
+
+struct BootstrapSemanticAttributeEntry {
+    name: *const u8;
+    name_length: usize;
+    mounts: usize;
+    arguments: bool;
+}
+
+struct BootstrapSemanticAttributeMountEntry {
+    kind: BootstrapSyntaxKind;
+    mount: usize;
+}
+
+fn bootstrap_semantic_attribute_entry(
+    index: usize
+) -> BootstrapSemanticAttributeEntry {
+    var table: [2]BootstrapSemanticAttributeEntry = {};
+    table[0] = {
+        name = "inline", name_length = 6,
+        mounts = BootstrapSemanticAttributeMount.function as usize,
+        arguments = false,
+    };
+    table[1] = {
+        name = "noreturn", name_length = 8,
+        mounts = BootstrapSemanticAttributeMount.function as usize,
+        arguments = false,
+    };
+    let entry: BootstrapSemanticAttributeEntry = table[index];
+    return entry;
+}
+
+fn bootstrap_semantic_attribute_mount_for(
+    kind: BootstrapSyntaxKind
+) -> usize {
+    var table: [7]BootstrapSemanticAttributeMountEntry = {};
+    table[0] = {
+        kind = BootstrapSyntaxKind.function_declaration,
+        mount = BootstrapSemanticAttributeMount.function as usize,
+    };
+    table[1] = {
+        kind = BootstrapSyntaxKind.structure_declaration,
+        mount = BootstrapSemanticAttributeMount.record as usize,
+    };
+    table[2] = {
+        kind = BootstrapSyntaxKind.union_declaration,
+        mount = BootstrapSemanticAttributeMount.record as usize,
+    };
+    table[3] = {
+        kind = BootstrapSyntaxKind.enum_declaration,
+        mount = BootstrapSemanticAttributeMount.enumeration as usize,
+    };
+    table[4] = {
+        kind = BootstrapSyntaxKind.field_declaration,
+        mount = BootstrapSemanticAttributeMount.field as usize,
+    };
+    table[5] = {
+        kind = BootstrapSyntaxKind.variable_declaration,
+        mount = BootstrapSemanticAttributeMount.variable as usize,
+    };
+    table[6] = {
+        kind = BootstrapSyntaxKind.type_alias_declaration,
+        mount = BootstrapSemanticAttributeMount.alias as usize,
+    };
+    var index: usize = 0;
+    while (index < 7) {
+        if (table[index].kind == kind) {
+            return table[index].mount;
+        }
+        index += 1;
+    }
+    return BootstrapSemanticAttributeMount.none as usize;
+}
+
+fn bootstrap_semantic_find_attribute(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    name_token: usize
+) -> usize {
+    var index: usize = 0;
+    while (index < 2) {
+        let entry: BootstrapSemanticAttributeEntry =
+            bootstrap_semantic_attribute_entry(index);
+        if (bootstrap_semantic_token_equals_bytes(
+                context,
+                unit_index,
+                name_token,
+                entry.name,
+                entry.name_length
+            )) {
+            return index;
+        }
+        index += 1;
+    }
+    return bootstrap_semantic_no_id();
+}
+
+fn bootstrap_semantic_count_attribute_children(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    declaration: BootstrapSyntaxNode
+) -> usize {
+    let none: usize = bootstrap_semantic_no_id();
+    var count: usize = 0;
+    var child: usize = declaration.first_child;
+    while (child != none) {
+        let node: BootstrapSyntaxNode =
+            bootstrap_semantic_node(context, unit_index, child);
+        if (node.kind == BootstrapSyntaxKind.attribute) {
+            count += 1;
+        }
+        child = node.next_sibling;
+    }
+    return count;
+}
+
+fn bootstrap_semantic_declaration_has_attribute(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    declaration: BootstrapSyntaxNode,
+    attribute: BootstrapSemanticAttribute
+) -> bool {
+    let entry: BootstrapSemanticAttributeEntry =
+        bootstrap_semantic_attribute_entry(attribute as usize);
+    let none: usize = bootstrap_semantic_no_id();
+    var child: usize = declaration.first_child;
+    while (child != none) {
+        let node: BootstrapSyntaxNode =
+            bootstrap_semantic_node(context, unit_index, child);
+        if (node.kind == BootstrapSyntaxKind.attribute &&
+            bootstrap_semantic_token_equals_bytes(
+                context,
+                unit_index,
+                node.token_index,
+                entry.name,
+                entry.name_length
+            )) {
+            return true;
+        }
+        child = node.next_sibling;
+    }
+    return false;
+}
+
+fn bootstrap_semantic_validate_attribute(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    node: BootstrapSyntaxNode
+) -> bool {
+    let none: usize = bootstrap_semantic_no_id();
+    var mount: usize =
+        BootstrapSemanticAttributeMount.none as usize;
+    if (node.parent != none) {
+        mount = bootstrap_semantic_attribute_mount_for(
+            bootstrap_semantic_node(
+                context, unit_index, node.parent
+            ).kind
+        );
+    }
+    let table_index: usize =
+        bootstrap_semantic_find_attribute(
+            context, unit_index, node.token_index
+        );
+    if (table_index == none) {
+        return bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.unknown_attribute,
+            unit_index,
+            node.span,
+            none,
+            bootstrap_semantic_empty_span(),
+            0
+        );
+    }
+    let entry: BootstrapSemanticAttributeEntry =
+        bootstrap_semantic_attribute_entry(table_index);
+    if (mount == (BootstrapSemanticAttributeMount.none as usize) ||
+        (entry.mounts & mount) == 0 ||
+        ((node.flags &
+                (BootstrapSyntaxFlag.has_arguments as usize)) != 0 &&
+            !entry.arguments)) {
+        return bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.invalid_attribute,
+            unit_index,
+            node.span,
+            none,
+            bootstrap_semantic_empty_span(),
+            table_index
+        );
+    }
+    return true;
+}
+
+fn bootstrap_semantic_validate_attributes(
+    context: *BootstrapSemanticContext
+) -> bool {
+    var unit_index: usize = 0;
+    while (unit_index < context->input.unit_count &&
+        context->error == RuntimeError.none) {
+        let unit: *const BootstrapSemanticUnit =
+            bootstrap_semantic_input_unit(context, unit_index);
+        var node_index: usize = 0;
+        while (node_index < unit->tree.count &&
+            context->error == RuntimeError.none) {
+            let node: BootstrapSyntaxNode =
+                bootstrap_semantic_node(
+                    context, unit_index, node_index
+                );
+            if (node.kind == BootstrapSyntaxKind.attribute &&
+                !bootstrap_semantic_validate_attribute(
+                    context, unit_index, node
+                )) {
+                return false;
+            }
+            node_index += 1;
+        }
+        unit_index += 1;
+    }
+    return context->error == RuntimeError.none;
+}
