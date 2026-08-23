@@ -12,6 +12,7 @@ fn bootstrap_semantic_invalid_expression()
         has_constant = false,
         lvalue = false,
         mutable_lvalue = false,
+        volatile_lvalue = false,
         valid = false,
     };
 }
@@ -936,6 +937,7 @@ fn bootstrap_semantic_lower_floating_literal(
         has_constant = false,
         lvalue = false,
         mutable_lvalue = false,
+        volatile_lvalue = false,
         valid = value_id != bootstrap_semantic_no_id(),
     };
 }
@@ -1034,7 +1036,8 @@ fn bootstrap_semantic_lower_string_literal(
         bootstrap_type_table_pointer(
             &context->types,
             BootstrapBuiltinType.unsigned_8 as usize,
-            true
+            true,
+            false
         );
     context->error = pointer.error;
     var instruction: BootstrapIrInstruction =
@@ -1056,6 +1059,7 @@ fn bootstrap_semantic_lower_string_literal(
         has_constant = false,
         lvalue = false,
         mutable_lvalue = false,
+        volatile_lvalue = false,
         valid = value_id != bootstrap_semantic_no_id(),
     };
 }
@@ -1111,6 +1115,7 @@ fn bootstrap_semantic_lower_scalar_zero_initializer(
         has_constant = false,
         lvalue = false,
         mutable_lvalue = false,
+        volatile_lvalue = false,
         valid = value_id != bootstrap_semantic_no_id(),
     };
 }
@@ -1274,13 +1279,15 @@ fn bootstrap_semantic_lower_initializer(
         &context->ir,
         bootstrap_semantic_current_ir_function(context),
         expected_type,
-        true
+        true,
+        false
     );
     let address_id: usize = bootstrap_semantic_address_of_slot(
         context,
         node,
         slot_id,
         expected_type,
+        false,
         false
     );
     if (slot_id == none || address_id == none ||
@@ -1368,6 +1375,7 @@ fn bootstrap_semantic_lower_initializer(
                         bootstrap_type_table_pointer(
                             &context->types,
                             field.type_id,
+                            false,
                             false
                         );
                     context->error = pointer.error;
@@ -1431,6 +1439,7 @@ fn bootstrap_semantic_lower_initializer(
         has_constant = false,
         lvalue = false,
         mutable_lvalue = false,
+        volatile_lvalue = false,
         valid = address_id != none,
     };
 }
@@ -1514,6 +1523,7 @@ fn bootstrap_semantic_function_value(
         has_constant = false,
         lvalue = false,
         mutable_lvalue = false,
+        volatile_lvalue = false,
         valid = value_id != none,
     };
 }
@@ -1562,7 +1572,8 @@ fn bootstrap_semantic_lower_name(
         node,
         local.slot_id,
         local.type_id,
-        !local.mutable_binding
+        !local.mutable_binding,
+        local.volatile_binding
     );
     let expression: BootstrapSemanticExpression = {
         type_id = local.type_id,
@@ -1572,6 +1583,7 @@ fn bootstrap_semantic_lower_name(
         has_constant = false,
         lvalue = true,
         mutable_lvalue = local.mutable_binding,
+        volatile_lvalue = local.volatile_binding,
         valid = address_id != bootstrap_semantic_no_id(),
     };
     return bootstrap_semantic_load_lvalue(
@@ -1707,6 +1719,7 @@ fn bootstrap_semantic_lower_member(
     var owner_type: usize = base.type_id;
     var owner_address: usize = base.address_id;
     var mutable_lvalue: bool = base.mutable_lvalue;
+    var volatile_lvalue: bool = base.volatile_lvalue;
     if (operation == BootstrapTokenKind.arrow) {
         let pointer_record: BootstrapTypeRecord =
             bootstrap_semantic_type_record(
@@ -1731,6 +1744,9 @@ fn bootstrap_semantic_lower_member(
         mutable_lvalue =
             (pointer_record.flags &
                 (BootstrapTypeFlag.read_only as usize)) == 0;
+        volatile_lvalue =
+            (pointer_record.flags &
+                (BootstrapTypeFlag.volatile_pointee as usize)) != 0;
         var check: BootstrapIrInstruction =
             bootstrap_semantic_instruction(
                 BootstrapIrOpcode.null_check,
@@ -1792,7 +1808,8 @@ fn bootstrap_semantic_lower_member(
         bootstrap_type_table_pointer(
             &context->types,
             field.type_id,
-            !mutable_lvalue
+            !mutable_lvalue,
+            volatile_lvalue
         );
     context->error = pointer.error;
     var instruction: BootstrapIrInstruction =
@@ -1815,6 +1832,7 @@ fn bootstrap_semantic_lower_member(
         has_constant = false,
         lvalue = true,
         mutable_lvalue = mutable_lvalue,
+        volatile_lvalue = volatile_lvalue,
         valid = address_id != bootstrap_semantic_no_id(),
     };
     return bootstrap_semantic_load_lvalue(
@@ -1872,12 +1890,15 @@ fn bootstrap_semantic_lower_index(
     var element_type: usize = bootstrap_semantic_no_id();
     var base_address: usize = bootstrap_semantic_no_id();
     var mutable_lvalue: bool = false;
+    var volatile_lvalue: bool = false;
     if (base_record.kind == BootstrapTypeKind.array &&
         base.address_id != bootstrap_semantic_no_id()) {
         element_type = base_record.element_type;
         base_address = base.address_id;
         mutable_lvalue =
             base.lvalue && base.mutable_lvalue;
+        volatile_lvalue =
+            base.lvalue && base.volatile_lvalue;
         let bound: BootstrapSemanticExpression =
             bootstrap_semantic_emit_integer_constant(
                 context,
@@ -1900,6 +1921,9 @@ fn bootstrap_semantic_lower_index(
         mutable_lvalue =
             (base_record.flags &
                 (BootstrapTypeFlag.read_only as usize)) == 0;
+        volatile_lvalue =
+            (base_record.flags &
+                (BootstrapTypeFlag.volatile_pointee as usize)) != 0;
         if (bootstrap_semantic_type_record(
                 context,
                 element_type
@@ -1936,7 +1960,8 @@ fn bootstrap_semantic_lower_index(
         bootstrap_type_table_pointer(
             &context->types,
             element_type,
-            !mutable_lvalue
+            !mutable_lvalue,
+            volatile_lvalue
         );
     context->error = pointer.error;
     var offset: BootstrapIrInstruction =
@@ -1960,6 +1985,7 @@ fn bootstrap_semantic_lower_index(
         has_constant = false,
         lvalue = true,
         mutable_lvalue = mutable_lvalue,
+        volatile_lvalue = volatile_lvalue,
         valid = address_id != bootstrap_semantic_no_id(),
     };
     return bootstrap_semantic_load_lvalue(
@@ -2117,7 +2143,8 @@ fn bootstrap_semantic_lower_call(
                     &context->ir,
                     bootstrap_semantic_current_ir_function(context),
                     argument.type_id,
-                    true
+                    true,
+                    false
                 );
                 let snapshot_address: usize =
                     bootstrap_semantic_address_of_slot(
@@ -2129,6 +2156,7 @@ fn bootstrap_semantic_lower_call(
                         ),
                         snapshot_slot,
                         argument.type_id,
+                        false,
                         false
                     );
                 if (snapshot_slot == none ||
@@ -2254,6 +2282,7 @@ fn bootstrap_semantic_lower_call(
         has_constant = false,
         lvalue = false,
         mutable_lvalue = false,
+        volatile_lvalue = false,
         valid = instruction_id != none,
     };
 }
@@ -2353,7 +2382,8 @@ fn bootstrap_semantic_lower_unary(
             bootstrap_type_table_pointer(
                 &context->types,
                 operand.type_id,
-                !operand.mutable_lvalue
+                !operand.mutable_lvalue,
+                operand.volatile_lvalue
             );
         context->error = pointer.error;
         var result: BootstrapSemanticExpression = operand;
@@ -2362,6 +2392,7 @@ fn bootstrap_semantic_lower_unary(
         result.address_id = bootstrap_semantic_no_id();
         result.lvalue = false;
         result.mutable_lvalue = false;
+        result.volatile_lvalue = false;
         return result;
     }
     if (operation == BootstrapTokenKind.star) {
@@ -2399,6 +2430,9 @@ fn bootstrap_semantic_lower_unary(
             mutable_lvalue =
                 (operand_record.flags &
                     (BootstrapTypeFlag.read_only as usize)) == 0,
+            volatile_lvalue =
+                (operand_record.flags &
+                    (BootstrapTypeFlag.volatile_pointee as usize)) != 0,
             valid = true,
         };
         return bootstrap_semantic_load_lvalue(
@@ -2480,6 +2514,7 @@ fn bootstrap_semantic_lower_unary(
         has_constant = has_constant,
         lvalue = false,
         mutable_lvalue = false,
+        volatile_lvalue = false,
         valid = value_id != bootstrap_semantic_no_id(),
     };
 }
@@ -2513,10 +2548,17 @@ fn bootstrap_semantic_cast_is_valid(
     }
     if (source.kind == BootstrapTypeKind.pointer &&
         target.kind == BootstrapTypeKind.pointer) {
-        return (source.flags &
-            (BootstrapTypeFlag.read_only as usize)) == 0 ||
+        let drops_read_only: bool =
+            (source.flags &
+                (BootstrapTypeFlag.read_only as usize)) != 0 &&
             (target.flags &
-                (BootstrapTypeFlag.read_only as usize)) != 0;
+                (BootstrapTypeFlag.read_only as usize)) == 0;
+        let drops_volatile: bool =
+            (source.flags &
+                (BootstrapTypeFlag.volatile_pointee as usize)) != 0 &&
+            (target.flags &
+                (BootstrapTypeFlag.volatile_pointee as usize)) == 0;
+        return !drops_read_only && !drops_volatile;
     }
     if (source.kind == BootstrapTypeKind.function_pointer &&
         target.kind == BootstrapTypeKind.function_pointer) {
@@ -2772,6 +2814,7 @@ fn bootstrap_semantic_lower_cast(
         has_constant = false,
         lvalue = false,
         mutable_lvalue = false,
+        volatile_lvalue = false,
         valid = value_id != bootstrap_semantic_no_id(),
     };
 }
@@ -2840,13 +2883,15 @@ fn bootstrap_semantic_lower_short_circuit(
         &context->ir,
         bootstrap_semantic_current_ir_function(context),
         BootstrapBuiltinType.boolean as usize,
-        true
+        true,
+        false
     );
     let address: usize = bootstrap_semantic_address_of_slot(
         context,
         node,
         slot_id,
         BootstrapBuiltinType.boolean as usize,
+        false,
         false
     );
     bootstrap_semantic_store_to_address(
@@ -2918,6 +2963,7 @@ fn bootstrap_semantic_lower_short_circuit(
         has_constant = false,
         lvalue = true,
         mutable_lvalue = false,
+        volatile_lvalue = false,
         valid = true,
     };
     let result: BootstrapSemanticExpression =
@@ -3144,6 +3190,7 @@ fn bootstrap_semantic_lower_binary(
             has_constant = false,
             lvalue = false,
             mutable_lvalue = false,
+            volatile_lvalue = false,
             valid = value_id != bootstrap_semantic_no_id(),
         };
     }
@@ -3221,6 +3268,7 @@ fn bootstrap_semantic_lower_binary(
             has_constant = false,
             lvalue = false,
             mutable_lvalue = false,
+            volatile_lvalue = false,
             valid = byte_distance !=
                 bootstrap_semantic_no_id(),
         };
@@ -3284,6 +3332,7 @@ fn bootstrap_semantic_lower_binary(
             has_constant = false,
             lvalue = false,
             mutable_lvalue = false,
+            volatile_lvalue = false,
             valid = value_id != bootstrap_semantic_no_id(),
         };
     }
@@ -3344,6 +3393,7 @@ fn bootstrap_semantic_lower_binary(
         has_constant = false,
         lvalue = false,
         mutable_lvalue = false,
+        volatile_lvalue = false,
         valid = value_id != bootstrap_semantic_no_id(),
     };
 }
@@ -3416,7 +3466,8 @@ fn bootstrap_semantic_lower_conditional(
         &context->ir,
         bootstrap_semantic_current_ir_function(context),
         then_value.type_id,
-        true
+        true,
+        false
     );
     let then_address: usize =
         bootstrap_semantic_address_of_slot(
@@ -3424,6 +3475,7 @@ fn bootstrap_semantic_lower_conditional(
             node,
             result_slot,
             then_value.type_id,
+            false,
             false
         );
     bootstrap_semantic_store_to_address(
@@ -3464,6 +3516,7 @@ fn bootstrap_semantic_lower_conditional(
             node,
             result_slot,
             then_value.type_id,
+            false,
             false
         );
     bootstrap_semantic_store_to_address(
@@ -3485,6 +3538,7 @@ fn bootstrap_semantic_lower_conditional(
             node,
             result_slot,
             then_value.type_id,
+            false,
             false
         );
     let type_record: BootstrapTypeRecord =
@@ -3501,6 +3555,7 @@ fn bootstrap_semantic_lower_conditional(
             has_constant = false,
             lvalue = false,
             mutable_lvalue = false,
+            volatile_lvalue = false,
             valid = true,
         };
     }
@@ -3512,6 +3567,7 @@ fn bootstrap_semantic_lower_conditional(
         has_constant = false,
         lvalue = true,
         mutable_lvalue = false,
+        volatile_lvalue = false,
         valid = true,
     };
     let result: BootstrapSemanticExpression =
@@ -3701,6 +3757,7 @@ fn bootstrap_semantic_lower_expression(
             has_constant = true,
             lvalue = false,
             mutable_lvalue = false,
+            volatile_lvalue = false,
             valid = value_id != bootstrap_semantic_no_id(),
         };
     }

@@ -10,6 +10,7 @@ implementation status is tracked in `roadmap.md`.
 | Area | State |
 | --- | --- |
 | m1.1 aliases / pointer arithmetic / function pointers | landed; 80/80 cases; verify fixed point |
+| m1.2 qualifiers / attributes / static assertions | landed; 96/96 cases; verify fixed point |
 | Refactor R0-R2 (120-column reflow, table mappings, semantic split) | landed; same gates |
 | C23 disposition review | landed in `syntax-plan.md`; m1.2-m1.10 sequenced |
 | `anchor/` | promoted to the m1.1 stage-fixed toolchain (0.2 done) |
@@ -56,29 +57,26 @@ with exactly that leading `BootstrapSemanticDiagnosticKind` (exit status
 `64 + kind`, compile-only, no linking). Kind ordinals are parsed from
 `compiler/middleend/semantic/context.interface.luna`.
 
-## Step 1 — m1.2 qualifiers, attributes and static assertions
+## Step 1 — m1.2 qualifiers, attributes and static assertions — done
 
-Four slices in dependency order; each slice updates
-`docs/language.md` first, lands behind build/test/verify, and ticks its
-roadmap box.
+All four slices landed behind build/test/verify, 96/96 cases:
 
-1. Attribute infrastructure: `@name` parsing on declarations, AST
-   flag/storage, unknown-attribute diagnostics. Built once; `@inline`
-   only records metadata.
-2. `@noreturn`: mark callees, feed the existing successor-reachability
-   worklist so calls to noreturn functions terminate blocks. Makes
-   `missing_return` analysis smarter; executable tests use a trapping
-   helper.
-3. `assert(const bool)`: narrow constant evaluator over literals,
-   comparisons, layout queries and enum members. This is the seed of
-   the m1.5 constant-function interpreter; design the interface for
-   growth. Failure is a compile-time diagnostic.
+1. Attribute infrastructure: `@name`/`@name(args)` parsing on module-scope
+   declarations, fields and local variables; the
+   `middleend/semantic/attributes` module owns the known-attribute table
+   and the mounting-point validation pass. `@inline` records the
+   `inline_hint` function flag only.
+2. `@noreturn`: direct calls end the block with a new `unreachable` IR
+   opcode (ud2) and no successor edge; `return` inside or a reachable
+   body end is `noreturn_returns`. Dead blocks are swept to
+   `unreachable` at end of lowering.
+3. `assert(const bool)`: the `consteval` module tree-walks literals,
+   enum members, arithmetic/bitwise/comparison/logical operators,
+   conditionals, integer casts and layout queries; module scope and
+   function bodies. Seed of the m1.5 interpreter.
 4. `volatile`: object qualification plus pointee qualification
-   (`*volatile T`) modelled like the read-only flag; every source-level
-   access stays a real memory access (already true in the
-   correctness-first backend), the IR flag exists so a future optimizer
-   must honour it; document how many accesses compound assignment
-   implies.
+   (`*volatile T`) modelled on the read-only flag, recorded on semantic
+   locals and IR slots for any future optimizer.
 
 ## Step 2 — decision: built-ins package or FFI completeness
 

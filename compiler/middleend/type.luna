@@ -197,7 +197,7 @@ fn bootstrap_type_table_add_named(
 }
 
 fn bootstrap_type_table_pointer(
-    table: *BootstrapTypeTable, element_type: usize, read_only: bool) -> BootstrapTypeIdResult {
+    table: *BootstrapTypeTable, element_type: usize, read_only: bool, volatile_pointee: bool) -> BootstrapTypeIdResult {
     if (table == null || !bootstrap_type_table_storage_is_valid(*table) || element_type >= table->type_count) {
         return {
             type_id = bootstrap_type_no_id(), error = RuntimeError.invalid_argument,
@@ -213,8 +213,9 @@ fn bootstrap_type_table_pointer(
     while (index < table->type_count) {
         let record: BootstrapTypeRecord = records[index];
         let record_read_only: bool = (record.flags & (BootstrapTypeFlag.read_only as usize)) != 0;
+        let record_volatile: bool = (record.flags & (BootstrapTypeFlag.volatile_pointee as usize)) != 0;
         if (record.kind == BootstrapTypeKind.pointer && record.element_type == element_type &&
-            record_read_only == read_only) {
+            record_read_only == read_only && record_volatile == volatile_pointee) {
             return {
                 type_id = index, error = RuntimeError.none,
             };
@@ -230,6 +231,9 @@ fn bootstrap_type_table_pointer(
     record.flags = BootstrapTypeFlag.complete as usize;
     if (read_only) {
         record.flags |= BootstrapTypeFlag.read_only as usize;
+    }
+    if (volatile_pointee) {
+        record.flags |= BootstrapTypeFlag.volatile_pointee as usize;
     }
     let type_id: usize = table->type_count;
     let added: BootstrapTypeTableResult = bootstrap_type_append_record(*table, record);
@@ -538,7 +542,7 @@ fn bootstrap_type_table_is_valid(table: BootstrapTypeTable, require_complete: bo
     var index: usize = 0;
     while (index < table.type_count) {
         let record: BootstrapTypeRecord = records[index];
-        if ((record.kind as usize) > (BootstrapTypeKind.function_pointer as usize) || record.flags > 15) {
+        if ((record.kind as usize) > (BootstrapTypeKind.function_pointer as usize) || record.flags > 31) {
             return false;
         }
         if (index < BootstrapBuiltinType.count as usize) {
@@ -556,15 +560,18 @@ fn bootstrap_type_table_is_valid(table: BootstrapTypeTable, require_complete: bo
                 record.declaration_unit != bootstrap_type_no_id() ||
                 record.declaration_node != bootstrap_type_no_id() || record.name_token != bootstrap_type_no_id() ||
                 record.first_field != bootstrap_type_no_id() || record.field_count != 0 || record.size_bytes != 8 ||
-                record.alignment_bytes != 8 || (record.flags != BootstrapTypeFlag.complete as usize && record.flags !=
-                        ((BootstrapTypeFlag.complete as usize) | (BootstrapTypeFlag.read_only as usize)))) {
+                record.alignment_bytes != 8 || (record.flags & (BootstrapTypeFlag.complete as usize)) == 0 ||
+                (record.flags & ~((BootstrapTypeFlag.complete as usize) | (BootstrapTypeFlag.read_only as usize) |
+                        (BootstrapTypeFlag.volatile_pointee as usize))) != 0) {
                 return false;
             }
             var previous: usize = BootstrapBuiltinType.count as usize;
             while (previous < index) {
                 if (records[previous].kind == BootstrapTypeKind.pointer && records[previous].element_type ==
-                        record.element_type && (records[previous].flags & (BootstrapTypeFlag.read_only as usize)) ==
-                        (record.flags & (BootstrapTypeFlag.read_only as usize))) {
+                        record.element_type && (records[previous].flags & ((BootstrapTypeFlag.read_only as usize) |
+                            (BootstrapTypeFlag.volatile_pointee as usize))) ==
+                        (record.flags & ((BootstrapTypeFlag.read_only as usize) |
+                            (BootstrapTypeFlag.volatile_pointee as usize)))) {
                     return false;
                 }
                 previous += 1;

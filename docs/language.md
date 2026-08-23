@@ -210,6 +210,32 @@ only reads. Taking the address of a mutable lvalue produces `*T`; taking the
 address of an immutable lvalue produces `*const T`. `*void` and `*const void`
 are opaque pointer types and cannot be dereferenced or indexed.
 
+The second pointer qualifier is `volatile`, which composes with `const` in
+either order: `*volatile T`, `*const volatile T`. Every access through a
+volatile-qualified pointer is a real memory access — never elided, coalesced
+or reordered against another volatile access. A pointer may gain `volatile`
+through an explicit `as`, just as it may gain `const`; dropping either
+qualifier is rejected. Taking the address of a volatile lvalue produces
+`*volatile T` (`*const volatile T` when the lvalue is also immutable), and
+member access and indexing propagate the pointee's qualification to the
+selected object.
+
+Local object declarations carry the same qualification:
+
+```luna
+volatile var status: u32 = 0;        // every read and write is real
+volatile let config: u32 = 3;        // real loads, no writes
+```
+
+A volatile object behaves like any other binding of its type, except that
+every source-level access is guaranteed to reach memory exactly as written:
+a read is a load, a write is a store, and a compound assignment is exactly
+one load followed by one store. The qualification belongs to the
+declaration, not to the type — `status` above has type `u32` — and it is
+recorded on the variable's storage slot so that any future optimizer must
+honor it.
+
+
 A function-pointer type names a function signature as a first-class
 scalar type:
 
