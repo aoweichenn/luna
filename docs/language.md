@@ -659,3 +659,23 @@ The compile-time surface in Luna 0 consists of typed constants, enum values
 and the type-only `sizeof`, `alignof` and `offsetof` layout queries. There is
 no preprocessor, textual macro system, conditional compilation, generic
 selection, general type reflection or user-defined attribute syntax.
+
+`assert(expression);` is a compile-time assertion, legal both at module
+scope and as a function-body statement:
+
+```luna
+assert(sizeof(Packet) == 64);
+assert(offsetof(Packet, checksum) == 60 && PacketKind.data == 1);
+```
+
+The expression is evaluated by the constant evaluator during semantic
+analysis. A constant true assertion vanishes without emitting code; a
+constant false one fails compilation, as does an expression the evaluator
+cannot fold. The evaluator walks the syntax tree without emitting IR and
+supports integer and boolean literals, enum member references, unary
+`- ~ !`, wrapping integer arithmetic and bitwise operators, signed
+comparisons, short-circuit `&&` and `||` on boolean operands, the
+conditional operator, integer `as` casts and the three layout queries.
+Arithmetic works on 64-bit two's-complement values; division or remainder
+by zero is an evaluation error. Everything else — variables, calls,
+indexing, floating-point, strings — is not constant.

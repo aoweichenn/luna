@@ -1,0 +1,599 @@
+module luna.bootstrap.middleend.semantic.consteval;
+
+fn bootstrap_const_integer(
+    value: u64
+) -> BootstrapConstValue {
+    return {
+        is_constant = true, is_boolean = false, value = value,
+        error = false,
+    };
+}
+
+fn bootstrap_const_boolean(
+    value: bool
+) -> BootstrapConstValue {
+    var result: BootstrapConstValue = {
+        is_constant = true, is_boolean = true, value = 0,
+        error = false,
+    };
+    if (value) {
+        result.value = 1;
+    }
+    return result;
+}
+
+fn bootstrap_const_not_constant() -> BootstrapConstValue {
+    return {
+        is_constant = false, is_boolean = false, value = 0,
+        error = false,
+    };
+}
+
+fn bootstrap_const_error() -> BootstrapConstValue {
+    return {
+        is_constant = false, is_boolean = false, value = 0,
+        error = true,
+    };
+}
+
+fn bootstrap_const_eval_enum_member(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    node: BootstrapSyntaxNode
+) -> BootstrapConstValue {
+    if (node.child_count != 2) {
+        return bootstrap_const_not_constant();
+    }
+    let owner_node: BootstrapSyntaxNode =
+        bootstrap_semantic_node(
+            context, unit_index, node.first_child
+        );
+    let member_node: BootstrapSyntaxNode =
+        bootstrap_semantic_node(
+            context, unit_index, owner_node.next_sibling
+        );
+    if (owner_node.kind !=
+            BootstrapSyntaxKind.name_expression ||
+        member_node.kind !=
+            BootstrapSyntaxKind.name_expression) {
+        return bootstrap_const_not_constant();
+    }
+    let type_symbol: usize = bootstrap_semantic_lookup_symbol(
+        context,
+        unit_index,
+        owner_node.token_index,
+        BootstrapSemanticSymbolKind.named_type
+    );
+    if (type_symbol == bootstrap_semantic_no_id()) {
+        return bootstrap_const_not_constant();
+    }
+    let symbols: *const BootstrapSemanticSymbol =
+        context->symbols.data as
+            *const BootstrapSemanticSymbol;
+    var type_id: usize = symbols[type_symbol].type_id;
+    let alias_record: BootstrapTypeRecord =
+        bootstrap_semantic_type_record(context, type_id);
+    if (alias_record.kind == BootstrapTypeKind.alias &&
+        bootstrap_semantic_require_complete_type(
+            context, type_id
+        )) {
+        type_id = bootstrap_semantic_type_record(
+            context, type_id
+        ).element_type;
+    }
+    if (bootstrap_semantic_type_record(
+            context, type_id
+        ).kind != BootstrapTypeKind.enumeration) {
+        return bootstrap_const_not_constant();
+    }
+    let member_symbol: usize =
+        bootstrap_semantic_find_enum_member(
+            context,
+            type_id,
+            unit_index,
+            member_node.token_index
+        );
+    if (member_symbol == bootstrap_semantic_no_id()) {
+        return bootstrap_const_not_constant();
+    }
+    return bootstrap_const_integer(
+        symbols[member_symbol].integer_value
+    );
+}
+
+fn bootstrap_const_eval_unary(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    node: BootstrapSyntaxNode
+) -> BootstrapConstValue {
+    if (node.child_count != 1) {
+        return bootstrap_const_not_constant();
+    }
+    let operation: BootstrapTokenKind =
+        bootstrap_semantic_token(
+            context, unit_index, node.token_index
+        ).kind;
+    let operand: BootstrapConstValue =
+        bootstrap_consteval_expression(
+            context, unit_index, node.first_child
+        );
+    if (!operand.is_constant || operand.error) {
+        return operand;
+    }
+    if (operation == BootstrapTokenKind.minus) {
+        return bootstrap_const_integer(
+            (0 as u64) - operand.value
+        );
+    }
+    if (operation == BootstrapTokenKind.tilde) {
+        return bootstrap_const_integer(~(operand.value));
+    }
+    if (operation == BootstrapTokenKind.bang) {
+        if (!operand.is_boolean) {
+            return bootstrap_const_error();
+        }
+        return bootstrap_const_boolean(operand.value == 0);
+    }
+    return bootstrap_const_not_constant();
+}
+
+fn bootstrap_const_eval_logical(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    left_index: usize,
+    right_index: usize,
+    operation: BootstrapTokenKind
+) -> BootstrapConstValue {
+    let left: BootstrapConstValue =
+        bootstrap_consteval_expression(
+            context, unit_index, left_index
+        );
+    if (!left.is_constant || left.error) {
+        return left;
+    }
+    if (!left.is_boolean) {
+        return bootstrap_const_error();
+    }
+    if (operation == BootstrapTokenKind.logical_and &&
+        left.value == 0) {
+        return bootstrap_const_boolean(false);
+    }
+    if (operation == BootstrapTokenKind.logical_or &&
+        left.value != 0) {
+        return bootstrap_const_boolean(true);
+    }
+    let right: BootstrapConstValue =
+        bootstrap_consteval_expression(
+            context, unit_index, right_index
+        );
+    if (!right.is_constant || right.error) {
+        return right;
+    }
+    if (!right.is_boolean) {
+        return bootstrap_const_error();
+    }
+    return bootstrap_const_boolean(right.value != 0);
+}
+
+fn bootstrap_const_eval_binary(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    node: BootstrapSyntaxNode
+) -> BootstrapConstValue {
+    if (node.child_count != 2) {
+        return bootstrap_const_not_constant();
+    }
+    let operation: BootstrapTokenKind =
+        bootstrap_semantic_token(
+            context, unit_index, node.token_index
+        ).kind;
+    let left_node: BootstrapSyntaxNode =
+        bootstrap_semantic_node(
+            context, unit_index, node.first_child
+        );
+    let right_index: usize = left_node.next_sibling;
+    if (operation == BootstrapTokenKind.logical_and ||
+        operation == BootstrapTokenKind.logical_or) {
+        return bootstrap_const_eval_logical(
+            context,
+            unit_index,
+            node.first_child,
+            right_index,
+            operation
+        );
+    }
+    let left: BootstrapConstValue =
+        bootstrap_consteval_expression(
+            context, unit_index, node.first_child
+        );
+    if (!left.is_constant || left.error) {
+        return left;
+    }
+    let right: BootstrapConstValue =
+        bootstrap_consteval_expression(
+            context, unit_index, right_index
+        );
+    if (!right.is_constant || right.error) {
+        return right;
+    }
+    if (operation == BootstrapTokenKind.plus) {
+        return bootstrap_const_integer(
+            left.value + right.value
+        );
+    }
+    if (operation == BootstrapTokenKind.minus) {
+        return bootstrap_const_integer(
+            left.value - right.value
+        );
+    }
+    if (operation == BootstrapTokenKind.star) {
+        return bootstrap_const_integer(
+            left.value * right.value
+        );
+    }
+    if (operation == BootstrapTokenKind.slash ||
+        operation == BootstrapTokenKind.percent) {
+        if (right.value == 0) {
+            return bootstrap_const_error();
+        }
+        let dividend: i64 = left.value as i64;
+        let divisor: i64 = right.value as i64;
+        if (divisor == -1 &&
+            left.value == ((1 as u64) << 63)) {
+            return bootstrap_const_error();
+        }
+        if (operation == BootstrapTokenKind.slash) {
+            return bootstrap_const_integer(
+                (dividend / divisor) as u64
+            );
+        }
+        return bootstrap_const_integer(
+            (dividend % divisor) as u64
+        );
+    }
+    if (operation == BootstrapTokenKind.shift_left ||
+        operation == BootstrapTokenKind.shift_right) {
+        if (right.value >= 64) {
+            return bootstrap_const_error();
+        }
+        if (operation == BootstrapTokenKind.shift_left) {
+            return bootstrap_const_integer(
+                left.value << right.value
+            );
+        }
+        var shifted: u64 = left.value >> right.value;
+        if (right.value != 0 &&
+            (left.value & ((1 as u64) << 63)) != 0) {
+            shifted = shifted |
+                ~((~((0 as u64))) >> right.value);
+        }
+        return bootstrap_const_integer(shifted);
+    }
+    if (operation == BootstrapTokenKind.ampersand) {
+        return bootstrap_const_integer(
+            left.value & right.value
+        );
+    }
+    if (operation == BootstrapTokenKind.pipe) {
+        return bootstrap_const_integer(
+            left.value | right.value
+        );
+    }
+    if (operation == BootstrapTokenKind.caret) {
+        return bootstrap_const_integer(
+            left.value ^ right.value
+        );
+    }
+    if (operation == BootstrapTokenKind.equal_equal) {
+        return bootstrap_const_boolean(
+            left.value == right.value
+        );
+    }
+    if (operation == BootstrapTokenKind.bang_equal) {
+        return bootstrap_const_boolean(
+            left.value != right.value
+        );
+    }
+    if (operation == BootstrapTokenKind.less) {
+        return bootstrap_const_boolean(
+            (left.value as i64) < (right.value as i64)
+        );
+    }
+    if (operation == BootstrapTokenKind.less_equal) {
+        return bootstrap_const_boolean(
+            (left.value as i64) <= (right.value as i64)
+        );
+    }
+    if (operation == BootstrapTokenKind.greater) {
+        return bootstrap_const_boolean(
+            (left.value as i64) > (right.value as i64)
+        );
+    }
+    if (operation == BootstrapTokenKind.greater_equal) {
+        return bootstrap_const_boolean(
+            (left.value as i64) >= (right.value as i64)
+        );
+    }
+    return bootstrap_const_not_constant();
+}
+
+fn bootstrap_const_eval_conditional(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    node: BootstrapSyntaxNode
+) -> BootstrapConstValue {
+    if (node.child_count != 3) {
+        return bootstrap_const_not_constant();
+    }
+    let condition_node: BootstrapSyntaxNode =
+        bootstrap_semantic_node(
+            context, unit_index, node.first_child
+        );
+    let then_node: BootstrapSyntaxNode =
+        bootstrap_semantic_node(
+            context, unit_index, condition_node.next_sibling
+        );
+    let condition: BootstrapConstValue =
+        bootstrap_consteval_expression(
+            context, unit_index, node.first_child
+        );
+    if (!condition.is_constant || condition.error) {
+        return condition;
+    }
+    if (!condition.is_boolean) {
+        return bootstrap_const_error();
+    }
+    if (condition.value != 0) {
+        return bootstrap_consteval_expression(
+            context, unit_index, condition_node.next_sibling
+        );
+    }
+    return bootstrap_consteval_expression(
+        context, unit_index, then_node.next_sibling
+    );
+}
+
+fn bootstrap_const_eval_layout_query(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    node: BootstrapSyntaxNode
+) -> BootstrapConstValue {
+    if (node.child_count == 0) {
+        return bootstrap_const_error();
+    }
+    let type_id: usize =
+        bootstrap_semantic_resolve_type_node(
+            context, unit_index, node.first_child
+        );
+    if (type_id == bootstrap_semantic_no_id() ||
+        !bootstrap_semantic_require_complete_type(
+            context, type_id
+        )) {
+        return bootstrap_const_error();
+    }
+    let record: BootstrapTypeRecord =
+        bootstrap_semantic_type_record(context, type_id);
+    if (record.kind == BootstrapTypeKind.type_void ||
+        record.size_bytes == 0 ||
+        record.alignment_bytes == 0) {
+        return bootstrap_const_error();
+    }
+    var value: usize = 0;
+    if (node.kind == BootstrapSyntaxKind.sizeof_expression) {
+        value = record.size_bytes;
+    } else if (node.kind ==
+        BootstrapSyntaxKind.alignof_expression) {
+        value = record.alignment_bytes;
+    } else if (node.kind ==
+            BootstrapSyntaxKind.offsetof_expression &&
+        node.child_count == 2) {
+        let type_node: BootstrapSyntaxNode =
+            bootstrap_semantic_node(
+                context, unit_index, node.first_child
+            );
+        let member: BootstrapSyntaxNode =
+            bootstrap_semantic_node(
+                context, unit_index, type_node.next_sibling
+            );
+        let field_id: usize = bootstrap_semantic_find_field(
+            context,
+            type_id,
+            unit_index,
+            member.token_index
+        );
+        if (field_id == bootstrap_semantic_no_id()) {
+            return bootstrap_const_error();
+        }
+        let fields: *const BootstrapTypeField =
+            context->types.fields.data as
+                *const BootstrapTypeField;
+        value = fields[field_id].offset_bytes;
+    } else {
+        return bootstrap_const_error();
+    }
+    return bootstrap_const_integer(value as u64);
+}
+
+fn bootstrap_const_eval_cast(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    node: BootstrapSyntaxNode
+) -> BootstrapConstValue {
+    if (node.child_count != 2) {
+        return bootstrap_const_not_constant();
+    }
+    let operand_node: BootstrapSyntaxNode =
+        bootstrap_semantic_node(
+            context, unit_index, node.first_child
+        );
+    let target_type: usize =
+        bootstrap_semantic_resolve_type_node(
+            context, unit_index, operand_node.next_sibling
+        );
+    if (target_type == bootstrap_semantic_no_id()) {
+        return bootstrap_const_error();
+    }
+    let operand: BootstrapConstValue =
+        bootstrap_consteval_expression(
+            context, unit_index, node.first_child
+        );
+    if (!operand.is_constant || operand.error) {
+        return operand;
+    }
+    let target_record: BootstrapTypeRecord =
+        bootstrap_semantic_type_record(context, target_type);
+    if (!bootstrap_type_is_integer(target_record.kind)) {
+        return bootstrap_const_not_constant();
+    }
+    let width: usize =
+        bootstrap_type_bit_width(target_record.kind);
+    var value: u64 =
+        bootstrap_semantic_mask_integer(operand.value, width);
+    if (width < 64 &&
+        bootstrap_type_is_signed_integer(target_record.kind) &&
+        (value & ((1 as u64) << ((width - 1) as u64))) != 0) {
+        value = value | ~(((1 as u64) << (width as u64)) - 1);
+    }
+    return bootstrap_const_integer(value);
+}
+
+fn bootstrap_consteval_expression(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    node_index: usize
+) -> BootstrapConstValue {
+    let node: BootstrapSyntaxNode = bootstrap_semantic_node(
+        context, unit_index, node_index
+    );
+    if (node.kind == BootstrapSyntaxKind.integer_expression) {
+        var value: u64 = 0;
+        if (!bootstrap_semantic_parse_unsigned(
+                context, unit_index, node.token_index, &value
+            )) {
+            return bootstrap_const_error();
+        }
+        return bootstrap_const_integer(value);
+    }
+    if (node.kind == BootstrapSyntaxKind.boolean_expression) {
+        return bootstrap_const_boolean(
+            bootstrap_semantic_token(
+                context, unit_index, node.token_index
+            ).kind == BootstrapTokenKind.keyword_true
+        );
+    }
+    if (node.kind ==
+        BootstrapSyntaxKind.parenthesized_expression) {
+        if (node.child_count != 1) {
+            return bootstrap_const_not_constant();
+        }
+        return bootstrap_consteval_expression(
+            context, unit_index, node.first_child
+        );
+    }
+    if (node.kind == BootstrapSyntaxKind.member_expression) {
+        return bootstrap_const_eval_enum_member(
+            context, unit_index, node
+        );
+    }
+    if (node.kind == BootstrapSyntaxKind.unary_expression) {
+        return bootstrap_const_eval_unary(
+            context, unit_index, node
+        );
+    }
+    if (node.kind == BootstrapSyntaxKind.binary_expression) {
+        return bootstrap_const_eval_binary(
+            context, unit_index, node
+        );
+    }
+    if (node.kind ==
+        BootstrapSyntaxKind.conditional_expression) {
+        return bootstrap_const_eval_conditional(
+            context, unit_index, node
+        );
+    }
+    if (node.kind == BootstrapSyntaxKind.sizeof_expression ||
+        node.kind == BootstrapSyntaxKind.alignof_expression ||
+        node.kind ==
+            BootstrapSyntaxKind.offsetof_expression) {
+        return bootstrap_const_eval_layout_query(
+            context, unit_index, node
+        );
+    }
+    if (node.kind == BootstrapSyntaxKind.cast_expression) {
+        return bootstrap_const_eval_cast(
+            context, unit_index, node
+        );
+    }
+    return bootstrap_const_not_constant();
+}
+
+fn bootstrap_semantic_check_assert(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    node_index: usize
+) -> bool {
+    let node: BootstrapSyntaxNode = bootstrap_semantic_node(
+        context, unit_index, node_index
+    );
+    if (node.child_count != 1) {
+        return true;
+    }
+    let result: BootstrapConstValue =
+        bootstrap_consteval_expression(
+            context, unit_index, node.first_child
+        );
+    if (result.error || !result.is_constant) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.invalid_assert,
+            unit_index,
+            node.span,
+            bootstrap_semantic_no_id(),
+            bootstrap_semantic_empty_span(),
+            0
+        );
+        return false;
+    }
+    if (result.value == 0) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.assertion_failed,
+            unit_index,
+            node.span,
+            bootstrap_semantic_no_id(),
+            bootstrap_semantic_empty_span(),
+            0
+        );
+        return false;
+    }
+    return true;
+}
+
+fn bootstrap_semantic_check_module_asserts(
+    context: *BootstrapSemanticContext
+) -> bool {
+    var unit_index: usize = 0;
+    while (unit_index < context->input.unit_count &&
+        context->error == RuntimeError.none) {
+        var declaration_id: usize =
+            bootstrap_semantic_first_declaration(
+                context, unit_index
+            );
+        while (declaration_id != bootstrap_semantic_no_id() &&
+            context->error == RuntimeError.none) {
+            let declaration: BootstrapSyntaxNode =
+                bootstrap_semantic_node(
+                    context, unit_index, declaration_id
+                );
+            if (declaration.kind ==
+                BootstrapSyntaxKind.assert_statement) {
+                bootstrap_semantic_check_assert(
+                    context, unit_index, declaration_id
+                );
+            }
+            declaration_id = declaration.next_sibling;
+        }
+        unit_index += 1;
+    }
+    return context->error == RuntimeError.none;
+}

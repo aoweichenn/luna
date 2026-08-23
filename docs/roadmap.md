@@ -140,7 +140,7 @@ feature has executable tests plus a green `verify` fixed point.
 - [x] `@noreturn` unreachable-successor integration
 - [x] `@inline` recorded metadata
 - [x] shared attribute grammar and mounting-point validation framework
-- [ ] compile-time `assert(const bool)` on the m1.5 interpreter seed
+- [x] compile-time `assert(const bool)` on the m1.5 interpreter seed
 
 ### m1.3 kernel UAPI layout package
 
