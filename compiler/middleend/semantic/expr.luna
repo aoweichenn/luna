@@ -2289,6 +2289,180 @@ fn bootstrap_semantic_lower_call(
     };
 }
 
+fn bootstrap_semantic_address_chain_gcd(
+    left: usize,
+    right: usize
+) -> usize {
+    var a: usize = left;
+    var b: usize = right;
+    while (b != 0) {
+        let remainder: usize = a % b;
+        a = b;
+        b = remainder;
+    }
+    return a;
+}
+
+// Walks an lvalue syntax chain (names, dereferences, member accesses and
+// indexes) accumulating the static byte offset and the gcd of dynamic index
+// strides relative to the innermost base, returning the chain's type.
+fn bootstrap_semantic_address_chain_type(
+    context: *BootstrapSemanticContext,
+    node_id: usize,
+    offset: *usize,
+    stride: *usize
+) -> usize {
+    let none: usize = bootstrap_semantic_no_id();
+    let node: BootstrapSyntaxNode =
+        bootstrap_semantic_node(
+            context,
+            context->current_unit,
+            node_id
+        );
+    if (node.kind ==
+            BootstrapSyntaxKind.parenthesized_expression &&
+        node.child_count == 1) {
+        return bootstrap_semantic_address_chain_type(
+            context,
+            node.first_child,
+            offset,
+            stride
+        );
+    }
+    if (node.kind == BootstrapSyntaxKind.name_expression) {
+        let local_id: usize = bootstrap_semantic_find_local(
+            context,
+            context->current_unit,
+            node.token_index
+        );
+        if (local_id == none) {
+            return none;
+        }
+        let locals: *const BootstrapSemanticLocal =
+            context->locals.data as
+                *const BootstrapSemanticLocal;
+        *offset = 0;
+        *stride = 0;
+        return locals[local_id].type_id;
+    }
+    if (node.child_count == 0) {
+        return none;
+    }
+    let base_type: usize = bootstrap_semantic_address_chain_type(
+        context,
+        node.first_child,
+        offset,
+        stride
+    );
+    if (base_type == none) {
+        return none;
+    }
+    let base_record: BootstrapTypeRecord =
+        bootstrap_semantic_type_record(context, base_type);
+    let operation: BootstrapTokenKind =
+        bootstrap_semantic_token(
+            context,
+            context->current_unit,
+            node.token_index
+        ).kind;
+    if (node.kind == BootstrapSyntaxKind.unary_expression &&
+        node.child_count == 1 &&
+        operation == BootstrapTokenKind.star) {
+        if (base_record.kind != BootstrapTypeKind.pointer) {
+            return none;
+        }
+        *offset = 0;
+        *stride = 0;
+        return base_record.element_type;
+    }
+    if (node.kind == BootstrapSyntaxKind.member_expression &&
+        node.child_count == 2) {
+        var owner_type: usize = base_type;
+        if (operation == BootstrapTokenKind.arrow) {
+            if (base_record.kind != BootstrapTypeKind.pointer) {
+                return none;
+            }
+            owner_type = base_record.element_type;
+            *offset = 0;
+            *stride = 0;
+        } else if (operation != BootstrapTokenKind.dot) {
+            return none;
+        }
+        let owner_record: BootstrapTypeRecord =
+            bootstrap_semantic_type_record(context, owner_type);
+        if (owner_record.kind != BootstrapTypeKind.structure &&
+            owner_record.kind !=
+                BootstrapTypeKind.record_union) {
+            return none;
+        }
+        let base_node: BootstrapSyntaxNode =
+            bootstrap_semantic_node(
+                context,
+                context->current_unit,
+                node.first_child
+            );
+        let field_id: usize = bootstrap_semantic_find_field(
+            context,
+            owner_type,
+            context->current_unit,
+            bootstrap_semantic_node(
+                context,
+                context->current_unit,
+                base_node.next_sibling
+            ).token_index
+        );
+        if (field_id == none) {
+            return none;
+        }
+        let fields: *const BootstrapTypeField =
+            context->types.fields.data as
+                *const BootstrapTypeField;
+        *offset += fields[field_id].offset_bytes;
+        return fields[field_id].type_id;
+    }
+    if (node.kind == BootstrapSyntaxKind.index_expression &&
+        node.child_count == 2) {
+        if (base_record.kind != BootstrapTypeKind.array &&
+            base_record.kind != BootstrapTypeKind.pointer) {
+            return none;
+        }
+        let element_size: usize =
+            bootstrap_semantic_type_record(
+                context,
+                base_record.element_type
+            ).size_bytes;
+        if (base_record.kind == BootstrapTypeKind.pointer) {
+            *offset = 0;
+            *stride = 0;
+        }
+        *stride = bootstrap_semantic_address_chain_gcd(
+            *stride,
+            element_size
+        );
+        return base_record.element_type;
+    }
+    return none;
+}
+
+fn bootstrap_semantic_address_is_aligned(
+    context: *BootstrapSemanticContext,
+    node_id: usize,
+    alignment: usize
+) -> bool {
+    var offset: usize = 0;
+    var stride: usize = 0;
+    if (bootstrap_semantic_address_chain_type(
+            context,
+            node_id,
+            &offset,
+            &stride
+        ) == bootstrap_semantic_no_id()) {
+        return true;
+    }
+    return bootstrap_semantic_address_chain_gcd(offset, stride) %
+        alignment == 0;
+}
+
 fn bootstrap_semantic_lower_unary(
     context: *BootstrapSemanticContext,
     node: BootstrapSyntaxNode,
@@ -2372,6 +2546,24 @@ fn bootstrap_semantic_lower_unary(
             bootstrap_semantic_add_diagnostic(
                 context,
                 BootstrapSemanticDiagnosticKind.invalid_lvalue,
+                context->current_unit,
+                node.span,
+                bootstrap_semantic_no_id(),
+                bootstrap_semantic_empty_span(),
+                operand.type_id
+            );
+            return bootstrap_semantic_invalid_expression();
+        }
+        if (operand_record.alignment_bytes > 1 &&
+            !bootstrap_semantic_address_is_aligned(
+                context,
+                node.first_child,
+                operand_record.alignment_bytes
+            )) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind
+                    .unaligned_field_address,
                 context->current_unit,
                 node.span,
                 bootstrap_semantic_no_id(),

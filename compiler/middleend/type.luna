@@ -429,6 +429,23 @@ fn bootstrap_type_table_set_layout(
     return RuntimeError.none;
 }
 
+fn bootstrap_type_table_set_packed(table: BootstrapTypeTable, type_id: usize, packed: bool) -> RuntimeError {
+    if (!bootstrap_type_table_storage_is_valid(table) || type_id >= table.type_count) {
+        return RuntimeError.invalid_argument;
+    }
+    let records: *BootstrapTypeRecord = table.types.data as *BootstrapTypeRecord;
+    if (records[type_id].kind != BootstrapTypeKind.structure || (records[type_id].flags &
+            (BootstrapTypeFlag.complete as usize)) != 0) {
+        return RuntimeError.invalid_argument;
+    }
+    if (packed) {
+        records[type_id].flags |= BootstrapTypeFlag.packed as usize;
+    } else {
+        records[type_id].flags &= ~(BootstrapTypeFlag.packed as usize);
+    }
+    return RuntimeError.none;
+}
+
 fn bootstrap_type_table_set_enum_underlying(
     table: BootstrapTypeTable, type_id: usize, underlying_type: usize) -> RuntimeError {
     if (!bootstrap_type_table_storage_is_valid(table) || type_id >= table.type_count ||
@@ -546,7 +563,7 @@ fn bootstrap_type_table_is_valid(table: BootstrapTypeTable, require_complete: bo
     var index: usize = 0;
     while (index < table.type_count) {
         let record: BootstrapTypeRecord = records[index];
-        if ((record.kind as usize) > (BootstrapTypeKind.function_pointer as usize) || record.flags > 31) {
+        if ((record.kind as usize) > (BootstrapTypeKind.function_pointer as usize) || record.flags > 63) {
             return false;
         }
         if (index < BootstrapBuiltinType.count as usize) {
@@ -716,6 +733,8 @@ fn bootstrap_type_table_is_valid(table: BootstrapTypeTable, require_complete: bo
             }
         } else if (record.kind == BootstrapTypeKind.structure || record.kind == BootstrapTypeKind.record_union) {
             let is_union: bool = record.kind == BootstrapTypeKind.record_union;
+            // A packed structure lays fields out back to back with alignment 1.
+            let is_packed: bool = (record.flags & (BootstrapTypeFlag.packed as usize)) != 0;
             var expected_size: usize = 0;
             var expected_alignment: usize = 1;
             var field_index: usize = 0;
@@ -727,8 +746,11 @@ fn bootstrap_type_table_is_valid(table: BootstrapTypeTable, require_complete: bo
                     (field.alignment_bytes & (field.alignment_bytes - 1)) != 0) {
                     return false;
                 }
-                let field_alignment: usize = field.alignment_bytes > field_type.alignment_bytes ?
+                var field_alignment: usize = field.alignment_bytes > field_type.alignment_bytes ?
                     field.alignment_bytes : field_type.alignment_bytes;
+                if (is_packed) {
+                    field_alignment = 1;
+                }
                 if (field_alignment > expected_alignment) {
                     expected_alignment = field_alignment;
                 }

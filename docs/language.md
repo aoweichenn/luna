@@ -195,6 +195,24 @@ and in the layout of any containing record. An aggregate whose alignment
 exceeds 16 bytes is classified MEMORY at the System V boundary, so it is
 passed and returned on the stack.
 
+`@packed` mounts on structure declarations only and takes no arguments:
+
+```luna
+struct WireHeader @packed {
+    kind: u8;
+    length: u32;                       // offset 1, intentionally unaligned
+}
+```
+
+A packed structure removes all padding: fields are laid out back to back,
+its alignment is 1 and `sizeof` is the sum of the field sizes. Reads and
+writes of packed fields compile to ordinary (possibly unaligned) memory
+accesses. Because an unaligned field cannot honor the alignment a pointer
+type promises, taking the address of a packed field whose offset is not a
+multiple of its type's alignment is a compile-time error, through any
+member-access or indexing chain. `@packed` and `@align` on the same
+structure are rejected together.
+
 ## Types
 
 ```text
