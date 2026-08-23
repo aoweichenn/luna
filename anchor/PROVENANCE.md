@@ -32,3 +32,16 @@ monolith`). Provenance chain: the previous m0 anchor (above) built
 confirmed every assembly, object and executable artifact byte-identical
 between the two stages, and `test` passed 80/80. The stage-fixed
 executables were copied here and `SHA256SUMS` refreshed.
+
+## 2026-08-23: promotion to the m1.2 self-built toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`d7590d81a0218c41b2eeadfdc587d7f10ba6b840`
+(`feat(m1.2): volatile object and pointee qualification`). Provenance
+chain: the previous m1.1 anchor (above) built `out/stage-next`, which
+rebuilt itself into `out/stage-fixed`; `verify` confirmed every artifact
+byte-identical between the two stages, and `test` passed 96/96. The
+stage-fixed executables were copied here and `SHA256SUMS` refreshed.
+Compiler sources may now adopt m1.2 syntax: declaration attributes
+(`@inline`/`@noreturn`), compile-time `assert` and `volatile`
+qualification.
