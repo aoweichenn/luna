@@ -302,6 +302,30 @@ fn bootstrap_semantic_resolve_type_node(
                 failed = true;
                 break;
             }
+            let parameter_record: BootstrapTypeRecord =
+                bootstrap_semantic_type_record(
+                    context,
+                    parameter_type
+                );
+            if ((parameter_record.flags &
+                    ((BootstrapTypeFlag.header as usize) |
+                        (BootstrapTypeFlag.flexible as usize))) != 0) {
+                bootstrap_semantic_add_diagnostic(
+                    context,
+                    BootstrapSemanticDiagnosticKind.incomplete_type,
+                    unit_index,
+                    bootstrap_semantic_node(
+                        context,
+                        unit_index,
+                        child
+                    ).span,
+                    none,
+                    bootstrap_semantic_empty_span(),
+                    parameter_type
+                );
+                failed = true;
+                break;
+            }
             let appended: StdByteBufferResult =
                 std_byte_buffer_append(
                     parameter_types,
@@ -333,6 +357,26 @@ fn bootstrap_semantic_resolve_type_node(
                         context,
                         resolved
                     )) {
+                    failed = true;
+                } else if ((bootstrap_semantic_type_record(
+                            context,
+                            resolved
+                        ).flags &
+                        ((BootstrapTypeFlag.header as usize) |
+                            (BootstrapTypeFlag.flexible as usize))) != 0) {
+                    bootstrap_semantic_add_diagnostic(
+                        context,
+                        BootstrapSemanticDiagnosticKind.incomplete_type,
+                        unit_index,
+                        bootstrap_semantic_node(
+                            context,
+                            unit_index,
+                            child
+                        ).span,
+                        none,
+                        bootstrap_semantic_empty_span(),
+                        resolved
+                    );
                     failed = true;
                 } else {
                     return_type = resolved;
@@ -389,7 +433,58 @@ fn bootstrap_semantic_resolve_type_node(
             }
         }
     } else if (node.kind == BootstrapSyntaxKind.type_array) {
-        if (node.child_count == 2) {
+        let flexible: bool =
+            (node.flags &
+                (BootstrapSyntaxFlag.flexible as usize)) != 0;
+        if (flexible && node.child_count == 1) {
+            let flexible_element: usize =
+                bootstrap_semantic_resolve_type_node(
+                    context,
+                    unit_index,
+                    node.first_child
+                );
+            if (flexible_element != none &&
+                bootstrap_semantic_require_complete_type(
+                    context,
+                    flexible_element
+                )) {
+                let flexible_record: BootstrapTypeRecord =
+                    bootstrap_semantic_type_record(
+                        context,
+                        flexible_element
+                    );
+                if (flexible_record.kind ==
+                        BootstrapTypeKind.type_void ||
+                    flexible_record.size_bytes == 0 ||
+                    (flexible_record.flags &
+                        ((BootstrapTypeFlag.header as usize) |
+                            (BootstrapTypeFlag.flexible as
+                                usize))) != 0) {
+                    bootstrap_semantic_add_diagnostic(
+                        context,
+                        BootstrapSemanticDiagnosticKind
+                            .incomplete_type,
+                        unit_index,
+                        node.span,
+                        none,
+                        bootstrap_semantic_empty_span(),
+                        flexible_element
+                    );
+                    return none;
+                }
+                let result: BootstrapTypeIdResult =
+                    bootstrap_type_table_flexible_array(
+                        &context->types,
+                        flexible_element
+                    );
+                context->error = result.error;
+                if (result.error == RuntimeError.none) {
+                    return result.type_id;
+                }
+            }
+            return none;
+        }
+        if (!flexible && node.child_count == 2) {
             let count_node: BootstrapSyntaxNode =
                 bootstrap_semantic_node(
                     context,
@@ -431,6 +526,22 @@ fn bootstrap_semantic_resolve_type_node(
                         context,
                         element_type
                     );
+                if ((element_record.flags &
+                        ((BootstrapTypeFlag.header as usize) |
+                            (BootstrapTypeFlag.flexible as
+                                usize))) != 0) {
+                    bootstrap_semantic_add_diagnostic(
+                        context,
+                        BootstrapSemanticDiagnosticKind
+                            .incomplete_type,
+                        unit_index,
+                        node.span,
+                        none,
+                        bootstrap_semantic_empty_span(),
+                        element_type
+                    );
+                    return none;
+                }
                 if (element_record.size_bytes == 0 ||
                     element_count >
                         (BootstrapSemanticLimit
@@ -748,6 +859,7 @@ fn bootstrap_semantic_resolve_record_layout(
     }
     var size_bytes: usize = 0;
     var alignment_bytes: usize = 1;
+    var has_flexible: bool = false;
     var field_node: usize = declaration.first_child;
     while (field_node != bootstrap_semantic_no_id()) {
         let field_declaration: BootstrapSyntaxNode =
@@ -830,9 +942,48 @@ fn bootstrap_semantic_resolve_record_layout(
             context->error = field_record.error;
             return false;
         }
-        if (field_record.record.kind ==
+        let field_flexible: bool =
+            field_record.record.kind == BootstrapTypeKind.array &&
+            (field_record.record.flags &
+                (BootstrapTypeFlag.flexible as usize)) != 0;
+        if (field_flexible) {
+            // A flexible member is legal solely in last position of a
+            // structure; the record then becomes a header type.
+            var last: bool = true;
+            var following: usize = field_declaration.next_sibling;
+            while (following != bootstrap_semantic_no_id()) {
+                let following_node: BootstrapSyntaxNode =
+                    bootstrap_semantic_node(
+                        context,
+                        record.declaration_unit,
+                        following
+                    );
+                if (following_node.kind ==
+                    BootstrapSyntaxKind.field_declaration) {
+                    last = false;
+                }
+                following = following_node.next_sibling;
+            }
+            if (is_union || !last) {
+                bootstrap_semantic_add_diagnostic(
+                    context,
+                    BootstrapSemanticDiagnosticKind
+                        .invalid_flexible_member,
+                    record.declaration_unit,
+                    field_declaration.span,
+                    bootstrap_semantic_no_id(),
+                    bootstrap_semantic_empty_span(),
+                    field_type
+                );
+                field_node = field_declaration.next_sibling;
+                continue;
+            }
+            has_flexible = true;
+        } else if (field_record.record.kind ==
                 BootstrapTypeKind.type_void ||
-            field_record.record.size_bytes == 0) {
+            field_record.record.size_bytes == 0 ||
+            (field_record.record.flags &
+                (BootstrapTypeFlag.header as usize)) != 0) {
             bootstrap_semantic_add_diagnostic(
                 context,
                 BootstrapSemanticDiagnosticKind.incomplete_type,
@@ -921,6 +1072,16 @@ fn bootstrap_semantic_resolve_record_layout(
     }
     if (size_bytes == 0) {
         size_bytes = 1;
+    }
+    if (has_flexible) {
+        context->error = bootstrap_type_table_set_header(
+            context->types,
+            type_id,
+            true
+        );
+        if (context->error != RuntimeError.none) {
+            return false;
+        }
     }
     var aligned_size: usize = 0;
     if (!bootstrap_semantic_align_up(

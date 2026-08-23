@@ -329,6 +329,28 @@ exactly like a named field of its record type, and only inline
 definitions may be anonymous — a nameless field of a named type is not
 allowed.
 
+A structure's last field may be a flexible array member, written `[?]T`:
+
+```luna
+struct InotifyEvent {
+    wd: i32;
+    mask: u32;
+    cookie: u32;
+    length: u32;
+    name: [?]u8;                       // flexible member, last position
+}
+```
+
+The structure becomes a header type: it has a layout but no complete
+size, so no variables, by-value parameters or returns, fields in other
+aggregates, array elements, or whole-object initialization or assignment
+— it lives only behind pointers, with storage sized by the caller
+(`sizeof(S) + count * sizeof(T)`). As in C, `sizeof` covers only the
+fixed part while the member's element alignment still counts toward the
+structure's, so `offsetof(S, name)` can be smaller than `sizeof(S)`.
+Member access through a pointer (`p->name`) yields `*T` pointing at the
+first element and composes with raw-pointer indexing and arithmetic.
+
 The target layout can be queried with type-only compile-time expressions:
 
 ```luna

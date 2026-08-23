@@ -1848,6 +1848,45 @@ fn bootstrap_semantic_lower_member(
         context->types.fields.data as
             *const BootstrapTypeField;
     let field: BootstrapTypeField = fields[lookup.field_id];
+    let field_record: BootstrapTypeRecord =
+        bootstrap_semantic_type_record(context, field.type_id);
+    if (field_record.kind == BootstrapTypeKind.array &&
+        (field_record.flags &
+            (BootstrapTypeFlag.flexible as usize)) != 0) {
+        // A flexible member access yields *T at the member offset, not an
+        // array lvalue; it composes with raw-pointer indexing and arithmetic.
+        let element_pointer: BootstrapTypeIdResult =
+            bootstrap_type_table_pointer(
+                &context->types,
+                field_record.element_type,
+                !mutable_lvalue,
+                volatile_lvalue
+            );
+        context->error = element_pointer.error;
+        var flexible_instruction: BootstrapIrInstruction =
+            bootstrap_semantic_instruction(
+                BootstrapIrOpcode.member_address,
+                node
+            );
+        flexible_instruction.left = owner_address;
+        flexible_instruction.auxiliary = lookup.offset_bytes;
+        let flexible_address: usize = bootstrap_semantic_emit_value(
+            context,
+            flexible_instruction,
+            element_pointer.type_id
+        );
+        return {
+            type_id = element_pointer.type_id,
+            value_id = flexible_address,
+            address_id = bootstrap_semantic_no_id(),
+            constant_value = 0,
+            has_constant = false,
+            lvalue = false,
+            mutable_lvalue = false,
+            volatile_lvalue = false,
+            valid = flexible_address != bootstrap_semantic_no_id(),
+        };
+    }
     let pointer: BootstrapTypeIdResult =
         bootstrap_type_table_pointer(
             &context->types,

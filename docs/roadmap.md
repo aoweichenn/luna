@@ -158,7 +158,7 @@ feature has executable tests plus a green `verify` fixed point.
 - [ ] bitfields (`@bits`) following the x86-64 psABI
 - [x] `@align(N)` alignment control with over-aligned SysV rules
 - [x] `@packed` structures (no padding; field addresses rejected)
-- [ ] flexible trailing array member (`[?]T` header types)
+- [x] flexible trailing array member (`[?]T` header types)
 
 ### m1.4 characters, strings, literals and inference
 
