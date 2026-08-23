@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import filecmp
+import os
 import pathlib
 import re
 import shutil
@@ -21,6 +22,9 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+# Optional emulator prefix (e.g. "qemu-x86_64-static") applied to every
+# toolchain binary invocation, for cross-architecture development hosts.
+TOOL_RUNNER = tuple(os.environ.get("LUNA_TOOL_RUNNER", "").split())
 IMPORT_PATTERN = re.compile(
     r"^[ \t]*import[ \t]+([A-Za-z0-9_.]+)[ \t]*;[ \t]*$",
     re.MULTILINE,
@@ -183,11 +187,15 @@ DRIVERS = {
     ),
 }
 
-TIMEOUT_SECONDS = 600
+TIMEOUT_SECONDS = 600 if not TOOL_RUNNER else 3600
 
 
 def fail(message: str) -> None:
     raise SystemExit(f"error: {message}")
+
+
+def tool(directory: pathlib.Path, name: str) -> list[str | pathlib.Path]:
+    return [*TOOL_RUNNER, directory / name]
 
 
 def run(command: list[str], *, cwd: pathlib.Path | None = None) -> None:
@@ -247,12 +255,12 @@ def build_stage(
     runner: list[str],
 ) -> dict[str, pathlib.Path]:
     """Compile, assemble and link one complete toolchain into `out`."""
-    compiler = tools / "lunac"
-    assembler = tools / "luna-as"
-    linker = tools / "luna-link"
-    for tool in (compiler, assembler, linker):
-        if not tool.is_file():
-            fail(f"missing tool {tool}")
+    compiler = tool(tools, "lunac")
+    assembler = tool(tools, "luna-as")
+    linker = tool(tools, "luna-link")
+    for prefix in (compiler, assembler, linker):
+        if not prefix[-1].is_file():
+            fail(f"missing tool {prefix[-1]}")
 
     assembly_root = out / "assembly"
     object_root = out / "objects"
@@ -265,8 +273,8 @@ def build_stage(
     for key in LIBRARY_ORDER:
         assembly = assembly_root / f"{key}.s"
         object_file = object_root / f"{key}.lo"
-        run([compiler, "--library", "-o", assembly, *library_units(key)])
-        run([assembler, "-o", object_file, assembly])
+        run([*compiler, "--library", "-o", assembly, *library_units(key)])
+        run([*assembler, "-o", object_file, assembly])
         objects[key] = object_file
         print(f"  built library {key}")
 
@@ -279,10 +287,10 @@ def build_stage(
             (ROOT / LIBRARIES[key][1]).with_suffix(".interface.luna")
             for key in interface_keys
         )
-        run([compiler, "--executable", "-o", assembly, *units])
-        run([assembler, "-o", driver_object, assembly])
+        run([*compiler, "--executable", "-o", assembly, *units])
+        run([*assembler, "-o", driver_object, assembly])
         executable = binary_root / name
-        run([linker, "-o", executable, driver_object, *(objects[k] for k in LIBRARY_ORDER)])
+        run([*linker, "-o", executable, driver_object, *(objects[k] for k in LIBRARY_ORDER)])
         executables[name] = executable
         print(f"  linked {name}")
 
@@ -331,15 +339,15 @@ def execute_tests(stage_bin: pathlib.Path, runner: list[str]) -> int:
         try:
             run(
                 [
-                    stage_bin / "lunac",
+                    *tool(stage_bin, "lunac"),
                     "--executable",
                     "-o",
                     assembly,
                     cases / name,
                 ]
             )
-            run([stage_bin / "luna-as", "-o", object_file, assembly])
-            run([stage_bin / "luna-link", "-o", executable, object_file])
+            run([*tool(stage_bin, "luna-as"), "-o", object_file, assembly])
+            run([*tool(stage_bin, "luna-link"), "-o", executable, object_file])
             completed = subprocess.run(
                 [*runner, str(executable)],
                 timeout=TIMEOUT_SECONDS,
