@@ -170,6 +170,27 @@ only reads. Taking the address of a mutable lvalue produces `*T`; taking the
 address of an immutable lvalue produces `*const T`. `*void` and `*const void`
 are opaque pointer types and cannot be dereferenced or indexed.
 
+A function-pointer type names a function signature as a first-class
+scalar type:
+
+```luna
+type Binary = fn(i32, i32) -> i32;
+
+struct Handler {
+    tag: u8;
+    op: Binary;
+}
+```
+
+A function pointer has target pointer width and belongs to the System V
+INTEGER class at the ABI boundary. It can be stored in structure, union
+and array elements, passed as a parameter, returned from a function and
+reassigned between values of the same exact type. `null` is a valid
+value of every function-pointer type. There are no closures: a function
+pointer carries a code address only, never an environment. Distinct
+function-pointer shapes are distinct types with no implicit conversion
+between them.
+
 Fixed-array lengths are positive integer literals. Arrays may be nested and
 their total target layout must fit in the compiler's supported object-size
 range. Arrays remain memory objects rather than scalar expressions, but Luna
@@ -209,6 +230,34 @@ exact result type and evaluate only the selected branch. Aggregates still
 cannot be compared or used with scalar operators. Reading a union field
 interprets the bytes currently in the overlapping storage; Luna does not
 track an active union member.
+
+A module-scope `type` declaration gives an existing type a transparent
+alias:
+
+```luna
+type Size = usize;
+type Handle = i32;
+type Chain = Size;
+type Pixels = [4]Size;
+type Cursor = *Size;
+type Callback = fn(i32, i32) -> i32;
+```
+
+The alias names exactly its target: every occurrence resolves to the
+target type during type checking, so an alias is interchangeable with
+its target in declarations, assignments, explicit conversions, exact
+type matching and the `sizeof`, `alignof` and `offsetof` layout
+queries. Alias chains are allowed and resolve through to a non-alias
+target; an alias whose resolution reaches itself, directly or through a
+chain, is rejected as a recursive type. The target must be a complete
+non-`void` type.
+
+Aliases follow the same module visibility rules as structure, union and
+enum declarations: an alias written in an interface unit may be marked
+`export`, and an exported alias must resolve to a type that is itself
+valid in a public signature. An alias may appear in every type
+position, including pointee, array element, field, parameter, return
+and function-pointer positions.
 
 ## Functions
 
@@ -380,8 +429,39 @@ indexing a null pointer traps. Other invalid raw addresses retain the target
 machine's fault behavior.
 
 `null` is a context-dependent pointer literal and has no standalone default
-type. Pointer equality requires the same exact pointer type. Pointer ordering
-and implicit pointer arithmetic are not part of Luna 0.
+type. Pointer equality requires the same exact pointer type.
+
+Pointer arithmetic advances in units of the pointee size, not bytes:
+
+```luna
+cursor += 1;
+let finish: *i32 = begin + (4 as usize);
+let next: *i32 = (1 as usize) + begin;
+let remaining: usize = end - start;
+if (start < end) {
+    ...
+}
+```
+
+For a pointer `p` to a complete, non-array element type, `p + n`, `n + p`
+and `p - n` yield the same pointer type as `p`, offset by `n` elements.
+In these expression forms the count `n` must already have type `usize`;
+a bare integer literal is not contextually typed here and needs an
+explicit `as usize`. The compound assignments `p += n` and `p -= n`
+equally require a `usize` count but do contextually type a bare integer
+literal as `usize`, so `cursor += 1` is accepted. Pointer arithmetic
+does not apply to `*void`, `*const void` or pointers to arrays.
+
+`p - q` requires the same exact pointer type on both sides and yields
+the element distance between the two addresses as `usize`. The ordering
+operators `<`, `<=`, `>` and `>=` also require the same exact pointer
+type and compare the address values as unsigned integers; equality keeps
+its existing same-exact-type rule.
+
+Address computation wraps modulo 2^64. Dereferencing or indexing through
+an invalid address retains the target machine's fault behavior, the null
+check still precedes every dereference and index, and arithmetic on a
+raw pointer implies no bounds knowledge.
 
 A string literal has type `*const u8` and points at immutable static bytes
 followed by one terminating zero byte. The supported escapes are `\\`, `\"`,
@@ -473,6 +553,24 @@ and from `usize`; no other integer type participates in pointer conversion.
 Pointer conversions never happen implicitly. Read-only qualification is
 checked through nested pointer and fixed-array layers, so an intermediate
 `*void` or differently shaped pointee cannot erase it.
+
+A function name in a value position, or the explicit `&name` form,
+yields a pointer to that function with its exact signature type:
+
+```luna
+var op: fn(i32, i32) -> i32 = add;
+let referenced: fn(i32, i32) -> i32 = &mul;
+let five: i32 = op(2, 3);
+```
+
+A call whose callee is a function-pointer value is indirect and checks
+the value against null first; calling a null function pointer traps,
+mirroring the null-pointer dereference rule. The equality operators
+`==` and `!=` accept `null` or another value of the same exact
+function-pointer type; ordering comparisons are not defined on function
+pointers. Explicit `as` conversions preserve the address bits between
+any two function-pointer shapes and between a function pointer and
+`usize`; no other conversions involve function-pointer types.
 
 Assignment and compound assignment are statements, not expressions. There are
 no increment, decrement or comma operators.

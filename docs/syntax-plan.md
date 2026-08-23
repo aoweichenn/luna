@@ -224,15 +224,18 @@ let remaining: usize = end - start; // element count, unsigned
 if (start < end) { ... }
 ```
 
-`p + n`, `n + p` and `p += n` require `n: usize` and yield the same pointer
-type, scaled by the element size. `p - q` requires identical pointee types
-and yields the element distance as `usize` (the program has established
-order when it matters). Ordering comparisons `< <= > >=` require the same
-exact pointer type and compare address values as unsigned integers.
-Equality already exists. Address computation wraps modulo 2^64; dereading
-or indexing through an invalid address retains machine fault behavior, and
-null checks still precede every dereference. Pointer arithmetic does not
-imply array bounds knowledge — raw pointers stay raw.
+`p + n`, `n + p`, `p += n` and `p -= n` require `n: usize` and yield the
+same pointer type, scaled by the element size. Expression forms require
+an already-`usize` count, while the compound assignments additionally
+contextually type a bare integer literal as `usize`. `p - q` requires
+the same exact pointer type and yields the element distance as `usize`
+(the program has established order when it matters). Ordering
+comparisons `< <= > >=` require the same exact pointer type and compare
+address values as unsigned integers. Equality already exists. Address
+computation wraps modulo 2^64; dereferencing or indexing through an
+invalid address retains machine fault behavior, and null checks still
+precede every dereference. Pointer arithmetic does not imply array
+bounds knowledge — raw pointers stay raw.
 
 ## Milestone m1.2 — qualifiers, attributes and static assertions
 
