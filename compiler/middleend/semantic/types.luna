@@ -461,6 +461,14 @@ fn bootstrap_semantic_resolve_type_node(
                 }
             }
         }
+    } else if (node.kind ==
+            BootstrapSyntaxKind.structure_declaration ||
+        node.kind == BootstrapSyntaxKind.union_declaration) {
+        return bootstrap_semantic_anonymous_record_type(
+            context,
+            unit_index,
+            node_index
+        );
     }
     bootstrap_semantic_add_diagnostic(
         context,
@@ -472,6 +480,65 @@ fn bootstrap_semantic_resolve_type_node(
         node_index
     );
     return none;
+}
+
+fn bootstrap_semantic_field_is_anonymous(
+    context: *BootstrapSemanticContext,
+    field: BootstrapTypeField
+) -> bool {
+    if (field.declaration_unit == bootstrap_semantic_no_id() ||
+        field.declaration_node == bootstrap_semantic_no_id()) {
+        return false;
+    }
+    let node: BootstrapSyntaxNode =
+        bootstrap_semantic_node(
+            context,
+            field.declaration_unit,
+            field.declaration_node
+        );
+    return node.kind == BootstrapSyntaxKind.field_declaration &&
+        (node.flags &
+            (BootstrapSyntaxFlag.anonymous as usize)) != 0;
+}
+
+fn bootstrap_semantic_anonymous_record_type(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    node_index: usize
+) -> usize {
+    let none: usize = bootstrap_semantic_no_id();
+    let node: BootstrapSyntaxNode =
+        bootstrap_semantic_node(context, unit_index, node_index);
+    let kind: BootstrapTypeKind =
+        node.kind == BootstrapSyntaxKind.structure_declaration ?
+            BootstrapTypeKind.structure :
+            BootstrapTypeKind.record_union;
+    let records: *const BootstrapTypeRecord =
+        context->types.types.data as *const BootstrapTypeRecord;
+    var type_id: usize = BootstrapBuiltinType.count as usize;
+    while (type_id < context->types.type_count) {
+        if (records[type_id].kind == kind &&
+            records[type_id].declaration_unit == unit_index &&
+            records[type_id].declaration_node == node_index) {
+            return type_id;
+        }
+        type_id += 1;
+    }
+    let added: BootstrapTypeTableResult =
+        bootstrap_type_table_add_named(
+            context->types,
+            kind,
+            unit_index,
+            node_index,
+            node.token_index,
+            false
+        );
+    context->types = added.table;
+    context->error = added.error;
+    if (added.error != RuntimeError.none) {
+        return none;
+    }
+    return context->types.type_count - 1;
 }
 
 fn bootstrap_semantic_find_type_symbol(
@@ -502,8 +569,26 @@ fn bootstrap_semantic_report_type_declaration(
     let symbol_id: usize =
         bootstrap_semantic_find_type_symbol(context, type_id);
     if (symbol_id == bootstrap_semantic_no_id()) {
-        context->error = RuntimeError.invalid_argument;
-        return false;
+        let record: BootstrapTypeRecord =
+            bootstrap_semantic_type_record(context, type_id);
+        if (record.declaration_unit == bootstrap_semantic_no_id() ||
+            record.declaration_node == bootstrap_semantic_no_id()) {
+            context->error = RuntimeError.invalid_argument;
+            return false;
+        }
+        return bootstrap_semantic_add_diagnostic(
+            context,
+            kind,
+            record.declaration_unit,
+            bootstrap_semantic_node(
+                context,
+                record.declaration_unit,
+                record.declaration_node
+            ).span,
+            bootstrap_semantic_no_id(),
+            bootstrap_semantic_empty_span(),
+            detail
+        );
     }
     let symbols: *const BootstrapSemanticSymbol =
         context->symbols.data as
@@ -687,7 +772,11 @@ fn bootstrap_semantic_resolve_record_layout(
             context->error = RuntimeError.invalid_argument;
             return false;
         }
-        let duplicate: usize =
+        let anonymous: bool =
+            (field_declaration.flags &
+                (BootstrapSyntaxFlag.anonymous as usize)) != 0;
+        let duplicate: usize = anonymous ?
+            bootstrap_semantic_no_id() :
             bootstrap_semantic_field_name_exists(
                 context,
                 type_id,
@@ -1278,6 +1367,99 @@ fn bootstrap_semantic_find_field(
     return bootstrap_semantic_no_id();
 }
 
+fn bootstrap_semantic_lookup_promoted_field(
+    context: *BootstrapSemanticContext,
+    type_id: usize,
+    unit_index: usize,
+    name_token: usize,
+    base_offset: usize,
+    result: *BootstrapSemanticFieldLookup
+) -> void {
+    let record: BootstrapTypeRecord =
+        bootstrap_semantic_type_record(context, type_id);
+    let fields: *const BootstrapTypeField =
+        context->types.fields.data as *const BootstrapTypeField;
+    var index: usize = 0;
+    while (index < record.field_count &&
+        result->status != BootstrapSemanticFieldStatus.ambiguous) {
+        let field: BootstrapTypeField =
+            fields[record.first_field + index];
+        if (bootstrap_semantic_field_is_anonymous(context, field)) {
+            let direct: usize =
+                bootstrap_semantic_find_field(
+                    context,
+                    field.type_id,
+                    unit_index,
+                    name_token
+                );
+            if (direct != bootstrap_semantic_no_id()) {
+                if (result->status ==
+                    BootstrapSemanticFieldStatus.found) {
+                    result->status =
+                        BootstrapSemanticFieldStatus.ambiguous;
+                } else {
+                    result->status =
+                        BootstrapSemanticFieldStatus.found;
+                    result->field_id = direct;
+                    result->offset_bytes = base_offset +
+                        field.offset_bytes +
+                        fields[direct].offset_bytes;
+                }
+            } else {
+                bootstrap_semantic_lookup_promoted_field(
+                    context,
+                    field.type_id,
+                    unit_index,
+                    name_token,
+                    base_offset + field.offset_bytes,
+                    result
+                );
+            }
+        }
+        index += 1;
+    }
+}
+
+fn bootstrap_semantic_lookup_field(
+    context: *BootstrapSemanticContext,
+    type_id: usize,
+    unit_index: usize,
+    name_token: usize
+) -> BootstrapSemanticFieldLookup {
+    let none: usize = bootstrap_semantic_no_id();
+    let direct: usize =
+        bootstrap_semantic_find_field(
+            context,
+            type_id,
+            unit_index,
+            name_token
+        );
+    if (direct != none) {
+        let fields: *const BootstrapTypeField =
+            context->types.fields.data as
+                *const BootstrapTypeField;
+        return {
+            status = BootstrapSemanticFieldStatus.found,
+            field_id = direct,
+            offset_bytes = fields[direct].offset_bytes,
+        };
+    }
+    var result: BootstrapSemanticFieldLookup = {
+        status = BootstrapSemanticFieldStatus.missing,
+        field_id = none,
+        offset_bytes = 0,
+    };
+    bootstrap_semantic_lookup_promoted_field(
+        context,
+        type_id,
+        unit_index,
+        name_token,
+        0,
+        &result
+    );
+    return result;
+}
+
 fn bootstrap_semantic_find_enum_member(
     context: *BootstrapSemanticContext,
     type_id: usize,
@@ -1338,6 +1520,58 @@ fn bootstrap_semantic_public_type_is_valid(
         (BootstrapSemanticSymbolFlag.exported as usize)) != 0;
 }
 
+fn bootstrap_semantic_public_anonymous_fields_valid(
+    context: *BootstrapSemanticContext,
+    type_id: usize,
+    symbol: BootstrapSemanticSymbol
+) -> bool {
+    var valid: bool = true;
+    let record: BootstrapTypeRecord =
+        bootstrap_semantic_type_record(context, type_id);
+    let fields: *const BootstrapTypeField =
+        context->types.fields.data as *const BootstrapTypeField;
+    var index: usize = 0;
+    while (index < record.field_count &&
+        context->error == RuntimeError.none) {
+        let field: BootstrapTypeField =
+            fields[record.first_field + index];
+        if (bootstrap_semantic_field_is_anonymous(context, field)) {
+            if (!bootstrap_semantic_public_anonymous_fields_valid(
+                    context,
+                    field.type_id,
+                    symbol
+                )) {
+                valid = false;
+            }
+        } else if (!bootstrap_semantic_public_type_is_valid(
+                context,
+                field.type_id
+            )) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind
+                    .private_type_exposure,
+                field.declaration_unit,
+                bootstrap_semantic_node(
+                    context,
+                    field.declaration_unit,
+                    field.declaration_node
+                ).span,
+                symbol.declaration_unit,
+                bootstrap_semantic_node(
+                    context,
+                    symbol.declaration_unit,
+                    symbol.declaration_node
+                ).span,
+                field.type_id
+            );
+            valid = false;
+        }
+        index += 1;
+    }
+    return valid;
+}
+
 fn bootstrap_semantic_validate_public_types(
     context: *BootstrapSemanticContext
 ) -> bool {
@@ -1392,7 +1626,16 @@ fn bootstrap_semantic_validate_public_types(
             while (index < record.field_count) {
                 let field: BootstrapTypeField =
                     fields[record.first_field + index];
-                if (!bootstrap_semantic_public_type_is_valid(
+                if (bootstrap_semantic_field_is_anonymous(
+                        context,
+                        field
+                    )) {
+                    bootstrap_semantic_public_anonymous_fields_valid(
+                        context,
+                        field.type_id,
+                        symbol
+                    );
+                } else if (!bootstrap_semantic_public_type_is_valid(
                         context,
                         field.type_id
                     )) {

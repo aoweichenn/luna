@@ -1140,13 +1140,27 @@ fn bootstrap_semantic_validate_initializer_fields(
                 context->current_unit,
                 child
             );
-        let field_id: usize = bootstrap_semantic_find_field(
-            context,
-            expected_type,
-            context->current_unit,
-            initializer.token_index
-        );
-        if (field_id == none) {
+        let lookup: BootstrapSemanticFieldLookup =
+            bootstrap_semantic_lookup_field(
+                context,
+                expected_type,
+                context->current_unit,
+                initializer.token_index
+            );
+        if (lookup.status ==
+            BootstrapSemanticFieldStatus.ambiguous) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.ambiguous_field,
+                context->current_unit,
+                initializer.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                expected_type
+            );
+            valid = false;
+        } else if (lookup.status !=
+            BootstrapSemanticFieldStatus.found) {
             bootstrap_semantic_add_diagnostic(
                 context,
                 BootstrapSemanticDiagnosticKind.unknown_field,
@@ -1158,6 +1172,7 @@ fn bootstrap_semantic_validate_initializer_fields(
             );
             valid = false;
         } else {
+            let field_id: usize = lookup.field_id;
             let seen: *const usize =
                 seen_fields.data as *const usize;
             var duplicate: bool = false;
@@ -1317,13 +1332,27 @@ fn bootstrap_semantic_lower_initializer(
                     context->current_unit,
                     child
                 );
-            let field_id: usize = bootstrap_semantic_find_field(
-                context,
-                expected_type,
-                context->current_unit,
-                initializer.token_index
-            );
-            if (field_id == none) {
+            let lookup: BootstrapSemanticFieldLookup =
+                bootstrap_semantic_lookup_field(
+                    context,
+                    expected_type,
+                    context->current_unit,
+                    initializer.token_index
+                );
+            if (lookup.status ==
+                BootstrapSemanticFieldStatus.ambiguous) {
+                bootstrap_semantic_add_diagnostic(
+                    context,
+                    BootstrapSemanticDiagnosticKind
+                        .ambiguous_field,
+                    context->current_unit,
+                    initializer.span,
+                    none,
+                    bootstrap_semantic_empty_span(),
+                    expected_type
+                );
+            } else if (lookup.status !=
+                BootstrapSemanticFieldStatus.found) {
                 bootstrap_semantic_add_diagnostic(
                     context,
                     BootstrapSemanticDiagnosticKind.unknown_field,
@@ -1334,6 +1363,7 @@ fn bootstrap_semantic_lower_initializer(
                     expected_type
                 );
             } else {
+                let field_id: usize = lookup.field_id;
                 let seen: *const usize =
                     seen_fields.data as *const usize;
                 var duplicate: bool = false;
@@ -1388,7 +1418,7 @@ fn bootstrap_semantic_lower_initializer(
                         );
                     member_instruction.left = address_id;
                     member_instruction.auxiliary =
-                        field.offset_bytes;
+                        lookup.offset_bytes;
                     let field_address: usize =
                         bootstrap_semantic_emit_value(
                             context,
@@ -1783,13 +1813,26 @@ fn bootstrap_semantic_lower_member(
         );
         return bootstrap_semantic_invalid_expression();
     }
-    let field_id: usize = bootstrap_semantic_find_field(
-        context,
-        owner_type,
-        context->current_unit,
-        name_node.token_index
-    );
-    if (field_id == bootstrap_semantic_no_id()) {
+    let lookup: BootstrapSemanticFieldLookup =
+        bootstrap_semantic_lookup_field(
+            context,
+            owner_type,
+            context->current_unit,
+            name_node.token_index
+        );
+    if (lookup.status == BootstrapSemanticFieldStatus.ambiguous) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.ambiguous_field,
+            context->current_unit,
+            name_node.span,
+            bootstrap_semantic_no_id(),
+            bootstrap_semantic_empty_span(),
+            owner_type
+        );
+        return bootstrap_semantic_invalid_expression();
+    }
+    if (lookup.status != BootstrapSemanticFieldStatus.found) {
         bootstrap_semantic_add_diagnostic(
             context,
             BootstrapSemanticDiagnosticKind.unknown_field,
@@ -1804,7 +1847,7 @@ fn bootstrap_semantic_lower_member(
     let fields: *const BootstrapTypeField =
         context->types.fields.data as
             *const BootstrapTypeField;
-    let field: BootstrapTypeField = fields[field_id];
+    let field: BootstrapTypeField = fields[lookup.field_id];
     let pointer: BootstrapTypeIdResult =
         bootstrap_type_table_pointer(
             &context->types,
@@ -1819,7 +1862,7 @@ fn bootstrap_semantic_lower_member(
             node
         );
     instruction.left = owner_address;
-    instruction.auxiliary = field.offset_bytes;
+    instruction.auxiliary = lookup.offset_bytes;
     let address_id: usize = bootstrap_semantic_emit_value(
         context,
         instruction,
@@ -2401,24 +2444,25 @@ fn bootstrap_semantic_address_chain_type(
                 context->current_unit,
                 node.first_child
             );
-        let field_id: usize = bootstrap_semantic_find_field(
-            context,
-            owner_type,
-            context->current_unit,
-            bootstrap_semantic_node(
+        let lookup: BootstrapSemanticFieldLookup =
+            bootstrap_semantic_lookup_field(
                 context,
+                owner_type,
                 context->current_unit,
-                base_node.next_sibling
-            ).token_index
-        );
-        if (field_id == none) {
+                bootstrap_semantic_node(
+                    context,
+                    context->current_unit,
+                    base_node.next_sibling
+                ).token_index
+            );
+        if (lookup.status != BootstrapSemanticFieldStatus.found) {
             return none;
         }
         let fields: *const BootstrapTypeField =
             context->types.fields.data as
                 *const BootstrapTypeField;
-        *offset += fields[field_id].offset_bytes;
-        return fields[field_id].type_id;
+        *offset += lookup.offset_bytes;
+        return fields[lookup.field_id].type_id;
     }
     if (node.kind == BootstrapSyntaxKind.index_expression &&
         node.child_count == 2) {
@@ -3834,13 +3878,28 @@ fn bootstrap_semantic_lower_layout_query(
                 context->current_unit,
                 type_node.next_sibling
             );
-        let field_id: usize = bootstrap_semantic_find_field(
-            context,
-            type_id,
-            context->current_unit,
-            member.token_index
-        );
-        if (field_id == bootstrap_semantic_no_id()) {
+        let lookup: BootstrapSemanticFieldLookup =
+            bootstrap_semantic_lookup_field(
+                context,
+                type_id,
+                context->current_unit,
+                member.token_index
+            );
+        if (lookup.status ==
+            BootstrapSemanticFieldStatus.ambiguous) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind
+                    .ambiguous_field,
+                context->current_unit,
+                node.span,
+                bootstrap_semantic_no_id(),
+                bootstrap_semantic_empty_span(),
+                type_id
+            );
+            return bootstrap_semantic_invalid_expression();
+        }
+        if (lookup.status != BootstrapSemanticFieldStatus.found) {
             bootstrap_semantic_add_diagnostic(
                 context,
                 BootstrapSemanticDiagnosticKind
@@ -3853,10 +3912,7 @@ fn bootstrap_semantic_lower_layout_query(
             );
             return bootstrap_semantic_invalid_expression();
         }
-        let fields: *const BootstrapTypeField =
-            context->types.fields.data as
-                *const BootstrapTypeField;
-        value = fields[field_id].offset_bytes;
+        value = lookup.offset_bytes;
     } else {
         return bootstrap_semantic_invalid_expression();
     }

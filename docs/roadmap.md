@@ -154,7 +154,7 @@ feature has executable tests plus a green `verify` fixed point.
 
 ### m1.3 kernel UAPI layout package
 
-- [ ] anonymous struct/union members
+- [x] anonymous struct/union members
 - [ ] bitfields (`@bits`) following the x86-64 psABI
 - [x] `@align(N)` alignment control with over-aligned SysV rules
 - [x] `@packed` structures (no padding; field addresses rejected)

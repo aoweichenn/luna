@@ -2,6 +2,7 @@ module luna.bootstrap.middleend.ir;
 
 enum BootstrapIrLimit: usize {
     maximum_size = 18446744073709551615, maximum_alignment = 8, maximum_slot_alignment = 4096,
+    maximum_type_depth = 256,
 }
 
 fn bootstrap_ir_no_id() -> usize {
@@ -588,10 +589,37 @@ fn bootstrap_ir_instruction_expects_result(
         instruction.opcode == BootstrapIrOpcode.float_max || instruction.opcode == BootstrapIrOpcode.overflow_flag;
 }
 
+fn bootstrap_ir_member_address_offset_is_valid(
+    types: BootstrapTypeTable, owner_type: usize, offset: usize, element_type: usize, depth: usize) -> bool {
+    if (depth > (BootstrapIrLimit.maximum_type_depth as usize)) {
+        return false;
+    }
+    let records: *const BootstrapTypeRecord = types.types.data as *const BootstrapTypeRecord;
+    let fields: *const BootstrapTypeField = types.fields.data as *const BootstrapTypeField;
+    let owner: BootstrapTypeRecord = records[owner_type];
+    var index: usize = 0;
+    while (index < owner.field_count) {
+        let field: BootstrapTypeField = fields[owner.first_field + index];
+        if (field.offset_bytes == offset && field.type_id == element_type) {
+            return true;
+        }
+        let field_record: BootstrapTypeRecord = records[field.type_id];
+        // A promoted member of an anonymous record field is addressed through
+        // the enclosing record at the accumulated offset.
+        if ((field_record.kind == BootstrapTypeKind.structure || field_record.kind == BootstrapTypeKind.record_union) &&
+            offset >= field.offset_bytes && offset - field.offset_bytes < field_record.size_bytes &&
+            bootstrap_ir_member_address_offset_is_valid(
+                types, field.type_id, offset - field.offset_bytes, element_type, depth + 1)) {
+            return true;
+        }
+        index += 1;
+    }
+    return false;
+}
+
 fn bootstrap_ir_member_address_is_valid(
     instruction: BootstrapIrInstruction, types: BootstrapTypeTable, values: *const BootstrapIrValue) -> bool {
     let records: *const BootstrapTypeRecord = types.types.data as *const BootstrapTypeRecord;
-    let fields: *const BootstrapTypeField = types.fields.data as *const BootstrapTypeField;
     let source_pointer: BootstrapTypeRecord = records[values[instruction.left].type_id];
     let result_pointer: BootstrapTypeRecord = records[instruction.type_id];
     if (result_pointer.kind != BootstrapTypeKind.pointer) {
@@ -610,16 +638,12 @@ fn bootstrap_ir_member_address_is_valid(
     if (!bootstrap_type_is_memory(owner.kind)) {
         return false;
     }
-    var index: usize = 0;
-    while (index < owner.field_count) {
-        let field: BootstrapTypeField = fields[owner.first_field + index];
-        if (field.offset_bytes == instruction.auxiliary && field.type_id == result_pointer.element_type) {
-            let result_read_only: bool = (result_pointer.flags & (BootstrapTypeFlag.read_only as usize)) != 0;
-            return !source_read_only || result_read_only;
-        }
-        index += 1;
+    if (!bootstrap_ir_member_address_offset_is_valid(
+            types, owner_type, instruction.auxiliary, result_pointer.element_type, 0)) {
+        return false;
     }
-    return false;
+    let result_read_only: bool = (result_pointer.flags & (BootstrapTypeFlag.read_only as usize)) != 0;
+    return !source_read_only || result_read_only;
 }
 
 fn bootstrap_ir_instruction_types_are_valid(

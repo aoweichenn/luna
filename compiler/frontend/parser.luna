@@ -72,7 +72,7 @@ fn bootstrap_syntax_tree_is_valid(tree: BootstrapSyntaxTree) -> bool {
     var node_index: usize = 0;
     while (node_index < tree.count) {
         let node: BootstrapSyntaxNode = nodes[node_index];
-        if ((node.kind as usize) > (BootstrapSyntaxKind.intrinsic_expression as usize) || node.flags > 1023 ||
+        if ((node.kind as usize) > (BootstrapSyntaxKind.intrinsic_expression as usize) || node.flags > 2047 ||
             node.span.line == 0 || node.span.column == 0 || node.span.length >
                 (BootstrapParserLimit.maximum_size as usize) - node.span.offset || (node.token_index != none &&
                 node.token_index >= tree.token_count)) {
@@ -1750,6 +1750,40 @@ fn bootstrap_parser_parse_field(state: *BootstrapParserState, owner: usize) -> u
     bootstrap_parser_parse_attributes(state, &first_attribute, &attribute_count);
     let name: BootstrapToken = state->current;
     let name_index: usize = state->current_index;
+    if (name.kind == BootstrapTokenKind.keyword_struct || name.kind == BootstrapTokenKind.keyword_union) {
+        bootstrap_parser_advance(state);
+        let field: usize =
+            bootstrap_parser_new_node(state, BootstrapSyntaxKind.field_declaration, name.span, name_index);
+        bootstrap_parser_add_node_flags(state, field, BootstrapSyntaxFlag.anonymous as usize);
+        let declaration: usize = bootstrap_parser_new_node(
+            state,
+            name.kind == BootstrapTokenKind.keyword_struct ? BootstrapSyntaxKind.structure_declaration :
+                BootstrapSyntaxKind.union_declaration, name.span, name_index);
+        bootstrap_parser_add_child(state, field, declaration);
+        bootstrap_parser_expect(state, BootstrapTokenKind.left_brace);
+        if (!bootstrap_parser_enter_nesting(state, name.span)) {
+            bootstrap_parser_attach_attributes(state, owner, first_attribute, attribute_count);
+            return field;
+        }
+        while (state->error == RuntimeError.none && state->current.kind != BootstrapTokenKind.right_brace &&
+            state->current.kind != BootstrapTokenKind.end) {
+            let index_before: usize = state->current_index;
+            let nested: usize = bootstrap_parser_parse_field(state, declaration);
+            if (nested != none) {
+                bootstrap_parser_add_child(state, declaration, nested);
+            }
+            if (state->current_index == index_before && state->current.kind != BootstrapTokenKind.end) {
+                bootstrap_parser_advance(state);
+            }
+        }
+        bootstrap_parser_expect(state, BootstrapTokenKind.right_brace);
+        bootstrap_parser_leave_nesting(state);
+        bootstrap_parser_set_node_span(
+            state, declaration, bootstrap_parser_join_spans(name.span, state->previous.span));
+        bootstrap_parser_attach_attributes(state, field, first_attribute, attribute_count);
+        bootstrap_parser_set_node_span(state, field, bootstrap_parser_join_spans(name.span, state->previous.span));
+        return field;
+    }
     if (!bootstrap_parser_expect(
             state, BootstrapTokenKind.identifier)) {
         bootstrap_parser_attach_attributes(state, owner, first_attribute, attribute_count);

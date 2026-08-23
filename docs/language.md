@@ -309,6 +309,26 @@ aligned size of its largest field. A type may contain a pointer to itself or
 participate in mutually recursive pointer graphs, but a recursive by-value
 field is rejected because it has no finite layout.
 
+A field written as an inline record definition with no name is an anonymous
+member (C11 semantics):
+
+```luna
+union Value {
+    struct { low: u8; high: u8; }
+    whole: u16;
+}
+```
+
+The fields of an anonymous member are promoted into the enclosing scope:
+`v.low` means `v.<anonymous>.low`. Promotion is recursive, applies to
+member access, named initializers and `offsetof`, and follows the C11
+rule that a direct field of the enclosing record wins over a promoted
+field of the same name; two promoted fields with the same name make that
+name's access a compile-time error. An anonymous member occupies layout
+exactly like a named field of its record type, and only inline
+definitions may be anonymous — a nameless field of a named type is not
+allowed.
+
 The target layout can be queried with type-only compile-time expressions:
 
 ```luna
