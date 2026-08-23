@@ -4,7 +4,7 @@ struct BootstrapSemanticAttributeEntry {
     name: *const u8;
     name_length: usize;
     mounts: usize;
-    arguments: bool;
+    arguments: BootstrapSemanticAttributeArgumentPolicy;
 }
 
 struct BootstrapSemanticAttributeMountEntry {
@@ -15,16 +15,23 @@ struct BootstrapSemanticAttributeMountEntry {
 fn bootstrap_semantic_attribute_entry(
     index: usize
 ) -> BootstrapSemanticAttributeEntry {
-    var table: [2]BootstrapSemanticAttributeEntry = {};
+    var table: [3]BootstrapSemanticAttributeEntry = {};
     table[0] = {
         name = "inline", name_length = 6,
         mounts = BootstrapSemanticAttributeMount.function as usize,
-        arguments = false,
+        arguments = BootstrapSemanticAttributeArgumentPolicy.none,
     };
     table[1] = {
         name = "noreturn", name_length = 8,
         mounts = BootstrapSemanticAttributeMount.function as usize,
-        arguments = false,
+        arguments = BootstrapSemanticAttributeArgumentPolicy.none,
+    };
+    table[2] = {
+        name = "align", name_length = 5,
+        mounts = (BootstrapSemanticAttributeMount.variable as usize) |
+            (BootstrapSemanticAttributeMount.field as usize) |
+            (BootstrapSemanticAttributeMount.record as usize),
+        arguments = BootstrapSemanticAttributeArgumentPolicy.one_constant_integer,
     };
     let entry: BootstrapSemanticAttributeEntry = table[index];
     return entry;
@@ -78,7 +85,7 @@ fn bootstrap_semantic_find_attribute(
     name_token: usize
 ) -> usize {
     var index: usize = 0;
-    while (index < 2) {
+    while (index < 3) {
         let entry: BootstrapSemanticAttributeEntry =
             bootstrap_semantic_attribute_entry(index);
         if (bootstrap_semantic_token_equals_bytes(
@@ -142,6 +149,39 @@ fn bootstrap_semantic_declaration_has_attribute(
     return false;
 }
 
+fn bootstrap_semantic_declaration_attribute_argument(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    declaration: BootstrapSyntaxNode,
+    attribute: BootstrapSemanticAttribute
+) -> usize {
+    let entry: BootstrapSemanticAttributeEntry =
+        bootstrap_semantic_attribute_entry(attribute as usize);
+    let none: usize = bootstrap_semantic_no_id();
+    var child: usize = declaration.first_child;
+    while (child != none) {
+        let node: BootstrapSyntaxNode =
+            bootstrap_semantic_node(context, unit_index, child);
+        if (node.kind == BootstrapSyntaxKind.attribute &&
+            bootstrap_semantic_token_equals_bytes(
+                context,
+                unit_index,
+                node.token_index,
+                entry.name,
+                entry.name_length
+            )) {
+            if ((node.flags &
+                    (BootstrapSyntaxFlag.has_arguments as usize)) != 0 &&
+                node.child_count == 1) {
+                return node.first_child;
+            }
+            return none;
+        }
+        child = node.next_sibling;
+    }
+    return none;
+}
+
 fn bootstrap_semantic_validate_attribute(
     context: *BootstrapSemanticContext,
     unit_index: usize,
@@ -174,11 +214,18 @@ fn bootstrap_semantic_validate_attribute(
     }
     let entry: BootstrapSemanticAttributeEntry =
         bootstrap_semantic_attribute_entry(table_index);
+    let has_arguments: bool =
+        (node.flags &
+            (BootstrapSyntaxFlag.has_arguments as usize)) != 0;
     if (mount == (BootstrapSemanticAttributeMount.none as usize) ||
         (entry.mounts & mount) == 0 ||
-        ((node.flags &
-                (BootstrapSyntaxFlag.has_arguments as usize)) != 0 &&
-            !entry.arguments)) {
+        (entry.arguments ==
+                BootstrapSemanticAttributeArgumentPolicy.none &&
+            has_arguments) ||
+        (entry.arguments ==
+                BootstrapSemanticAttributeArgumentPolicy
+                    .one_constant_integer &&
+            (!has_arguments || node.child_count != 1))) {
         return bootstrap_semantic_add_diagnostic(
             context,
             BootstrapSemanticDiagnosticKind.invalid_attribute,

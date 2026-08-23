@@ -294,6 +294,14 @@ fn bootstrap_semantic_context_storage_is_valid(
         context->local_count ==
             context->locals.length /
                 sizeof(BootstrapSemanticLocal) &&
+        std_byte_buffer_is_valid(
+            context->alignment_overrides
+        ) &&
+        context->alignment_overrides.length %
+            sizeof(BootstrapSemanticAlignmentOverride) == 0 &&
+        context->alignment_override_count ==
+            context->alignment_overrides.length /
+                sizeof(BootstrapSemanticAlignmentOverride) &&
         context->scope_depth <=
             BootstrapSemanticLimit.maximum_scope_depth as usize &&
         context->type_depth <=
@@ -324,6 +332,8 @@ fn bootstrap_semantic_context_init(
         parameter_count = 0,
         locals = std_byte_buffer_empty(),
         local_count = 0,
+        alignment_overrides = std_byte_buffer_empty(),
+        alignment_override_count = 0,
         types = bootstrap_type_table_empty(),
         ir = bootstrap_ir_empty(),
         diagnostics = bootstrap_semantic_diagnostics_empty(),
@@ -369,6 +379,10 @@ fn bootstrap_semantic_context_release_work(
     error = bootstrap_semantic_release_error(
         error,
         std_byte_buffer_release(context->locals)
+    );
+    error = bootstrap_semantic_release_error(
+        error,
+        std_byte_buffer_release(context->alignment_overrides)
     );
     return error;
 }
@@ -1287,6 +1301,50 @@ fn bootstrap_semantic_append_local(
     }
     context->local_count += 1;
     return result;
+}
+
+fn bootstrap_semantic_append_alignment_override(
+    context: *BootstrapSemanticContext,
+    declaration_unit: usize,
+    declaration_node: usize,
+    alignment: usize
+) -> bool {
+    let entry: BootstrapSemanticAlignmentOverride = {
+        declaration_unit = declaration_unit,
+        declaration_node = declaration_node,
+        alignment = alignment,
+    };
+    if (!bootstrap_semantic_append_record(
+            context,
+            &context->alignment_overrides,
+            (&entry) as
+                *const BootstrapSemanticAlignmentOverride as
+                *const u8,
+            sizeof(BootstrapSemanticAlignmentOverride)
+        )) {
+        return false;
+    }
+    context->alignment_override_count += 1;
+    return true;
+}
+
+fn bootstrap_semantic_alignment_override(
+    context: *BootstrapSemanticContext,
+    declaration_unit: usize,
+    declaration_node: usize
+) -> usize {
+    let overrides: *const BootstrapSemanticAlignmentOverride =
+        context->alignment_overrides.data as
+            *const BootstrapSemanticAlignmentOverride;
+    var index: usize = 0;
+    while (index < context->alignment_override_count) {
+        if (overrides[index].declaration_unit == declaration_unit &&
+            overrides[index].declaration_node == declaration_node) {
+            return overrides[index].alignment;
+        }
+        index += 1;
+    }
+    return 0;
 }
 
 fn bootstrap_semantic_find_local(

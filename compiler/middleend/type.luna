@@ -2,6 +2,7 @@ module luna.bootstrap.middleend.type;
 
 enum BootstrapTypeLimit: usize {
     maximum_size = 18446744073709551615, target_pointer_bytes = 8, target_pointer_alignment = 8,
+    maximum_alignment = 4096,
 }
 
 fn bootstrap_type_no_id() -> usize {
@@ -21,7 +22,7 @@ fn bootstrap_type_invalid_field() -> BootstrapTypeField {
     let none: usize = bootstrap_type_no_id();
     return {
         owner_type = none, type_id = none, declaration_unit = none, declaration_node = none, name_token = none,
-        offset_bytes = 0,
+        offset_bytes = 0, alignment_bytes = 0,
     };
 }
 
@@ -289,7 +290,9 @@ fn bootstrap_type_table_array(
 fn bootstrap_type_table_add_field(table: BootstrapTypeTable, field: BootstrapTypeField) -> BootstrapTypeTableResult {
     if (!bootstrap_type_table_storage_is_valid(table) || field.owner_type >= table.type_count ||
         field.type_id >= table.type_count || field.declaration_unit == bootstrap_type_no_id() ||
-        field.declaration_node == bootstrap_type_no_id() || field.name_token == bootstrap_type_no_id()) {
+        field.declaration_node == bootstrap_type_no_id() || field.name_token == bootstrap_type_no_id() ||
+        field.alignment_bytes > (BootstrapTypeLimit.maximum_alignment as usize) ||
+        (field.alignment_bytes & (field.alignment_bytes - 1)) != 0) {
         return {
             table = table, error = RuntimeError.invalid_argument,
         };
@@ -401,7 +404,8 @@ fn bootstrap_type_layout_parameters_are_valid(
     let declared: bool = bootstrap_type_kind_is_declared(record.kind) ||
         record.kind == BootstrapTypeKind.function_pointer;
     if (!declared || (record.flags & (BootstrapTypeFlag.complete as usize)) != 0 ||
-        size_bytes == 0 || alignment_bytes == 0 || alignment_bytes > 8 ||
+        size_bytes == 0 || alignment_bytes == 0 ||
+        alignment_bytes > (BootstrapTypeLimit.maximum_alignment as usize) ||
         (alignment_bytes & (alignment_bytes - 1)) != 0 || size_bytes % alignment_bytes != 0) {
         return false;
     }
@@ -718,11 +722,15 @@ fn bootstrap_type_table_is_valid(table: BootstrapTypeTable, require_complete: bo
             while (field_index < record.field_count) {
                 let field: BootstrapTypeField = fields[record.first_field + field_index];
                 let field_type: BootstrapTypeRecord = records[field.type_id];
-                if (field.owner_type != index) {
+                if (field.owner_type != index ||
+                    field.alignment_bytes > (BootstrapTypeLimit.maximum_alignment as usize) ||
+                    (field.alignment_bytes & (field.alignment_bytes - 1)) != 0) {
                     return false;
                 }
-                if (field_type.alignment_bytes > expected_alignment) {
-                    expected_alignment = field_type.alignment_bytes;
+                let field_alignment: usize = field.alignment_bytes > field_type.alignment_bytes ?
+                    field.alignment_bytes : field_type.alignment_bytes;
+                if (field_alignment > expected_alignment) {
+                    expected_alignment = field_alignment;
                 }
                 if (is_union) {
                     if (field.offset_bytes != 0) {
@@ -732,7 +740,7 @@ fn bootstrap_type_table_is_valid(table: BootstrapTypeTable, require_complete: bo
                         expected_size = field_type.size_bytes;
                     }
                 } else {
-                    let mask: usize = field_type.alignment_bytes - 1;
+                    let mask: usize = field_alignment - 1;
                     if (expected_size > (BootstrapTypeLimit.maximum_size as usize) - mask) {
                         return false;
                     }
@@ -748,12 +756,19 @@ fn bootstrap_type_table_is_valid(table: BootstrapTypeTable, require_complete: bo
             if (expected_size == 0) {
                 expected_size = 1;
             }
-            let alignment_mask: usize = expected_alignment - 1;
+            // A type-level @align may raise the record alignment beyond the
+            // field-derived maximum; the size is then tail-padded to it.
+            if (record.alignment_bytes < expected_alignment ||
+                record.alignment_bytes > (BootstrapTypeLimit.maximum_alignment as usize) ||
+                (record.alignment_bytes & (record.alignment_bytes - 1)) != 0) {
+                return false;
+            }
+            let alignment_mask: usize = record.alignment_bytes - 1;
             if (expected_size > (BootstrapTypeLimit.maximum_size as usize) - alignment_mask) {
                 return false;
             }
             expected_size = (expected_size + alignment_mask) & ~alignment_mask;
-            if (record.size_bytes != expected_size || record.alignment_bytes != expected_alignment) {
+            if (record.size_bytes != expected_size) {
                 return false;
             }
         }

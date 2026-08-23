@@ -1,7 +1,7 @@
 module luna.bootstrap.middleend.ir;
 
 enum BootstrapIrLimit: usize {
-    maximum_size = 18446744073709551615, maximum_alignment = 8,
+    maximum_size = 18446744073709551615, maximum_alignment = 8, maximum_slot_alignment = 4096,
 }
 
 fn bootstrap_ir_no_id() -> usize {
@@ -193,10 +193,12 @@ fn bootstrap_ir_function_can_extend_range(first: usize, count: usize, next: usiz
 
 fn bootstrap_ir_add_slot(
     ir: *BootstrapTypedIr, function_id: usize, type_id: usize, mutable_binding: bool,
-    volatile_binding: bool) -> usize {
+    volatile_binding: bool, alignment_bytes: usize) -> usize {
     let none: usize = bootstrap_ir_no_id();
     if (ir == null || ir->error != RuntimeError.none || !bootstrap_ir_storage_is_valid(*ir) ||
-        function_id >= ir->function_count || type_id == none) {
+        function_id >= ir->function_count || type_id == none ||
+        alignment_bytes > (BootstrapIrLimit.maximum_slot_alignment as usize) ||
+        (alignment_bytes & (alignment_bytes - 1)) != 0) {
         if (ir != null) {
             bootstrap_ir_set_error(ir, RuntimeError.invalid_argument);
         }
@@ -204,8 +206,8 @@ fn bootstrap_ir_add_slot(
     }
     let functions: *BootstrapIrFunction = ir->functions.data as *BootstrapIrFunction;
     let slot: BootstrapIrSlot = {
-        function_id = function_id, type_id = type_id, mutable_binding = mutable_binding,
-        volatile_binding = volatile_binding,
+        function_id = function_id, type_id = type_id, alignment_bytes = alignment_bytes,
+        mutable_binding = mutable_binding, volatile_binding = volatile_binding,
     };
     let appended: StdByteBufferResult = bootstrap_ir_append(
         ir->slots, (&slot) as *const BootstrapIrSlot as *const u8, sizeof(BootstrapIrSlot));
@@ -239,7 +241,7 @@ fn bootstrap_ir_add_parameter(ir: *BootstrapTypedIr, function_id: usize, type_id
         bootstrap_ir_set_error(ir, RuntimeError.invalid_argument);
         return none;
     }
-    let slot_id: usize = bootstrap_ir_add_slot(ir, function_id, type_id, false, false);
+    let slot_id: usize = bootstrap_ir_add_slot(ir, function_id, type_id, false, false, 0);
     if (slot_id == none) {
         return none;
     }
@@ -915,7 +917,9 @@ fn bootstrap_ir_is_valid(ir: BootstrapTypedIr, types: BootstrapTypeTable) -> boo
     while (index < ir.slot_count) {
         if (slots[index].function_id >= ir.function_count ||
             !bootstrap_ir_type_can_be_value(
-                types, slots[index].type_id)) {
+                types, slots[index].type_id) ||
+            slots[index].alignment_bytes > (BootstrapIrLimit.maximum_slot_alignment as usize) ||
+            (slots[index].alignment_bytes & (slots[index].alignment_bytes - 1)) != 0) {
             return false;
         }
         index += 1;

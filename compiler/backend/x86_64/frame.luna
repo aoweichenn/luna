@@ -102,11 +102,13 @@ fn bootstrap_x86_64_frame_add_slots(
         if (slot.function_id == function_id) {
             let record: BootstrapTypeRecord = records[slot.type_id];
             let memory: bool = bootstrap_type_is_memory(record.kind);
+            let natural_alignment: usize = memory ? record.alignment_bytes : BootstrapX8664FrameLimit
+                    .scalar_home_alignment as usize;
+            let alignment: usize = slot.alignment_bytes > natural_alignment ? slot.alignment_bytes : natural_alignment;
             if (!bootstrap_x86_64_frame_add_storage(
                     plan, frame, function_id, BootstrapX8664StorageKind.slot, slot_id, slot.type_id, memory ?
                         record.size_bytes : BootstrapX8664FrameLimit.scalar_home_size
-                            as usize, memory ? record.alignment_bytes : BootstrapX8664FrameLimit
-                            .scalar_home_alignment as usize, current_offset)) {
+                            as usize, alignment, current_offset)) {
                 return false;
             }
         }
@@ -174,7 +176,7 @@ fn bootstrap_x86_64_frame_plan_build(
         let function: BootstrapIrFunction = functions[function_id];
         var frame: BootstrapX8664Frame = {
             function_id = function_id, first_storage = function.has_body ? plan.storage_count :
-                bootstrap_x86_64_frame_no_id(), storage_count = 0, frame_size_bytes = 0,
+                bootstrap_x86_64_frame_no_id(), storage_count = 0, frame_size_bytes = 0, dynamic_alignment = 0,
         };
         var offset: usize = 0;
         if (function.has_body && (!bootstrap_x86_64_frame_add_slots(&plan, &frame, ir, types, function_id, &offset) ||
@@ -194,6 +196,20 @@ fn bootstrap_x86_64_frame_plan_build(
                 plan.error = RuntimeError.invalid_argument;
             }
             break;
+        }
+        if (function.has_body) {
+            let storage: *const BootstrapX8664Storage = plan.storage.data as *const BootstrapX8664Storage;
+            var storage_index: usize = 0;
+            while (storage_index < frame.storage_count) {
+                let alignment: usize = storage[frame.first_storage + storage_index].alignment_bytes;
+                if (alignment > frame.dynamic_alignment) {
+                    frame.dynamic_alignment = alignment;
+                }
+                storage_index += 1;
+            }
+            if (frame.dynamic_alignment <= (BootstrapX8664FrameLimit.stack_alignment as usize)) {
+                frame.dynamic_alignment = 0;
+            }
         }
         frame.frame_size_bytes =
             bootstrap_x86_64_frame_align_up(offset, BootstrapX8664FrameLimit.stack_alignment as usize);
@@ -243,7 +259,7 @@ fn bootstrap_x86_64_frame_invalid()
     -> BootstrapX8664Frame {
     let none: usize = bootstrap_x86_64_frame_no_id();
     return {
-        function_id = none, first_storage = none, storage_count = 0, frame_size_bytes = 0,
+        function_id = none, first_storage = none, storage_count = 0, frame_size_bytes = 0, dynamic_alignment = 0,
     };
 }
 

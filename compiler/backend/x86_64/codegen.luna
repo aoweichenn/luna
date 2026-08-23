@@ -16,6 +16,9 @@ struct BootstrapX8664CodegenContext {
     frames: BootstrapX8664FramePlan;
     text: BootstrapX8664Text;
     current_function: usize;
+    // Live bytes subtracted from rsp for outgoing call argument areas; only
+    // nonzero between a call's subq and its matching addq.
+    call_frame_depth: usize;
     error: RuntimeError;
 }
 
@@ -208,6 +211,17 @@ fn bootstrap_x86_64_codegen_storage(
 
 fn bootstrap_x86_64_codegen_append_stack(
     context: *BootstrapX8664CodegenContext, storage: BootstrapX8664Storage) -> bool {
+    let frame: BootstrapX8664FrameResult = bootstrap_x86_64_frame_get(context->frames, context->current_function);
+    if (frame.error == RuntimeError.none && frame.frame.dynamic_alignment != 0) {
+        // Dynamic alignment: the prologue aligned rsp down to the frame's
+        // dynamic boundary, so storage is addressed from rsp with the
+        // frame-relative offset inverted (rsp = aligned_base - frame_size),
+        // plus any live outgoing call argument area below rsp.
+        return bootstrap_x86_64_codegen_usize(
+                context,
+                context->call_frame_depth + frame.frame.frame_size_bytes - storage.offset_bytes) &&
+            bootstrap_x86_64_codegen_literal(context, "(%rsp)");
+    }
     return bootstrap_x86_64_codegen_literal(context, "-") &&
         bootstrap_x86_64_codegen_usize(context, storage.offset_bytes) &&
         bootstrap_x86_64_codegen_literal(context, "(%rbp)");
@@ -1510,6 +1524,7 @@ fn bootstrap_x86_64_codegen_emit_call_indirect(
             context, ", %rsp\n"))) {
         return false;
     }
+    context->call_frame_depth += function_abi.call_frame_size_bytes;
     var index: usize = 0;
     while (index < function_abi.parameter_count) {
         let parameter: BootstrapX8664AbiParameter = parameters[function_abi.first_parameter + index];
@@ -1553,6 +1568,7 @@ fn bootstrap_x86_64_codegen_emit_call_indirect(
             context, "    movq %rax, %r11\n    call *%r11\n")) {
         return false;
     }
+    context->call_frame_depth -= function_abi.call_frame_size_bytes;
     if (function_abi.call_frame_size_bytes != 0 && (!bootstrap_x86_64_codegen_literal(context, "    addq $") ||
         !bootstrap_x86_64_codegen_usize(context, function_abi.call_frame_size_bytes) ||
         !bootstrap_x86_64_codegen_literal(
@@ -1581,6 +1597,7 @@ fn bootstrap_x86_64_codegen_emit_call(
             context, ", %rsp\n"))) {
         return false;
     }
+    context->call_frame_depth += function_abi.call_frame_size_bytes;
     var index: usize = 0;
     while (index < function_abi.parameter_count) {
         let parameter: BootstrapX8664AbiParameter = parameters[function_abi.first_parameter + index];
@@ -1623,6 +1640,7 @@ fn bootstrap_x86_64_codegen_emit_call(
         !bootstrap_x86_64_codegen_literal(context, "\n")) {
         return false;
     }
+    context->call_frame_depth -= function_abi.call_frame_size_bytes;
     if (function_abi.call_frame_size_bytes != 0 && (!bootstrap_x86_64_codegen_literal(context, "    addq $") ||
         !bootstrap_x86_64_codegen_usize(context, function_abi.call_frame_size_bytes) ||
         !bootstrap_x86_64_codegen_literal(
@@ -2029,6 +2047,7 @@ fn bootstrap_x86_64_codegen_emit_function(context: *BootstrapX8664CodegenContext
         return true;
     }
     context->current_function = function_id;
+    context->call_frame_depth = 0;
     if (function.linkage == BootstrapIrLinkage.module_export &&
         (!bootstrap_x86_64_codegen_literal(context, "    .globl ") ||
         !bootstrap_x86_64_codegen_append_function_symbol(context, function_id) ||
@@ -2041,6 +2060,12 @@ fn bootstrap_x86_64_codegen_emit_function(context: *BootstrapX8664CodegenContext
         !bootstrap_x86_64_codegen_append_function_symbol(context, function_id) ||
         !bootstrap_x86_64_codegen_literal(
             context, ":\n    pushq %rbp\n    movq %rsp, %rbp\n")) {
+        return false;
+    }
+    if (frames[function_id].dynamic_alignment != 0 &&
+        (!bootstrap_x86_64_codegen_literal(context, "    andq $-") ||
+            !bootstrap_x86_64_codegen_usize(context, frames[function_id].dynamic_alignment) ||
+            !bootstrap_x86_64_codegen_literal(context, ", %rsp\n"))) {
         return false;
     }
     if (frames[function_id].frame_size_bytes != 0 && (!bootstrap_x86_64_codegen_literal(context, "    subq $") ||
@@ -2132,7 +2157,7 @@ fn bootstrap_x86_64_emit_assembly(
     var context: BootstrapX8664CodegenContext = {
         semantic_input = semantic_input, ir = ir, types = types, abi = result.abi, frames = result.frames,
         text = bootstrap_x86_64_text_empty(), current_function = bootstrap_x86_64_codegen_no_id(),
-        error = RuntimeError.none,
+        call_frame_depth = 0, error = RuntimeError.none,
     };
     if (!bootstrap_x86_64_codegen_emit_module(&context)) {
         let error: RuntimeError = context.error == RuntimeError.none ? RuntimeError.invalid_argument : context.error;

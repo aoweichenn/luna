@@ -174,6 +174,27 @@ remaining path only calls a `@noreturn` function is not required to
 `return`, even with a non-`void` result type. The attribute is not part of
 any function-pointer type, so indirect calls carry no such knowledge.
 
+`@align(N)` mounts on local variable declarations, structure and union
+fields, and structure and union declarations, with one constant argument:
+
+```luna
+@align(64) var line_buffer: [64]u8 = {};
+struct Packet {
+    tag: u32;
+    @align(8) kind: u32;               // offset 8, sizeof 16
+}
+@align(16) struct Vector { x: f64; y: f64; }
+```
+
+The argument must be a positive power of two no larger than 4096. The
+attribute raises alignment — of the object's storage slot, of the field's
+offset within the record, or of the whole type — to at least the given
+value; it never lowers it. A raised type alignment participates in
+`alignof`, in tail padding (`sizeof` rounds up to it), in array strides
+and in the layout of any containing record. An aggregate whose alignment
+exceeds 16 bytes is classified MEMORY at the System V boundary, so it is
+passed and returned on the stack.
+
 ## Types
 
 ```text

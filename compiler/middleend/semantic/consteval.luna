@@ -527,6 +527,144 @@ fn bootstrap_consteval_expression(
     return bootstrap_const_not_constant();
 }
 
+fn bootstrap_semantic_alignment_value_is_valid(
+    value: u64
+) -> bool {
+    return value != 0 &&
+        value <=
+            BootstrapSemanticLimit.maximum_attribute_alignment as
+                usize as u64 &&
+        (value & (value - 1)) == 0;
+}
+
+fn bootstrap_semantic_declaration_alignment(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    declaration_node: usize
+) -> BootstrapSemanticAlignment {
+    let declaration: BootstrapSyntaxNode =
+        bootstrap_semantic_node(
+            context, unit_index, declaration_node
+        );
+    let argument: usize =
+        bootstrap_semantic_declaration_attribute_argument(
+            context,
+            unit_index,
+            declaration,
+            BootstrapSemanticAttribute.align
+        );
+    if (argument == bootstrap_semantic_no_id()) {
+        return {
+            alignment = 0, valid = true,
+        };
+    }
+    let argument_node: BootstrapSyntaxNode =
+        bootstrap_semantic_node(context, unit_index, argument);
+    let value: BootstrapConstValue =
+        bootstrap_consteval_expression(
+            context, unit_index, argument
+        );
+    if (value.error || !value.is_constant || value.is_boolean ||
+        !bootstrap_semantic_alignment_value_is_valid(
+            value.value
+        )) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.invalid_alignment,
+            unit_index,
+            argument_node.span,
+            bootstrap_semantic_no_id(),
+            bootstrap_semantic_empty_span(),
+            declaration_node
+        );
+        return {
+            alignment = 0, valid = false,
+        };
+    }
+    return {
+        alignment = value.value as usize, valid = true,
+    };
+}
+
+fn bootstrap_semantic_resolve_alignment_attributes(
+    context: *BootstrapSemanticContext
+) -> bool {
+    let none: usize = bootstrap_semantic_no_id();
+    let symbols: *const BootstrapSemanticSymbol =
+        context->symbols.data as *const BootstrapSemanticSymbol;
+    var valid: bool = true;
+    var symbol_id: usize = 0;
+    while (symbol_id < context->symbol_count &&
+        context->error == RuntimeError.none) {
+        let symbol: BootstrapSemanticSymbol = symbols[symbol_id];
+        if (symbol.kind ==
+            BootstrapSemanticSymbolKind.named_type) {
+            let record: BootstrapTypeRecord =
+                bootstrap_semantic_type_record(
+                    context, symbol.type_id
+                );
+            if (record.kind == BootstrapTypeKind.structure ||
+                record.kind == BootstrapTypeKind.record_union) {
+                let type_alignment: BootstrapSemanticAlignment =
+                    bootstrap_semantic_declaration_alignment(
+                        context,
+                        symbol.declaration_unit,
+                        symbol.declaration_node
+                    );
+                if (!type_alignment.valid) {
+                    valid = false;
+                } else if (type_alignment.alignment != 0) {
+                    bootstrap_semantic_append_alignment_override(
+                        context,
+                        symbol.declaration_unit,
+                        symbol.declaration_node,
+                        type_alignment.alignment
+                    );
+                }
+                let declaration: BootstrapSyntaxNode =
+                    bootstrap_semantic_node(
+                        context,
+                        symbol.declaration_unit,
+                        symbol.declaration_node
+                    );
+                var child: usize = declaration.first_child;
+                while (child != none &&
+                    context->error == RuntimeError.none) {
+                    let node: BootstrapSyntaxNode =
+                        bootstrap_semantic_node(
+                            context,
+                            symbol.declaration_unit,
+                            child
+                        );
+                    if (node.kind ==
+                        BootstrapSyntaxKind.field_declaration) {
+                        let field_alignment:
+                            BootstrapSemanticAlignment =
+                                bootstrap_semantic_declaration_alignment(
+                                    context,
+                                    symbol.declaration_unit,
+                                    child
+                                );
+                        if (!field_alignment.valid) {
+                            valid = false;
+                        } else if (field_alignment.alignment != 0) {
+                            bootstrap_semantic_append_alignment_override(
+                                context,
+                                symbol.declaration_unit,
+                                child,
+                                field_alignment.alignment
+                            );
+                        }
+                    }
+                    child = node.next_sibling;
+                }
+            }
+        }
+        symbol_id += 1;
+    }
+    return valid && context->error == RuntimeError.none;
+}
+
 fn bootstrap_semantic_check_assert(
     context: *BootstrapSemanticContext,
     unit_index: usize,
