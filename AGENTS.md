@@ -26,7 +26,9 @@ python3 tools/selfhost.py test     # compile+run tests/cases against
   `compiler/` or `drivers/`. It takes a few minutes.
 - Test expectations live in `tests/expectations.txt`
   (`<case>.luna <exit-code>`); negative codes are fatal signals, e.g. `-8`
-  for a division trap.
+  for a division trap. Expected-failure cases use
+  `<case>.luna FAIL <diagnostic-kind>`: compilation must fail with that
+  leading `BootstrapSemanticDiagnosticKind`, compile-only, no linking.
 
 ## Iteration discipline
 

@@ -11,9 +11,9 @@ implementation status is tracked in `roadmap.md`.
 | --- | --- |
 | m1.1 aliases / pointer arithmetic / function pointers | landed; 80/80 cases; verify fixed point |
 | Refactor R0-R2 (120-column reflow, table mappings, semantic split) | landed; same gates |
-| `docs/language.md` | missing the m1.1 chapters (debt, see step 0.1) |
-| `anchor/` | still pre-m1.1 toolchain (debt, see step 0.2) |
-| Negative tests | harness only expresses positive exit codes (debt, see step 0.3) |
+| C23 disposition review | landed in `syntax-plan.md`; m1.2-m1.10 sequenced |
+| `anchor/` | promoted to the m1.1 stage-fixed toolchain (0.2 done) |
+| Negative tests | `FAIL <diagnostic-kind>` harness landed (0.3 done) |
 
 ## Step 0 — close m1.1 completely
 
@@ -48,13 +48,13 @@ This unlocks step 2 of the iteration discipline: compiler sources may
 adopt aliases, pointer arithmetic and function pointers (dispatch
 tables included).
 
-### 0.3 Expected-failure cases
+### 0.3 Expected-failure cases — done
 
-Extend `tools/selfhost.py` with a second expectation form,
+`tools/selfhost.py` accepts a second expectation form,
 `<case>.luna FAIL <diagnostic-kind>`, asserting that compilation fails
-with exactly that leading diagnostic. Needed by nearly every m1.2
-slice (assert failures, volatile misuse, unknown attributes,
-unreachable-code misuse). Keep it small: compile-only, no linking.
+with exactly that leading `BootstrapSemanticDiagnosticKind` (exit status
+`64 + kind`, compile-only, no linking). Kind ordinals are parsed from
+`compiler/middleend/semantic/context.interface.luna`.
 
 ## Step 1 — m1.2 qualifiers, attributes and static assertions
 
@@ -98,12 +98,13 @@ benefit from.
 
 Purely additive intrinsics; low risk.
 
-### Option Y: m1.3 FFI completeness
+### Option Y: m1.3 kernel UAPI layout package
 
 Anonymous struct/union members, psABI-conformant bitfields via
-`@bits(...)`, flexible trailing array member, variadic extern calls
-with the `%al` protocol. Heaviest single item is the bitfield layout
-engine; deferred until after X.
+`@bits(...)`, `@align(N)` alignment control, `@packed` structures and the
+`[?]T` flexible trailing array member (header types). Heaviest single item
+is the bitfield layout engine; deferred until after X. Variadic support
+is parked in m1.7 until a real C-library consumer appears.
 
 ## Deferred (explicitly)
 
@@ -111,9 +112,10 @@ engine; deferred until after X.
   soft ceiling after R0; revisit only if they regrow.
 - Global variables initialized with function addresses: needs a data
   symbol relocation path (`.quad`-style); not required by any accepted
-  example.
-- Threads/atomics, `_BitInt(N)`, macros, packed layouts, alignment
-  attributes: remain out of scope per `syntax-plan.md`.
+  example. Note the language currently has no module-scope variables at
+  all; the `@align` object mount in m1.3 mounts on locals until then.
+- Threads/atomics (standard library per syntax-plan decision 6),
+  `_BitInt(N)`, macros: remain out of scope per `syntax-plan.md`.
 
 ## Discipline reminders
 

@@ -370,22 +370,78 @@ def verify_anchor(anchor: pathlib.Path) -> None:
     run(["sha256sum", "--check", "--strict", sums], cwd=anchor)
 
 
+SEMANTIC_DIAGNOSTIC_BASE = 64
+
+
+def semantic_diagnostic_kinds() -> dict[str, int]:
+    """Map BootstrapSemanticDiagnosticKind names to their enum ordinals."""
+    interface = (
+        ROOT
+        / "compiler"
+        / "middleend"
+        / "semantic"
+        / "context.interface.luna"
+    )
+    text = interface.read_text(encoding="utf-8")
+    match = re.search(
+        r"enum BootstrapSemanticDiagnosticKind[^}]*\{(.*?)\}", text, re.S
+    )
+    if match is None:
+        fail("cannot locate BootstrapSemanticDiagnosticKind")
+    return {
+        name: ordinal
+        for ordinal, name in enumerate(
+            re.findall(r"[a-z_][a-z0-9_]*", match.group(1))
+        )
+    }
+
+
 def execute_tests(stage_bin: pathlib.Path, runner: list[str]) -> int:
     expectations = ROOT / "tests" / "expectations.txt"
     cases = ROOT / "tests" / "cases"
+    kinds = semantic_diagnostic_kinds()
     passed = 0
     failed: list[str] = []
     for line in expectations.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        name, expected_text = line.split()
-        expected = int(expected_text)
+        parts = line.split()
+        name = parts[0]
         work = ROOT / "out" / "tests" / name.removesuffix(".luna")
         reset(work)
         assembly = work / f"{name}.s"
-        object_file = work / f"{name}.lo"
-        executable = work / name.removesuffix(".luna")
         try:
+            if len(parts) == 3 and parts[1] == "FAIL":
+                kind = parts[2]
+                if kind not in kinds:
+                    raise AssertionError(f"unknown diagnostic kind {kind}")
+                completed = subprocess.run(
+                    [
+                        *tool(stage_bin, "lunac"),
+                        "--executable",
+                        "-o",
+                        assembly,
+                        cases / name,
+                    ],
+                    timeout=TIMEOUT_SECONDS,
+                    capture_output=True,
+                    text=True,
+                )
+                expected_status = SEMANTIC_DIAGNOSTIC_BASE + kinds[kind]
+                if completed.returncode != expected_status:
+                    raise AssertionError(
+                        f"exit {completed.returncode}, expected {expected_status} ({kind})"
+                    )
+                if not completed.stderr.startswith(f"semantic:{kinds[kind]}:"):
+                    raise AssertionError(
+                        f"stderr {completed.stderr.strip()!r}, expected leading semantic:{kinds[kind]}:"
+                    )
+                passed += 1
+                print(f"PASS {name} (FAIL {kind})")
+                continue
+            expected = int(parts[1])
+            object_file = work / f"{name}.lo"
+            executable = work / name.removesuffix(".luna")
             run(
                 [
                     *tool(stage_bin, "lunac"),
