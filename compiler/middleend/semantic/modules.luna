@@ -1,0 +1,616 @@
+module luna.bootstrap.middleend.semantic.modules;
+
+
+fn bootstrap_semantic_collect_modules(
+    context: *BootstrapSemanticContext
+) -> bool {
+    var unit_index: usize = 0;
+    while (unit_index < context->input.unit_count &&
+        context->error == RuntimeError.none) {
+        let unit: *const BootstrapSemanticUnit =
+            bootstrap_semantic_input_unit(context, unit_index);
+        let root: BootstrapSyntaxNode =
+            bootstrap_semantic_node(
+                context,
+                unit_index,
+                unit->tree.root
+            );
+        let interface_unit: bool =
+            (root.flags &
+                (BootstrapSyntaxFlag.interface_unit as usize)) != 0;
+        let name_node: usize =
+            bootstrap_semantic_program_module_node(
+                context,
+                unit_index
+            );
+        var module_id: usize =
+            bootstrap_semantic_find_module_by_name(
+                context,
+                unit_index,
+                name_node
+            );
+        if (module_id == bootstrap_semantic_no_id()) {
+            module_id = bootstrap_semantic_append_module(
+                context,
+                {
+                    interface_unit = bootstrap_semantic_no_id(),
+                    implementation_unit =
+                        bootstrap_semantic_no_id(),
+                    name_unit = unit_index,
+                    name_node = name_node,
+                    first_import = bootstrap_semantic_no_id(),
+                    import_count = 0,
+                    visit_state = 0,
+                    reachable = false,
+                }
+            );
+        }
+        if (module_id == bootstrap_semantic_no_id()) {
+            return false;
+        }
+        let modules: *BootstrapSemanticModule =
+            context->modules.data as *BootstrapSemanticModule;
+        let previous: usize = interface_unit ?
+            modules[module_id].interface_unit :
+            modules[module_id].implementation_unit;
+        if (previous != bootstrap_semantic_no_id()) {
+            let previous_node: usize =
+                bootstrap_semantic_program_module_node(
+                    context,
+                    previous
+                );
+            bootstrap_semantic_add_diagnostic(
+                context,
+                interface_unit ?
+                    BootstrapSemanticDiagnosticKind
+                        .duplicate_interface :
+                    BootstrapSemanticDiagnosticKind
+                        .duplicate_implementation,
+                unit_index,
+                bootstrap_semantic_node(
+                    context,
+                    unit_index,
+                    name_node
+                ).span,
+                previous,
+                bootstrap_semantic_node(
+                    context,
+                    previous,
+                    previous_node
+                ).span,
+                module_id
+            );
+        } else if (interface_unit) {
+            modules[module_id].interface_unit = unit_index;
+        } else {
+            modules[module_id].implementation_unit = unit_index;
+        }
+        if (!bootstrap_semantic_append_unit_info(
+                context,
+                {
+                    module_id = module_id,
+                    interface_unit = interface_unit ? 1 : 0,
+                }
+            )) {
+            return false;
+        }
+        unit_index += 1;
+    }
+    return context->error == RuntimeError.none;
+}
+
+fn bootstrap_semantic_collect_unit_imports(
+    context: *BootstrapSemanticContext,
+    module_id: usize,
+    unit_index: usize,
+    interface_import: bool
+) -> bool {
+    let none: usize = bootstrap_semantic_no_id();
+    if (unit_index == none) {
+        return true;
+    }
+    let unit: *const BootstrapSemanticUnit =
+        bootstrap_semantic_input_unit(context, unit_index);
+    let root: BootstrapSyntaxNode =
+        bootstrap_semantic_node(
+            context,
+            unit_index,
+            unit->tree.root
+        );
+    var child: usize = bootstrap_semantic_node(
+        context,
+        unit_index,
+        root.first_child
+    ).next_sibling;
+    while (child != none) {
+        let declaration: BootstrapSyntaxNode =
+            bootstrap_semantic_node(
+                context,
+                unit_index,
+                child
+            );
+        if (declaration.kind !=
+            BootstrapSyntaxKind.import_declaration) {
+            break;
+        }
+        let target: usize =
+            bootstrap_semantic_find_module_by_name(
+                context,
+                unit_index,
+                child
+            );
+        if (target == none) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.unknown_import,
+                unit_index,
+                declaration.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                0
+            );
+        } else if (target == module_id) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.self_import,
+                unit_index,
+                declaration.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                module_id
+            );
+        } else {
+            let modules: *BootstrapSemanticModule =
+                context->modules.data as
+                    *BootstrapSemanticModule;
+            let imports: *const BootstrapSemanticImport =
+                context->imports.data as
+                    *const BootstrapSemanticImport;
+            var duplicate: usize = none;
+            var index: usize = 0;
+            while (index < modules[module_id].import_count) {
+                let import_id: usize =
+                    modules[module_id].first_import + index;
+                if (imports[import_id].target_module == target) {
+                    duplicate = import_id;
+                    break;
+                }
+                index += 1;
+            }
+            if (duplicate != none) {
+                bootstrap_semantic_add_diagnostic(
+                    context,
+                    BootstrapSemanticDiagnosticKind
+                        .duplicate_import,
+                    unit_index,
+                    declaration.span,
+                    imports[duplicate].source_unit,
+                    bootstrap_semantic_node(
+                        context,
+                        imports[duplicate].source_unit,
+                        imports[duplicate].declaration_node
+                    ).span,
+                    target
+                );
+            } else {
+                let import_id: usize =
+                    bootstrap_semantic_append_import(
+                        context,
+                        {
+                            owner_module = module_id,
+                            source_unit = unit_index,
+                            declaration_node = child,
+                            target_module = target,
+                            interface_import = interface_import,
+                        }
+                    );
+                if (import_id == none) {
+                    return false;
+                }
+                let result_modules: *BootstrapSemanticModule =
+                    context->modules.data as
+                        *BootstrapSemanticModule;
+                if (result_modules[module_id].import_count == 0) {
+                    result_modules[module_id].first_import =
+                        import_id;
+                }
+                result_modules[module_id].import_count += 1;
+            }
+        }
+        child = declaration.next_sibling;
+    }
+    return context->error == RuntimeError.none;
+}
+
+fn bootstrap_semantic_collect_imports(
+    context: *BootstrapSemanticContext
+) -> bool {
+    var module_id: usize = 0;
+    while (module_id < context->module_count &&
+        context->error == RuntimeError.none) {
+        let modules: *const BootstrapSemanticModule =
+            context->modules.data as
+                *const BootstrapSemanticModule;
+        let interface_unit: usize =
+            modules[module_id].interface_unit;
+        let implementation_unit: usize =
+            modules[module_id].implementation_unit;
+        if (!bootstrap_semantic_collect_unit_imports(
+                context,
+                module_id,
+                interface_unit,
+                true
+            ) ||
+            !bootstrap_semantic_collect_unit_imports(
+                context,
+                module_id,
+                implementation_unit,
+                false
+            )) {
+            return false;
+        }
+        module_id += 1;
+    }
+    return true;
+}
+
+fn bootstrap_semantic_visit_imports(
+    context: *BootstrapSemanticContext,
+    module_id: usize,
+    depth: usize
+) -> bool {
+    var modules: *BootstrapSemanticModule =
+        context->modules.data as *BootstrapSemanticModule;
+    if (modules[module_id].visit_state == 2) {
+        return true;
+    }
+    if (modules[module_id].visit_state == 1) {
+        return false;
+    }
+    if (depth >=
+        BootstrapSemanticLimit.maximum_module_depth as usize) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.resource_limit,
+            modules[module_id].name_unit,
+            bootstrap_semantic_node(
+                context,
+                modules[module_id].name_unit,
+                modules[module_id].name_node
+            ).span,
+            bootstrap_semantic_no_id(),
+            bootstrap_semantic_empty_span(),
+            depth
+        );
+        return false;
+    }
+    modules[module_id].visit_state = 1;
+    let first_import: usize = modules[module_id].first_import;
+    let import_count: usize = modules[module_id].import_count;
+    var index: usize = 0;
+    while (index < import_count) {
+        let imports: *const BootstrapSemanticImport =
+            context->imports.data as
+                *const BootstrapSemanticImport;
+        let record: BootstrapSemanticImport =
+            imports[first_import + index];
+        let diagnostic_count: usize =
+            context->diagnostics.count;
+        if (!bootstrap_semantic_visit_imports(
+                context,
+                record.target_module,
+                depth + 1
+            )) {
+            if (context->error != RuntimeError.none ||
+                context->diagnostics.count != diagnostic_count) {
+                return false;
+            }
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.import_cycle,
+                record.source_unit,
+                bootstrap_semantic_node(
+                    context,
+                    record.source_unit,
+                    record.declaration_node
+                ).span,
+                modules[record.target_module].name_unit,
+                bootstrap_semantic_node(
+                    context,
+                    modules[record.target_module].name_unit,
+                    modules[record.target_module].name_node
+                ).span,
+                record.target_module
+            );
+            return false;
+        }
+        index += 1;
+    }
+    modules = context->modules.data as
+        *BootstrapSemanticModule;
+    modules[module_id].visit_state = 2;
+    return true;
+}
+
+fn bootstrap_semantic_validate_import_graph(
+    context: *BootstrapSemanticContext
+) -> bool {
+    var module_id: usize = 0;
+    while (module_id < context->module_count) {
+        let modules: *const BootstrapSemanticModule =
+            context->modules.data as
+                *const BootstrapSemanticModule;
+        if (modules[module_id].visit_state == 0) {
+            bootstrap_semantic_visit_imports(
+                context,
+                module_id,
+                0
+            );
+        }
+        module_id += 1;
+    }
+    return context->error == RuntimeError.none;
+}
+
+fn bootstrap_semantic_symbols_have_same_name(
+    context: *BootstrapSemanticContext,
+    left: BootstrapSemanticSymbol,
+    right: BootstrapSemanticSymbol
+) -> bool {
+    return left.kind !=
+            BootstrapSemanticSymbolKind.enum_member &&
+        right.kind !=
+            BootstrapSemanticSymbolKind.enum_member &&
+        bootstrap_semantic_tokens_equal(
+            context,
+            left.declaration_unit,
+            left.name_token,
+            right.declaration_unit,
+            right.name_token
+        );
+}
+
+fn bootstrap_semantic_validate_imported_names(
+    context: *BootstrapSemanticContext
+) -> bool {
+    let modules: *const BootstrapSemanticModule =
+        context->modules.data as
+            *const BootstrapSemanticModule;
+    let imports: *const BootstrapSemanticImport =
+        context->imports.data as
+            *const BootstrapSemanticImport;
+    let symbols: *const BootstrapSemanticSymbol =
+        context->symbols.data as
+            *const BootstrapSemanticSymbol;
+    var module_id: usize = 0;
+    while (module_id < context->module_count) {
+        let module_record: BootstrapSemanticModule =
+            modules[module_id];
+        var left_import_index: usize = 0;
+        while (left_import_index <
+            module_record.import_count) {
+            let left_import: BootstrapSemanticImport =
+                imports[
+                    module_record.first_import +
+                        left_import_index
+                ];
+            var right_import_index: usize =
+                left_import_index + 1;
+            while (right_import_index <
+                module_record.import_count) {
+                let right_import: BootstrapSemanticImport =
+                    imports[
+                        module_record.first_import +
+                            right_import_index
+                    ];
+                var left_symbol_id: usize = 0;
+                while (left_symbol_id <
+                    context->symbol_count) {
+                    let left_symbol: BootstrapSemanticSymbol =
+                        symbols[left_symbol_id];
+                    if (left_symbol.module_id ==
+                            left_import.target_module &&
+                        (left_symbol.flags &
+                            (BootstrapSemanticSymbolFlag
+                                .exported as usize)) != 0) {
+                        var right_symbol_id: usize = 0;
+                        while (right_symbol_id <
+                            context->symbol_count) {
+                            let right_symbol:
+                                BootstrapSemanticSymbol =
+                                symbols[right_symbol_id];
+                            if (right_symbol.module_id ==
+                                    right_import.target_module &&
+                                (right_symbol.flags &
+                                    (BootstrapSemanticSymbolFlag
+                                        .exported as usize)) != 0 &&
+                                bootstrap_semantic_symbols_have_same_name(
+                                    context,
+                                    left_symbol,
+                                    right_symbol
+                                )) {
+                                bootstrap_semantic_add_diagnostic(
+                                    context,
+                                    BootstrapSemanticDiagnosticKind
+                                        .ambiguous_import,
+                                    right_import.source_unit,
+                                    bootstrap_semantic_node(
+                                        context,
+                                        right_import.source_unit,
+                                        right_import
+                                            .declaration_node
+                                    ).span,
+                                    left_import.source_unit,
+                                    bootstrap_semantic_node(
+                                        context,
+                                        left_import.source_unit,
+                                        left_import
+                                            .declaration_node
+                                    ).span,
+                                    right_symbol_id
+                                );
+                            }
+                            right_symbol_id += 1;
+                        }
+                    }
+                    left_symbol_id += 1;
+                }
+                right_import_index += 1;
+            }
+            left_import_index += 1;
+        }
+
+        var local_symbol_id: usize = 0;
+        while (local_symbol_id < context->symbol_count) {
+            let local_symbol: BootstrapSemanticSymbol =
+                symbols[local_symbol_id];
+            if (local_symbol.module_id == module_id &&
+                local_symbol.kind !=
+                    BootstrapSemanticSymbolKind.enum_member) {
+                var import_index: usize = 0;
+                while (import_index <
+                    module_record.import_count) {
+                    let import_record:
+                        BootstrapSemanticImport =
+                        imports[
+                            module_record.first_import +
+                                import_index
+                        ];
+                    var imported_symbol_id: usize = 0;
+                    while (imported_symbol_id <
+                        context->symbol_count) {
+                        let imported_symbol:
+                            BootstrapSemanticSymbol =
+                            symbols[imported_symbol_id];
+                        if (imported_symbol.module_id ==
+                                import_record.target_module &&
+                            (imported_symbol.flags &
+                                (BootstrapSemanticSymbolFlag
+                                    .exported as usize)) != 0 &&
+                            bootstrap_semantic_symbols_have_same_name(
+                                context,
+                                local_symbol,
+                                imported_symbol
+                            )) {
+                            bootstrap_semantic_add_diagnostic(
+                                context,
+                                BootstrapSemanticDiagnosticKind
+                                    .duplicate_name,
+                                local_symbol.declaration_unit,
+                                bootstrap_semantic_token(
+                                    context,
+                                    local_symbol.declaration_unit,
+                                    local_symbol.name_token
+                                ).span,
+                                imported_symbol.declaration_unit,
+                                bootstrap_semantic_token(
+                                    context,
+                                    imported_symbol
+                                        .declaration_unit,
+                                    imported_symbol.name_token
+                                ).span,
+                                imported_symbol_id
+                            );
+                        }
+                        imported_symbol_id += 1;
+                    }
+                    import_index += 1;
+                }
+            }
+            local_symbol_id += 1;
+        }
+        module_id += 1;
+    }
+    return context->error == RuntimeError.none;
+}
+
+fn bootstrap_semantic_mark_reachable(
+    context: *BootstrapSemanticContext,
+    module_id: usize,
+    depth: usize
+) -> bool {
+    if (module_id >= context->module_count) {
+        context->error = RuntimeError.invalid_argument;
+        return false;
+    }
+    let modules: *BootstrapSemanticModule =
+        context->modules.data as *BootstrapSemanticModule;
+    if (modules[module_id].reachable) {
+        return true;
+    }
+    if (depth >=
+        BootstrapSemanticLimit.maximum_module_depth as usize) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.resource_limit,
+            modules[module_id].name_unit,
+            bootstrap_semantic_node(
+                context,
+                modules[module_id].name_unit,
+                modules[module_id].name_node
+            ).span,
+            bootstrap_semantic_no_id(),
+            bootstrap_semantic_empty_span(),
+            depth
+        );
+        return false;
+    }
+    modules[module_id].reachable = true;
+    let first_import: usize = modules[module_id].first_import;
+    let import_count: usize = modules[module_id].import_count;
+    var index: usize = 0;
+    while (index < import_count) {
+        let imports: *const BootstrapSemanticImport =
+            context->imports.data as
+                *const BootstrapSemanticImport;
+        if (!bootstrap_semantic_mark_reachable(
+            context,
+            imports[first_import + index].target_module,
+            depth + 1
+        )) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_semantic_validate_reachability(
+    context: *BootstrapSemanticContext,
+    root_module: usize
+) -> bool {
+    if (root_module >= context->module_count) {
+        return false;
+    }
+    if (!bootstrap_semantic_mark_reachable(
+            context,
+            root_module,
+            0
+        )) {
+        return false;
+    }
+    let modules: *const BootstrapSemanticModule =
+        context->modules.data as
+            *const BootstrapSemanticModule;
+    var module_id: usize = 0;
+    while (module_id < context->module_count) {
+        if (!modules[module_id].reachable) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind
+                    .unreachable_module,
+                modules[module_id].name_unit,
+                bootstrap_semantic_node(
+                    context,
+                    modules[module_id].name_unit,
+                    modules[module_id].name_node
+                ).span,
+                bootstrap_semantic_no_id(),
+                bootstrap_semantic_empty_span(),
+                module_id
+            );
+        }
+        module_id += 1;
+    }
+    return true;
+}

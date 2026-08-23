@@ -1,0 +1,1736 @@
+module luna.bootstrap.middleend.semantic.context;
+
+
+fn bootstrap_semantic_no_id() -> usize {
+    return BootstrapSemanticLimit.maximum_size as usize;
+}
+
+fn bootstrap_semantic_empty_span() -> BootstrapSourceSpan {
+    return {
+        offset = 0,
+        length = 0,
+        line = 0,
+        column = 0,
+    };
+}
+
+fn bootstrap_semantic_invalid_diagnostic()
+    -> BootstrapSemanticDiagnostic {
+    let none: usize = bootstrap_semantic_no_id();
+    return {
+        kind = BootstrapSemanticDiagnosticKind.invalid_input,
+        unit_index = none,
+        span = bootstrap_semantic_empty_span(),
+        related_unit = none,
+        related_span = bootstrap_semantic_empty_span(),
+        detail = 0,
+    };
+}
+
+fn bootstrap_semantic_input_empty(
+    executable: bool
+) -> BootstrapSemanticInput {
+    return {
+        units = std_byte_buffer_empty(),
+        unit_count = 0,
+        executable = executable,
+    };
+}
+
+fn bootstrap_semantic_input_storage_is_valid(
+    input: BootstrapSemanticInput
+) -> bool {
+    return std_byte_buffer_is_valid(input.units) &&
+        input.units.length % sizeof(BootstrapSemanticUnit) == 0 &&
+        input.unit_count <=
+            BootstrapSemanticLimit.maximum_modules as usize * 2 &&
+        input.unit_count ==
+            input.units.length / sizeof(BootstrapSemanticUnit);
+}
+
+fn bootstrap_semantic_source_is_valid(
+    source: StdTextView
+) -> bool {
+    if (!std_text_is_valid_utf8(source)) {
+        return false;
+    }
+    var index: usize = 0;
+    while (index < source.length) {
+        if (source.data[index] == 0) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_semantic_unit_is_valid(
+    unit: BootstrapSemanticUnit
+) -> bool {
+    return bootstrap_semantic_source_is_valid(unit.source) &&
+        bootstrap_token_buffer_is_valid(unit.tokens) &&
+        bootstrap_syntax_tree_is_valid(unit.tree) &&
+        unit.tokens.count == unit.tree.token_count;
+}
+
+fn bootstrap_semantic_input_is_valid(
+    input: BootstrapSemanticInput
+) -> bool {
+    if (!bootstrap_semantic_input_storage_is_valid(input) ||
+        input.unit_count == 0 ||
+        input.unit_count >
+            BootstrapSemanticLimit.maximum_modules as usize * 2) {
+        return false;
+    }
+    let units: *const BootstrapSemanticUnit =
+        input.units.data as *const BootstrapSemanticUnit;
+    var index: usize = 0;
+    while (index < input.unit_count) {
+        if (!bootstrap_semantic_unit_is_valid(units[index])) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_semantic_input_add(
+    input: *BootstrapSemanticInput,
+    unit: BootstrapSemanticUnit
+) -> bool {
+    if (input == null ||
+        !bootstrap_semantic_input_storage_is_valid(*input) ||
+        !bootstrap_semantic_unit_is_valid(unit) ||
+        input->unit_count >=
+            BootstrapSemanticLimit.maximum_modules as usize * 2) {
+        return false;
+    }
+    let appended: StdByteBufferResult = std_byte_buffer_append(
+        input->units,
+        (&unit) as *const BootstrapSemanticUnit as *const u8,
+        sizeof(BootstrapSemanticUnit)
+    );
+    input->units = appended.buffer;
+    if (appended.error != RuntimeError.none) {
+        return false;
+    }
+    input->unit_count += 1;
+    return true;
+}
+
+fn bootstrap_semantic_input_release(
+    input: BootstrapSemanticInput
+) -> RuntimeError {
+    if (!bootstrap_semantic_input_storage_is_valid(input)) {
+        return RuntimeError.invalid_argument;
+    }
+    return std_byte_buffer_release(input.units);
+}
+
+fn bootstrap_semantic_diagnostics_empty()
+    -> BootstrapSemanticDiagnosticBuffer {
+    return {
+        storage = std_byte_buffer_empty(),
+        count = 0,
+    };
+}
+
+fn bootstrap_semantic_diagnostics_storage_is_valid(
+    diagnostics: BootstrapSemanticDiagnosticBuffer
+) -> bool {
+    return std_byte_buffer_is_valid(diagnostics.storage) &&
+        diagnostics.storage.length %
+            sizeof(BootstrapSemanticDiagnostic) == 0 &&
+        diagnostics.count <=
+            BootstrapSemanticLimit.maximum_diagnostics as usize &&
+        diagnostics.count ==
+            diagnostics.storage.length /
+                sizeof(BootstrapSemanticDiagnostic);
+}
+
+fn bootstrap_semantic_diagnostic_get(
+    diagnostics: BootstrapSemanticDiagnosticBuffer,
+    index: usize
+) -> BootstrapSemanticDiagnosticResult {
+    if (!bootstrap_semantic_diagnostics_storage_is_valid(
+            diagnostics
+        ) || index >= diagnostics.count) {
+        return {
+            diagnostic = bootstrap_semantic_invalid_diagnostic(),
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    let records: *const BootstrapSemanticDiagnostic =
+        diagnostics.storage.data as
+            *const BootstrapSemanticDiagnostic;
+    return {
+        diagnostic = records[index],
+        error = RuntimeError.none,
+    };
+}
+
+fn bootstrap_semantic_add_diagnostic(
+    context: *BootstrapSemanticContext,
+    kind: BootstrapSemanticDiagnosticKind,
+    unit_index: usize,
+    span: BootstrapSourceSpan,
+    related_unit: usize,
+    related_span: BootstrapSourceSpan,
+    detail: usize
+) -> bool {
+    if (context->error != RuntimeError.none) {
+        return false;
+    }
+    if (context->diagnostics.count >=
+        BootstrapSemanticLimit.maximum_diagnostics as usize) {
+        context->error = RuntimeError.out_of_memory;
+        return false;
+    }
+    let diagnostic: BootstrapSemanticDiagnostic = {
+        kind = kind,
+        unit_index = unit_index,
+        span = span,
+        related_unit = related_unit,
+        related_span = related_span,
+        detail = detail,
+    };
+    let appended: StdByteBufferResult = std_byte_buffer_append(
+        context->diagnostics.storage,
+        (&diagnostic) as
+            *const BootstrapSemanticDiagnostic as *const u8,
+        sizeof(BootstrapSemanticDiagnostic)
+    );
+    context->diagnostics.storage = appended.buffer;
+    context->error = appended.error;
+    if (appended.error == RuntimeError.none) {
+        context->diagnostics.count += 1;
+        return true;
+    }
+    return false;
+}
+
+fn bootstrap_semantic_result_is_success(
+    result: BootstrapSemanticResult
+) -> bool {
+    return result.error == RuntimeError.none &&
+        result.diagnostics.count == 0 &&
+        bootstrap_type_table_is_valid(result.types, true) &&
+        bootstrap_ir_is_valid(result.ir, result.types);
+}
+
+fn bootstrap_semantic_release_error(
+    current: RuntimeError,
+    next: RuntimeError
+) -> RuntimeError {
+    return current == RuntimeError.none ? next : current;
+}
+
+fn bootstrap_semantic_result_release(
+    result: BootstrapSemanticResult
+) -> RuntimeError {
+    if (!bootstrap_semantic_diagnostics_storage_is_valid(
+            result.diagnostics
+        ) ||
+        !bootstrap_type_table_storage_is_valid(result.types) ||
+        !bootstrap_ir_storage_is_valid(result.ir)) {
+        return RuntimeError.invalid_argument;
+    }
+    var error: RuntimeError =
+        bootstrap_type_table_release(result.types);
+    error = bootstrap_semantic_release_error(
+        error,
+        bootstrap_ir_release(result.ir)
+    );
+    error = bootstrap_semantic_release_error(
+        error,
+        std_byte_buffer_release(result.diagnostics.storage)
+    );
+    return error;
+}
+
+fn bootstrap_semantic_context_storage_is_valid(
+    context: *BootstrapSemanticContext
+) -> bool {
+    return context != null &&
+        std_byte_buffer_is_valid(context->units) &&
+        context->units.length %
+            sizeof(BootstrapSemanticUnitInfo) == 0 &&
+        context->unit_count ==
+            context->units.length /
+                sizeof(BootstrapSemanticUnitInfo) &&
+        std_byte_buffer_is_valid(context->modules) &&
+        context->modules.length %
+            sizeof(BootstrapSemanticModule) == 0 &&
+        context->module_count ==
+            context->modules.length /
+                sizeof(BootstrapSemanticModule) &&
+        std_byte_buffer_is_valid(context->imports) &&
+        context->imports.length %
+            sizeof(BootstrapSemanticImport) == 0 &&
+        context->import_count ==
+            context->imports.length /
+                sizeof(BootstrapSemanticImport) &&
+        std_byte_buffer_is_valid(context->symbols) &&
+        context->symbols.length %
+            sizeof(BootstrapSemanticSymbol) == 0 &&
+        context->symbol_count ==
+            context->symbols.length /
+                sizeof(BootstrapSemanticSymbol) &&
+        std_byte_buffer_is_valid(context->functions) &&
+        context->functions.length %
+            sizeof(BootstrapSemanticFunction) == 0 &&
+        context->function_count ==
+            context->functions.length /
+                sizeof(BootstrapSemanticFunction) &&
+        std_byte_buffer_is_valid(context->parameters) &&
+        context->parameters.length %
+            sizeof(BootstrapSemanticParameter) == 0 &&
+        context->parameter_count ==
+            context->parameters.length /
+                sizeof(BootstrapSemanticParameter) &&
+        std_byte_buffer_is_valid(context->locals) &&
+        context->locals.length %
+            sizeof(BootstrapSemanticLocal) == 0 &&
+        context->local_count ==
+            context->locals.length /
+                sizeof(BootstrapSemanticLocal) &&
+        context->scope_depth <=
+            BootstrapSemanticLimit.maximum_scope_depth as usize &&
+        context->type_depth <=
+            BootstrapSemanticLimit.maximum_type_depth as usize &&
+        bootstrap_semantic_diagnostics_storage_is_valid(
+            context->diagnostics
+        ) &&
+        bootstrap_type_table_storage_is_valid(context->types) &&
+        bootstrap_ir_storage_is_valid(context->ir);
+}
+
+fn bootstrap_semantic_context_init(
+    input: BootstrapSemanticInput
+) -> BootstrapSemanticContext {
+    return {
+        input = input,
+        units = std_byte_buffer_empty(),
+        unit_count = 0,
+        modules = std_byte_buffer_empty(),
+        module_count = 0,
+        imports = std_byte_buffer_empty(),
+        import_count = 0,
+        symbols = std_byte_buffer_empty(),
+        symbol_count = 0,
+        functions = std_byte_buffer_empty(),
+        function_count = 0,
+        parameters = std_byte_buffer_empty(),
+        parameter_count = 0,
+        locals = std_byte_buffer_empty(),
+        local_count = 0,
+        types = bootstrap_type_table_empty(),
+        ir = bootstrap_ir_empty(),
+        diagnostics = bootstrap_semantic_diagnostics_empty(),
+        error = RuntimeError.none,
+        current_function = bootstrap_semantic_no_id(),
+        current_unit = bootstrap_semantic_no_id(),
+        current_block = bootstrap_semantic_no_id(),
+        scope_depth = 0,
+        type_depth = 0,
+        break_block = bootstrap_semantic_no_id(),
+        continue_block = bootstrap_semantic_no_id(),
+    };
+}
+
+fn bootstrap_semantic_context_release_work(
+    context: *BootstrapSemanticContext
+) -> RuntimeError {
+    if (!bootstrap_semantic_context_storage_is_valid(context)) {
+        return RuntimeError.invalid_argument;
+    }
+    var error: RuntimeError =
+        std_byte_buffer_release(context->units);
+    error = bootstrap_semantic_release_error(
+        error,
+        std_byte_buffer_release(context->modules)
+    );
+    error = bootstrap_semantic_release_error(
+        error,
+        std_byte_buffer_release(context->imports)
+    );
+    error = bootstrap_semantic_release_error(
+        error,
+        std_byte_buffer_release(context->symbols)
+    );
+    error = bootstrap_semantic_release_error(
+        error,
+        std_byte_buffer_release(context->functions)
+    );
+    error = bootstrap_semantic_release_error(
+        error,
+        std_byte_buffer_release(context->parameters)
+    );
+    error = bootstrap_semantic_release_error(
+        error,
+        std_byte_buffer_release(context->locals)
+    );
+    return error;
+}
+
+fn bootstrap_semantic_input_unit(
+    context: *BootstrapSemanticContext,
+    unit_index: usize
+) -> *const BootstrapSemanticUnit {
+    if (context == null ||
+        unit_index >= context->input.unit_count) {
+        return null;
+    }
+    let units: *const BootstrapSemanticUnit =
+        context->input.units.data as
+            *const BootstrapSemanticUnit;
+    return &units[unit_index];
+}
+
+fn bootstrap_semantic_node(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    node_index: usize
+) -> BootstrapSyntaxNode {
+    let unit: *const BootstrapSemanticUnit =
+        bootstrap_semantic_input_unit(context, unit_index);
+    if (unit == null) {
+        return {
+            kind = BootstrapSyntaxKind.invalid,
+            span = bootstrap_semantic_empty_span(),
+            token_index = bootstrap_semantic_no_id(),
+            parent = bootstrap_semantic_no_id(),
+            first_child = bootstrap_semantic_no_id(),
+            last_child = bootstrap_semantic_no_id(),
+            next_sibling = bootstrap_semantic_no_id(),
+            child_count = 0,
+            flags = 0,
+        };
+    }
+    let result: BootstrapSyntaxNodeResult =
+        bootstrap_syntax_tree_get(unit->tree, node_index);
+    if (result.error != RuntimeError.none) {
+        context->error = result.error;
+    }
+    return result.node;
+}
+
+fn bootstrap_semantic_token(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    token_index: usize
+) -> BootstrapToken {
+    let unit: *const BootstrapSemanticUnit =
+        bootstrap_semantic_input_unit(context, unit_index);
+    if (unit == null) {
+        return {
+            kind = BootstrapTokenKind.invalid,
+            span = bootstrap_semantic_empty_span(),
+        };
+    }
+    let result: BootstrapTokenResult =
+        bootstrap_token_buffer_get(unit->tokens, token_index);
+    if (result.error != RuntimeError.none) {
+        context->error = result.error;
+    }
+    return result.token;
+}
+
+fn bootstrap_semantic_text_equal(
+    context: *BootstrapSemanticContext,
+    left_unit: usize,
+    left_span: BootstrapSourceSpan,
+    right_unit: usize,
+    right_span: BootstrapSourceSpan
+) -> bool {
+    if (left_span.length != right_span.length) {
+        return false;
+    }
+    let left: *const BootstrapSemanticUnit =
+        bootstrap_semantic_input_unit(context, left_unit);
+    let right: *const BootstrapSemanticUnit =
+        bootstrap_semantic_input_unit(context, right_unit);
+    if (left == null || right == null ||
+        left_span.offset > left->source.length ||
+        left_span.length >
+            left->source.length - left_span.offset ||
+        right_span.offset > right->source.length ||
+        right_span.length >
+            right->source.length - right_span.offset) {
+        context->error = RuntimeError.invalid_argument;
+        return false;
+    }
+    var index: usize = 0;
+    while (index < left_span.length) {
+        if (left->source.data[left_span.offset + index] !=
+            right->source.data[right_span.offset + index]) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_semantic_tokens_equal(
+    context: *BootstrapSemanticContext,
+    left_unit: usize,
+    left_token: usize,
+    right_unit: usize,
+    right_token: usize
+) -> bool {
+    return bootstrap_semantic_text_equal(
+        context,
+        left_unit,
+        bootstrap_semantic_token(
+            context,
+            left_unit,
+            left_token
+        ).span,
+        right_unit,
+        bootstrap_semantic_token(
+            context,
+            right_unit,
+            right_token
+        ).span
+    );
+}
+
+fn bootstrap_semantic_module_names_equal(
+    context: *BootstrapSemanticContext,
+    left_unit: usize,
+    left_node: usize,
+    right_unit: usize,
+    right_node: usize
+) -> bool {
+    let left: BootstrapSyntaxNode =
+        bootstrap_semantic_node(context, left_unit, left_node);
+    let right: BootstrapSyntaxNode =
+        bootstrap_semantic_node(context, right_unit, right_node);
+    if (left.child_count != right.child_count ||
+        left.child_count == 0) {
+        return false;
+    }
+    var left_child: usize = left.first_child;
+    var right_child: usize = right.first_child;
+    var index: usize = 0;
+    while (index < left.child_count) {
+        let left_name: BootstrapSyntaxNode =
+            bootstrap_semantic_node(
+                context,
+                left_unit,
+                left_child
+            );
+        let right_name: BootstrapSyntaxNode =
+            bootstrap_semantic_node(
+                context,
+                right_unit,
+                right_child
+            );
+        if (!bootstrap_semantic_tokens_equal(
+                context,
+                left_unit,
+                left_name.token_index,
+                right_unit,
+                right_name.token_index
+            )) {
+            return false;
+        }
+        left_child = left_name.next_sibling;
+        right_child = right_name.next_sibling;
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_semantic_append_record(
+    context: *BootstrapSemanticContext,
+    destination: *StdByteBuffer,
+    data: *const u8,
+    length: usize
+) -> bool {
+    if (context->error != RuntimeError.none ||
+        destination == null || data == null || length == 0) {
+        return false;
+    }
+    let appended: StdByteBufferResult =
+        std_byte_buffer_append(*destination, data, length);
+    *destination = appended.buffer;
+    context->error = appended.error;
+    return appended.error == RuntimeError.none;
+}
+
+fn bootstrap_semantic_append_unit_info(
+    context: *BootstrapSemanticContext,
+    info: BootstrapSemanticUnitInfo
+) -> bool {
+    if (!bootstrap_semantic_append_record(
+            context,
+            &context->units,
+            (&info) as
+                *const BootstrapSemanticUnitInfo as *const u8,
+            sizeof(BootstrapSemanticUnitInfo)
+        )) {
+        return false;
+    }
+    context->unit_count += 1;
+    return true;
+}
+
+fn bootstrap_semantic_append_module(
+    context: *BootstrapSemanticContext,
+    module_record: BootstrapSemanticModule
+) -> usize {
+    let result: usize = context->module_count;
+    if (!bootstrap_semantic_append_record(
+            context,
+            &context->modules,
+            (&module_record) as
+                *const BootstrapSemanticModule as *const u8,
+            sizeof(BootstrapSemanticModule)
+        )) {
+        return bootstrap_semantic_no_id();
+    }
+    context->module_count += 1;
+    return result;
+}
+
+fn bootstrap_semantic_find_module_by_name(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    name_node: usize
+) -> usize {
+    let modules: *const BootstrapSemanticModule =
+        context->modules.data as
+            *const BootstrapSemanticModule;
+    var index: usize = 0;
+    while (index < context->module_count) {
+        if (bootstrap_semantic_module_names_equal(
+                context,
+                unit_index,
+                name_node,
+                modules[index].name_unit,
+                modules[index].name_node
+            )) {
+            return index;
+        }
+        index += 1;
+    }
+    return bootstrap_semantic_no_id();
+}
+
+fn bootstrap_semantic_program_module_node(
+    context: *BootstrapSemanticContext,
+    unit_index: usize
+) -> usize {
+    let unit: *const BootstrapSemanticUnit =
+        bootstrap_semantic_input_unit(context, unit_index);
+    let root: BootstrapSyntaxNode = bootstrap_semantic_node(
+        context,
+        unit_index,
+        unit->tree.root
+    );
+    if (root.kind != BootstrapSyntaxKind.program ||
+        root.child_count == 0) {
+        context->error = RuntimeError.invalid_argument;
+        return bootstrap_semantic_no_id();
+    }
+    let module_declaration: BootstrapSyntaxNode =
+        bootstrap_semantic_node(
+            context,
+            unit_index,
+            root.first_child
+        );
+    if (module_declaration.kind !=
+        BootstrapSyntaxKind.module_declaration) {
+        context->error = RuntimeError.invalid_argument;
+        return bootstrap_semantic_no_id();
+    }
+    return root.first_child;
+}
+
+fn bootstrap_semantic_append_import(
+    context: *BootstrapSemanticContext,
+    record: BootstrapSemanticImport
+) -> usize {
+    let result: usize = context->import_count;
+    if (!bootstrap_semantic_append_record(
+            context,
+            &context->imports,
+            (&record) as
+                *const BootstrapSemanticImport as *const u8,
+            sizeof(BootstrapSemanticImport)
+        )) {
+        return bootstrap_semantic_no_id();
+    }
+    context->import_count += 1;
+    return result;
+}
+
+fn bootstrap_semantic_append_symbol(
+    context: *BootstrapSemanticContext,
+    symbol: BootstrapSemanticSymbol
+) -> usize {
+    let result: usize = context->symbol_count;
+    if (!bootstrap_semantic_append_record(
+            context,
+            &context->symbols,
+            (&symbol) as
+                *const BootstrapSemanticSymbol as *const u8,
+            sizeof(BootstrapSemanticSymbol)
+        )) {
+        return bootstrap_semantic_no_id();
+    }
+    context->symbol_count += 1;
+    return result;
+}
+
+fn bootstrap_semantic_find_local_symbol(
+    context: *BootstrapSemanticContext,
+    module_id: usize,
+    unit_index: usize,
+    name_token: usize,
+    kind: BootstrapSemanticSymbolKind,
+    interface_scope: bool
+) -> usize {
+    let symbols: *const BootstrapSemanticSymbol =
+        context->symbols.data as
+            *const BootstrapSemanticSymbol;
+    var index: usize = 0;
+    while (index < context->symbol_count) {
+        let symbol: BootstrapSemanticSymbol = symbols[index];
+        if (symbol.module_id == module_id &&
+            symbol.kind == kind &&
+            (!interface_scope ||
+                (symbol.flags &
+                    (BootstrapSemanticSymbolFlag
+                        .interface_declaration as usize)) != 0) &&
+            bootstrap_semantic_tokens_equal(
+                context,
+                unit_index,
+                name_token,
+                symbol.declaration_unit,
+                symbol.name_token
+            )) {
+            return index;
+        }
+        index += 1;
+    }
+    return bootstrap_semantic_no_id();
+}
+
+fn bootstrap_semantic_find_any_local_symbol(
+    context: *BootstrapSemanticContext,
+    module_id: usize,
+    unit_index: usize,
+    name_token: usize
+) -> usize {
+    let symbols: *const BootstrapSemanticSymbol =
+        context->symbols.data as
+            *const BootstrapSemanticSymbol;
+    var index: usize = 0;
+    while (index < context->symbol_count) {
+        let symbol: BootstrapSemanticSymbol = symbols[index];
+        if (symbol.module_id == module_id &&
+            symbol.kind !=
+                BootstrapSemanticSymbolKind.enum_member &&
+            bootstrap_semantic_tokens_equal(
+                context,
+                unit_index,
+                name_token,
+                symbol.declaration_unit,
+                symbol.name_token
+            )) {
+            return index;
+        }
+        index += 1;
+    }
+    return bootstrap_semantic_no_id();
+}
+
+fn bootstrap_semantic_unit_module(
+    context: *BootstrapSemanticContext,
+    unit_index: usize
+) -> usize {
+    if (unit_index >= context->unit_count) {
+        context->error = RuntimeError.invalid_argument;
+        return bootstrap_semantic_no_id();
+    }
+    let units: *const BootstrapSemanticUnitInfo =
+        context->units.data as
+            *const BootstrapSemanticUnitInfo;
+    return units[unit_index].module_id;
+}
+
+fn bootstrap_semantic_unit_is_interface(
+    context: *BootstrapSemanticContext,
+    unit_index: usize
+) -> bool {
+    if (unit_index >= context->unit_count) {
+        context->error = RuntimeError.invalid_argument;
+        return false;
+    }
+    let units: *const BootstrapSemanticUnitInfo =
+        context->units.data as
+            *const BootstrapSemanticUnitInfo;
+    return units[unit_index].interface_unit != 0;
+}
+
+fn bootstrap_semantic_find_imported_symbol(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    name_token: usize,
+    kind: BootstrapSemanticSymbolKind
+) -> usize {
+    let none: usize = bootstrap_semantic_no_id();
+    let module_id: usize = bootstrap_semantic_unit_module(
+        context,
+        unit_index
+    );
+    let interface_scope: bool =
+        bootstrap_semantic_unit_is_interface(
+            context,
+            unit_index
+        );
+    let modules: *const BootstrapSemanticModule =
+        context->modules.data as
+            *const BootstrapSemanticModule;
+    let imports: *const BootstrapSemanticImport =
+        context->imports.data as
+            *const BootstrapSemanticImport;
+    let symbols: *const BootstrapSemanticSymbol =
+        context->symbols.data as
+            *const BootstrapSemanticSymbol;
+    var found: usize = none;
+    var import_index: usize = 0;
+    while (import_index < modules[module_id].import_count) {
+        let import_record: BootstrapSemanticImport =
+            imports[modules[module_id].first_import + import_index];
+        if (!interface_scope ||
+            import_record.interface_import) {
+            var symbol_index: usize = 0;
+            while (symbol_index < context->symbol_count) {
+                let symbol: BootstrapSemanticSymbol =
+                    symbols[symbol_index];
+                if (symbol.module_id ==
+                        import_record.target_module &&
+                    symbol.kind == kind &&
+                    (symbol.flags &
+                        (BootstrapSemanticSymbolFlag
+                            .exported as usize)) != 0 &&
+                    bootstrap_semantic_tokens_equal(
+                        context,
+                        unit_index,
+                        name_token,
+                        symbol.declaration_unit,
+                        symbol.name_token
+                    )) {
+                    if (found != none && found != symbol_index) {
+                        bootstrap_semantic_add_diagnostic(
+                            context,
+                            BootstrapSemanticDiagnosticKind
+                                .ambiguous_import,
+                            unit_index,
+                            bootstrap_semantic_token(
+                                context,
+                                unit_index,
+                                name_token
+                            ).span,
+                            symbols[found].declaration_unit,
+                            bootstrap_semantic_token(
+                                context,
+                                symbols[found].declaration_unit,
+                                symbols[found].name_token
+                            ).span,
+                            symbol_index
+                        );
+                        return none;
+                    }
+                    found = symbol_index;
+                }
+                symbol_index += 1;
+            }
+        }
+        import_index += 1;
+    }
+    return found;
+}
+
+fn bootstrap_semantic_lookup_symbol(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    name_token: usize,
+    kind: BootstrapSemanticSymbolKind
+) -> usize {
+    let module_id: usize = bootstrap_semantic_unit_module(
+        context,
+        unit_index
+    );
+    let local: usize = bootstrap_semantic_find_local_symbol(
+        context,
+        module_id,
+        unit_index,
+        name_token,
+        kind,
+        bootstrap_semantic_unit_is_interface(
+            context,
+            unit_index
+        )
+    );
+    if (local != bootstrap_semantic_no_id()) {
+        return local;
+    }
+    return bootstrap_semantic_find_imported_symbol(
+        context,
+        unit_index,
+        name_token,
+        kind
+    );
+}
+
+fn bootstrap_semantic_first_declaration(
+    context: *BootstrapSemanticContext,
+    unit_index: usize
+) -> usize {
+    let none: usize = bootstrap_semantic_no_id();
+    if (unit_index == none) {
+        return none;
+    }
+    let unit: *const BootstrapSemanticUnit =
+        bootstrap_semantic_input_unit(context, unit_index);
+    let root: BootstrapSyntaxNode =
+        bootstrap_semantic_node(
+            context,
+            unit_index,
+            unit->tree.root
+        );
+    var child: usize = root.first_child;
+    while (child != none) {
+        let node: BootstrapSyntaxNode =
+            bootstrap_semantic_node(
+                context,
+                unit_index,
+                child
+            );
+        if (node.kind !=
+                BootstrapSyntaxKind.module_declaration &&
+            node.kind !=
+                BootstrapSyntaxKind.import_declaration) {
+            return child;
+        }
+        child = node.next_sibling;
+    }
+    return none;
+}
+
+fn bootstrap_semantic_parse_unsigned(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    token_index: usize,
+    value: *u64
+) -> bool {
+    let token: BootstrapToken = bootstrap_semantic_token(
+        context,
+        unit_index,
+        token_index
+    );
+    let unit: *const BootstrapSemanticUnit =
+        bootstrap_semantic_input_unit(context, unit_index);
+    if (token.kind != BootstrapTokenKind.integer ||
+        value == null || token.span.length == 0) {
+        return false;
+    }
+    var base: u64 = 10;
+    var index: usize = 0;
+    if (token.span.length >= 2 &&
+        unit->source.data[token.span.offset] == 48) {
+        let prefix: u8 =
+            unit->source.data[token.span.offset + 1];
+        if (prefix == 98 || prefix == 66) {
+            base = 2;
+            index = 2;
+        } else if (prefix == 111 || prefix == 79) {
+            base = 8;
+            index = 2;
+        } else if (prefix == 120 || prefix == 88) {
+            base = 16;
+            index = 2;
+        }
+    }
+    var result: u64 = 0;
+    while (index < token.span.length) {
+        let byte: u8 =
+            unit->source.data[token.span.offset + index];
+        if (byte == 95) {
+            index += 1;
+            continue;
+        }
+        var digit: u64 = 0;
+        if (byte >= 48 && byte <= 57) {
+            digit = (byte - 48) as u64;
+        } else if (byte >= 65 && byte <= 70) {
+            digit = (byte - 65 + 10) as u64;
+        } else if (byte >= 97 && byte <= 102) {
+            digit = (byte - 97 + 10) as u64;
+        } else {
+            return false;
+        }
+        if (digit >= base ||
+            result > (18446744073709551615 - digit) / base) {
+            return false;
+        }
+        result = result * base + digit;
+        index += 1;
+    }
+    *value = result;
+    return true;
+}
+
+fn bootstrap_semantic_function_pointer_type(
+    context: *BootstrapSemanticContext,
+    return_type: usize,
+    parameter_types: *const usize,
+    parameter_count: usize
+) -> usize {
+    let none: usize = bootstrap_semantic_no_id();
+    if (parameter_count != 0 && parameter_types == null) {
+        context->error = RuntimeError.invalid_argument;
+        return none;
+    }
+    let records: *const BootstrapTypeRecord =
+        context->types.types.data as
+            *const BootstrapTypeRecord;
+    let fields: *const BootstrapTypeField =
+        context->types.fields.data as
+            *const BootstrapTypeField;
+    var candidate: usize =
+        BootstrapBuiltinType.count as usize;
+    while (candidate < context->types.type_count) {
+        let record: BootstrapTypeRecord = records[candidate];
+        if (record.kind ==
+                BootstrapTypeKind.function_pointer &&
+            record.element_type == return_type &&
+            record.field_count == parameter_count) {
+            var index: usize = 0;
+            var same: bool = true;
+            while (index < parameter_count && same) {
+                if (fields[record.first_field + index]
+                        .type_id != parameter_types[index]) {
+                    same = false;
+                }
+                index += 1;
+            }
+            if (same) {
+                return candidate;
+            }
+        }
+        candidate += 1;
+    }
+    let type_id: usize = context->types.type_count;
+    let created: BootstrapTypeTableResult =
+        bootstrap_type_table_add_function_pointer(
+            context->types,
+            return_type
+        );
+    context->types = created.table;
+    if (created.error != RuntimeError.none) {
+        context->error = created.error;
+        return none;
+    }
+    var index: usize = 0;
+    while (index < parameter_count) {
+        let added: BootstrapTypeTableResult =
+            bootstrap_type_table_add_parameter(
+                context->types,
+                type_id,
+                parameter_types[index]
+            );
+        context->types = added.table;
+        if (added.error != RuntimeError.none) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.invalid_external,
+                context->current_unit,
+                bootstrap_semantic_empty_span(),
+                none,
+                bootstrap_semantic_empty_span(),
+                parameter_types[index]
+            );
+            return none;
+        }
+        index += 1;
+    }
+    context->error = bootstrap_type_table_set_layout(
+        context->types,
+        type_id,
+        8,
+        8
+    );
+    if (context->error != RuntimeError.none) {
+        return none;
+    }
+    return type_id;
+}
+
+fn bootstrap_semantic_align_up(
+    value: usize,
+    alignment: usize,
+    result: *usize
+) -> bool {
+    if (alignment == 0 ||
+        (alignment & (alignment - 1)) != 0 ||
+        result == null) {
+        return false;
+    }
+    let mask: usize = alignment - 1;
+    if (value >
+        (BootstrapSemanticLimit.maximum_size as usize) - mask) {
+        return false;
+    }
+    *result = (value + mask) & ~mask;
+    return true;
+}
+
+fn bootstrap_semantic_integer_fits_type(
+    kind: BootstrapTypeKind,
+    magnitude: u64,
+    negative: bool
+) -> bool {
+    let bits: usize = bootstrap_type_bit_width(kind);
+    if (bits == 0 || bits > 64) {
+        return false;
+    }
+    if (!bootstrap_type_is_signed_integer(kind)) {
+        return !negative &&
+            (bits == 64 ||
+                magnitude < (1 as u64) << (bits as u64));
+    }
+    if (bits == 64) {
+        return negative ?
+            magnitude <= 9223372036854775808 :
+            magnitude <= 9223372036854775807;
+    }
+    let maximum: u64 =
+        (1 as u64) << ((bits - 1) as u64);
+    return negative ?
+        magnitude <= maximum :
+        magnitude < maximum;
+}
+
+fn bootstrap_semantic_type_record(
+    context: *BootstrapSemanticContext,
+    type_id: usize
+) -> BootstrapTypeRecord {
+    let result: BootstrapTypeRecordResult =
+        bootstrap_type_table_get(context->types, type_id);
+    if (result.error != RuntimeError.none) {
+        context->error = result.error;
+    }
+    return result.record;
+}
+
+fn bootstrap_semantic_current_ir_function(
+    context: *BootstrapSemanticContext
+) -> usize {
+    if (context->current_function >=
+        context->function_count) {
+        context->error = RuntimeError.invalid_argument;
+        return bootstrap_semantic_no_id();
+    }
+    let functions: *const BootstrapSemanticFunction =
+        context->functions.data as
+            *const BootstrapSemanticFunction;
+    return functions[context->current_function].ir_function;
+}
+
+fn bootstrap_semantic_instruction(
+    opcode: BootstrapIrOpcode,
+    node: BootstrapSyntaxNode
+) -> BootstrapIrInstruction {
+    let none: usize = bootstrap_semantic_no_id();
+    return {
+        opcode = opcode,
+        operation = BootstrapTokenKind.invalid,
+        type_id = none,
+        result = none,
+        left = none,
+        right = none,
+        third = none,
+        auxiliary = none,
+        immediate = 0,
+        floating = 0.0,
+        block_id = none,
+        next_instruction = none,
+        span = node.span,
+    };
+}
+
+fn bootstrap_semantic_emit_value(
+    context: *BootstrapSemanticContext,
+    instruction: BootstrapIrInstruction,
+    type_id: usize
+) -> usize {
+    let none: usize = bootstrap_semantic_no_id();
+    if (context->error != RuntimeError.none ||
+        context->current_block == none ||
+        type_id == none) {
+        return none;
+    }
+    let value_id: usize = bootstrap_ir_add_value(
+        &context->ir,
+        bootstrap_semantic_current_ir_function(context),
+        context->current_block,
+        type_id
+    );
+    if (value_id == none) {
+        context->error = context->ir.error;
+        return none;
+    }
+    var record: BootstrapIrInstruction = instruction;
+    record.type_id = type_id;
+    record.result = value_id;
+    record.block_id = context->current_block;
+    if (bootstrap_ir_emit(&context->ir, record) == none) {
+        context->error = context->ir.error;
+        return none;
+    }
+    return value_id;
+}
+
+fn bootstrap_semantic_emit_void(
+    context: *BootstrapSemanticContext,
+    instruction: BootstrapIrInstruction
+) -> usize {
+    var record: BootstrapIrInstruction = instruction;
+    record.block_id = context->current_block;
+    let instruction_id: usize =
+        bootstrap_ir_emit(&context->ir, record);
+    if (instruction_id == bootstrap_semantic_no_id()) {
+        context->error = context->ir.error;
+    }
+    return instruction_id;
+}
+
+fn bootstrap_semantic_emit_integer_constant(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    type_id: usize,
+    value: u64
+) -> BootstrapSemanticExpression {
+    var instruction: BootstrapIrInstruction =
+        bootstrap_semantic_instruction(
+            BootstrapIrOpcode.constant_integer,
+            node
+        );
+    instruction.immediate = value;
+    let value_id: usize = bootstrap_semantic_emit_value(
+        context,
+        instruction,
+        type_id
+    );
+    return {
+        type_id = type_id,
+        value_id = value_id,
+        address_id = bootstrap_semantic_no_id(),
+        constant_value = value,
+        has_constant = true,
+        lvalue = false,
+        mutable_lvalue = false,
+        valid = value_id != bootstrap_semantic_no_id(),
+    };
+}
+
+fn bootstrap_semantic_emit_boolean_constant(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    value: bool
+) -> BootstrapSemanticExpression {
+    var instruction: BootstrapIrInstruction =
+        bootstrap_semantic_instruction(
+            BootstrapIrOpcode.constant_boolean,
+            node
+        );
+    instruction.immediate = value ? 1 : 0;
+    let type_id: usize =
+        BootstrapBuiltinType.boolean as usize;
+    let value_id: usize = bootstrap_semantic_emit_value(
+        context,
+        instruction,
+        type_id
+    );
+    return {
+        type_id = type_id,
+        value_id = value_id,
+        address_id = bootstrap_semantic_no_id(),
+        constant_value = instruction.immediate,
+        has_constant = true,
+        lvalue = false,
+        mutable_lvalue = false,
+        valid = value_id != bootstrap_semantic_no_id(),
+    };
+}
+
+fn bootstrap_semantic_append_local(
+    context: *BootstrapSemanticContext,
+    local: BootstrapSemanticLocal
+) -> usize {
+    let result: usize = context->local_count;
+    if (!bootstrap_semantic_append_record(
+            context,
+            &context->locals,
+            (&local) as
+                *const BootstrapSemanticLocal as *const u8,
+            sizeof(BootstrapSemanticLocal)
+        )) {
+        return bootstrap_semantic_no_id();
+    }
+    context->local_count += 1;
+    return result;
+}
+
+fn bootstrap_semantic_find_local(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    name_token: usize
+) -> usize {
+    let locals: *const BootstrapSemanticLocal =
+        context->locals.data as
+            *const BootstrapSemanticLocal;
+    var index: usize = context->local_count;
+    while (index != 0) {
+        index -= 1;
+        if (locals[index].function_id ==
+                context->current_function &&
+            locals[index].scope_depth <= context->scope_depth &&
+            bootstrap_semantic_tokens_equal(
+                context,
+                unit_index,
+                name_token,
+                locals[index].unit_index,
+                locals[index].name_token
+            )) {
+            return index;
+        }
+    }
+    return bootstrap_semantic_no_id();
+}
+
+fn bootstrap_semantic_local_in_current_scope(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    name_token: usize
+) -> usize {
+    let locals: *const BootstrapSemanticLocal =
+        context->locals.data as
+            *const BootstrapSemanticLocal;
+    var index: usize = context->local_count;
+    while (index != 0) {
+        index -= 1;
+        if (locals[index].function_id !=
+            context->current_function) {
+            break;
+        }
+        if (locals[index].scope_depth < context->scope_depth) {
+            break;
+        }
+        if (locals[index].scope_depth == context->scope_depth &&
+            bootstrap_semantic_tokens_equal(
+                context,
+                unit_index,
+                name_token,
+                locals[index].unit_index,
+                locals[index].name_token
+            )) {
+            return index;
+        }
+    }
+    return bootstrap_semantic_no_id();
+}
+
+fn bootstrap_semantic_address_of_slot(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    slot_id: usize,
+    value_type: usize,
+    read_only: bool
+) -> usize {
+    let pointer: BootstrapTypeIdResult =
+        bootstrap_type_table_pointer(
+            &context->types,
+            value_type,
+            read_only
+        );
+    if (pointer.error != RuntimeError.none) {
+        context->error = pointer.error;
+        return bootstrap_semantic_no_id();
+    }
+    var instruction: BootstrapIrInstruction =
+        bootstrap_semantic_instruction(
+            BootstrapIrOpcode.address_of_slot,
+            node
+        );
+    instruction.auxiliary = slot_id;
+    return bootstrap_semantic_emit_value(
+        context,
+        instruction,
+        pointer.type_id
+    );
+}
+
+fn bootstrap_semantic_load_lvalue(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    expression: BootstrapSemanticExpression
+) -> BootstrapSemanticExpression {
+    if (!expression.valid || !expression.lvalue) {
+        return expression;
+    }
+    let type_record: BootstrapTypeRecord =
+        bootstrap_semantic_type_record(
+            context,
+            expression.type_id
+        );
+    if (bootstrap_type_is_memory(type_record.kind)) {
+        return expression;
+    }
+    var instruction: BootstrapIrInstruction =
+        bootstrap_semantic_instruction(
+            BootstrapIrOpcode.load_indirect,
+            node
+        );
+    instruction.left = expression.address_id;
+    let value_id: usize = bootstrap_semantic_emit_value(
+        context,
+        instruction,
+        expression.type_id
+    );
+    var result: BootstrapSemanticExpression = expression;
+    result.value_id = value_id;
+    result.valid =
+        value_id != bootstrap_semantic_no_id();
+    return result;
+}
+
+fn bootstrap_semantic_mask_integer(
+    value: u64,
+    bits: usize
+) -> u64 {
+    if (bits >= 64) {
+        return value;
+    }
+    return value & (((1 as u64) << (bits as u64)) - 1);
+}
+
+fn bootstrap_semantic_store_to_address(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    destination: usize,
+    type_id: usize,
+    value: BootstrapSemanticExpression
+) -> bool {
+    if (!value.valid || value.type_id != type_id ||
+        destination == bootstrap_semantic_no_id()) {
+        return false;
+    }
+    let type_record: BootstrapTypeRecord =
+        bootstrap_semantic_type_record(context, type_id);
+    var instruction: BootstrapIrInstruction =
+        bootstrap_semantic_instruction(
+            bootstrap_type_is_memory(type_record.kind) ?
+                BootstrapIrOpcode.memory_copy :
+                BootstrapIrOpcode.store_indirect,
+            node
+        );
+    instruction.left = destination;
+    instruction.right = bootstrap_type_is_memory(
+        type_record.kind
+    ) ? value.address_id : value.value_id;
+    instruction.type_id = type_id;
+    instruction.auxiliary = type_record.size_bytes;
+    return bootstrap_semantic_emit_void(
+        context,
+        instruction
+    ) != bootstrap_semantic_no_id();
+}
+
+fn bootstrap_semantic_zero_slot(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    slot_id: usize,
+    type_id: usize
+) -> bool {
+    var instruction: BootstrapIrInstruction =
+        bootstrap_semantic_instruction(
+            BootstrapIrOpcode.zero_slot,
+            node
+        );
+    instruction.type_id = type_id;
+    instruction.auxiliary = slot_id;
+    return bootstrap_semantic_emit_void(
+        context,
+        instruction
+    ) != bootstrap_semantic_no_id();
+}
+
+fn bootstrap_semantic_emit_jump(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    target_block: usize
+) -> bool {
+    var instruction: BootstrapIrInstruction =
+        bootstrap_semantic_instruction(
+            BootstrapIrOpcode.jump,
+            node
+        );
+    instruction.auxiliary = target_block;
+    return bootstrap_semantic_emit_void(
+        context,
+        instruction
+    ) != bootstrap_semantic_no_id();
+}
+
+fn bootstrap_semantic_emit_branch(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    condition: usize,
+    true_block: usize,
+    false_block: usize
+) -> bool {
+    var instruction: BootstrapIrInstruction =
+        bootstrap_semantic_instruction(
+            BootstrapIrOpcode.branch,
+            node
+        );
+    instruction.left = condition;
+    instruction.auxiliary = true_block;
+    instruction.third = false_block;
+    return bootstrap_semantic_emit_void(
+        context,
+        instruction
+    ) != bootstrap_semantic_no_id();
+}
+
+fn bootstrap_semantic_add_current_block(
+    context: *BootstrapSemanticContext
+) -> usize {
+    let block_id: usize = bootstrap_ir_add_block(
+        &context->ir,
+        bootstrap_semantic_current_ir_function(context)
+    );
+    if (block_id == bootstrap_semantic_no_id()) {
+        context->error = context->ir.error;
+    }
+    return block_id;
+}
+
+fn bootstrap_semantic_block_is_terminated(
+    context: *BootstrapSemanticContext,
+    block_id: usize
+) -> bool {
+    let result: BootstrapIrBlockResult =
+        bootstrap_ir_get_block(context->ir, block_id);
+    if (result.error != RuntimeError.none) {
+        context->error = result.error;
+        return true;
+    }
+    return result.block.terminated;
+}
+
+fn bootstrap_semantic_enqueue_reachable_block(
+    context: *BootstrapSemanticContext,
+    function: BootstrapIrFunction,
+    block_id: usize,
+    reached: *StdByteBuffer,
+    pending: *StdByteBuffer
+) -> bool {
+    if (block_id < function.first_block ||
+        block_id - function.first_block >=
+            function.block_count) {
+        context->error = RuntimeError.invalid_argument;
+        return false;
+    }
+    let local_id: usize =
+        block_id - function.first_block;
+    if (reached->data[local_id] != 0) {
+        return true;
+    }
+    reached->data[local_id] = 1;
+    let appended: StdByteBufferResult =
+        std_byte_buffer_append(
+            *pending,
+            (&block_id) as *const usize as *const u8,
+            sizeof(usize)
+        );
+    *pending = appended.buffer;
+    context->error = appended.error;
+    return appended.error == RuntimeError.none;
+}
+
+fn bootstrap_semantic_block_is_reachable(
+    context: *BootstrapSemanticContext,
+    function: BootstrapIrFunction,
+    target_block: usize
+) -> bool {
+    if (function.block_count == 0 ||
+        target_block < function.first_block ||
+        target_block - function.first_block >=
+            function.block_count) {
+        context->error = RuntimeError.invalid_argument;
+        return false;
+    }
+    var reached: StdByteBuffer =
+        std_byte_buffer_empty();
+    while (reached.length < function.block_count &&
+        context->error == RuntimeError.none) {
+        let pushed: StdByteBufferResult =
+            std_byte_buffer_push(reached, 0);
+        reached = pushed.buffer;
+        context->error = pushed.error;
+    }
+    var pending: StdByteBuffer =
+        std_byte_buffer_empty();
+    if (context->error == RuntimeError.none) {
+        bootstrap_semantic_enqueue_reachable_block(
+            context,
+            function,
+            function.first_block,
+            &reached,
+            &pending
+        );
+    }
+    var cursor: usize = 0;
+    let blocks: *const BootstrapIrBlock =
+        context->ir.blocks.data as
+            *const BootstrapIrBlock;
+    let instructions: *const BootstrapIrInstruction =
+        context->ir.instructions.data as
+            *const BootstrapIrInstruction;
+    while (cursor < pending.length &&
+        context->error == RuntimeError.none) {
+        let pending_blocks: *const usize =
+            pending.data as *const usize;
+        let block_id: usize =
+            pending_blocks[cursor / sizeof(usize)];
+        cursor += sizeof(usize);
+        let block: BootstrapIrBlock =
+            blocks[block_id];
+        if (block.terminated) {
+            let instruction: BootstrapIrInstruction =
+                instructions[block.last_instruction];
+            if (instruction.opcode ==
+                BootstrapIrOpcode.jump) {
+                bootstrap_semantic_enqueue_reachable_block(
+                    context,
+                    function,
+                    instruction.auxiliary,
+                    &reached,
+                    &pending
+                );
+            } else if (instruction.opcode ==
+                BootstrapIrOpcode.branch) {
+                bootstrap_semantic_enqueue_reachable_block(
+                    context,
+                    function,
+                    instruction.auxiliary,
+                    &reached,
+                    &pending
+                );
+                bootstrap_semantic_enqueue_reachable_block(
+                    context,
+                    function,
+                    instruction.third,
+                    &reached,
+                    &pending
+                );
+            }
+        }
+    }
+    let reachable: bool =
+        context->error == RuntimeError.none &&
+        reached.data[
+            target_block - function.first_block
+        ] != 0;
+    var release_error: RuntimeError =
+        std_byte_buffer_release(reached);
+    release_error = bootstrap_semantic_release_error(
+        release_error,
+        std_byte_buffer_release(pending)
+    );
+    if (context->error == RuntimeError.none) {
+        context->error = release_error;
+    }
+    return reachable;
+}
+
+fn bootstrap_semantic_enter_scope(
+    context: *BootstrapSemanticContext
+) -> usize {
+    let local_start: usize = context->local_count;
+    if (context->scope_depth >=
+        BootstrapSemanticLimit.maximum_scope_depth as usize) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.resource_limit,
+            context->current_unit,
+            bootstrap_semantic_empty_span(),
+            bootstrap_semantic_no_id(),
+            bootstrap_semantic_empty_span(),
+            context->scope_depth
+        );
+        return bootstrap_semantic_no_id();
+    }
+    context->scope_depth += 1;
+    return local_start;
+}
+
+fn bootstrap_semantic_leave_scope(
+    context: *BootstrapSemanticContext,
+    local_start: usize
+) -> bool {
+    if (context->scope_depth == 0 ||
+        local_start == bootstrap_semantic_no_id() ||
+        local_start > context->local_count) {
+        context->error = RuntimeError.invalid_argument;
+        return false;
+    }
+    let truncated: StdByteBufferResult =
+        std_byte_buffer_truncate(
+            context->locals,
+            local_start * sizeof(BootstrapSemanticLocal)
+        );
+    context->locals = truncated.buffer;
+    context->error = truncated.error;
+    context->local_count = local_start;
+    context->scope_depth -= 1;
+    return context->error == RuntimeError.none;
+}
+
+fn bootstrap_semantic_token_equals_bytes(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    token_index: usize,
+    bytes: *const u8,
+    length: usize
+) -> bool {
+    if (bytes == null) {
+        return false;
+    }
+    let token: BootstrapToken = bootstrap_semantic_token(
+        context,
+        unit_index,
+        token_index
+    );
+    let unit: *const BootstrapSemanticUnit =
+        bootstrap_semantic_input_unit(context, unit_index);
+    if (token.span.length != length) {
+        return false;
+    }
+    var index: usize = 0;
+    while (index < length) {
+        if (unit->source.data[token.span.offset + index] !=
+            bytes[index]) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}

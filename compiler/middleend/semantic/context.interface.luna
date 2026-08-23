@@ -1,0 +1,399 @@
+export module luna.bootstrap.middleend.semantic.context;
+
+import luna.runtime;
+import luna.std.bytes;
+import luna.std.text;
+import luna.bootstrap.frontend.lexer;
+import luna.bootstrap.frontend.parser;
+import luna.bootstrap.middleend.type;
+import luna.bootstrap.middleend.ir;
+
+export enum BootstrapSemanticDiagnosticKind: usize {
+    invalid_input,
+    duplicate_interface,
+    duplicate_implementation,
+    unknown_import,
+    self_import,
+    duplicate_import,
+    import_cycle,
+    unreachable_module,
+    duplicate_name,
+    ambiguous_import,
+    invalid_export,
+    private_type_exposure,
+    unknown_type,
+    duplicate_field,
+    recursive_type,
+    incomplete_type,
+    object_too_large,
+    invalid_enum_underlying,
+    invalid_type_alias,
+    invalid_enum_value,
+    enum_value_overflow,
+    duplicate_enum_member,
+    duplicate_function,
+    missing_definition,
+    signature_mismatch,
+    invalid_external,
+    duplicate_parameter,
+    unknown_name,
+    duplicate_local,
+    immutable_assignment,
+    type_mismatch,
+    invalid_condition,
+    invalid_operator,
+    invalid_cast,
+    invalid_lvalue,
+    invalid_call,
+    argument_count,
+    invalid_initializer,
+    duplicate_initializer_field,
+    unknown_field,
+    invalid_index,
+    invalid_member,
+    invalid_layout_query,
+    break_outside_control,
+    continue_outside_loop,
+    return_type,
+    missing_return,
+    invalid_switch,
+    duplicate_case,
+    duplicate_default,
+    integer_overflow,
+    floating_overflow,
+    resource_limit,
+    internal_invariant,
+}
+
+export struct BootstrapSemanticUnit {
+    source: StdTextView;
+    tokens: BootstrapTokenBuffer;
+    tree: BootstrapSyntaxTree;
+}
+
+export struct BootstrapSemanticInput {
+    units: StdByteBuffer;
+    unit_count: usize;
+    executable: bool;
+}
+
+export struct BootstrapSemanticDiagnostic {
+    kind: BootstrapSemanticDiagnosticKind;
+    unit_index: usize;
+    span: BootstrapSourceSpan;
+    related_unit: usize;
+    related_span: BootstrapSourceSpan;
+    detail: usize;
+}
+
+export struct BootstrapSemanticDiagnosticBuffer {
+    storage: StdByteBuffer;
+    count: usize;
+}
+
+export struct BootstrapSemanticResult {
+    types: BootstrapTypeTable;
+    ir: BootstrapTypedIr;
+    diagnostics: BootstrapSemanticDiagnosticBuffer;
+    error: RuntimeError;
+}
+
+export struct BootstrapSemanticDiagnosticResult {
+    diagnostic: BootstrapSemanticDiagnostic;
+    error: RuntimeError;
+}
+
+export enum BootstrapSemanticLimit: usize {
+    maximum_size = 18446744073709551615,
+    maximum_modules = 1024,
+    maximum_module_depth = 256,
+    maximum_diagnostics = 4096,
+    maximum_scope_depth = 256,
+    maximum_type_depth = 256,
+    target_maximum_alignment = 8,
+    target_maximum_object_size = 2147483647,
+    maximum_floating_digits = 1200,
+    maximum_floating_limbs = 128,
+    floating_exponent_margin = 2048,
+}
+
+export enum BootstrapSemanticSymbolKind: usize {
+    named_type,
+    function,
+    enum_member,
+}
+
+export enum BootstrapSemanticSymbolFlag: usize {
+    none = 0,
+    exported = 1,
+    external = 2,
+    interface_declaration = 4,
+}
+
+export enum BootstrapSemanticLiteralFamily: usize {
+    none,
+    integer,
+    floating,
+    null_pointer,
+}
+
+export struct BootstrapSemanticModule {
+    interface_unit: usize;
+    implementation_unit: usize;
+    name_unit: usize;
+    name_node: usize;
+    first_import: usize;
+    import_count: usize;
+    visit_state: usize;
+    reachable: bool;
+}
+
+export struct BootstrapSemanticUnitInfo {
+    module_id: usize;
+    interface_unit: usize;
+}
+
+export struct BootstrapSemanticImport {
+    owner_module: usize;
+    source_unit: usize;
+    declaration_node: usize;
+    target_module: usize;
+    interface_import: bool;
+}
+
+export struct BootstrapSemanticSymbol {
+    kind: BootstrapSemanticSymbolKind;
+    module_id: usize;
+    declaration_unit: usize;
+    declaration_node: usize;
+    name_token: usize;
+    type_id: usize;
+    function_id: usize;
+    integer_value: u64;
+    flags: usize;
+}
+
+export struct BootstrapSemanticFunction {
+    symbol_id: usize;
+    interface_unit: usize;
+    interface_node: usize;
+    implementation_unit: usize;
+    implementation_node: usize;
+    return_type: usize;
+    first_parameter: usize;
+    parameter_count: usize;
+    ir_function: usize;
+    flags: usize;
+}
+
+export struct BootstrapSemanticParameter {
+    function_id: usize;
+    type_id: usize;
+    unit_index: usize;
+    declaration_node: usize;
+    name_token: usize;
+}
+
+export struct BootstrapSemanticLocal {
+    function_id: usize;
+    type_id: usize;
+    slot_id: usize;
+    unit_index: usize;
+    declaration_node: usize;
+    name_token: usize;
+    scope_depth: usize;
+    mutable_binding: bool;
+}
+
+export struct BootstrapSemanticExpression {
+    type_id: usize;
+    value_id: usize;
+    address_id: usize;
+    constant_value: u64;
+    has_constant: bool;
+    lvalue: bool;
+    mutable_lvalue: bool;
+    valid: bool;
+}
+
+export struct BootstrapSemanticBigUnsigned {
+    limbs: [128]u64;
+    count: usize;
+}
+
+export struct BootstrapSemanticSignedMagnitude {
+    magnitude: usize;
+    negative: bool;
+}
+
+export struct BootstrapSemanticDecimalFloating {
+    coefficient: BootstrapSemanticBigUnsigned;
+    five_power: BootstrapSemanticBigUnsigned;
+    decimal_exponent: isize;
+    truncated_nonzero: bool;
+}
+
+export struct BootstrapSemanticContext {
+    input: BootstrapSemanticInput;
+    units: StdByteBuffer;
+    unit_count: usize;
+    modules: StdByteBuffer;
+    module_count: usize;
+    imports: StdByteBuffer;
+    import_count: usize;
+    symbols: StdByteBuffer;
+    symbol_count: usize;
+    functions: StdByteBuffer;
+    function_count: usize;
+    parameters: StdByteBuffer;
+    parameter_count: usize;
+    locals: StdByteBuffer;
+    local_count: usize;
+    types: BootstrapTypeTable;
+    ir: BootstrapTypedIr;
+    diagnostics: BootstrapSemanticDiagnosticBuffer;
+    error: RuntimeError;
+    current_function: usize;
+    current_unit: usize;
+    current_block: usize;
+    scope_depth: usize;
+    type_depth: usize;
+    break_block: usize;
+    continue_block: usize;
+}
+
+export fn bootstrap_semantic_no_id() -> usize;
+
+export fn bootstrap_semantic_empty_span() -> BootstrapSourceSpan;
+
+export fn bootstrap_semantic_invalid_diagnostic() -> BootstrapSemanticDiagnostic;
+
+export fn bootstrap_semantic_input_empty( executable: bool ) -> BootstrapSemanticInput;
+
+export fn bootstrap_semantic_input_storage_is_valid( input: BootstrapSemanticInput ) -> bool;
+
+export fn bootstrap_semantic_source_is_valid( source: StdTextView ) -> bool;
+
+export fn bootstrap_semantic_unit_is_valid( unit: BootstrapSemanticUnit ) -> bool;
+
+export fn bootstrap_semantic_input_is_valid( input: BootstrapSemanticInput ) -> bool;
+
+export fn bootstrap_semantic_input_add( input: *BootstrapSemanticInput, unit: BootstrapSemanticUnit ) -> bool;
+
+export fn bootstrap_semantic_input_release( input: BootstrapSemanticInput ) -> RuntimeError;
+
+export fn bootstrap_semantic_diagnostics_empty() -> BootstrapSemanticDiagnosticBuffer;
+
+export fn bootstrap_semantic_diagnostics_storage_is_valid( diagnostics: BootstrapSemanticDiagnosticBuffer ) -> bool;
+
+export fn bootstrap_semantic_diagnostic_get( diagnostics: BootstrapSemanticDiagnosticBuffer, index: usize ) -> BootstrapSemanticDiagnosticResult;
+
+export fn bootstrap_semantic_add_diagnostic( context: *BootstrapSemanticContext, kind: BootstrapSemanticDiagnosticKind, unit_index: usize, span: BootstrapSourceSpan, related_unit: usize, related_span: BootstrapSourceSpan, detail: usize ) -> bool;
+
+export fn bootstrap_semantic_result_is_success( result: BootstrapSemanticResult ) -> bool;
+
+export fn bootstrap_semantic_release_error( current: RuntimeError, next: RuntimeError ) -> RuntimeError;
+
+export fn bootstrap_semantic_result_release( result: BootstrapSemanticResult ) -> RuntimeError;
+
+export fn bootstrap_semantic_context_storage_is_valid( context: *BootstrapSemanticContext ) -> bool;
+
+export fn bootstrap_semantic_context_init( input: BootstrapSemanticInput ) -> BootstrapSemanticContext;
+
+export fn bootstrap_semantic_context_release_work( context: *BootstrapSemanticContext ) -> RuntimeError;
+
+export fn bootstrap_semantic_input_unit( context: *BootstrapSemanticContext, unit_index: usize ) -> *const BootstrapSemanticUnit;
+
+export fn bootstrap_semantic_node( context: *BootstrapSemanticContext, unit_index: usize, node_index: usize ) -> BootstrapSyntaxNode;
+
+export fn bootstrap_semantic_token( context: *BootstrapSemanticContext, unit_index: usize, token_index: usize ) -> BootstrapToken;
+
+export fn bootstrap_semantic_text_equal( context: *BootstrapSemanticContext, left_unit: usize, left_span: BootstrapSourceSpan, right_unit: usize, right_span: BootstrapSourceSpan ) -> bool;
+
+export fn bootstrap_semantic_tokens_equal( context: *BootstrapSemanticContext, left_unit: usize, left_token: usize, right_unit: usize, right_token: usize ) -> bool;
+
+export fn bootstrap_semantic_module_names_equal( context: *BootstrapSemanticContext, left_unit: usize, left_node: usize, right_unit: usize, right_node: usize ) -> bool;
+
+export fn bootstrap_semantic_append_record( context: *BootstrapSemanticContext, destination: *StdByteBuffer, data: *const u8, length: usize ) -> bool;
+
+export fn bootstrap_semantic_append_unit_info( context: *BootstrapSemanticContext, info: BootstrapSemanticUnitInfo ) -> bool;
+
+export fn bootstrap_semantic_append_module( context: *BootstrapSemanticContext, module_record: BootstrapSemanticModule ) -> usize;
+
+export fn bootstrap_semantic_find_module_by_name( context: *BootstrapSemanticContext, unit_index: usize, name_node: usize ) -> usize;
+
+export fn bootstrap_semantic_program_module_node( context: *BootstrapSemanticContext, unit_index: usize ) -> usize;
+
+export fn bootstrap_semantic_append_import( context: *BootstrapSemanticContext, record: BootstrapSemanticImport ) -> usize;
+
+export fn bootstrap_semantic_append_symbol( context: *BootstrapSemanticContext, symbol: BootstrapSemanticSymbol ) -> usize;
+
+export fn bootstrap_semantic_find_local_symbol( context: *BootstrapSemanticContext, module_id: usize, unit_index: usize, name_token: usize, kind: BootstrapSemanticSymbolKind, interface_scope: bool ) -> usize;
+
+export fn bootstrap_semantic_find_any_local_symbol( context: *BootstrapSemanticContext, module_id: usize, unit_index: usize, name_token: usize ) -> usize;
+
+export fn bootstrap_semantic_unit_module( context: *BootstrapSemanticContext, unit_index: usize ) -> usize;
+
+export fn bootstrap_semantic_unit_is_interface( context: *BootstrapSemanticContext, unit_index: usize ) -> bool;
+
+export fn bootstrap_semantic_find_imported_symbol( context: *BootstrapSemanticContext, unit_index: usize, name_token: usize, kind: BootstrapSemanticSymbolKind ) -> usize;
+
+export fn bootstrap_semantic_lookup_symbol( context: *BootstrapSemanticContext, unit_index: usize, name_token: usize, kind: BootstrapSemanticSymbolKind ) -> usize;
+
+export fn bootstrap_semantic_first_declaration( context: *BootstrapSemanticContext, unit_index: usize ) -> usize;
+
+export fn bootstrap_semantic_parse_unsigned( context: *BootstrapSemanticContext, unit_index: usize, token_index: usize, value: *u64 ) -> bool;
+
+export fn bootstrap_semantic_function_pointer_type( context: *BootstrapSemanticContext, return_type: usize, parameter_types: *const usize, parameter_count: usize ) -> usize;
+
+export fn bootstrap_semantic_align_up( value: usize, alignment: usize, result: *usize ) -> bool;
+
+export fn bootstrap_semantic_integer_fits_type( kind: BootstrapTypeKind, magnitude: u64, negative: bool ) -> bool;
+
+export fn bootstrap_semantic_type_record( context: *BootstrapSemanticContext, type_id: usize ) -> BootstrapTypeRecord;
+
+export fn bootstrap_semantic_current_ir_function( context: *BootstrapSemanticContext ) -> usize;
+
+export fn bootstrap_semantic_instruction( opcode: BootstrapIrOpcode, node: BootstrapSyntaxNode ) -> BootstrapIrInstruction;
+
+export fn bootstrap_semantic_emit_value( context: *BootstrapSemanticContext, instruction: BootstrapIrInstruction, type_id: usize ) -> usize;
+
+export fn bootstrap_semantic_emit_void( context: *BootstrapSemanticContext, instruction: BootstrapIrInstruction ) -> usize;
+
+export fn bootstrap_semantic_emit_integer_constant( context: *BootstrapSemanticContext, node: BootstrapSyntaxNode, type_id: usize, value: u64 ) -> BootstrapSemanticExpression;
+
+export fn bootstrap_semantic_emit_boolean_constant( context: *BootstrapSemanticContext, node: BootstrapSyntaxNode, value: bool ) -> BootstrapSemanticExpression;
+
+export fn bootstrap_semantic_append_local( context: *BootstrapSemanticContext, local: BootstrapSemanticLocal ) -> usize;
+
+export fn bootstrap_semantic_find_local( context: *BootstrapSemanticContext, unit_index: usize, name_token: usize ) -> usize;
+
+export fn bootstrap_semantic_local_in_current_scope( context: *BootstrapSemanticContext, unit_index: usize, name_token: usize ) -> usize;
+
+export fn bootstrap_semantic_address_of_slot( context: *BootstrapSemanticContext, node: BootstrapSyntaxNode, slot_id: usize, value_type: usize, read_only: bool ) -> usize;
+
+export fn bootstrap_semantic_load_lvalue( context: *BootstrapSemanticContext, node: BootstrapSyntaxNode, expression: BootstrapSemanticExpression ) -> BootstrapSemanticExpression;
+
+export fn bootstrap_semantic_mask_integer( value: u64, bits: usize ) -> u64;
+
+export fn bootstrap_semantic_store_to_address( context: *BootstrapSemanticContext, node: BootstrapSyntaxNode, destination: usize, type_id: usize, value: BootstrapSemanticExpression ) -> bool;
+
+export fn bootstrap_semantic_zero_slot( context: *BootstrapSemanticContext, node: BootstrapSyntaxNode, slot_id: usize, type_id: usize ) -> bool;
+
+export fn bootstrap_semantic_emit_jump( context: *BootstrapSemanticContext, node: BootstrapSyntaxNode, target_block: usize ) -> bool;
+
+export fn bootstrap_semantic_emit_branch( context: *BootstrapSemanticContext, node: BootstrapSyntaxNode, condition: usize, true_block: usize, false_block: usize ) -> bool;
+
+export fn bootstrap_semantic_add_current_block( context: *BootstrapSemanticContext ) -> usize;
+
+export fn bootstrap_semantic_block_is_terminated( context: *BootstrapSemanticContext, block_id: usize ) -> bool;
+
+export fn bootstrap_semantic_enqueue_reachable_block( context: *BootstrapSemanticContext, function: BootstrapIrFunction, block_id: usize, reached: *StdByteBuffer, pending: *StdByteBuffer ) -> bool;
+
+export fn bootstrap_semantic_block_is_reachable( context: *BootstrapSemanticContext, function: BootstrapIrFunction, target_block: usize ) -> bool;
+
+export fn bootstrap_semantic_enter_scope( context: *BootstrapSemanticContext ) -> usize;
+
+export fn bootstrap_semantic_leave_scope( context: *BootstrapSemanticContext, local_start: usize ) -> bool;
+
+export fn bootstrap_semantic_token_equals_bytes( context: *BootstrapSemanticContext, unit_index: usize, token_index: usize, bytes: *const u8, length: usize ) -> bool;

@@ -1,31 +1,23 @@
 module luna.tools.bootstrap.stage_assembler;
 
+import luna.bootstrap.backend.x86_64.assembler;
+import luna.bootstrap.backend.x86_64.object;
 import luna.runtime;
 import luna.std.bytes;
-import luna.std.text;
-import luna.std.path;
 import luna.std.io;
-import luna.bootstrap.backend.x86_64.object;
-import luna.bootstrap.backend.x86_64.assembler;
+import luna.std.path;
+import luna.std.text;
 
 enum BootstrapAssemblerDriverLimit: usize {
-    maximum_path_bytes = 4096,
-    maximum_input = 67108864,
+    maximum_path_bytes = 4096, maximum_input = 67108864,
 }
 
 enum BootstrapAssemblerDriverStatus: i32 {
-    input_error = 1,
-    assembly_error = 2,
-    serialization_error = 3,
-    output_error = 4,
-    release_error = 5,
-    success = 42,
+    input_error = 1, assembly_error = 2, serialization_error = 3, output_error = 4, release_error = 5, success = 42,
     cli_usage_error = 125,
 }
 
-fn bootstrap_assembler_driver_report(
-    line: usize
-) -> RuntimeError {
+fn bootstrap_assembler_driver_report(line: usize) -> RuntimeError {
     var digits: [20]u8 = {};
     var cursor: usize = 20;
     var value: usize = line;
@@ -38,99 +30,64 @@ fn bootstrap_assembler_driver_report(
         digits[cursor] = ((48 as usize) + value % 10) as u8;
         value /= 10;
     }
-    var error: RuntimeError = std_io_write_all(
-        runtime_standard_error(),
-        "assembler:",
-        10
-    );
+    var error: RuntimeError = std_io_write_all(runtime_standard_error(), "assembler:", 10);
     if (error == RuntimeError.none) {
-        error = std_io_write_all(
-            runtime_standard_error(),
-            &digits[cursor] as *const u8,
-            20 - cursor
-        );
+        error = std_io_write_all(runtime_standard_error(), &digits[cursor] as *const u8, 20 - cursor);
     }
     if (error == RuntimeError.none) {
-        error = std_io_write_all(
-            runtime_standard_error(),
-            "\n",
-            1
-        );
+        error = std_io_write_all(runtime_standard_error(), "\n", 1);
     }
     return error;
 }
 
-fn bootstrap_assembler_driver_run(
-    input_path: StdPath,
-    output_path: StdPath
-) -> i32 {
-    if (!std_path_is_valid(input_path) ||
-        !std_path_is_valid(output_path)) {
+fn bootstrap_assembler_driver_run(input_path: StdPath, output_path: StdPath) -> i32 {
+    if (!std_path_is_valid(input_path) || !std_path_is_valid(output_path)) {
         return BootstrapAssemblerDriverStatus.input_error as i32;
     }
     let input: StdByteBufferResult = std_io_read_file_limited(
-        input_path,
-        BootstrapAssemblerDriverLimit.maximum_input as usize
-    );
+        input_path, BootstrapAssemblerDriverLimit.maximum_input as usize);
     if (input.error != RuntimeError.none) {
         return BootstrapAssemblerDriverStatus.input_error as i32;
     }
-    let view: StdTextViewResult = std_text_view(
-        input.buffer.data as *const u8,
-        input.buffer.length
-    );
+    let view: StdTextViewResult = std_text_view(input.buffer.data as *const u8, input.buffer.length);
     if (view.error != RuntimeError.none) {
         std_byte_buffer_release(input.buffer);
         return BootstrapAssemblerDriverStatus.input_error as i32;
     }
-    let assembled: BootstrapAssemblerResult =
-        bootstrap_x86_64_assemble(view.view);
+    let assembled: BootstrapAssemblerResult = bootstrap_x86_64_assemble(view.view);
     if (assembled.error != RuntimeError.none) {
         bootstrap_assembler_driver_report(assembled.line);
         std_byte_buffer_release(input.buffer);
         return BootstrapAssemblerDriverStatus.assembly_error as i32;
     }
-    let serialized: StdByteBufferResult =
-        bootstrap_object_serialize(assembled.object);
+    let serialized: StdByteBufferResult = bootstrap_object_serialize(assembled.object);
     if (serialized.error != RuntimeError.none) {
         bootstrap_object_release(assembled.object);
         std_byte_buffer_release(input.buffer);
         return BootstrapAssemblerDriverStatus.serialization_error as i32;
     }
     let write_error: RuntimeError = std_io_write_file_atomic(
-        output_path,
-        serialized.buffer.data as *const u8,
-        serialized.buffer.length
-    );
-    let serialized_error: RuntimeError =
-        std_byte_buffer_release(serialized.buffer);
-    let object_error: RuntimeError =
-        bootstrap_object_release(assembled.object);
-    let input_error: RuntimeError =
-        std_byte_buffer_release(input.buffer);
+        output_path, serialized.buffer.data as *const u8, serialized.buffer.length);
+    let serialized_error: RuntimeError = std_byte_buffer_release(serialized.buffer);
+    let object_error: RuntimeError = bootstrap_object_release(assembled.object);
+    let input_error: RuntimeError = std_byte_buffer_release(input.buffer);
     if (write_error != RuntimeError.none) {
         return BootstrapAssemblerDriverStatus.output_error as i32;
     }
-    if (serialized_error != RuntimeError.none ||
-        object_error != RuntimeError.none ||
+    if (serialized_error != RuntimeError.none || object_error != RuntimeError.none ||
         input_error != RuntimeError.none) {
         return BootstrapAssemblerDriverStatus.release_error as i32;
     }
     return BootstrapAssemblerDriverStatus.success as i32;
 }
 
-fn bootstrap_assembler_argument_equals(
-    argument: *const u8,
-    expected: *const u8,
-    length: usize
-) -> bool {
+fn bootstrap_assembler_argument_equals(argument: *const u8, expected: *const u8, length: usize) -> bool {
     if (argument == null || expected == null) {
         return false;
     }
     var index: usize = 0;
     while (index < length) {
-        if (argument[index] != expected[index] ||
-            argument[index] == 0) {
+        if (argument[index] != expected[index] || argument[index] == 0) {
             return false;
         }
         index += 1;
@@ -138,59 +95,33 @@ fn bootstrap_assembler_argument_equals(
     return argument[length] == 0;
 }
 
-fn bootstrap_assembler_print(
-    file: RuntimeFile,
-    data: *const u8
-) -> RuntimeError {
-    let text: StdTextViewResult =
-        std_text_from_c_string(data, 512);
+fn bootstrap_assembler_print(file: RuntimeFile, data: *const u8) -> RuntimeError {
+    let text: StdTextViewResult = std_text_from_c_string(data, 512);
     if (text.error != RuntimeError.none) {
         return text.error;
     }
-    return std_io_write_all(
-        file,
-        text.view.data,
-        text.view.length
-    );
+    return std_io_write_all(file, text.view.data, text.view.length);
 }
 
 fn bootstrap_assembler_usage() -> i32 {
-    bootstrap_assembler_print(
-        runtime_standard_error(),
-        "usage: luna-as -o <output.lo> <input.s>\n"
-    );
+    bootstrap_assembler_print(runtime_standard_error(), "usage: luna-as -o <output.lo> <input.s>\n");
     return BootstrapAssemblerDriverStatus.cli_usage_error as i32;
 }
 
-fn bootstrap_assembler_cli_main(
-    argc: usize,
-    argv: **const u8
-) -> i32 {
+fn bootstrap_assembler_cli_main(argc: usize, argv: **const u8) -> i32 {
     if (argv == null || argc < 2) {
         return bootstrap_assembler_usage();
     }
     if (argc == 2 &&
         bootstrap_assembler_argument_equals(
-            argv[1],
-            "--help",
-            6
-        )) {
-        bootstrap_assembler_print(
-            runtime_standard_output(),
-            "usage: luna-as -o <output.lo> <input.s>\n"
-        );
+            argv[1], "--help", 6)) {
+        bootstrap_assembler_print(runtime_standard_output(), "usage: luna-as -o <output.lo> <input.s>\n");
         return 0;
     }
     if (argc == 2 &&
         bootstrap_assembler_argument_equals(
-            argv[1],
-            "--version",
-            9
-        )) {
-        bootstrap_assembler_print(
-            runtime_standard_output(),
-            "luna-as (self-hosted Luna 1) 0.1.0\n"
-        );
+            argv[1], "--version", 9)) {
+        bootstrap_assembler_print(runtime_standard_output(), "luna-as (self-hosted Luna 1) 0.1.0\n");
         return 0;
     }
 
@@ -205,27 +136,17 @@ fn bootstrap_assembler_cli_main(
         let argument: *const u8 = argv[index];
         if (!options_finished &&
             bootstrap_assembler_argument_equals(
-                argument,
-                "--",
-                2
-            )) {
+                argument, "--", 2)) {
             options_finished = true;
         } else if (!options_finished &&
             bootstrap_assembler_argument_equals(
-                argument,
-                "-o",
-                2
-            )) {
+                argument, "-o", 2)) {
             if (has_output || index + 1 >= argc) {
                 valid = false;
             } else {
                 index += 1;
                 let path: StdPathResult =
-                    std_path_from_c_string(
-                        argv[index],
-                        BootstrapAssemblerDriverLimit
-                            .maximum_path_bytes as usize
-                    );
+                    std_path_from_c_string(argv[index], BootstrapAssemblerDriverLimit.maximum_path_bytes as usize);
                 if (path.error != RuntimeError.none) {
                     valid = false;
                 } else {
@@ -233,18 +154,13 @@ fn bootstrap_assembler_cli_main(
                     has_output = true;
                 }
             }
-        } else if (!options_finished &&
-            argument != null && argument[0] == 45) {
+        } else if (!options_finished && argument != null && argument[0] == 45) {
             valid = false;
         } else if (has_input) {
             valid = false;
         } else {
             let path: StdPathResult =
-                std_path_from_c_string(
-                    argument,
-                    BootstrapAssemblerDriverLimit
-                        .maximum_path_bytes as usize
-                );
+                std_path_from_c_string(argument, BootstrapAssemblerDriverLimit.maximum_path_bytes as usize);
             if (path.error != RuntimeError.none) {
                 valid = false;
             } else {
@@ -258,21 +174,16 @@ fn bootstrap_assembler_cli_main(
         valid = false;
     }
     if (valid) {
-        let input_text: StdTextViewResult =
-            std_path_text(input);
-        let output_text: StdTextViewResult =
-            std_path_text(output);
-        valid = input_text.error == RuntimeError.none &&
-            output_text.error == RuntimeError.none &&
+        let input_text: StdTextViewResult = std_path_text(input);
+        let output_text: StdTextViewResult = std_path_text(output);
+        valid = input_text.error == RuntimeError.none && output_text.error == RuntimeError.none &&
             !std_text_equal(input_text.view, output_text.view);
     }
 
-    var status: i32 =
-        BootstrapAssemblerDriverStatus.cli_usage_error as i32;
+    var status: i32 = BootstrapAssemblerDriverStatus.cli_usage_error as i32;
     if (valid) {
         status = bootstrap_assembler_driver_run(input, output);
-        if (status ==
-            BootstrapAssemblerDriverStatus.success as i32) {
+        if (status == BootstrapAssemblerDriverStatus.success as i32) {
             status = 0;
         }
     } else {
@@ -283,8 +194,7 @@ fn bootstrap_assembler_cli_main(
         release_error = std_path_release(input);
     }
     if (has_output) {
-        let output_error: RuntimeError =
-            std_path_release(output);
+        let output_error: RuntimeError = std_path_release(output);
         if (release_error == RuntimeError.none) {
             release_error = output_error;
         }
@@ -299,27 +209,22 @@ fn main(argc: usize, argv: **const u8) -> i32 {
     if (argc != 1) {
         return bootstrap_assembler_cli_main(argc, argv);
     }
-    let input: StdPathResult =
-        std_path_from_c_string("bootstrap-assembly-input.s", 27);
+    let input: StdPathResult = std_path_from_c_string("bootstrap-assembly-input.s", 27);
     if (input.error != RuntimeError.none) {
         return BootstrapAssemblerDriverStatus.input_error as i32;
     }
-    let output: StdPathResult =
-        std_path_from_c_string("bootstrap-object-output.lo", 27);
+    let output: StdPathResult = std_path_from_c_string("bootstrap-object-output.lo", 27);
     if (output.error != RuntimeError.none) {
         std_path_release(input.path);
         return BootstrapAssemblerDriverStatus.output_error as i32;
     }
-    let status: i32 =
-        bootstrap_assembler_driver_run(input.path, output.path);
-    let input_error: RuntimeError =
-        std_path_release(input.path);
-    let output_error: RuntimeError =
-        std_path_release(output.path);
-    if (status == BootstrapAssemblerDriverStatus.success as i32 &&
-        (input_error != RuntimeError.none ||
+    let status: i32 = bootstrap_assembler_driver_run(input.path, output.path);
+    let input_error: RuntimeError = std_path_release(input.path);
+    let output_error: RuntimeError = std_path_release(output.path);
+    if (status == BootstrapAssemblerDriverStatus.success as i32 && (input_error != RuntimeError.none ||
             output_error != RuntimeError.none)) {
         return BootstrapAssemblerDriverStatus.release_error as i32;
     }
     return status;
 }
+

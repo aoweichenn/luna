@@ -37,6 +37,20 @@ python3 tools/selfhost.py test     # compile+run tests/cases against
 4. Promote a verified toolchain into `anchor/` with refreshed
    `SHA256SUMS` and a provenance note.
 
+## Style
+
+- Column budget is 120; `tools/refmt.py` reflows sources to it and must
+  keep every file's whitespace-insensitive token stream identical.
+- Enumerative mappings (keywords, token-to-kind tables) are data tables
+  plus a loop, never long if-chains.
+- A source file is a soft 2,000-line ceiling; split along pass
+  boundaries into interface/implementation module pairs and register
+  the new modules in `tools/selfhost.py`.
+- Semantic lowering lives under `compiler/middleend/semantic/`
+  (`context`, `modules`, `types`, `functions`, `expr`, `stmt`) with the
+  pipeline entry remaining in `sema.luna`; imports flow strictly
+  downward in that order.
+
 ## Layout
 
 - `anchor/` — fixed-point `lunac`, `luna-as`, `luna-link` from m0, with
