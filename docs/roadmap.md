@@ -137,7 +137,7 @@ feature has executable tests plus a green `verify` fixed point.
 ### m1.2 qualifiers, attributes and static assertions
 
 - [ ] `volatile` object and pointee qualification
-- [ ] `@noreturn` unreachable-successor integration
+- [x] `@noreturn` unreachable-successor integration
 - [x] `@inline` recorded metadata
 - [x] shared attribute grammar and mounting-point validation framework
 - [ ] compile-time `assert(const bool)` on the m1.5 interpreter seed

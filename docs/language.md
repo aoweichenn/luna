@@ -155,6 +155,25 @@ unexpected argument list is a compile-time error.
 records an inlining hint on the semantic function record. Nothing consumes
 the hint yet; it is metadata for a future optimizer.
 
+`@noreturn` mounts on function declarations and takes no arguments. It
+declares that the function never returns to its caller:
+
+```luna
+@noreturn fn fail(message: *const u8) {
+    report(message);
+    runtime_exit(1);
+}
+```
+
+A `return` statement inside a `@noreturn` body is a compile-time error, as
+is a body whose end is reachable; an infinite `loop` or a tail call to
+another `@noreturn` function satisfies the contract. A direct call to a
+`@noreturn` function ends the current control-flow block without a
+successor: subsequent statements are unreachable, and a function whose
+remaining path only calls a `@noreturn` function is not required to
+`return`, even with a non-`void` result type. The attribute is not part of
+any function-pointer type, so indirect calls carry no such knowledge.
+
 ## Types
 
 ```text
