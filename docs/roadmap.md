@@ -147,7 +147,7 @@ feature has executable tests plus a green `verify` fixed point.
 - [x] intrinsic expressions plus bit operations (`@clz`, `@ctz`,
       `@popcount`, `@rotate_left/right`, `@byte_swap`) as branch-free
       arithmetic expansions
-- [ ] float helpers (`@sqrt`, `@floor`, `@ceil`, `@trunc`, `@round`,
+- [x] float helpers (`@sqrt`, `@floor`, `@ceil`, `@trunc`, `@round`,
       `@min`, `@max`, `@abs`) with the six new SSE2 encodings
 - [ ] overflow intrinsics (`@add_overflow`/`@sub_overflow`/
       `@mul_overflow`), out-parameter plus `bool` shape

@@ -4,10 +4,14 @@ enum BootstrapIntrinsicOperandClass: usize {
     integer_scalar,
     integer_scalar_rotated,
     integer_scalar_wide,
+    float_scalar,
+    float_scalar_binary,
 }
 
 enum BootstrapIntrinsicLowering: usize {
     count_leading_zeros, count_trailing_zeros, population_count, rotate_left, rotate_right, byte_swap,
+    float_square_root, float_floor, float_ceiling, float_truncate, float_round, float_minimum, float_maximum,
+    float_absolute,
 }
 
 struct BootstrapIntrinsicEntry {
@@ -22,6 +26,14 @@ struct BootstrapIntrinsicIntegerInfo {
     kind: BootstrapTypeKind;
     unsigned_type: usize;
     width: usize;
+}
+
+struct BootstrapIntrinsicFloatInfo {
+    kind: BootstrapTypeKind;
+    // Values with |x| >= limit are already integral (or NaN/inf); below it the guarded expansions apply.
+    limit: f64;
+    // 1.5 * limit: adding then subtracting it forces a round-to-nearest-even at the unit bit.
+    magic: f64;
 }
 
 fn bootstrap_semantic_intrinsic_invalid_expression() -> BootstrapSemanticExpression {
@@ -40,7 +52,7 @@ fn bootstrap_semantic_intrinsic_invalid_expression() -> BootstrapSemanticExpress
 }
 
 fn bootstrap_semantic_intrinsic_entry(index: usize) -> BootstrapIntrinsicEntry {
-    var table: [6]BootstrapIntrinsicEntry = {};
+    var table: [14]BootstrapIntrinsicEntry = {};
     table[0] = {
         name = "clz", name_length = 3, arity = 1,
         operand_class = BootstrapIntrinsicOperandClass.integer_scalar,
@@ -70,6 +82,46 @@ fn bootstrap_semantic_intrinsic_entry(index: usize) -> BootstrapIntrinsicEntry {
         name = "byte_swap", name_length = 9, arity = 1,
         operand_class = BootstrapIntrinsicOperandClass.integer_scalar_wide,
         lowering = BootstrapIntrinsicLowering.byte_swap,
+    };
+    table[6] = {
+        name = "sqrt", name_length = 4, arity = 1,
+        operand_class = BootstrapIntrinsicOperandClass.float_scalar,
+        lowering = BootstrapIntrinsicLowering.float_square_root,
+    };
+    table[7] = {
+        name = "floor", name_length = 5, arity = 1,
+        operand_class = BootstrapIntrinsicOperandClass.float_scalar,
+        lowering = BootstrapIntrinsicLowering.float_floor,
+    };
+    table[8] = {
+        name = "ceil", name_length = 4, arity = 1,
+        operand_class = BootstrapIntrinsicOperandClass.float_scalar,
+        lowering = BootstrapIntrinsicLowering.float_ceiling,
+    };
+    table[9] = {
+        name = "trunc", name_length = 5, arity = 1,
+        operand_class = BootstrapIntrinsicOperandClass.float_scalar,
+        lowering = BootstrapIntrinsicLowering.float_truncate,
+    };
+    table[10] = {
+        name = "round", name_length = 5, arity = 1,
+        operand_class = BootstrapIntrinsicOperandClass.float_scalar,
+        lowering = BootstrapIntrinsicLowering.float_round,
+    };
+    table[11] = {
+        name = "min", name_length = 3, arity = 2,
+        operand_class = BootstrapIntrinsicOperandClass.float_scalar_binary,
+        lowering = BootstrapIntrinsicLowering.float_minimum,
+    };
+    table[12] = {
+        name = "max", name_length = 3, arity = 2,
+        operand_class = BootstrapIntrinsicOperandClass.float_scalar_binary,
+        lowering = BootstrapIntrinsicLowering.float_maximum,
+    };
+    table[13] = {
+        name = "abs", name_length = 3, arity = 1,
+        operand_class = BootstrapIntrinsicOperandClass.float_scalar,
+        lowering = BootstrapIntrinsicLowering.float_absolute,
     };
     return table[index];
 }
@@ -116,6 +168,13 @@ fn bootstrap_semantic_intrinsic_integer_info(index: usize) -> BootstrapIntrinsic
         kind = BootstrapTypeKind.unsigned_size,
         unsigned_type = BootstrapBuiltinType.unsigned_size as usize, width = 64,
     };
+    return table[index];
+}
+
+fn bootstrap_semantic_intrinsic_float_info(index: usize) -> BootstrapIntrinsicFloatInfo {
+    var table: [2]BootstrapIntrinsicFloatInfo = {};
+    table[0] = { kind = BootstrapTypeKind.float_32, limit = 8388608.0, magic = 12582912.0 };
+    table[1] = { kind = BootstrapTypeKind.float_64, limit = 4503599627370496.0, magic = 6755399441055744.0 };
     return table[index];
 }
 
@@ -268,12 +327,217 @@ fn bootstrap_semantic_intrinsic_byte_swap(
     return result;
 }
 
+fn bootstrap_semantic_intrinsic_float_constant(
+    context: *BootstrapSemanticContext, node: BootstrapSyntaxNode, type_id: usize, value: f64
+) -> usize {
+    var instruction: BootstrapIrInstruction =
+        bootstrap_semantic_instruction(BootstrapIrOpcode.constant_float, node);
+    instruction.floating = value;
+    return bootstrap_semantic_emit_value(context, instruction, type_id);
+}
+
+fn bootstrap_semantic_intrinsic_float_negate(
+    context: *BootstrapSemanticContext, node: BootstrapSyntaxNode, type_id: usize, value: usize
+) -> usize {
+    var instruction: BootstrapIrInstruction = bootstrap_semantic_instruction(BootstrapIrOpcode.unary_float, node);
+    instruction.operation = BootstrapTokenKind.minus;
+    instruction.left = value;
+    return bootstrap_semantic_emit_value(context, instruction, type_id);
+}
+
+fn bootstrap_semantic_intrinsic_float_binary(
+    context: *BootstrapSemanticContext, node: BootstrapSyntaxNode, opcode: BootstrapIrOpcode,
+    operation: BootstrapTokenKind, type_id: usize, left: usize, right: usize
+) -> usize {
+    var instruction: BootstrapIrInstruction = bootstrap_semantic_instruction(opcode, node);
+    instruction.operation = operation;
+    instruction.left = left;
+    instruction.right = right;
+    return bootstrap_semantic_emit_value(context, instruction, type_id);
+}
+
+fn bootstrap_semantic_intrinsic_float_compare(
+    context: *BootstrapSemanticContext, node: BootstrapSyntaxNode, operation: BootstrapTokenKind, left: usize,
+    right: usize
+) -> usize {
+    var instruction: BootstrapIrInstruction = bootstrap_semantic_instruction(BootstrapIrOpcode.compare, node);
+    instruction.operation = operation;
+    instruction.left = left;
+    instruction.right = right;
+    return bootstrap_semantic_emit_value(context, instruction, BootstrapBuiltinType.boolean as usize);
+}
+
+fn bootstrap_semantic_intrinsic_float_rvalue(type_id: usize, value_id: usize) -> BootstrapSemanticExpression {
+    return {
+        type_id = type_id,
+        value_id = value_id,
+        address_id = bootstrap_semantic_no_id(),
+        constant_value = 0,
+        has_constant = false,
+        lvalue = false,
+        mutable_lvalue = false,
+        volatile_lvalue = false,
+        valid = value_id != bootstrap_semantic_no_id(),
+    };
+}
+
+// Emits `|x| < limit ? expansion(x) : x` through a temporary slot, mirroring the conditional-expression
+// lowering. The ordered-less guard is false for NaN and for already-integral magnitudes, so the expansion
+// path's trapping float->integer conversion only ever runs on finite values below 2^(precision - 1).
+fn bootstrap_semantic_intrinsic_float_guarded(
+    context: *BootstrapSemanticContext, node: BootstrapSyntaxNode, lowering: BootstrapIntrinsicLowering,
+    type_id: usize, info: BootstrapIntrinsicFloatInfo, x: usize
+) -> usize {
+    let none: usize = bootstrap_semantic_no_id();
+    let magnitude: usize = bootstrap_semantic_intrinsic_float_binary(
+        context, node, BootstrapIrOpcode.float_max, BootstrapTokenKind.invalid, type_id, x,
+        bootstrap_semantic_intrinsic_float_negate(context, node, type_id, x));
+    let in_range: usize = bootstrap_semantic_intrinsic_float_compare(
+        context, node, BootstrapTokenKind.less, magnitude,
+        bootstrap_semantic_intrinsic_float_constant(context, node, type_id, info.limit));
+    let result_slot: usize = bootstrap_ir_add_slot(
+        &context->ir, bootstrap_semantic_current_ir_function(context), type_id, true, false);
+    let compute_block: usize = bootstrap_semantic_add_current_block(context);
+    let merge_block: usize = bootstrap_semantic_add_current_block(context);
+    bootstrap_semantic_store_to_address(
+        context, node, bootstrap_semantic_address_of_slot(context, node, result_slot, type_id, false, false),
+        type_id, bootstrap_semantic_intrinsic_float_rvalue(type_id, x));
+    bootstrap_semantic_emit_branch(context, node, in_range, compute_block, merge_block);
+    context->current_block = compute_block;
+    var result: usize = none;
+    if (lowering == BootstrapIntrinsicLowering.float_round) {
+        let magic: usize = bootstrap_semantic_intrinsic_float_constant(context, node, type_id, info.magic);
+        result = bootstrap_semantic_intrinsic_float_binary(
+            context, node, BootstrapIrOpcode.binary_float, BootstrapTokenKind.minus, type_id,
+            bootstrap_semantic_intrinsic_float_binary(
+                context, node, BootstrapIrOpcode.binary_float, BootstrapTokenKind.plus, type_id, x, magic),
+            magic);
+    } else {
+        let integer_type: usize = BootstrapBuiltinType.signed_64 as usize;
+        let truncated: usize = bootstrap_semantic_intrinsic_convert(context, node, x, type_id, integer_type);
+        let integral: usize = bootstrap_semantic_intrinsic_convert(context, node, truncated, integer_type, type_id);
+        if (lowering == BootstrapIntrinsicLowering.float_truncate) {
+            result = integral;
+        } else {
+            let downward: bool = lowering == BootstrapIntrinsicLowering.float_floor;
+            let adjust: usize = bootstrap_semantic_intrinsic_float_compare(
+                context, node, downward ? BootstrapTokenKind.greater : BootstrapTokenKind.less, integral, x);
+            let adjustment: usize = bootstrap_semantic_intrinsic_convert(
+                context, node, adjust, BootstrapBuiltinType.boolean as usize, type_id);
+            result = bootstrap_semantic_intrinsic_float_binary(
+                context, node, BootstrapIrOpcode.binary_float,
+                downward ? BootstrapTokenKind.minus : BootstrapTokenKind.plus, type_id, integral, adjustment);
+        }
+    }
+    bootstrap_semantic_store_to_address(
+        context, node, bootstrap_semantic_address_of_slot(context, node, result_slot, type_id, false, false),
+        type_id, bootstrap_semantic_intrinsic_float_rvalue(type_id, result));
+    bootstrap_semantic_emit_jump(context, node, merge_block);
+    context->current_block = merge_block;
+    let source: BootstrapSemanticExpression = {
+        type_id = type_id,
+        value_id = none,
+        address_id = bootstrap_semantic_address_of_slot(context, node, result_slot, type_id, false, false),
+        constant_value = 0,
+        has_constant = false,
+        lvalue = true,
+        mutable_lvalue = false,
+        volatile_lvalue = false,
+        valid = true,
+    };
+    return bootstrap_semantic_load_lvalue(context, node, source).value_id;
+}
+
+fn bootstrap_semantic_lower_float_intrinsic(
+    context: *BootstrapSemanticContext, node: BootstrapSyntaxNode, entry: BootstrapIntrinsicEntry,
+    operand: BootstrapSemanticExpression, second: BootstrapSemanticExpression
+) -> BootstrapSemanticExpression {
+    let none: usize = bootstrap_semantic_no_id();
+    let record: BootstrapTypeRecord = bootstrap_semantic_type_record(context, operand.type_id);
+    var info: BootstrapIntrinsicFloatInfo = bootstrap_semantic_intrinsic_float_info(0);
+    var float_operand: bool = false;
+    var info_index: usize = 0;
+    while (info_index < 2) {
+        info = bootstrap_semantic_intrinsic_float_info(info_index);
+        if (info.kind == record.kind) {
+            float_operand = true;
+            break;
+        }
+        info_index += 1;
+    }
+    if (!float_operand ||
+        (entry.operand_class == BootstrapIntrinsicOperandClass.float_scalar_binary &&
+            second.type_id != operand.type_id)) {
+        bootstrap_semantic_add_diagnostic(
+            context, BootstrapSemanticDiagnosticKind.type_mismatch, context->current_unit, node.span, none,
+            bootstrap_semantic_empty_span(), operand.type_id);
+        return bootstrap_semantic_intrinsic_invalid_expression();
+    }
+    let type_id: usize = operand.type_id;
+    var result: usize = none;
+    switch (entry.lowering) {
+    case BootstrapIntrinsicLowering.float_square_root {
+        var instruction: BootstrapIrInstruction =
+            bootstrap_semantic_instruction(BootstrapIrOpcode.float_sqrt, node);
+        instruction.left = operand.value_id;
+        result = bootstrap_semantic_emit_value(context, instruction, type_id);
+    }
+    case BootstrapIntrinsicLowering.float_minimum {
+        result = bootstrap_semantic_intrinsic_float_binary(
+            context, node, BootstrapIrOpcode.float_min, BootstrapTokenKind.invalid, type_id, operand.value_id,
+            second.value_id);
+    }
+    case BootstrapIntrinsicLowering.float_maximum {
+        result = bootstrap_semantic_intrinsic_float_binary(
+            context, node, BootstrapIrOpcode.float_max, BootstrapTokenKind.invalid, type_id, operand.value_id,
+            second.value_id);
+    }
+    case BootstrapIntrinsicLowering.float_absolute {
+        // maxsd(x, -x) clears the sign bit except that +0.0 compares equal to -0.0 and the second operand
+        // (-0.0) wins; the final add of +0.0 maps -0.0 back to +0.0 and is otherwise exact. NaN stays NaN.
+        let magnitude: usize = bootstrap_semantic_intrinsic_float_binary(
+            context, node, BootstrapIrOpcode.float_max, BootstrapTokenKind.invalid, type_id, operand.value_id,
+            bootstrap_semantic_intrinsic_float_negate(context, node, type_id, operand.value_id));
+        result = bootstrap_semantic_intrinsic_float_binary(
+            context, node, BootstrapIrOpcode.binary_float, BootstrapTokenKind.plus, type_id, magnitude,
+            bootstrap_semantic_intrinsic_float_constant(context, node, type_id, 0.0));
+    }
+    case BootstrapIntrinsicLowering.float_floor {
+        result = bootstrap_semantic_intrinsic_float_guarded(
+            context, node, entry.lowering, type_id, info, operand.value_id);
+    }
+    case BootstrapIntrinsicLowering.float_ceiling {
+        result = bootstrap_semantic_intrinsic_float_guarded(
+            context, node, entry.lowering, type_id, info, operand.value_id);
+    }
+    case BootstrapIntrinsicLowering.float_truncate {
+        result = bootstrap_semantic_intrinsic_float_guarded(
+            context, node, entry.lowering, type_id, info, operand.value_id);
+    }
+    case BootstrapIntrinsicLowering.float_round {
+        result = bootstrap_semantic_intrinsic_float_guarded(
+            context, node, entry.lowering, type_id, info, operand.value_id);
+    }
+    }
+    return {
+        type_id = type_id,
+        value_id = result,
+        address_id = none,
+        constant_value = 0,
+        has_constant = false,
+        lvalue = false,
+        mutable_lvalue = false,
+        volatile_lvalue = false,
+        valid = result != none,
+    };
+}
+
 fn bootstrap_semantic_intrinsic_resolve(
     context: *BootstrapSemanticContext, node: BootstrapSyntaxNode
 ) -> usize {
     let none: usize = bootstrap_semantic_no_id();
     var index: usize = 0;
-    while (index < 6) {
+    while (index < 14) {
         let entry: BootstrapIntrinsicEntry = bootstrap_semantic_intrinsic_entry(index);
         if (bootstrap_semantic_token_equals_bytes(
                 context, context->current_unit, node.token_index, entry.name, entry.name_length)) {
@@ -301,6 +565,10 @@ fn bootstrap_semantic_lower_intrinsic(
     let entry: BootstrapIntrinsicEntry = bootstrap_semantic_intrinsic_entry(intrinsic_index);
     if (!operand.valid || (entry.arity == 2 && !count.valid)) {
         return bootstrap_semantic_intrinsic_invalid_expression();
+    }
+    if (entry.operand_class == BootstrapIntrinsicOperandClass.float_scalar ||
+        entry.operand_class == BootstrapIntrinsicOperandClass.float_scalar_binary) {
+        return bootstrap_semantic_lower_float_intrinsic(context, node, entry, operand, count);
     }
     let record: BootstrapTypeRecord = bootstrap_semantic_type_record(context, operand.type_id);
     var width: usize = 0;

@@ -702,6 +702,23 @@ let swapped: u64 = @byte_swap(raw);          // widths of 16 bits and up
 byte order of operands of 16 bits or more. All of these are defined for
 every input bit pattern.
 
+Float helpers take `f32` or `f64` and return the same type; `@min` and
+`@max` take two operands of the same float type:
+
+```luna
+let root: f64 = @sqrt(area);
+let down: f64 = @floor(ratio);    // also @ceil, @trunc, @round
+let lo: f64 = @min(left, right);  // also @max
+let mag: f64 = @abs(value);
+```
+
+`@floor`, `@ceil`, `@trunc` and `@round` are exact for inputs already
+integral (magnitudes of 2^52 and up for `f64`, 2^23 and up for `f32`) and
+propagate NaN without trapping; `@round` rounds to nearest with ties to
+even. `@min` and `@max` follow the hardware rule that the second argument
+wins when either operand is NaN. `@abs` clears the sign bit, mapping
+`-0.0` to `+0.0`.
+
 ## Compile-time surface
 
 The compile-time surface in Luna 0 consists of typed constants, enum values
