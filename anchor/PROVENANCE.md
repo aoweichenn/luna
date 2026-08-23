@@ -45,3 +45,15 @@ stage-fixed executables were copied here and `SHA256SUMS` refreshed.
 Compiler sources may now adopt m1.2 syntax: declaration attributes
 (`@inline`/`@noreturn`), compile-time `assert` and `volatile`
 qualification.
+
+## 2026-08-23: promotion to the built-ins self-built toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`39d2df3bed094acc8be762e0bd5ba7189e5fde61`
+(`feat(builtins): overflow-reporting arithmetic intrinsics`). Provenance
+chain: the previous m1.2 anchor (above) built `out/stage-next`, which
+rebuilt itself into `out/stage-fixed`; `verify` confirmed every artifact
+byte-identical between the two stages, and `test` passed 106/106. The
+stage-fixed executables were copied here and `SHA256SUMS` refreshed.
+Compiler sources may now adopt the `@`-intrinsics: bit operations,
+float helpers and overflow-reporting arithmetic.
