@@ -149,7 +149,7 @@ feature has executable tests plus a green `verify` fixed point.
       arithmetic expansions
 - [x] float helpers (`@sqrt`, `@floor`, `@ceil`, `@trunc`, `@round`,
       `@min`, `@max`, `@abs`) with the six new SSE2 encodings
-- [ ] overflow intrinsics (`@add_overflow`/`@sub_overflow`/
+- [x] overflow intrinsics (`@add_overflow`/`@sub_overflow`/
       `@mul_overflow`), out-parameter plus `bool` shape
 
 ### m1.3 kernel UAPI layout package

@@ -719,6 +719,20 @@ even. `@min` and `@max` follow the hardware rule that the second argument
 wins when either operand is NaN. `@abs` clears the sign bit, mapping
 `-0.0` to `+0.0`.
 
+Overflow-reporting arithmetic mirrors `__builtin_add_overflow`:
+
+```luna
+var product: u64 = 0;
+if (@mul_overflow(count, stride, &product)) {
+    return -1;                       // wrapped value was still stored
+}
+```
+
+`@add_overflow`, `@sub_overflow` and `@mul_overflow` take two operands of
+the same integer scalar type and a mutable pointer of that exact type.
+The result is `bool` — true when the operation overflowed — and the
+wrapped value is always stored through the pointer, overflow or not.
+
 ## Compile-time surface
 
 The compile-time surface in Luna 0 consists of typed constants, enum values

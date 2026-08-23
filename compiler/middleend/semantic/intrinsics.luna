@@ -6,12 +6,13 @@ enum BootstrapIntrinsicOperandClass: usize {
     integer_scalar_wide,
     float_scalar,
     float_scalar_binary,
+    integer_overflow,
 }
 
 enum BootstrapIntrinsicLowering: usize {
     count_leading_zeros, count_trailing_zeros, population_count, rotate_left, rotate_right, byte_swap,
     float_square_root, float_floor, float_ceiling, float_truncate, float_round, float_minimum, float_maximum,
-    float_absolute,
+    float_absolute, overflow_add, overflow_subtract, overflow_multiply,
 }
 
 struct BootstrapIntrinsicEntry {
@@ -52,7 +53,7 @@ fn bootstrap_semantic_intrinsic_invalid_expression() -> BootstrapSemanticExpress
 }
 
 fn bootstrap_semantic_intrinsic_entry(index: usize) -> BootstrapIntrinsicEntry {
-    var table: [14]BootstrapIntrinsicEntry = {};
+    var table: [17]BootstrapIntrinsicEntry = {};
     table[0] = {
         name = "clz", name_length = 3, arity = 1,
         operand_class = BootstrapIntrinsicOperandClass.integer_scalar,
@@ -122,6 +123,21 @@ fn bootstrap_semantic_intrinsic_entry(index: usize) -> BootstrapIntrinsicEntry {
         name = "abs", name_length = 3, arity = 1,
         operand_class = BootstrapIntrinsicOperandClass.float_scalar,
         lowering = BootstrapIntrinsicLowering.float_absolute,
+    };
+    table[14] = {
+        name = "add_overflow", name_length = 12, arity = 3,
+        operand_class = BootstrapIntrinsicOperandClass.integer_overflow,
+        lowering = BootstrapIntrinsicLowering.overflow_add,
+    };
+    table[15] = {
+        name = "sub_overflow", name_length = 12, arity = 3,
+        operand_class = BootstrapIntrinsicOperandClass.integer_overflow,
+        lowering = BootstrapIntrinsicLowering.overflow_subtract,
+    };
+    table[16] = {
+        name = "mul_overflow", name_length = 12, arity = 3,
+        operand_class = BootstrapIntrinsicOperandClass.integer_overflow,
+        lowering = BootstrapIntrinsicLowering.overflow_multiply,
     };
     return table[index];
 }
@@ -532,12 +548,110 @@ fn bootstrap_semantic_lower_float_intrinsic(
     };
 }
 
+// @add_overflow/@sub_overflow/@mul_overflow: both operands share an integer scalar type T and the third
+// argument is a mutable *T. The wrapped result is always stored through the pointer; the intrinsic returns
+// whether the operation overflowed T.
+fn bootstrap_semantic_lower_overflow_intrinsic(
+    context: *BootstrapSemanticContext, node: BootstrapSyntaxNode, entry: BootstrapIntrinsicEntry,
+    operand: BootstrapSemanticExpression, count: BootstrapSemanticExpression,
+    destination: BootstrapSemanticExpression
+) -> BootstrapSemanticExpression {
+    let none: usize = bootstrap_semantic_no_id();
+    let record: BootstrapTypeRecord = bootstrap_semantic_type_record(context, operand.type_id);
+    var width: usize = 0;
+    var info_index: usize = 0;
+    while (info_index < 10) {
+        let info: BootstrapIntrinsicIntegerInfo = bootstrap_semantic_intrinsic_integer_info(info_index);
+        if (info.kind == record.kind) {
+            width = info.width;
+            break;
+        }
+        info_index += 1;
+    }
+    let destination_record: BootstrapTypeRecord = bootstrap_semantic_type_record(context, destination.type_id);
+    if (width == 0 || count.type_id != operand.type_id || destination_record.kind != BootstrapTypeKind.pointer ||
+        destination_record.element_type != operand.type_id ||
+        (destination_record.flags & (BootstrapTypeFlag.read_only as usize)) != 0) {
+        bootstrap_semantic_add_diagnostic(
+            context, BootstrapSemanticDiagnosticKind.type_mismatch, context->current_unit, node.span, none,
+            bootstrap_semantic_empty_span(), operand.type_id);
+        return bootstrap_semantic_intrinsic_invalid_expression();
+    }
+    let operation: BootstrapTokenKind = entry.lowering == BootstrapIntrinsicLowering.overflow_add ?
+        BootstrapTokenKind.plus : entry.lowering == BootstrapIntrinsicLowering.overflow_subtract ?
+        BootstrapTokenKind.minus : BootstrapTokenKind.star;
+    let type_id: usize = operand.type_id;
+    let boolean_type: usize = BootstrapBuiltinType.boolean as usize;
+    // The narrow result wraps at width T in a plain binary_integer, so the wrapped value is available
+    // whether or not the operation overflowed.
+    let wrapped: usize = bootstrap_semantic_intrinsic_binary(
+        context, node, operation, type_id, operand.value_id, count.value_id);
+    var overflow: usize = none;
+    if (width < 64) {
+        // Redo the operation in the i64 domain (sign- or zero-extended per T), where it is exact, and
+        // compare against the re-widened wrapped value; every conversion here widens and never traps.
+        let wide_type: usize = BootstrapBuiltinType.signed_64 as usize;
+        let wide: usize = bootstrap_semantic_intrinsic_binary(
+            context, node, operation, wide_type,
+            bootstrap_semantic_intrinsic_convert(context, node, operand.value_id, type_id, wide_type),
+            bootstrap_semantic_intrinsic_convert(context, node, count.value_id, type_id, wide_type));
+        overflow = bootstrap_semantic_intrinsic_float_compare(
+            context, node, BootstrapTokenKind.bang_equal, wide,
+            bootstrap_semantic_intrinsic_convert(context, node, wrapped, type_id, wide_type));
+    } else if (entry.lowering == BootstrapIntrinsicLowering.overflow_multiply &&
+        !bootstrap_type_is_signed_integer(record.kind)) {
+        // Two-operand imul sets OF on signed significance only, so it misses unsigned 64-bit overflows
+        // (0xFFFFFFFFFFFFFFFF * 2 reads as -1 * 2 = -2, which "fits"). Expand instead: overflow iff
+        // a != 0 && wrapped / a != b. The divisor is forced to 1 when a == 0 (a | (a == 0)), so the
+        // division never traps; a == 0 cannot overflow and is masked out of the result.
+        let zero: usize = bootstrap_semantic_intrinsic_constant(context, node, type_id, 0);
+        let is_zero: usize = bootstrap_semantic_intrinsic_convert(
+            context, node,
+            bootstrap_semantic_intrinsic_float_compare(
+                context, node, BootstrapTokenKind.equal_equal, operand.value_id, zero),
+            boolean_type, type_id);
+        let divisor: usize = bootstrap_semantic_intrinsic_binary(
+            context, node, BootstrapTokenKind.pipe, type_id, operand.value_id, is_zero);
+        let quotient: usize = bootstrap_semantic_intrinsic_binary(
+            context, node, BootstrapTokenKind.slash, type_id, wrapped, divisor);
+        let mismatch: usize = bootstrap_semantic_intrinsic_convert(
+            context, node,
+            bootstrap_semantic_intrinsic_float_compare(
+                context, node, BootstrapTokenKind.bang_equal, quotient, count.value_id),
+            boolean_type, type_id);
+        let nonzero: usize = bootstrap_semantic_intrinsic_convert(
+            context, node,
+            bootstrap_semantic_intrinsic_float_compare(
+                context, node, BootstrapTokenKind.bang_equal, operand.value_id, zero),
+            boolean_type, type_id);
+        overflow = bootstrap_semantic_intrinsic_float_compare(
+            context, node, BootstrapTokenKind.bang_equal,
+            bootstrap_semantic_intrinsic_binary(
+                context, node, BootstrapTokenKind.ampersand, type_id, mismatch, nonzero),
+            zero);
+    } else {
+        // overflow_flag must be emitted immediately after the arithmetic: codegen for binary_integer ends
+        // with a mov store, so the add/sub/imul flags reach the setcc unclobbered. Only signed operations
+        // and unsigned add/sub come here: signed uses seto, unsigned add/sub uses setc.
+        var flag: BootstrapIrInstruction = bootstrap_semantic_instruction(BootstrapIrOpcode.overflow_flag, node);
+        flag.auxiliary = bootstrap_type_is_signed_integer(record.kind) ? 1 : 0;
+        overflow = bootstrap_semantic_emit_value(context, flag, boolean_type);
+    }
+    if (wrapped == none || overflow == none ||
+        !bootstrap_semantic_store_to_address(
+            context, node, destination.value_id, type_id,
+            bootstrap_semantic_intrinsic_float_rvalue(type_id, wrapped))) {
+        return bootstrap_semantic_intrinsic_invalid_expression();
+    }
+    return bootstrap_semantic_intrinsic_float_rvalue(boolean_type, overflow);
+}
+
 fn bootstrap_semantic_intrinsic_resolve(
     context: *BootstrapSemanticContext, node: BootstrapSyntaxNode
 ) -> usize {
     let none: usize = bootstrap_semantic_no_id();
     var index: usize = 0;
-    while (index < 14) {
+    while (index < 17) {
         let entry: BootstrapIntrinsicEntry = bootstrap_semantic_intrinsic_entry(index);
         if (bootstrap_semantic_token_equals_bytes(
                 context, context->current_unit, node.token_index, entry.name, entry.name_length)) {
@@ -559,12 +673,16 @@ fn bootstrap_semantic_intrinsic_resolve(
 
 fn bootstrap_semantic_lower_intrinsic(
     context: *BootstrapSemanticContext, node: BootstrapSyntaxNode, intrinsic_index: usize,
-    operand: BootstrapSemanticExpression, count: BootstrapSemanticExpression
+    operand: BootstrapSemanticExpression, count: BootstrapSemanticExpression,
+    destination: BootstrapSemanticExpression
 ) -> BootstrapSemanticExpression {
     let none: usize = bootstrap_semantic_no_id();
     let entry: BootstrapIntrinsicEntry = bootstrap_semantic_intrinsic_entry(intrinsic_index);
-    if (!operand.valid || (entry.arity == 2 && !count.valid)) {
+    if (!operand.valid || (entry.arity >= 2 && !count.valid) || (entry.arity == 3 && !destination.valid)) {
         return bootstrap_semantic_intrinsic_invalid_expression();
+    }
+    if (entry.operand_class == BootstrapIntrinsicOperandClass.integer_overflow) {
+        return bootstrap_semantic_lower_overflow_intrinsic(context, node, entry, operand, count, destination);
     }
     if (entry.operand_class == BootstrapIntrinsicOperandClass.float_scalar ||
         entry.operand_class == BootstrapIntrinsicOperandClass.float_scalar_binary) {

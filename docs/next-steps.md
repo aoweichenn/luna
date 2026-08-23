@@ -80,12 +80,11 @@ All four slices landed behind build/test/verify, 96/96 cases:
 
 ## Step 2 — decision: built-ins package or FFI completeness
 
-Two candidate main lines after m1.2. Recommendation: **built-ins
-first** — they unblock practical library work (text formatting, hashing,
-decimal printing) that later milestones, including m1.3 test programs,
-benefit from.
+Built-ins package landed (recommended option X): bit operations, float
+helpers and overflow intrinsics, 106/106 cases behind verify. Next main
+line is m1.3 (kernel UAPI layout package) per the revised syntax plan.
 
-### Option X (recommended): built-ins package
+### Option X (recommended): built-ins package — done
 
 - bit operations: `clz`, `ctz`, `popcount`, `rotate_left/right`,
   `byte_swap`;
