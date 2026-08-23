@@ -66,4 +66,6 @@ Version 0.1.0 closed the full bootstrap (see the `m0` branch and
 `docs/roadmap.md`). This branch reorganizes the project around pure-Luna
 development; new language work happens here, in Luna. The accepted syntax
 completion direction and its milestone order are recorded in
-[`docs/syntax-plan.md`](docs/syntax-plan.md).
+[`docs/syntax-plan.md`](docs/syntax-plan.md), and the working plan for
+the next steps — m1.1 closeout, m1.2 and beyond — lives in
+[`docs/next-steps.md`](docs/next-steps.md).
