@@ -21,3 +21,14 @@ and `drivers/` using these anchors, then verified against its own rebuild
 
 Replace the anchor only after a green `verify` run, together with refreshed
 `SHA256SUMS` and a new provenance note.
+
+## 2026-08-23: promotion to the m1.1 self-built toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`06d15e0a35b43b06824e0ab936d4d939e9e7f685`
+(`refactor: reflow to 120 columns, table-driven mappings, split semantic
+monolith`). Provenance chain: the previous m0 anchor (above) built
+`out/stage-next`, which rebuilt itself into `out/stage-fixed`; `verify`
+confirmed every assembly, object and executable artifact byte-identical
+between the two stages, and `test` passed 80/80. The stage-fixed
+executables were copied here and `SHA256SUMS` refreshed.
