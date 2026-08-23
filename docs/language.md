@@ -679,6 +679,29 @@ var copy: [4]i32 = values;
 let first: *i32 = &values[0];
 ```
 
+## Intrinsics
+
+Call-shaped intrinsics live in the same `@` namespace as declaration
+attributes, but appear in expression position. Each has a fixed arity and
+typed operand rules; an unknown name, wrong arity or wrong operand class
+is a compile-time error.
+
+Bit operations accept any integer scalar and return its type:
+
+```luna
+let highest: u32 = @clz(flags);              // 0..32; @clz(0) is 32
+let lowest: u64 = @ctz(mask);                // 0..64; @ctz(0) is 64
+let bits: u32 = @popcount(mask);
+let rolled: u32 = @rotate_left(value, 3);    // usize count, masked mod width
+let back: u32 = @rotate_right(value, 3);
+let swapped: u64 = @byte_swap(raw);          // widths of 16 bits and up
+```
+
+`@clz` and `@ctz` count from the operand's own width, so `@clz(0)` and
+`@ctz(0)` yield that width rather than trapping. `@byte_swap` reverses the
+byte order of operands of 16 bits or more. All of these are defined for
+every input bit pattern.
+
 ## Compile-time surface
 
 The compile-time surface in Luna 0 consists of typed constants, enum values

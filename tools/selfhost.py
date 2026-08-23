@@ -92,6 +92,12 @@ LIBRARIES = {
         ("runtime", "bytes", "text", "lexer", "parser", "type", "ir",
          "sem_ctx", "sem_types"),
     ),
+    "sem_intrinsics": (
+        "luna.bootstrap.middleend.semantic.intrinsics",
+        "compiler/middleend/semantic/intrinsics",
+        ("runtime", "bytes", "text", "lexer", "parser", "type", "ir",
+         "sem_ctx", "sem_types"),
+    ),
     "sem_funcs": (
         "luna.bootstrap.middleend.semantic.functions",
         "compiler/middleend/semantic/functions",
@@ -102,7 +108,7 @@ LIBRARIES = {
         "luna.bootstrap.middleend.semantic.expr",
         "compiler/middleend/semantic/expr",
         ("runtime", "bytes", "text", "lexer", "parser", "type", "ir",
-         "sem_ctx", "sem_types"),
+         "sem_ctx", "sem_types", "sem_intrinsics"),
     ),
     "sem_stmt": (
         "luna.bootstrap.middleend.semantic.stmt",
@@ -184,6 +190,7 @@ LIBRARY_ORDER = (
     "sem_modules",
     "sem_types",
     "sem_consteval",
+    "sem_intrinsics",
     "sem_funcs",
     "sem_expr",
     "sem_stmt",
@@ -216,6 +223,7 @@ DRIVERS = {
             "sem_modules",
             "sem_types",
             "sem_consteval",
+            "sem_intrinsics",
             "sem_funcs",
             "sem_expr",
             "sem_stmt",

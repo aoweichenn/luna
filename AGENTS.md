@@ -50,7 +50,7 @@ python3 tools/selfhost.py test     # compile+run tests/cases against
   the new modules in `tools/selfhost.py`.
 - Semantic lowering lives under `compiler/middleend/semantic/`
   (`context`, `attributes`, `modules`, `types`, `consteval`,
-  `functions`, `expr`, `stmt`) with the pipeline entry remaining in
+  `intrinsics`, `functions`, `expr`, `stmt`) with the pipeline entry remaining in
   `sema.luna`; imports flow strictly downward in that order.
 
 ## Layout

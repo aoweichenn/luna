@@ -144,7 +144,7 @@ feature has executable tests plus a green `verify` fixed point.
 
 ### built-ins package (between m1.2 and m1.3)
 
-- [ ] intrinsic expressions plus bit operations (`@clz`, `@ctz`,
+- [x] intrinsic expressions plus bit operations (`@clz`, `@ctz`,
       `@popcount`, `@rotate_left/right`, `@byte_swap`) as branch-free
       arithmetic expansions
 - [ ] float helpers (`@sqrt`, `@floor`, `@ceil`, `@trunc`, `@round`,

@@ -72,7 +72,7 @@ fn bootstrap_syntax_tree_is_valid(tree: BootstrapSyntaxTree) -> bool {
     var node_index: usize = 0;
     while (node_index < tree.count) {
         let node: BootstrapSyntaxNode = nodes[node_index];
-        if ((node.kind as usize) > (BootstrapSyntaxKind.assert_statement as usize) || node.flags > 1023 ||
+        if ((node.kind as usize) > (BootstrapSyntaxKind.intrinsic_expression as usize) || node.flags > 1023 ||
             node.span.line == 0 || node.span.column == 0 || node.span.length >
                 (BootstrapParserLimit.maximum_size as usize) - node.span.offset || (node.token_index != none &&
                 node.token_index >= tree.token_count)) {
@@ -792,6 +792,39 @@ fn bootstrap_parser_parse_call(
     return call;
 }
 
+fn bootstrap_parser_parse_intrinsic_expression(state: *BootstrapParserState, at_sign: BootstrapToken) -> usize {
+    let none: usize = bootstrap_syntax_no_index();
+    let name_index: usize = state->current_index;
+    let intrinsic: usize = bootstrap_parser_new_node(
+        state, BootstrapSyntaxKind.intrinsic_expression, at_sign.span, name_index);
+    if (bootstrap_parser_expect(
+            state, BootstrapTokenKind.identifier) &&
+        bootstrap_parser_expect(
+            state, BootstrapTokenKind.left_parenthesis)) {
+        if (!bootstrap_parser_enter_nesting(
+                state, at_sign.span)) {
+            return intrinsic;
+        }
+        if (state->current.kind != BootstrapTokenKind.right_parenthesis) {
+            while (state->error == RuntimeError.none) {
+                let argument: usize = bootstrap_parser_parse_expression(state);
+                if (argument != none) {
+                    bootstrap_parser_add_child(state, intrinsic, argument);
+                }
+                if (!bootstrap_parser_match(
+                        state, BootstrapTokenKind.comma)) {
+                    break;
+                }
+            }
+        }
+        bootstrap_parser_expect(state, BootstrapTokenKind.right_parenthesis);
+        bootstrap_parser_leave_nesting(state);
+    }
+    bootstrap_parser_set_node_span(
+        state, intrinsic, bootstrap_parser_join_spans(at_sign.span, state->previous.span));
+    return intrinsic;
+}
+
 fn bootstrap_parser_parse_layout_query(
     state: *BootstrapParserState, keyword: BootstrapToken, keyword_index: usize) -> usize {
     if (!bootstrap_parser_enter_nesting(
@@ -834,6 +867,10 @@ fn bootstrap_parser_parse_primary_expression(state: *BootstrapParserState) -> us
         token.kind == BootstrapTokenKind.keyword_offsetof) {
         bootstrap_parser_advance(state);
         return bootstrap_parser_parse_layout_query(state, token, token_index);
+    }
+    if (token.kind == BootstrapTokenKind.at_sign) {
+        bootstrap_parser_advance(state);
+        return bootstrap_parser_parse_intrinsic_expression(state, token);
     }
     if (token.kind == BootstrapTokenKind.integer) {
         bootstrap_parser_advance(state);
