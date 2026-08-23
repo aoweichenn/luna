@@ -139,19 +139,24 @@ feature has executable tests plus a green `verify` fixed point.
 - [ ] `volatile` object and pointee qualification
 - [ ] `@noreturn` unreachable-successor integration
 - [ ] `@inline` recorded metadata
-- [ ] compile-time `assert(const bool)`
+- [ ] shared attribute grammar and mounting-point validation framework
+- [ ] compile-time `assert(const bool)` on the m1.5 interpreter seed
 
-### m1.3 FFI completeness
+### m1.3 kernel UAPI layout package
 
 - [ ] anonymous struct/union members
 - [ ] bitfields (`@bits`) following the x86-64 psABI
-- [ ] flexible trailing array member
-- [ ] variadic extern calls with the `%al` protocol
+- [ ] `@align(N)` alignment control with over-aligned SysV rules
+- [ ] `@packed` structures (no padding; field addresses rejected)
+- [ ] flexible trailing array member (`[?]T` header types)
 
-### m1.4 characters, strings and inference
+### m1.4 characters, strings, literals and inference
 
 - [ ] `char` spelling, string width prefixes (`u16"`, `u32"`),
       adjacent literal concatenation, `\u{...}` escapes
+- [ ] binary (`0b`) and hexadecimal floating literals
+- [ ] positional and indexed array initializer lists
+- [ ] nested `offsetof` designators
 - [ ] initializer type inference for `let`/`var`
 
 ### m1.5 constant functions
@@ -162,11 +167,29 @@ feature has executable tests plus a green `verify` fixed point.
 ### m1.6 labels and goto
 
 - [ ] labeled `break`/`continue`
-- [ ] validated `goto`
+- [ ] validated `goto` (`defer` shelved, see syntax-plan decision 2)
 
-### m1.7 variadic definitions
+### m1.7 variadic functions
 
+- [ ] variadic extern calls with the `%al` protocol
 - [ ] `va_list` with register save areas and typed `va_arg`
+
+  No kernel consumer exists (all syscalls are fixed-arity); this milestone
+  starts when the first real C-library consumer appears.
+
+### m1.8 naked assembly functions
+
+- [ ] `asm fn` with string-literal bodies, no prologue/epilogue
+- [ ] `luna.linux.syscall` migrated from linker injection to `asm fn`
+
+### m1.9 compile-time intrinsics
+
+- [ ] `@add_overflow`/`@sub_overflow`/`@mul_overflow` for integer scalars
+- [ ] `@file()`/`@line()` source position builtins
+
+### m1.10 embedded binary data
+
+- [ ] `@embed("path")` file-to-array-constant with determinism rules
 
 ## Explicitly deferred
 
@@ -176,4 +199,6 @@ server work and non-x86-64 backends are outside the bootstrap path.
 Using libc to implement the target runtime or standard library is also outside
 the accepted design; optional explicit FFI remains supported. Debug
 presentation for local variables and types, optimized location lists, macro
-information and unwind tables are separate post-bootstrap contracts.
+information and unwind tables are separate post-bootstrap contracts. The
+feature-level dispositions, including every deliberate rejection, are
+accounted for in `syntax-plan.md`'s C23 disposition tables.

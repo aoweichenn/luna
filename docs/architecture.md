@@ -20,7 +20,10 @@ The project-owned x86-64 Linux system-call ABI layer
 converts System V calls with zero to six arguments to the kernel register ABI
 and invokes `syscall` directly. The Luna runtime and standard library must be
 built only on that layer. Optional caller-supplied external objects are an
-explicit FFI boundary, not a runtime dependency.
+explicit FFI boundary, not a runtime dependency. FFI exists to match
+interfaces described as C ABI layouts — the kernel UAPI first — and never
+implies linking glibc, musl or any libc; adopting one would be a separate
+explicit boundary decision.
 
 The compiler owns the language semantics. The hosted stage-0 path encodes
 x86-64 instructions into ELF64 relocatable objects directly. The self-hosted
