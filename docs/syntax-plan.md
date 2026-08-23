@@ -124,7 +124,7 @@ is deliberate.
 | `?:` conditional | kept | `bool` condition, one exact result type |
 | `sizeof(expression)` | rejected | type-only `sizeof`/`alignof`/`offsetof` |
 | `_Generic` | rejected | native generics if ever |
-| `<stdckdint.h>` checked arithmetic | modernized | `@add_overflow` and kin, m1.9 |
+| `<stdckdint.h>` checked arithmetic | modernized | `@add_overflow` and kin, built-ins package |
 | compound literals | modernized | context-directed `{}` initialization |
 | designated initializers | adopted | named fields done; array lists in m1.4 |
 
@@ -259,6 +259,48 @@ validation pass that later attributes (`@align`, `@packed`, `@bits`) and
 intrinsics (`@add_overflow`, `@file`) reuse. The constant evaluator behind
 `assert` is written as the seed of the m1.5 `const fn` interpreter, not as
 a separate evaluator.
+
+## Built-ins package — between m1.2 and m1.3
+
+Call-shaped intrinsics in expression position, in the same `@` namespace
+as declaration attributes. Three groups, all restricted to the baseline
+x86-64 + SSE2 instruction set (no BMI, no SSE4):
+
+```luna
+let highest: u32 = @clz(flags);              // 0..32, clz(0) == 32
+let lowest: u64 = @ctz(mask);                // 0..64, ctz(0) == 64
+let bits: u32 = @popcount(mask);
+let rolled: u32 = @rotate_left(value, 3);    // count masked mod width
+let swapped: u64 = @byte_swap(raw);          // widths >= 16 bits
+
+let root: f64 = @sqrt(area);
+let down: f64 = @floor(ratio);               // also @ceil, @trunc, @round
+let lo: f64 = @min(left, right);             // also @max, @abs
+
+var product: u64 = 0;
+if (@mul_overflow(count, stride, &product)) {
+    return -1;                               // wrapped value still stored
+}
+```
+
+Type rules: bit operations accept any integer scalar and return its type
+(`@byte_swap` requires width >= 16 bits); rotate counts are `usize`,
+masked modulo the operand width. Float helpers take `f32`/`f64` and return
+the same type; `@min`/`@max` follow the hardware NaN semantics, `@round`
+rounds to nearest with ties to even. The overflow intrinsics take two
+same-typed integer operands plus a mutable pointer for the result and
+return `bool` — true on overflow, with the wrapped value always stored.
+This out-parameter shape supersedes the earlier struct-return sketch: it
+needs no prelude type and mirrors `__builtin_add_overflow`.
+
+Implementation notes: bit operations lower to branch-free arithmetic
+expansions over existing IR (SWAR popcount; `clz(x) = popcount(~smear(x))`,
+`ctz(x) = popcount(~x & (x - 1))` — both correct at zero). `@sqrt`,
+`@min`/`@max` gain six SSE2 encodings (`sqrtsd`/`sqrtss`,
+`minsd`/`minss`/`maxsd`/`maxss`); `@abs` masks the sign bit in a GPR; the
+rounding family uses the `cvtt`/`cvt` conversions with the `|x| >= 2^52`
+guard. Overflow intrinsics are one `add`/`sub`/`imul` plus `seto`.
+Wrapping arithmetic needs no intrinsic: plain operators already wrap.
 
 ## Milestone m1.3 — kernel UAPI layout package
 
@@ -425,23 +467,16 @@ their linker-injected special case to honest `asm fn` source in
 `library/linux/syscall.luna` — including the argument-register shuffle the
 `syscall` instruction requires (`rcx` arrives as `r10`).
 
-## Milestone m1.9 — compile-time intrinsics
-
-Call-shaped intrinsics in the `@` namespace, each with a defined result
-type and no runtime dependency:
+## Milestone m1.9 — source position intrinsics
 
 ```luna
-let result: OverflowResult = @add_overflow(count, stride);
-if (result.overflowed) { ... }          // one JO in the backend
-
 @panic(@file(), @line(), "unreachable"); // position builtins for diagnostics
 ```
 
-`@add_overflow`, `@sub_overflow` and `@mul_overflow` cover every integer
-scalar pair and return the wrapped value plus an `overflowed` flag — the
-`<stdckdint.h>` capability without the macro form, sized for allocator
-arithmetic. `@file()` and `@line()` yield the source position as
-`*const u8` and `usize`, giving `assert` and panic paths real locations.
+`@file()` and `@line()` yield the source position as `*const u8` and
+`usize`, giving `assert` and panic paths real locations. The overflow
+intrinsics originally sketched here landed earlier in the built-ins
+package with an out-parameter shape.
 
 ## Milestone m1.10 — embedded binary data
 

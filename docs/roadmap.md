@@ -142,6 +142,16 @@ feature has executable tests plus a green `verify` fixed point.
 - [x] shared attribute grammar and mounting-point validation framework
 - [x] compile-time `assert(const bool)` on the m1.5 interpreter seed
 
+### built-ins package (between m1.2 and m1.3)
+
+- [ ] intrinsic expressions plus bit operations (`@clz`, `@ctz`,
+      `@popcount`, `@rotate_left/right`, `@byte_swap`) as branch-free
+      arithmetic expansions
+- [ ] float helpers (`@sqrt`, `@floor`, `@ceil`, `@trunc`, `@round`,
+      `@min`, `@max`, `@abs`) with the six new SSE2 encodings
+- [ ] overflow intrinsics (`@add_overflow`/`@sub_overflow`/
+      `@mul_overflow`), out-parameter plus `bool` shape
+
 ### m1.3 kernel UAPI layout package
 
 - [ ] anonymous struct/union members
@@ -182,9 +192,8 @@ feature has executable tests plus a green `verify` fixed point.
 - [ ] `asm fn` with string-literal bodies, no prologue/epilogue
 - [ ] `luna.linux.syscall` migrated from linker injection to `asm fn`
 
-### m1.9 compile-time intrinsics
+### m1.9 source position intrinsics
 
-- [ ] `@add_overflow`/`@sub_overflow`/`@mul_overflow` for integer scalars
 - [ ] `@file()`/`@line()` source position builtins
 
 ### m1.10 embedded binary data
