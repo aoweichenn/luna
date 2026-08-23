@@ -57,3 +57,15 @@ byte-identical between the two stages, and `test` passed 106/106. The
 stage-fixed executables were copied here and `SHA256SUMS` refreshed.
 Compiler sources may now adopt the `@`-intrinsics: bit operations,
 float helpers and overflow-reporting arithmetic.
+
+## 2026-08-23: promotion to the m1.3 self-built toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`8a9e0f168cfd3318a43052eff8ed407c170dab2f`
+(`feat(m1.3): @bits bitfields`). Provenance chain: the previous
+built-ins anchor (above) built `out/stage-next`, which rebuilt itself
+into `out/stage-fixed`; `verify` confirmed every artifact byte-identical
+between the two stages, and `test` passed 122/122. The stage-fixed
+executables were copied here and `SHA256SUMS` refreshed. Compiler
+sources may now adopt m1.3 syntax: `@align`, `@packed`, anonymous
+members, `[?]T` header types and `@bits`.
