@@ -236,6 +236,13 @@ fn bootstrap_type_kind_is_named(
         kind == BootstrapTypeKind.enumeration;
 }
 
+fn bootstrap_type_kind_is_declared(
+    kind: BootstrapTypeKind
+) -> bool {
+    return bootstrap_type_kind_is_named(kind) ||
+        kind == BootstrapTypeKind.alias;
+}
+
 fn bootstrap_type_table_add_named(
     table: BootstrapTypeTable,
     kind: BootstrapTypeKind,
@@ -244,7 +251,7 @@ fn bootstrap_type_table_add_named(
     name_token: usize,
     exported: bool
 ) -> BootstrapTypeTableResult {
-    if (!bootstrap_type_kind_is_named(kind) ||
+    if (!bootstrap_type_kind_is_declared(kind) ||
         declaration_unit == bootstrap_type_no_id() ||
         declaration_node == bootstrap_type_no_id() ||
         name_token == bootstrap_type_no_id()) {
@@ -446,12 +453,125 @@ fn bootstrap_type_table_add_field(
     };
 }
 
+fn bootstrap_type_table_add_function_pointer(
+    table: BootstrapTypeTable,
+    return_type: usize
+) -> BootstrapTypeTableResult {
+    if (!bootstrap_type_table_storage_is_valid(table) ||
+        return_type >= table.type_count) {
+        return {
+            table = table,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    let records: *const BootstrapTypeRecord =
+        table.types.data as *const BootstrapTypeRecord;
+    let return_record: BootstrapTypeRecord =
+        records[return_type];
+    if (return_record.kind == BootstrapTypeKind.invalid ||
+        return_record.kind == BootstrapTypeKind.alias ||
+        return_record.kind == BootstrapTypeKind.array ||
+        (return_record.flags &
+            (BootstrapTypeFlag.complete as usize)) == 0) {
+        return {
+            table = table,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    var record: BootstrapTypeRecord =
+        bootstrap_type_invalid_record();
+    record.kind = BootstrapTypeKind.function_pointer;
+    record.element_type = return_type;
+    record.size_bytes =
+        BootstrapTypeLimit.target_pointer_bytes as usize;
+    record.alignment_bytes =
+        BootstrapTypeLimit.target_pointer_alignment as usize;
+    return bootstrap_type_append_record(table, record);
+}
+
+fn bootstrap_type_table_add_parameter(
+    table: BootstrapTypeTable,
+    owner_type: usize,
+    parameter_type: usize
+) -> BootstrapTypeTableResult {
+    if (!bootstrap_type_table_storage_is_valid(table) ||
+        owner_type >= table.type_count ||
+        parameter_type >= table.type_count) {
+        return {
+            table = table,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+    let records: *BootstrapTypeRecord =
+        table.types.data as *BootstrapTypeRecord;
+    let owner: BootstrapTypeRecord = records[owner_type];
+    let parameter: BootstrapTypeRecord =
+        records[parameter_type];
+    if (owner.kind != BootstrapTypeKind.function_pointer ||
+        (owner.flags &
+            (BootstrapTypeFlag.complete as usize)) != 0 ||
+        (owner.field_count == 0 && owner.first_field !=
+            bootstrap_type_no_id()) ||
+        (owner.field_count != 0 &&
+            owner.first_field + owner.field_count !=
+                table.field_count) ||
+        parameter.kind == BootstrapTypeKind.invalid ||
+        parameter.kind == BootstrapTypeKind.type_void ||
+        parameter.kind == BootstrapTypeKind.alias ||
+        parameter.kind == BootstrapTypeKind.array ||
+        (parameter.flags &
+            (BootstrapTypeFlag.complete as usize)) == 0 ||
+        parameter.size_bytes == 0 ||
+        owner.field_count ==
+            BootstrapTypeLimit.maximum_size as usize) {
+        return {
+            table = table,
+            error = RuntimeError.invalid_argument,
+        };
+    }
+
+    var field: BootstrapTypeField =
+        bootstrap_type_invalid_field();
+    field.owner_type = owner_type;
+    field.type_id = parameter_type;
+    field.offset_bytes = 0;
+    let appended: StdByteBufferResult =
+        std_byte_buffer_append(
+            table.fields,
+            (&field) as *const BootstrapTypeField as *const u8,
+            sizeof(BootstrapTypeField)
+        );
+    var result: BootstrapTypeTable = table;
+    result.fields = appended.buffer;
+    if (appended.error != RuntimeError.none) {
+        return {
+            table = result,
+            error = appended.error,
+        };
+    }
+    let result_records: *BootstrapTypeRecord =
+        result.types.data as *BootstrapTypeRecord;
+    if (result_records[owner_type].field_count == 0) {
+        result_records[owner_type].first_field =
+            result.field_count;
+    }
+    result_records[owner_type].field_count += 1;
+    result.field_count += 1;
+    return {
+        table = result,
+        error = RuntimeError.none,
+    };
+}
+
 fn bootstrap_type_layout_parameters_are_valid(
     record: BootstrapTypeRecord,
     size_bytes: usize,
     alignment_bytes: usize
 ) -> bool {
-    if (!bootstrap_type_kind_is_named(record.kind) ||
+    let declared: bool =
+        bootstrap_type_kind_is_declared(record.kind) ||
+        record.kind == BootstrapTypeKind.function_pointer;
+    if (!declared ||
         (record.flags & (BootstrapTypeFlag.complete as usize)) != 0 ||
         size_bytes == 0 || alignment_bytes == 0 ||
         alignment_bytes > 8 ||
@@ -515,6 +635,45 @@ fn bootstrap_type_table_set_enum_underlying(
     return RuntimeError.none;
 }
 
+fn bootstrap_type_table_set_alias_target(
+    table: BootstrapTypeTable,
+    type_id: usize,
+    target_type: usize
+) -> RuntimeError {
+    if (!bootstrap_type_table_storage_is_valid(table) ||
+        type_id >= table.type_count ||
+        target_type >= table.type_count) {
+        return RuntimeError.invalid_argument;
+    }
+    let records: *BootstrapTypeRecord =
+        table.types.data as *BootstrapTypeRecord;
+    if (records[type_id].kind != BootstrapTypeKind.alias ||
+        (records[type_id].flags &
+            (BootstrapTypeFlag.complete as usize)) != 0 ||
+        records[type_id].element_type !=
+            bootstrap_type_no_id()) {
+        return RuntimeError.invalid_argument;
+    }
+    let target: BootstrapTypeRecord = records[target_type];
+    if ((target.flags &
+            (BootstrapTypeFlag.complete as usize)) == 0 ||
+        target.kind == BootstrapTypeKind.invalid ||
+        target.kind == BootstrapTypeKind.type_void ||
+        target.size_bytes == 0 ||
+        target.alignment_bytes == 0) {
+        return RuntimeError.invalid_argument;
+    }
+    records[type_id].element_type = target_type;
+    records[type_id].size_bytes = target.size_bytes;
+    records[type_id].alignment_bytes =
+        target.alignment_bytes;
+    records[type_id].flags &=
+        ~(BootstrapTypeFlag.resolving as usize);
+    records[type_id].flags |=
+        BootstrapTypeFlag.complete as usize;
+    return RuntimeError.none;
+}
+
 fn bootstrap_type_table_set_resolving(
     table: BootstrapTypeTable,
     type_id: usize,
@@ -527,7 +686,7 @@ fn bootstrap_type_table_set_resolving(
     }
     let records: *BootstrapTypeRecord =
         table.types.data as *BootstrapTypeRecord;
-    if (!bootstrap_type_kind_is_named(records[type_id].kind) ||
+    if (!bootstrap_type_kind_is_declared(records[type_id].kind) ||
         (records[type_id].flags &
             (BootstrapTypeFlag.complete as usize)) != 0) {
         return RuntimeError.invalid_argument;
@@ -575,7 +734,8 @@ fn bootstrap_type_is_scalar(kind: BootstrapTypeKind) -> bool {
         bootstrap_type_is_integer(kind) ||
         bootstrap_type_is_float(kind) ||
         kind == BootstrapTypeKind.pointer ||
-        kind == BootstrapTypeKind.enumeration;
+        kind == BootstrapTypeKind.enumeration ||
+        kind == BootstrapTypeKind.function_pointer;
 }
 
 fn bootstrap_type_is_memory(kind: BootstrapTypeKind) -> bool {
@@ -604,7 +764,8 @@ fn bootstrap_type_bit_width(kind: BootstrapTypeKind) -> usize {
         kind == BootstrapTypeKind.unsigned_64 ||
         kind == BootstrapTypeKind.unsigned_size ||
         kind == BootstrapTypeKind.float_64 ||
-        kind == BootstrapTypeKind.pointer) {
+        kind == BootstrapTypeKind.pointer ||
+        kind == BootstrapTypeKind.function_pointer) {
         return 64;
     }
     return 0;
@@ -626,7 +787,7 @@ fn bootstrap_type_table_is_valid(
     while (index < table.type_count) {
         let record: BootstrapTypeRecord = records[index];
         if ((record.kind as usize) >
-                (BootstrapTypeKind.enumeration as usize) ||
+                (BootstrapTypeKind.function_pointer as usize) ||
             record.flags > 15) {
             return false;
         }
@@ -723,6 +884,88 @@ fn bootstrap_type_table_is_valid(
                 }
                 previous += 1;
             }
+        } else if (record.kind ==
+            BootstrapTypeKind.function_pointer) {
+            if ((record.flags &
+                    (BootstrapTypeFlag.complete as usize)) ==
+                0 ||
+                record.element_type >= table.type_count ||
+                record.element_count != 0 ||
+                record.declaration_unit !=
+                    bootstrap_type_no_id() ||
+                record.declaration_node !=
+                    bootstrap_type_no_id() ||
+                record.name_token != bootstrap_type_no_id() ||
+                record.size_bytes != 8 ||
+                record.alignment_bytes != 8 ||
+                records[record.element_type].kind ==
+                    BootstrapTypeKind.invalid) {
+                return false;
+            }
+            var previous: usize =
+                BootstrapBuiltinType.count as usize;
+            while (previous < index) {
+                if (records[previous].kind ==
+                        BootstrapTypeKind.function_pointer &&
+                    records[previous].element_type ==
+                        record.element_type &&
+                    records[previous].field_count ==
+                        record.field_count) {
+                    var parameter_index: usize = 0;
+                    var same: bool = true;
+                    while (parameter_index <
+                            record.field_count && same) {
+                        if (fields[records[previous]
+                                .first_field + parameter_index]
+                                .type_id !=
+                            fields[record.first_field +
+                                parameter_index].type_id) {
+                            same = false;
+                        }
+                        parameter_index += 1;
+                    }
+                    if (same) {
+                        return false;
+                    }
+                }
+                previous += 1;
+            }
+        } else if (record.kind == BootstrapTypeKind.alias) {
+            let complete: bool =
+                (record.flags &
+                    (BootstrapTypeFlag.complete as usize)) != 0;
+            if (record.declaration_unit == bootstrap_type_no_id() ||
+                record.declaration_node == bootstrap_type_no_id() ||
+                record.name_token == bootstrap_type_no_id() ||
+                record.element_count != 0 ||
+                record.first_field != bootstrap_type_no_id() ||
+                record.field_count != 0 ||
+                (complete && record.element_type ==
+                    bootstrap_type_no_id()) ||
+                (!complete && record.element_type !=
+                    bootstrap_type_no_id())) {
+                return false;
+            }
+            if (complete) {
+                if ((record.flags &
+                        (BootstrapTypeFlag.resolving as usize)) != 0 ||
+                    record.element_type >= table.type_count ||
+                    record.size_bytes == 0 ||
+                    record.alignment_bytes == 0) {
+                    return false;
+                }
+                let target: BootstrapTypeRecord =
+                    records[record.element_type];
+                if ((target.flags &
+                        (BootstrapTypeFlag.complete as usize)) == 0 ||
+                    target.kind == BootstrapTypeKind.invalid ||
+                    target.kind == BootstrapTypeKind.type_void ||
+                    record.size_bytes != target.size_bytes ||
+                    record.alignment_bytes !=
+                        target.alignment_bytes) {
+                    return false;
+                }
+            }
         } else if (bootstrap_type_kind_is_named(record.kind)) {
             let complete: bool =
                 (record.flags &
@@ -771,26 +1014,34 @@ fn bootstrap_type_table_is_valid(
     index = 0;
     while (index < table.field_count) {
         let field: BootstrapTypeField = fields[index];
-        if (field.owner_type >= table.type_count ||
+        let owner_kind: BootstrapTypeKind =
+            records[field.owner_type].kind;
+        let parameter_owner: bool =
+            owner_kind == BootstrapTypeKind.function_pointer;
+        if (!(parameter_owner ||
+                bootstrap_type_is_memory(owner_kind)) ||
             field.type_id >= table.type_count ||
-            !bootstrap_type_is_memory(
-                records[field.owner_type].kind
-            ) ||
             records[field.type_id].kind ==
                 BootstrapTypeKind.invalid ||
             records[field.type_id].kind ==
                 BootstrapTypeKind.type_void ||
-            field.declaration_unit == bootstrap_type_no_id() ||
-            field.declaration_node == bootstrap_type_no_id() ||
-            field.name_token == bootstrap_type_no_id() ||
+            (!parameter_owner &&
+                field.declaration_unit ==
+                    bootstrap_type_no_id()) ||
+            (!parameter_owner &&
+                field.declaration_node ==
+                    bootstrap_type_no_id()) ||
+            (!parameter_owner &&
+                field.name_token == bootstrap_type_no_id()) ||
             field.offset_bytes >
                 records[field.owner_type].size_bytes ||
             (records[field.type_id].flags &
                 (BootstrapTypeFlag.complete as usize)) == 0 ||
             records[field.type_id].size_bytes == 0 ||
-            records[field.type_id].size_bytes >
-                records[field.owner_type].size_bytes -
-                    field.offset_bytes) {
+            (!parameter_owner &&
+                records[field.type_id].size_bytes >
+                    records[field.owner_type].size_bytes -
+                        field.offset_bytes)) {
             return false;
         }
         let owner: BootstrapTypeRecord =

@@ -795,6 +795,94 @@ fn bootstrap_x86_64_abi_analyze(
         }
         function_id += 1;
     }
+    let type_records: *const BootstrapTypeRecord =
+        types.types.data as *const BootstrapTypeRecord;
+    let type_fields: *const BootstrapTypeField =
+        types.fields.data as *const BootstrapTypeField;
+    var signature_type: usize = 0;
+    while (signature_type < types.type_count &&
+        abi.error == RuntimeError.none) {
+        let record: BootstrapTypeRecord =
+            type_records[signature_type];
+        if (record.kind !=
+            BootstrapTypeKind.function_pointer) {
+            signature_type += 1;
+            continue;
+        }
+        var synthesized: BootstrapX8664AbiFunction = {
+            function_id = none,
+            first_parameter = record.field_count == 0 ?
+                none : abi.parameter_count,
+            parameter_count = 0,
+            first_return_piece = none,
+            return_piece_count = 0,
+            return_type = record.element_type,
+            return_size_bytes = 0,
+            return_alignment_bytes = 0,
+            return_aggregate = false,
+            hidden_return_pointer = false,
+            general_register_count = 0,
+            vector_register_count = 0,
+            stack_argument_size_bytes = 0,
+            call_frame_size_bytes = 0,
+        };
+        if (!bootstrap_x86_64_abi_build_return(
+                &abi,
+                &synthesized,
+                types
+            )) {
+            abi.error = RuntimeError.invalid_argument;
+            break;
+        }
+        var parameter_index: usize = 0;
+        while (parameter_index < record.field_count &&
+            abi.error == RuntimeError.none) {
+            var ir_parameter: BootstrapIrParameter = {
+                function_id = none,
+                type_id = type_fields[
+                    record.first_field +
+                        parameter_index
+                ].type_id,
+                slot_id = none,
+                name_token = none,
+            };
+            if (!bootstrap_x86_64_abi_build_parameter(
+                    &abi,
+                    &synthesized,
+                    ir_parameter,
+                    parameter_index,
+                    types
+                )) {
+                if (abi.error == RuntimeError.none) {
+                    abi.error =
+                        RuntimeError.invalid_argument;
+                }
+                break;
+            }
+            synthesized.parameter_count += 1;
+            parameter_index += 1;
+        }
+        synthesized.call_frame_size_bytes =
+            bootstrap_x86_64_abi_align_up(
+                synthesized.stack_argument_size_bytes,
+                BootstrapX8664AbiLimit.stack_alignment as usize
+            );
+        if (abi.error == RuntimeError.none &&
+            (synthesized.call_frame_size_bytes ==
+                    bootstrap_x86_64_abi_no_id() ||
+                synthesized.call_frame_size_bytes >
+                    BootstrapX8664AbiLimit.maximum_stack_size
+                        as usize ||
+                bootstrap_x86_64_abi_add_function(
+                    &abi,
+                    synthesized
+                ) == none)) {
+            if (abi.error == RuntimeError.none) {
+                abi.error = RuntimeError.invalid_argument;
+            }
+        }
+        signature_type += 1;
+    }
     if (abi.error != RuntimeError.none) {
         let error: RuntimeError = abi.error;
         bootstrap_x86_64_abi_release(abi);

@@ -35,7 +35,7 @@ there is no preprocessor.
    group lands green (`tools/selfhost.py verify` + `test`) before compiler
    sources adopt any of it, one group at a time.
 
-## Milestone M1 — foundation trio
+## Milestone m1.1 — foundation trio
 
 Type aliases, function pointers and pointer arithmetic. Together they
 unlock callbacks, vtables and cursor-style traversal, which every later
@@ -89,7 +89,7 @@ or indexing through an invalid address retains machine fault behavior, and
 null checks still precede every dereference. Pointer arithmetic does not
 imply array bounds knowledge — raw pointers stay raw.
 
-## Milestone M2 — qualifiers, attributes and static assertions
+## Milestone m1.2 — qualifiers, attributes and static assertions
 
 ```luna
 volatile var status: u32 = 0;          // every access is a real load/store
@@ -105,7 +105,7 @@ uses. `@inline` is recorded now, honored when an optimizer exists.
 `assert(...)` takes a constant-evaluable `bool` and fails compilation.
 `restrict` waits for the optimizer.
 
-## Milestone M3 — FFI completeness package
+## Milestone m1.3 — FFI completeness package
 
 Anonymous struct/union members, bitfields, flexible trailing array member,
 variadic extern calls:
@@ -135,7 +135,7 @@ is otherwise restricted to the C interop rules. Variadic extern calls
 implement the `%al` protocol at call sites; variadic definitions arrive in
 a later milestone.
 
-## Milestone M4 — characters, strings and inference
+## Milestone m1.4 — characters, strings and inference
 
 ```luna
 type char = i8;                         // SysV x86-64 spelling of char
@@ -149,7 +149,7 @@ adjacent same-width literals concatenate at translation time. Inference is
 deliberately narrow: only bindings with an initializer, never parameters or
 returns. A `typeof(expr)` type position may be added here if needed.
 
-## Milestone M5 — constant functions
+## Milestone m1.5 — constant functions
 
 ```luna
 const fn align_up(value: usize, alignment: usize) -> usize {
@@ -163,7 +163,7 @@ comparisons, calls to other const functions. No memory access, no loops
 until proven terminating (fixed step budget). Results feed array lengths,
 enum discriminants, assertions and typed constants.
 
-## Milestone M6 — labels and goto
+## Milestone m1.6 — labels and goto
 
 ```luna
 search: for (row: usize = 0; row < rows; row += 1) {
@@ -181,7 +181,7 @@ Labeled loops first; then `goto` with explicit semantic rules: labels share
 function scope, no jump into the extent of any initialization, jump table
 validated per function before lowering.
 
-## Milestone M7 — variadic definitions
+## Milestone m1.7 — variadic definitions
 
 `fn format(out: *mut File, fmt: *const u8, ...) { ... }` plus `va_list`
 exposure equivalent to `<stdarg.h>`: register save areas in the prologue,

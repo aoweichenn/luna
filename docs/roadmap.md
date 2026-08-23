@@ -114,6 +114,60 @@ M7 closes the planned compiler and bootstrap implementation. Freezing a
 release tag and publishing its already-versioned seed are release operations,
 not an additional compiler milestone.
 
+## m1: pure-Luna language completion (sub-milestones)
+
+Accepted direction lives in `docs/syntax-plan.md`. A checked box means the
+feature has executable tests plus a green `verify` fixed point.
+
+### m1.1 foundation trio
+
+- [x] transparent type aliases (`type Name = Target;`) with chain
+      resolution, cycle rejection and export exposure checks
+- [x] pointer arithmetic: `p + n`, `n + p`, `p += n`, `p -= n`,
+      element-distance `p - q` and same-type ordering comparisons;
+      expression-form counts require explicit `as usize`, assignment
+      forms accept bare integer literals
+- [x] function pointers as first-class scalars: `fn(T...) -> R` types,
+      bare-name and `&name` function values, indirect calls with null
+      trap, equality against null/same shape, `as` between shapes and
+      `usize`, storage in aggregates/arrays/parameters/returns
+- [x] enabling backend paths: register-indirect `call`/`jmp` encodings
+      (`FF /2`, `FF /4`) with AT&T `*operand` syntax
+
+### m1.2 qualifiers, attributes and static assertions
+
+- [ ] `volatile` object and pointee qualification
+- [ ] `@noreturn` unreachable-successor integration
+- [ ] `@inline` recorded metadata
+- [ ] compile-time `assert(const bool)`
+
+### m1.3 FFI completeness
+
+- [ ] anonymous struct/union members
+- [ ] bitfields (`@bits`) following the x86-64 psABI
+- [ ] flexible trailing array member
+- [ ] variadic extern calls with the `%al` protocol
+
+### m1.4 characters, strings and inference
+
+- [ ] `char` spelling, string width prefixes (`u16"`, `u32"`),
+      adjacent literal concatenation, `\u{...}` escapes
+- [ ] initializer type inference for `let`/`var`
+
+### m1.5 constant functions
+
+- [ ] `const fn` scalar interpreter feeding array lengths, enum
+      discriminants, assertions and typed constants
+
+### m1.6 labels and goto
+
+- [ ] labeled `break`/`continue`
+- [ ] validated `goto`
+
+### m1.7 variadic definitions
+
+- [ ] `va_list` with register save areas and typed `va_arg`
+
 ## Explicitly deferred
 
 Optimization beyond local x86-64 improvements, general metaprogramming,

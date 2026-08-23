@@ -758,8 +758,10 @@ fn bootstrap_ir_add_argument(
         ir->instructions.data as *const BootstrapIrInstruction;
     let values: *const BootstrapIrValue =
         ir->values.data as *const BootstrapIrValue;
-    if (instructions[instruction_id].opcode !=
-            BootstrapIrOpcode.call ||
+    if ((instructions[instruction_id].opcode !=
+            BootstrapIrOpcode.call &&
+        instructions[instruction_id].opcode !=
+            BootstrapIrOpcode.call_indirect) ||
         values[value_id].function_id !=
             (ir->blocks.data as *const BootstrapIrBlock)[
                 instructions[instruction_id].block_id
@@ -855,6 +857,7 @@ fn bootstrap_ir_instruction_operands_are_valid(
         instruction.opcode == BootstrapIrOpcode.boolean_not ||
         instruction.opcode == BootstrapIrOpcode.convert ||
         instruction.opcode == BootstrapIrOpcode.return_value ||
+        instruction.opcode == BootstrapIrOpcode.call_indirect ||
         instruction.opcode == BootstrapIrOpcode.branch;
     let binary: bool =
         instruction.opcode == BootstrapIrOpcode.memory_copy ||
@@ -963,6 +966,17 @@ fn bootstrap_ir_instruction_expects_result(
             functions[instruction.auxiliary].return_type
         ].kind != BootstrapTypeKind.type_void;
     }
+    if (instruction.opcode ==
+        BootstrapIrOpcode.call_indirect) {
+        let records: *const BootstrapTypeRecord =
+            types.types.data as *const BootstrapTypeRecord;
+        return records[instruction.type_id].kind !=
+            BootstrapTypeKind.type_void;
+    }
+    if (instruction.opcode ==
+        BootstrapIrOpcode.function_address) {
+        return true;
+    }
     return instruction.opcode ==
             BootstrapIrOpcode.constant_integer ||
         instruction.opcode == BootstrapIrOpcode.constant_float ||
@@ -1057,6 +1071,8 @@ fn bootstrap_ir_instruction_types_are_valid(
             BootstrapIrOpcode.store_indirect ||
         instruction.opcode == BootstrapIrOpcode.call ||
         instruction.opcode ==
+            BootstrapIrOpcode.call_indirect ||
+        instruction.opcode ==
             BootstrapIrOpcode.return_value ||
         instruction.opcode == BootstrapIrOpcode.return_void;
     if (expects_result != (instruction.result != none) ||
@@ -1092,7 +1108,9 @@ fn bootstrap_ir_instruction_types_are_valid(
     if (instruction.opcode ==
         BootstrapIrOpcode.constant_null) {
         return records[instruction.type_id].kind ==
-            BootstrapTypeKind.pointer;
+                BootstrapTypeKind.pointer ||
+            records[instruction.type_id].kind ==
+                BootstrapTypeKind.function_pointer;
     }
     if (instruction.opcode ==
         BootstrapIrOpcode.address_of_slot) {
@@ -1187,8 +1205,10 @@ fn bootstrap_ir_instruction_types_are_valid(
             );
     }
     if (instruction.opcode == BootstrapIrOpcode.null_check) {
-        return records[values[instruction.left].type_id].kind ==
-            BootstrapTypeKind.pointer;
+        let checked: BootstrapTypeKind =
+            records[values[instruction.left].type_id].kind;
+        return checked == BootstrapTypeKind.pointer ||
+            checked == BootstrapTypeKind.function_pointer;
     }
     if (instruction.opcode == BootstrapIrOpcode.bounds_check) {
         return values[instruction.left].type_id ==
@@ -1295,6 +1315,22 @@ fn bootstrap_ir_instruction_types_are_valid(
     if (instruction.opcode == BootstrapIrOpcode.call) {
         return instruction.type_id ==
             functions[instruction.auxiliary].return_type;
+    }
+    if (instruction.opcode ==
+        BootstrapIrOpcode.call_indirect) {
+        if (instruction.left >= bootstrap_ir_no_id()) {
+            return false;
+        }
+        let callee: BootstrapTypeRecord =
+            records[values[instruction.left].type_id];
+        return callee.kind ==
+                BootstrapTypeKind.function_pointer &&
+            callee.element_type == instruction.type_id;
+    }
+    if (instruction.opcode ==
+        BootstrapIrOpcode.function_address) {
+        return records[instruction.type_id].kind ==
+            BootstrapTypeKind.function_pointer;
     }
     if (instruction.opcode == BootstrapIrOpcode.branch) {
         return instruction.type_id == none &&
@@ -1640,17 +1676,65 @@ fn bootstrap_ir_is_valid(
             )) {
             return false;
         }
-        if (instruction.opcode == BootstrapIrOpcode.call) {
-            let callee: BootstrapIrFunction =
-                functions[instruction.auxiliary];
+        if (instruction.opcode == BootstrapIrOpcode.call ||
+            instruction.opcode ==
+                BootstrapIrOpcode.call_indirect) {
+            var call_parameter_count: usize = 0;
+            if (instruction.opcode == BootstrapIrOpcode.call) {
+                call_parameter_count =
+                    functions[instruction.auxiliary]
+                        .parameter_count;
+            } else {
+                let callee_records: *const
+                    BootstrapTypeRecord =
+                    types.types.data as
+                        *const BootstrapTypeRecord;
+                let callee: BootstrapTypeRecord =
+                    callee_records[
+                        values[instruction.left].type_id
+                    ];
+                call_parameter_count = callee.field_count;
+            }
             var call_argument_count: usize = 0;
             var argument_index: usize = 0;
             while (argument_index < ir.argument_count) {
                 let argument: BootstrapIrArgument =
                     arguments[argument_index];
                 if (argument.instruction_id == index) {
+                    var parameter_type: usize =
+                        bootstrap_ir_no_id();
+                    if (instruction.opcode ==
+                        BootstrapIrOpcode.call) {
+                        let parameters: *const
+                            BootstrapIrParameter =
+                            ir.parameters.data as
+                                *const BootstrapIrParameter;
+                        parameter_type =
+                            parameters[
+                                functions[instruction.auxiliary]
+                                    .first_parameter +
+                                    call_argument_count
+                            ].type_id;
+                    } else {
+                        let fields: *const BootstrapTypeField =
+                            types.fields.data as
+                                *const BootstrapTypeField;
+                        let records: *const
+                            BootstrapTypeRecord =
+                            types.types.data as
+                                *const BootstrapTypeRecord;
+                        let callee: BootstrapTypeRecord =
+                            records[
+                                values[instruction.left].type_id
+                            ];
+                        parameter_type =
+                            fields[
+                                callee.first_field +
+                                    call_argument_count
+                            ].type_id;
+                    }
                     if (call_argument_count >=
-                            callee.parameter_count ||
+                            call_parameter_count ||
                         argument.value_id >= ir.value_count ||
                         values[argument.value_id].function_id !=
                             blocks[
@@ -1659,10 +1743,7 @@ fn bootstrap_ir_is_valid(
                         !bootstrap_ir_carrier_matches_type(
                             types,
                             values[argument.value_id].type_id,
-                            parameters[
-                                callee.first_parameter +
-                                    call_argument_count
-                            ].type_id
+                            parameter_type
                         ) ||
                         values[argument.value_id].definition >=
                             index) {
@@ -1673,7 +1754,7 @@ fn bootstrap_ir_is_valid(
                 argument_index += 1;
             }
             if (call_argument_count !=
-                callee.parameter_count) {
+                call_parameter_count) {
                 return false;
             }
         }
@@ -1685,8 +1766,10 @@ fn bootstrap_ir_is_valid(
         let argument: BootstrapIrArgument = arguments[index];
         if (argument.instruction_id >= ir.instruction_count ||
             argument.value_id >= ir.value_count ||
-            instructions[argument.instruction_id].opcode !=
-                BootstrapIrOpcode.call) {
+            (instructions[argument.instruction_id].opcode !=
+                BootstrapIrOpcode.call &&
+                instructions[argument.instruction_id].opcode !=
+                    BootstrapIrOpcode.call_indirect)) {
             return false;
         }
         index += 1;

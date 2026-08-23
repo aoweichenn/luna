@@ -877,6 +877,29 @@ fn bootstrap_x86_64_codegen_emit_address(
             );
     }
     if (instruction.opcode ==
+        BootstrapIrOpcode.function_address) {
+        return bootstrap_x86_64_codegen_literal(
+                context,
+                "    leaq "
+            ) &&
+            bootstrap_x86_64_codegen_append_function_symbol(
+                context,
+                instruction.auxiliary
+            ) &&
+            bootstrap_x86_64_codegen_literal(
+                context,
+                "(%rip), %rax\n"
+            ) &&
+            bootstrap_x86_64_codegen_store_rax(
+                context,
+                instruction.result,
+                bootstrap_x86_64_codegen_type(
+                    context,
+                    instruction.type_id
+                )
+            );
+    }
+    if (instruction.opcode ==
         BootstrapIrOpcode.member_address) {
         if (!bootstrap_x86_64_codegen_load_rax(
                 context,
@@ -3212,6 +3235,171 @@ fn bootstrap_x86_64_codegen_emit_call_result(
         bootstrap_x86_64_codegen_literal(context, "\n");
 }
 
+fn bootstrap_x86_64_codegen_function_pointer_abi_index(
+    context: *BootstrapX8664CodegenContext,
+    type_id: usize
+) -> usize {
+    let records: *const BootstrapTypeRecord =
+        context->types.types.data as
+            *const BootstrapTypeRecord;
+    var ordinal: usize = 0;
+    var index: usize = 0;
+    while (index < type_id) {
+        if (records[index].kind ==
+            BootstrapTypeKind.function_pointer) {
+            ordinal += 1;
+        }
+        index += 1;
+    }
+    return context->ir.function_count + ordinal;
+}
+
+fn bootstrap_x86_64_codegen_emit_call_indirect(
+    context: *BootstrapX8664CodegenContext,
+    instruction: BootstrapIrInstruction,
+    instruction_id: usize
+) -> bool {
+    let values: *const BootstrapIrValue =
+        context->ir.values.data as *const BootstrapIrValue;
+    let callee_type: usize =
+        values[instruction.left].type_id;
+    let abi_index: usize =
+        bootstrap_x86_64_codegen_function_pointer_abi_index(
+            context,
+            callee_type
+        );
+    let abi_functions: *const BootstrapX8664AbiFunction =
+        context->abi.functions.data as
+            *const BootstrapX8664AbiFunction;
+    let function_abi: BootstrapX8664AbiFunction =
+        abi_functions[abi_index];
+    let parameters: *const BootstrapX8664AbiParameter =
+        context->abi.parameters.data as
+            *const BootstrapX8664AbiParameter;
+    if (function_abi.call_frame_size_bytes != 0 &&
+        (!bootstrap_x86_64_codegen_literal(
+            context,
+            "    subq $"
+        ) ||
+        !bootstrap_x86_64_codegen_usize(
+            context,
+            function_abi.call_frame_size_bytes
+        ) ||
+        !bootstrap_x86_64_codegen_literal(
+            context,
+            ", %rsp\n"
+        ))) {
+        return false;
+    }
+    var index: usize = 0;
+    while (index < function_abi.parameter_count) {
+        let parameter: BootstrapX8664AbiParameter =
+            parameters[function_abi.first_parameter + index];
+        if (parameter.location ==
+            BootstrapX8664AbiLocationKind.stack) {
+            let argument: usize =
+                bootstrap_x86_64_codegen_argument_at(
+                    context,
+                    instruction_id,
+                    index
+                );
+            if (argument ==
+                    bootstrap_x86_64_codegen_no_id() ||
+                !bootstrap_x86_64_codegen_emit_call_stack_argument(
+                    context,
+                    parameter,
+                    argument,
+                    false
+                )) {
+                return false;
+            }
+        }
+        index += 1;
+    }
+    if (function_abi.hidden_return_pointer) {
+        let destination: BootstrapX8664Storage =
+            bootstrap_x86_64_codegen_storage(
+                context,
+                BootstrapX8664StorageKind.aggregate_call_result,
+                instruction.result
+            );
+        if (context->error != RuntimeError.none ||
+            !bootstrap_x86_64_codegen_literal(
+                context,
+                "    leaq "
+            ) ||
+            !bootstrap_x86_64_codegen_append_stack(
+                context,
+                destination
+            ) ||
+            !bootstrap_x86_64_codegen_literal(
+                context,
+                ", %rdi\n"
+            )) {
+            return false;
+        }
+    }
+    index = 0;
+    while (index < function_abi.parameter_count) {
+        let parameter: BootstrapX8664AbiParameter =
+            parameters[function_abi.first_parameter + index];
+        if (parameter.location !=
+            BootstrapX8664AbiLocationKind.stack) {
+            let argument: usize =
+                bootstrap_x86_64_codegen_argument_at(
+                    context,
+                    instruction_id,
+                    index
+                );
+            if (argument ==
+                    bootstrap_x86_64_codegen_no_id() ||
+                !bootstrap_x86_64_codegen_emit_call_register_argument(
+                    context,
+                    parameter,
+                    argument,
+                    false
+                )) {
+                return false;
+            }
+        }
+        index += 1;
+    }
+    if (!bootstrap_x86_64_codegen_load_rax(
+            context,
+            instruction.left,
+            bootstrap_x86_64_codegen_type(
+                context,
+                callee_type
+            )
+        ) ||
+        !bootstrap_x86_64_codegen_literal(
+            context,
+            "    movq %rax, %r11\n    call *%r11\n"
+        )) {
+        return false;
+    }
+    if (function_abi.call_frame_size_bytes != 0 &&
+        (!bootstrap_x86_64_codegen_literal(
+            context,
+            "    addq $"
+        ) ||
+        !bootstrap_x86_64_codegen_usize(
+            context,
+            function_abi.call_frame_size_bytes
+        ) ||
+        !bootstrap_x86_64_codegen_literal(
+            context,
+            ", %rsp\n"
+        ))) {
+        return false;
+    }
+    return bootstrap_x86_64_codegen_emit_call_result(
+        context,
+        instruction,
+        function_abi
+    );
+}
+
 fn bootstrap_x86_64_codegen_emit_call(
     context: *BootstrapX8664CodegenContext,
     instruction: BootstrapIrInstruction,
@@ -3885,6 +4073,8 @@ fn bootstrap_x86_64_codegen_emit_instruction(
         instruction.opcode ==
             BootstrapIrOpcode.global_address ||
         instruction.opcode ==
+            BootstrapIrOpcode.function_address ||
+        instruction.opcode ==
             BootstrapIrOpcode.pointer_offset) {
         return bootstrap_x86_64_codegen_emit_address(
             context,
@@ -3974,6 +4164,14 @@ fn bootstrap_x86_64_codegen_emit_instruction(
     }
     if (instruction.opcode == BootstrapIrOpcode.call) {
         return bootstrap_x86_64_codegen_emit_call(
+            context,
+            instruction,
+            instruction_id
+        );
+    }
+    if (instruction.opcode ==
+        BootstrapIrOpcode.call_indirect) {
+        return bootstrap_x86_64_codegen_emit_call_indirect(
             context,
             instruction,
             instruction_id
