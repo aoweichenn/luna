@@ -586,9 +586,18 @@ fn bootstrap_assembler_parse_operand(
     input: StdTextView,
     result: *BootstrapAssemblerOperand
 ) -> bool {
-    let view: StdTextView = bootstrap_assembler_trim(input);
-    if (result == null || view.length == 0) {
+    let trimmed: StdTextView = bootstrap_assembler_trim(input);
+    if (result == null || trimmed.length == 0) {
         return false;
+    }
+    var view: StdTextView = trimmed;
+    if (view.data[0] == 42) {
+        view = bootstrap_assembler_trim(
+            bootstrap_assembler_slice(view, 1, view.length - 1)
+        );
+        if (view.length == 0) {
+            return false;
+        }
     }
     *result = bootstrap_assembler_empty_operand();
     if (view.data[0] == 36) {
@@ -1056,6 +1065,22 @@ fn bootstrap_assembler_emit_relative(
             kind
         ) &&
         bootstrap_assembler_append_u32(assembler, 0);
+}
+
+fn bootstrap_assembler_emit_indirect_transfer(
+    assembler: *BootstrapAssembler,
+    operand: *const BootstrapAssemblerOperand,
+    reg_field: u8
+) -> bool {
+    let code: u8 = operand->register.code;
+    return (code < 8 ||
+            bootstrap_assembler_append_u8(assembler, 65)) &&
+        bootstrap_assembler_append_u8(assembler, 255) &&
+        bootstrap_assembler_append_u8(
+            assembler,
+            ((192 as u8) | ((reg_field & 7) << 3) |
+                (code & 7)) as u8
+        );
 }
 
 fn bootstrap_assembler_fits_i32(bits: u64) -> bool {
@@ -1769,16 +1794,29 @@ fn bootstrap_assembler_encode(
                 ((80 as u8) | (code & 7)) as u8
             );
     }
-    if (bootstrap_assembler_equal(mnemonic, "call", 4)) {
+    if (bootstrap_assembler_equal(mnemonic, "call", 4) ||
+        bootstrap_assembler_equal(mnemonic, "jmp", 3)) {
+        let is_call: bool =
+            bootstrap_assembler_equal(mnemonic, "call", 4);
+        if (operands->count == 1 &&
+            bootstrap_assembler_is_gpr(
+                &operands->values[0],
+                64
+            )) {
+            return bootstrap_assembler_emit_indirect_transfer(
+                assembler,
+                &operands->values[0],
+                is_call ? 2 : 4
+            );
+        }
         return bootstrap_assembler_emit_relative(
-            assembler, 232, 0, 1, operands,
-            BootstrapAssemblerFixupKind.call
-        );
-    }
-    if (bootstrap_assembler_equal(mnemonic, "jmp", 3)) {
-        return bootstrap_assembler_emit_relative(
-            assembler, 233, 0, 1, operands,
-            BootstrapAssemblerFixupKind.branch
+            assembler,
+            is_call ? 232 : 233,
+            0,
+            1,
+            operands,
+            is_call ? BootstrapAssemblerFixupKind.call :
+                      BootstrapAssemblerFixupKind.branch
         );
     }
     if (mnemonic.length > 1 && mnemonic.data[0] == 106) {
