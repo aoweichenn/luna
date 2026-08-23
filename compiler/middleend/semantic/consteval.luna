@@ -663,6 +663,188 @@ fn bootstrap_semantic_resolve_alignment_attributes(
     return valid && context->error == RuntimeError.none;
 }
 
+fn bootstrap_semantic_resolve_bitfield_attribute(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    attribute_node: BootstrapSyntaxNode
+) -> bool {
+    let none: usize = bootstrap_semantic_no_id();
+    if (attribute_node.parent == none) {
+        return true;
+    }
+    let parent: BootstrapSyntaxNode = bootstrap_semantic_node(
+        context, unit_index, attribute_node.parent
+    );
+    if (parent.kind != BootstrapSyntaxKind.field_declaration) {
+        // Mis-mounted; validate_attributes already reported it.
+        return true;
+    }
+    var valid: bool = true;
+    var bit_offset: usize = 0;
+    var child: usize = attribute_node.first_child;
+    while (child != none && context->error == RuntimeError.none) {
+        let argument: BootstrapSyntaxNode =
+            bootstrap_semantic_node(context, unit_index, child);
+        if (argument.kind != BootstrapSyntaxKind.named_argument ||
+            argument.child_count != 1) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.invalid_bitfield,
+                unit_index,
+                argument.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                child
+            );
+            valid = false;
+            break;
+        }
+        let segments: *const BootstrapSemanticBitfieldSegment =
+            context->bitfield_segments.data as
+                *const BootstrapSemanticBitfieldSegment;
+        var duplicate: bool = false;
+        var segment_id: usize = 0;
+        while (segment_id < context->bitfield_segment_count) {
+            if (segments[segment_id].declaration_unit == unit_index &&
+                segments[segment_id].declaration_node ==
+                    attribute_node.parent &&
+                bootstrap_semantic_tokens_equal(
+                    context,
+                    unit_index,
+                    argument.token_index,
+                    unit_index,
+                    segments[segment_id].name_token
+                )) {
+                duplicate = true;
+            }
+            segment_id += 1;
+        }
+        let width: BootstrapConstValue =
+            bootstrap_consteval_expression(
+                context, unit_index, argument.first_child
+            );
+        if (duplicate || width.error || !width.is_constant ||
+            width.is_boolean || width.value == 0 ||
+            width.value > 64) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.invalid_bitfield,
+                unit_index,
+                argument.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                child
+            );
+            valid = false;
+            break;
+        }
+        if (!bootstrap_semantic_append_bitfield_segment(
+                context,
+                {
+                    declaration_unit = unit_index,
+                    declaration_node = attribute_node.parent,
+                    name_token = argument.token_index,
+                    bit_offset = bit_offset,
+                    bit_width = width.value as usize,
+                }
+            )) {
+            return false;
+        }
+        bit_offset += width.value as usize;
+        child = argument.next_sibling;
+    }
+    return valid && context->error == RuntimeError.none;
+}
+
+fn bootstrap_semantic_resolve_bitfield_attributes(
+    context: *BootstrapSemanticContext
+) -> bool {
+    var valid: bool = true;
+    var unit_index: usize = 0;
+    while (unit_index < context->input.unit_count &&
+        context->error == RuntimeError.none) {
+        let unit: *const BootstrapSemanticUnit =
+            bootstrap_semantic_input_unit(context, unit_index);
+        var node_index: usize = 0;
+        while (node_index < unit->tree.count &&
+            context->error == RuntimeError.none) {
+            let node: BootstrapSyntaxNode =
+                bootstrap_semantic_node(
+                    context, unit_index, node_index
+                );
+            if (node.kind == BootstrapSyntaxKind.attribute &&
+                bootstrap_semantic_find_attribute(
+                    context, unit_index, node.token_index
+                ) == (BootstrapSemanticAttribute.bits as usize) &&
+                !bootstrap_semantic_resolve_bitfield_attribute(
+                    context, unit_index, node
+                )) {
+                valid = false;
+            }
+            node_index += 1;
+        }
+        unit_index += 1;
+    }
+    return valid && context->error == RuntimeError.none;
+}
+
+// The storage type is only known after layout resolution, so the integer
+// kind and exact width-sum checks live in a second pass.
+fn bootstrap_semantic_validate_bitfields(
+    context: *BootstrapSemanticContext
+) -> bool {
+    let none: usize = bootstrap_semantic_no_id();
+    let segments: *const BootstrapSemanticBitfieldSegment =
+        context->bitfield_segments.data as
+            *const BootstrapSemanticBitfieldSegment;
+    let fields: *const BootstrapTypeField =
+        context->types.fields.data as *const BootstrapTypeField;
+    var valid: bool = true;
+    var index: usize = 0;
+    while (index < context->bitfield_segment_count &&
+        context->error == RuntimeError.none) {
+        let first: BootstrapSemanticBitfieldSegment = segments[index];
+        var total: usize = 0;
+        var group_end: usize = index;
+        while (group_end < context->bitfield_segment_count &&
+            segments[group_end].declaration_unit ==
+                first.declaration_unit &&
+            segments[group_end].declaration_node ==
+                first.declaration_node) {
+            total += segments[group_end].bit_width;
+            group_end += 1;
+        }
+        let field_id: usize =
+            bootstrap_semantic_bitfield_storage_field(context, first);
+        if (field_id != none) {
+            let field_record: BootstrapTypeRecord =
+                bootstrap_semantic_type_record(
+                    context, fields[field_id].type_id
+                );
+            if (!bootstrap_type_is_integer(field_record.kind) ||
+                total !=
+                    bootstrap_type_bit_width(field_record.kind)) {
+                bootstrap_semantic_add_diagnostic(
+                    context,
+                    BootstrapSemanticDiagnosticKind.invalid_bitfield,
+                    first.declaration_unit,
+                    bootstrap_semantic_node(
+                        context,
+                        first.declaration_unit,
+                        first.declaration_node
+                    ).span,
+                    none,
+                    bootstrap_semantic_empty_span(),
+                    field_id
+                );
+                valid = false;
+            }
+        }
+        index = group_end;
+    }
+    return valid && context->error == RuntimeError.none;
+}
+
 fn bootstrap_semantic_check_assert(
     context: *BootstrapSemanticContext,
     unit_index: usize,

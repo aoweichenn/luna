@@ -15,7 +15,7 @@ struct BootstrapSemanticAttributeMountEntry {
 fn bootstrap_semantic_attribute_entry(
     index: usize
 ) -> BootstrapSemanticAttributeEntry {
-    var table: [4]BootstrapSemanticAttributeEntry = {};
+    var table: [5]BootstrapSemanticAttributeEntry = {};
     table[0] = {
         name = "inline", name_length = 6,
         mounts = BootstrapSemanticAttributeMount.function as usize,
@@ -37,6 +37,11 @@ fn bootstrap_semantic_attribute_entry(
         name = "packed", name_length = 6,
         mounts = BootstrapSemanticAttributeMount.structure as usize,
         arguments = BootstrapSemanticAttributeArgumentPolicy.none,
+    };
+    table[4] = {
+        name = "bits", name_length = 4,
+        mounts = BootstrapSemanticAttributeMount.field as usize,
+        arguments = BootstrapSemanticAttributeArgumentPolicy.named_bitfields,
     };
     let entry: BootstrapSemanticAttributeEntry = table[index];
     return entry;
@@ -91,7 +96,7 @@ fn bootstrap_semantic_find_attribute(
     name_token: usize
 ) -> usize {
     var index: usize = 0;
-    while (index < 4) {
+    while (index < 5) {
         let entry: BootstrapSemanticAttributeEntry =
             bootstrap_semantic_attribute_entry(index);
         if (bootstrap_semantic_token_equals_bytes(
@@ -231,7 +236,11 @@ fn bootstrap_semantic_validate_attribute(
         (entry.arguments ==
                 BootstrapSemanticAttributeArgumentPolicy
                     .one_constant_integer &&
-            (!has_arguments || node.child_count != 1))) {
+            (!has_arguments || node.child_count != 1)) ||
+        (entry.arguments ==
+                BootstrapSemanticAttributeArgumentPolicy
+                    .named_bitfields &&
+            (!has_arguments || node.child_count == 0))) {
         return bootstrap_semantic_add_diagnostic(
             context,
             BootstrapSemanticDiagnosticKind.invalid_attribute,
@@ -241,6 +250,30 @@ fn bootstrap_semantic_validate_attribute(
             bootstrap_semantic_empty_span(),
             table_index
         );
+    }
+    // Positional policies take plain expressions; named arguments are left
+    // for the named_bitfields consumer to validate so it can report
+    // invalid_bitfield rather than a framework error.
+    let expects_named: bool =
+        entry.arguments ==
+            BootstrapSemanticAttributeArgumentPolicy.named_bitfields;
+    var argument: usize = node.first_child;
+    while (!expects_named && argument != none) {
+        let argument_node: BootstrapSyntaxNode =
+            bootstrap_semantic_node(context, unit_index, argument);
+        if ((argument_node.kind ==
+                BootstrapSyntaxKind.named_argument) != expects_named) {
+            return bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.invalid_attribute,
+                unit_index,
+                argument_node.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                table_index
+            );
+        }
+        argument = argument_node.next_sibling;
     }
     if (table_index == (BootstrapSemanticAttribute.packed as usize) &&
         node.parent != none) {

@@ -72,7 +72,7 @@ fn bootstrap_syntax_tree_is_valid(tree: BootstrapSyntaxTree) -> bool {
     var node_index: usize = 0;
     while (node_index < tree.count) {
         let node: BootstrapSyntaxNode = nodes[node_index];
-        if ((node.kind as usize) > (BootstrapSyntaxKind.intrinsic_expression as usize) || node.flags > 4095 ||
+        if ((node.kind as usize) > (BootstrapSyntaxKind.named_argument as usize) || node.flags > 4095 ||
             node.span.line == 0 || node.span.column == 0 || node.span.length >
                 (BootstrapParserLimit.maximum_size as usize) - node.span.offset || (node.token_index != none &&
                 node.token_index >= tree.token_count)) {
@@ -1230,7 +1230,27 @@ fn bootstrap_parser_parse_attributes(
                 state, BootstrapTokenKind.left_parenthesis)) {
             if (state->current.kind != BootstrapTokenKind.right_parenthesis) {
                 while (state->error == RuntimeError.none) {
-                    let argument: usize = bootstrap_parser_parse_expression(state);
+                    var argument: usize = none;
+                    if (state->current.kind == BootstrapTokenKind.identifier &&
+                        bootstrap_parser_token_at(state, state->current_index + 1).kind == BootstrapTokenKind.colon) {
+                        let argument_name: BootstrapToken = state->current;
+                        let argument_name_index: usize = state->current_index;
+                        bootstrap_parser_advance(state);
+                        bootstrap_parser_advance(state);
+                        let argument_value: usize = bootstrap_parser_parse_expression(state);
+                        if (argument_value == none) {
+                            return false;
+                        }
+                        argument = bootstrap_parser_new_node(
+                            state, BootstrapSyntaxKind.named_argument,
+                            bootstrap_parser_join_spans(argument_name.span, state->previous.span), argument_name_index);
+                        if (argument == none) {
+                            return false;
+                        }
+                        bootstrap_parser_add_child(state, argument, argument_value);
+                    } else {
+                        argument = bootstrap_parser_parse_expression(state);
+                    }
                     if (argument == none) {
                         return false;
                     }
@@ -1798,8 +1818,12 @@ fn bootstrap_parser_parse_field(state: *BootstrapParserState, owner: usize) -> u
     if (type_node != none) {
         bootstrap_parser_add_child(state, field, type_node);
     }
+    var trailing_attribute: usize = none;
+    var trailing_count: usize = 0;
+    bootstrap_parser_parse_attributes(state, &trailing_attribute, &trailing_count);
     bootstrap_parser_expect(state, BootstrapTokenKind.semicolon);
     bootstrap_parser_attach_attributes(state, field, first_attribute, attribute_count);
+    bootstrap_parser_attach_attributes(state, field, trailing_attribute, trailing_count);
     bootstrap_parser_set_node_span(state, field, bootstrap_parser_join_spans(name.span, state->previous.span));
     return field;
 }

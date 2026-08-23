@@ -351,6 +351,23 @@ structure's, so `offsetof(S, name)` can be smaller than `sizeof(S)`.
 Member access through a pointer (`p->name`) yields `*T` pointing at the
 first element and composes with raw-pointer indexing and arithmetic.
 
+An integer field may be decomposed into named bit segments with a
+trailing `@bits` attribute:
+
+```luna
+struct Flags {
+    raw: u32 @bits(ready: 1, error: 1, level: 6, reserved: 24);
+}
+```
+
+Segments allocate LSB-first, matching the x86-64 psABI bit order, and
+their widths must sum exactly to the storage field's width. Reading a
+segment shifts and masks (sign-extending for signed storage); writing
+one is a read-modify-write that leaves neighboring segments untouched.
+The storage field (`raw`) stays an ordinary field — addressable,
+whole-word readable and writable — while a segment itself has no
+address and no byte offset.
+
 The target layout can be queried with type-only compile-time expressions:
 
 ```luna

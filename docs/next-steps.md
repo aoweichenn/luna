@@ -11,6 +11,8 @@ implementation status is tracked in `roadmap.md`.
 | --- | --- |
 | m1.1 aliases / pointer arithmetic / function pointers | landed; 80/80 cases; verify fixed point |
 | m1.2 qualifiers / attributes / static assertions | landed; 96/96 cases; verify fixed point |
+| built-ins package (bit ops, float helpers, overflow) | landed; 106/106 cases |
+| m1.3 kernel UAPI layout package | landed; 122/122 cases; verify fixed point |
 | Refactor R0-R2 (120-column reflow, table mappings, semantic split) | landed; same gates |
 | C23 disposition review | landed in `syntax-plan.md`; m1.2-m1.10 sequenced |
 | `anchor/` | promoted to the m1.1 stage-fixed toolchain (0.2 done) |

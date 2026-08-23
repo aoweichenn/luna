@@ -302,6 +302,12 @@ fn bootstrap_semantic_context_storage_is_valid(
         context->alignment_override_count ==
             context->alignment_overrides.length /
                 sizeof(BootstrapSemanticAlignmentOverride) &&
+        std_byte_buffer_is_valid(context->bitfield_segments) &&
+        context->bitfield_segments.length %
+            sizeof(BootstrapSemanticBitfieldSegment) == 0 &&
+        context->bitfield_segment_count ==
+            context->bitfield_segments.length /
+                sizeof(BootstrapSemanticBitfieldSegment) &&
         context->scope_depth <=
             BootstrapSemanticLimit.maximum_scope_depth as usize &&
         context->type_depth <=
@@ -334,6 +340,8 @@ fn bootstrap_semantic_context_init(
         local_count = 0,
         alignment_overrides = std_byte_buffer_empty(),
         alignment_override_count = 0,
+        bitfield_segments = std_byte_buffer_empty(),
+        bitfield_segment_count = 0,
         types = bootstrap_type_table_empty(),
         ir = bootstrap_ir_empty(),
         diagnostics = bootstrap_semantic_diagnostics_empty(),
@@ -383,6 +391,10 @@ fn bootstrap_semantic_context_release_work(
     error = bootstrap_semantic_release_error(
         error,
         std_byte_buffer_release(context->alignment_overrides)
+    );
+    error = bootstrap_semantic_release_error(
+        error,
+        std_byte_buffer_release(context->bitfield_segments)
     );
     return error;
 }
@@ -1251,6 +1263,7 @@ fn bootstrap_semantic_emit_integer_constant(
         mutable_lvalue = false,
         volatile_lvalue = false,
         valid = value_id != bootstrap_semantic_no_id(),
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
 }
 
@@ -1282,6 +1295,7 @@ fn bootstrap_semantic_emit_boolean_constant(
         mutable_lvalue = false,
         volatile_lvalue = false,
         valid = value_id != bootstrap_semantic_no_id(),
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
 }
 
@@ -1345,6 +1359,100 @@ fn bootstrap_semantic_alignment_override(
         index += 1;
     }
     return 0;
+}
+
+fn bootstrap_semantic_append_bitfield_segment(
+    context: *BootstrapSemanticContext,
+    segment: BootstrapSemanticBitfieldSegment
+) -> bool {
+    if (!bootstrap_semantic_append_record(
+            context,
+            &context->bitfield_segments,
+            (&segment) as
+                *const BootstrapSemanticBitfieldSegment as *const u8,
+            sizeof(BootstrapSemanticBitfieldSegment)
+        )) {
+        return false;
+    }
+    context->bitfield_segment_count += 1;
+    return true;
+}
+
+fn bootstrap_semantic_bitfield_segment(
+    context: *BootstrapSemanticContext,
+    segment_id: usize
+) -> BootstrapSemanticBitfieldSegment {
+    let segments: *const BootstrapSemanticBitfieldSegment =
+        context->bitfield_segments.data as
+            *const BootstrapSemanticBitfieldSegment;
+    if (segment_id >= context->bitfield_segment_count) {
+        return {
+            declaration_unit = bootstrap_semantic_no_id(),
+            declaration_node = bootstrap_semantic_no_id(),
+            name_token = bootstrap_semantic_no_id(),
+            bit_offset = 0,
+            bit_width = 0,
+        };
+    }
+    return segments[segment_id];
+}
+
+fn bootstrap_semantic_bitfield_storage_field(
+    context: *BootstrapSemanticContext,
+    segment: BootstrapSemanticBitfieldSegment
+) -> usize {
+    let fields: *const BootstrapTypeField =
+        context->types.fields.data as *const BootstrapTypeField;
+    var field_id: usize = 0;
+    while (field_id < context->types.field_count) {
+        if (fields[field_id].declaration_unit ==
+                segment.declaration_unit &&
+            fields[field_id].declaration_node ==
+                segment.declaration_node) {
+            return field_id;
+        }
+        field_id += 1;
+    }
+    return bootstrap_semantic_no_id();
+}
+
+fn bootstrap_semantic_lookup_bitfield_segment(
+    context: *BootstrapSemanticContext,
+    owner_type: usize,
+    unit_index: usize,
+    name_token: usize
+) -> usize {
+    let record: BootstrapTypeRecord =
+        bootstrap_semantic_type_record(context, owner_type);
+    let fields: *const BootstrapTypeField =
+        context->types.fields.data as *const BootstrapTypeField;
+    let segments: *const BootstrapSemanticBitfieldSegment =
+        context->bitfield_segments.data as
+            *const BootstrapSemanticBitfieldSegment;
+    var field_index: usize = 0;
+    while (field_index < record.field_count) {
+        let field: BootstrapTypeField =
+            fields[record.first_field + field_index];
+        var segment_id: usize = 0;
+        while (segment_id < context->bitfield_segment_count) {
+            if (segments[segment_id].declaration_unit ==
+                    field.declaration_unit &&
+                segments[segment_id].declaration_node ==
+                    field.declaration_node &&
+                bootstrap_semantic_tokens_equal(
+                    context,
+                    unit_index,
+                    name_token,
+                    segments[segment_id].declaration_unit,
+                    segments[segment_id].name_token
+                )) {
+                return segment_id;
+            }
+            segment_id += 1;
+        }
+        field_index += 1;
+    }
+    return bootstrap_semantic_no_id();
 }
 
 fn bootstrap_semantic_find_local(

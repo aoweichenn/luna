@@ -14,6 +14,7 @@ fn bootstrap_semantic_invalid_expression()
         mutable_lvalue = false,
         volatile_lvalue = false,
         valid = false,
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
 }
 
@@ -939,6 +940,7 @@ fn bootstrap_semantic_lower_floating_literal(
         mutable_lvalue = false,
         volatile_lvalue = false,
         valid = value_id != bootstrap_semantic_no_id(),
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
 }
 
@@ -1061,6 +1063,7 @@ fn bootstrap_semantic_lower_string_literal(
         mutable_lvalue = false,
         volatile_lvalue = false,
         valid = value_id != bootstrap_semantic_no_id(),
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
 }
 
@@ -1117,6 +1120,7 @@ fn bootstrap_semantic_lower_scalar_zero_initializer(
         mutable_lvalue = false,
         volatile_lvalue = false,
         valid = value_id != bootstrap_semantic_no_id(),
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
 }
 
@@ -1161,14 +1165,26 @@ fn bootstrap_semantic_validate_initializer_fields(
             valid = false;
         } else if (lookup.status !=
             BootstrapSemanticFieldStatus.found) {
+            let segment_id: usize =
+                bootstrap_semantic_lookup_bitfield_segment(
+                    context,
+                    expected_type,
+                    context->current_unit,
+                    initializer.token_index
+                );
+            // Segments are not directly initializable yet; naming one is a
+            // bitfield error rather than an unknown field.
             bootstrap_semantic_add_diagnostic(
                 context,
-                BootstrapSemanticDiagnosticKind.unknown_field,
+                segment_id != none ?
+                    BootstrapSemanticDiagnosticKind
+                        .invalid_bitfield :
+                    BootstrapSemanticDiagnosticKind.unknown_field,
                 context->current_unit,
                 initializer.span,
                 none,
                 bootstrap_semantic_empty_span(),
-                expected_type
+                segment_id != none ? segment_id : expected_type
             );
             valid = false;
         } else {
@@ -1472,6 +1488,7 @@ fn bootstrap_semantic_lower_initializer(
         mutable_lvalue = false,
         volatile_lvalue = false,
         valid = address_id != none,
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
 }
 
@@ -1556,6 +1573,7 @@ fn bootstrap_semantic_function_value(
         mutable_lvalue = false,
         volatile_lvalue = false,
         valid = value_id != none,
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
 }
 
@@ -1616,6 +1634,7 @@ fn bootstrap_semantic_lower_name(
         mutable_lvalue = local.mutable_binding,
         volatile_lvalue = local.volatile_binding,
         valid = address_id != bootstrap_semantic_no_id(),
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
     return bootstrap_semantic_load_lvalue(
         context,
@@ -1706,6 +1725,334 @@ fn bootstrap_semantic_lower_enum_member(
         type_id,
         symbols[member_symbol].integer_value
     );
+}
+
+fn bootstrap_semantic_emit_integer_binary(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    operation: BootstrapTokenKind,
+    type_id: usize,
+    left: usize,
+    right: usize
+) -> usize {
+    var instruction: BootstrapIrInstruction =
+        bootstrap_semantic_instruction(
+            BootstrapIrOpcode.binary_integer,
+            node
+        );
+    instruction.operation = operation;
+    instruction.left = left;
+    instruction.right = right;
+    return bootstrap_semantic_emit_value(
+        context,
+        instruction,
+        type_id
+    );
+}
+
+fn bootstrap_semantic_emit_integer_shift(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    operation: BootstrapTokenKind,
+    type_id: usize,
+    value: usize,
+    amount: usize
+) -> usize {
+    let count: BootstrapSemanticExpression =
+        bootstrap_semantic_emit_integer_constant(
+            context,
+            node,
+            type_id,
+            amount as u64
+        );
+    return bootstrap_semantic_emit_integer_binary(
+        context,
+        node,
+        operation,
+        type_id,
+        value,
+        count.value_id
+    );
+}
+
+fn bootstrap_semantic_emit_integer_mask(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    type_id: usize,
+    value: usize,
+    mask: u64
+) -> usize {
+    let mask_expression: BootstrapSemanticExpression =
+        bootstrap_semantic_emit_integer_constant(
+            context,
+            node,
+            type_id,
+            mask
+        );
+    return bootstrap_semantic_emit_integer_binary(
+        context,
+        node,
+        BootstrapTokenKind.ampersand,
+        type_id,
+        value,
+        mask_expression.value_id
+    );
+}
+
+fn bootstrap_semantic_bitfield_bit_mask(
+    bits: usize
+) -> u64 {
+    return bootstrap_semantic_mask_integer(
+        0xFFFFFFFFFFFFFFFF,
+        bits
+    );
+}
+
+// (raw >> offset) & mask(width) for unsigned storage; signed storage shifts
+// the segment to the top of the word and arithmetic-shifts it back down so
+// the segment's own sign bit extends.
+fn bootstrap_semantic_emit_bitfield_extract(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    type_id: usize,
+    raw: usize,
+    bit_offset: usize,
+    bit_width: usize
+) -> usize {
+    let record: BootstrapTypeRecord =
+        bootstrap_semantic_type_record(context, type_id);
+    let width: usize =
+        bootstrap_type_bit_width(record.kind);
+    var value: usize = raw;
+    if (bootstrap_type_is_signed_integer(record.kind)) {
+        if (bit_offset + bit_width < width) {
+            value = bootstrap_semantic_emit_integer_shift(
+                context,
+                node,
+                BootstrapTokenKind.shift_left,
+                type_id,
+                value,
+                width - bit_offset - bit_width
+            );
+        }
+        if (bit_width < width) {
+            value = bootstrap_semantic_emit_integer_shift(
+                context,
+                node,
+                BootstrapTokenKind.shift_right,
+                type_id,
+                value,
+                width - bit_width
+            );
+        }
+        return value;
+    }
+    if (bit_offset > 0) {
+        value = bootstrap_semantic_emit_integer_shift(
+            context,
+            node,
+            BootstrapTokenKind.shift_right,
+            type_id,
+            value,
+            bit_offset
+        );
+    }
+    if (bit_width < width) {
+        value = bootstrap_semantic_emit_integer_mask(
+            context,
+            node,
+            type_id,
+            value,
+            bootstrap_semantic_bitfield_bit_mask(bit_width)
+        );
+    }
+    return value;
+}
+
+fn bootstrap_semantic_lower_bitfield_member(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    owner_address: usize,
+    segment_id: usize,
+    mutable_lvalue: bool,
+    volatile_lvalue: bool
+) -> BootstrapSemanticExpression {
+    let none: usize = bootstrap_semantic_no_id();
+    let segment: BootstrapSemanticBitfieldSegment =
+        bootstrap_semantic_bitfield_segment(context, segment_id);
+    let field_id: usize =
+        bootstrap_semantic_bitfield_storage_field(context, segment);
+    if (field_id == none) {
+        return bootstrap_semantic_invalid_expression();
+    }
+    let fields: *const BootstrapTypeField =
+        context->types.fields.data as
+            *const BootstrapTypeField;
+    let field: BootstrapTypeField = fields[field_id];
+    let pointer: BootstrapTypeIdResult =
+        bootstrap_type_table_pointer(
+            &context->types,
+            field.type_id,
+            !mutable_lvalue,
+            volatile_lvalue
+        );
+    context->error = pointer.error;
+    var instruction: BootstrapIrInstruction =
+        bootstrap_semantic_instruction(
+            BootstrapIrOpcode.member_address,
+            node
+        );
+    instruction.left = owner_address;
+    instruction.auxiliary = field.offset_bytes;
+    let address_id: usize = bootstrap_semantic_emit_value(
+        context,
+        instruction,
+        pointer.type_id
+    );
+    let loaded: BootstrapSemanticExpression =
+        bootstrap_semantic_load_lvalue(
+            context,
+            node,
+            {
+                type_id = field.type_id,
+                value_id = none,
+                address_id = address_id,
+                constant_value = 0,
+                has_constant = false,
+                lvalue = true,
+                mutable_lvalue = mutable_lvalue,
+                volatile_lvalue = volatile_lvalue,
+                valid = address_id != none,
+                bitfield_segment = none,
+            }
+        );
+    if (!loaded.valid) {
+        return bootstrap_semantic_invalid_expression();
+    }
+    let extracted: usize =
+        bootstrap_semantic_emit_bitfield_extract(
+            context,
+            node,
+            field.type_id,
+            loaded.value_id,
+            segment.bit_offset,
+            segment.bit_width
+        );
+    return {
+        type_id = field.type_id,
+        value_id = extracted,
+        address_id = address_id,
+        constant_value = 0,
+        has_constant = false,
+        lvalue = true,
+        mutable_lvalue = mutable_lvalue,
+        volatile_lvalue = volatile_lvalue,
+        valid = extracted != none,
+        bitfield_segment = segment_id,
+    };
+}
+
+// Read-modify-write of the storage field: load the raw word, clear the
+// segment's bits, insert the new value masked to its width, store back.
+fn bootstrap_semantic_store_bitfield(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    destination: usize,
+    segment_id: usize,
+    value: BootstrapSemanticExpression
+) -> bool {
+    let none: usize = bootstrap_semantic_no_id();
+    let segment: BootstrapSemanticBitfieldSegment =
+        bootstrap_semantic_bitfield_segment(context, segment_id);
+    let field_id: usize =
+        bootstrap_semantic_bitfield_storage_field(context, segment);
+    if (!value.valid || field_id == none || destination == none) {
+        return false;
+    }
+    let fields: *const BootstrapTypeField =
+        context->types.fields.data as
+            *const BootstrapTypeField;
+    let field: BootstrapTypeField = fields[field_id];
+    if (value.type_id != field.type_id) {
+        return false;
+    }
+    let record: BootstrapTypeRecord =
+        bootstrap_semantic_type_record(context, field.type_id);
+    let width: usize =
+        bootstrap_type_bit_width(record.kind);
+    var load_instruction: BootstrapIrInstruction =
+        bootstrap_semantic_instruction(
+            BootstrapIrOpcode.load_indirect,
+            node
+        );
+    load_instruction.left = destination;
+    let raw: usize = bootstrap_semantic_emit_value(
+        context,
+        load_instruction,
+        field.type_id
+    );
+    if (raw == none) {
+        return false;
+    }
+    var inserted: usize = value.value_id;
+    if (segment.bit_width < width) {
+        inserted = bootstrap_semantic_emit_integer_mask(
+            context,
+            node,
+            field.type_id,
+            inserted,
+            bootstrap_semantic_bitfield_bit_mask(segment.bit_width)
+        );
+    }
+    if (segment.bit_offset > 0) {
+        inserted = bootstrap_semantic_emit_integer_shift(
+            context,
+            node,
+            BootstrapTokenKind.shift_left,
+            field.type_id,
+            inserted,
+            segment.bit_offset
+        );
+    }
+    var combined: usize = inserted;
+    if (segment.bit_offset != 0 || segment.bit_width != width) {
+        let clear_mask: u64 = bootstrap_semantic_mask_integer(
+            bootstrap_semantic_bitfield_bit_mask(width) ^
+                (bootstrap_semantic_bitfield_bit_mask(
+                    segment.bit_width
+                ) << (segment.bit_offset as u64)),
+            width
+        );
+        let cleared: usize =
+            bootstrap_semantic_emit_integer_mask(
+                context,
+                node,
+                field.type_id,
+                raw,
+                clear_mask
+            );
+        combined = bootstrap_semantic_emit_integer_binary(
+            context,
+            node,
+            BootstrapTokenKind.pipe,
+            field.type_id,
+            cleared,
+            inserted
+        );
+    }
+    var store_instruction: BootstrapIrInstruction =
+        bootstrap_semantic_instruction(
+            BootstrapIrOpcode.store_indirect,
+            node
+        );
+    store_instruction.left = destination;
+    store_instruction.right = combined;
+    store_instruction.type_id = field.type_id;
+    store_instruction.auxiliary = record.size_bytes;
+    return bootstrap_semantic_emit_void(
+        context,
+        store_instruction
+    ) != none;
 }
 
 fn bootstrap_semantic_lower_member(
@@ -1833,6 +2180,23 @@ fn bootstrap_semantic_lower_member(
         return bootstrap_semantic_invalid_expression();
     }
     if (lookup.status != BootstrapSemanticFieldStatus.found) {
+        let segment_id: usize =
+            bootstrap_semantic_lookup_bitfield_segment(
+                context,
+                owner_type,
+                context->current_unit,
+                name_node.token_index
+            );
+        if (segment_id != bootstrap_semantic_no_id()) {
+            return bootstrap_semantic_lower_bitfield_member(
+                context,
+                node,
+                owner_address,
+                segment_id,
+                mutable_lvalue,
+                volatile_lvalue
+            );
+        }
         bootstrap_semantic_add_diagnostic(
             context,
             BootstrapSemanticDiagnosticKind.unknown_field,
@@ -1885,6 +2249,7 @@ fn bootstrap_semantic_lower_member(
             mutable_lvalue = false,
             volatile_lvalue = false,
             valid = flexible_address != bootstrap_semantic_no_id(),
+            bitfield_segment = bootstrap_semantic_no_id(),
         };
     }
     let pointer: BootstrapTypeIdResult =
@@ -1917,6 +2282,7 @@ fn bootstrap_semantic_lower_member(
         mutable_lvalue = mutable_lvalue,
         volatile_lvalue = volatile_lvalue,
         valid = address_id != bootstrap_semantic_no_id(),
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
     return bootstrap_semantic_load_lvalue(
         context,
@@ -2070,6 +2436,7 @@ fn bootstrap_semantic_lower_index(
         mutable_lvalue = mutable_lvalue,
         volatile_lvalue = volatile_lvalue,
         valid = address_id != bootstrap_semantic_no_id(),
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
     return bootstrap_semantic_load_lvalue(
         context,
@@ -2368,6 +2735,7 @@ fn bootstrap_semantic_lower_call(
         mutable_lvalue = false,
         volatile_lvalue = false,
         valid = instruction_id != none,
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
 }
 
@@ -2625,6 +2993,19 @@ fn bootstrap_semantic_lower_unary(
             operand.type_id
         );
     if (operation == BootstrapTokenKind.ampersand) {
+        if (operand.bitfield_segment !=
+            bootstrap_semantic_no_id()) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.invalid_bitfield,
+                context->current_unit,
+                node.span,
+                bootstrap_semantic_no_id(),
+                bootstrap_semantic_empty_span(),
+                operand.bitfield_segment
+            );
+            return bootstrap_semantic_invalid_expression();
+        }
         if (!operand.lvalue) {
             bootstrap_semantic_add_diagnostic(
                 context,
@@ -2711,6 +3092,7 @@ fn bootstrap_semantic_lower_unary(
                 (operand_record.flags &
                     (BootstrapTypeFlag.volatile_pointee as usize)) != 0,
             valid = true,
+            bitfield_segment = bootstrap_semantic_no_id(),
         };
         return bootstrap_semantic_load_lvalue(
             context,
@@ -2793,6 +3175,7 @@ fn bootstrap_semantic_lower_unary(
         mutable_lvalue = false,
         volatile_lvalue = false,
         valid = value_id != bootstrap_semantic_no_id(),
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
 }
 
@@ -3093,6 +3476,7 @@ fn bootstrap_semantic_lower_cast(
         mutable_lvalue = false,
         volatile_lvalue = false,
         valid = value_id != bootstrap_semantic_no_id(),
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
 }
 
@@ -3243,6 +3627,7 @@ fn bootstrap_semantic_lower_short_circuit(
         mutable_lvalue = false,
         volatile_lvalue = false,
         valid = true,
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
     let result: BootstrapSemanticExpression =
         bootstrap_semantic_load_lvalue(
@@ -3470,6 +3855,7 @@ fn bootstrap_semantic_lower_binary(
             mutable_lvalue = false,
             volatile_lvalue = false,
             valid = value_id != bootstrap_semantic_no_id(),
+            bitfield_segment = bootstrap_semantic_no_id(),
         };
     }
     if (operation == BootstrapTokenKind.minus &&
@@ -3549,6 +3935,7 @@ fn bootstrap_semantic_lower_binary(
             volatile_lvalue = false,
             valid = byte_distance !=
                 bootstrap_semantic_no_id(),
+            bitfield_segment = bootstrap_semantic_no_id(),
         };
     }
     if (left.type_id != right.type_id) {
@@ -3612,6 +3999,7 @@ fn bootstrap_semantic_lower_binary(
             mutable_lvalue = false,
             volatile_lvalue = false,
             valid = value_id != bootstrap_semantic_no_id(),
+            bitfield_segment = bootstrap_semantic_no_id(),
         };
     }
     if (bootstrap_semantic_binary_is_comparison(operation)) {
@@ -3673,6 +4061,7 @@ fn bootstrap_semantic_lower_binary(
         mutable_lvalue = false,
         volatile_lvalue = false,
         valid = value_id != bootstrap_semantic_no_id(),
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
 }
 
@@ -3836,6 +4225,7 @@ fn bootstrap_semantic_lower_conditional(
             mutable_lvalue = false,
             volatile_lvalue = false,
             valid = true,
+            bitfield_segment = bootstrap_semantic_no_id(),
         };
     }
     let source: BootstrapSemanticExpression = {
@@ -3848,6 +4238,7 @@ fn bootstrap_semantic_lower_conditional(
         mutable_lvalue = false,
         volatile_lvalue = false,
         valid = true,
+        bitfield_segment = bootstrap_semantic_no_id(),
     };
     let result: BootstrapSemanticExpression =
         bootstrap_semantic_load_lvalue(
@@ -4050,6 +4441,7 @@ fn bootstrap_semantic_lower_expression(
             mutable_lvalue = false,
             volatile_lvalue = false,
             valid = value_id != bootstrap_semantic_no_id(),
+            bitfield_segment = bootstrap_semantic_no_id(),
         };
     }
     if (node.kind == BootstrapSyntaxKind.name_expression) {
