@@ -5,7 +5,7 @@ fn bootstrap_semantic_no_id() -> usize {
     return BootstrapSemanticLimit.maximum_size as usize;
 }
 
-fn bootstrap_semantic_empty_span() -> BootstrapSourceSpan {
+fn bootstrap_semantic_empty_span() -> lexer::SourceSpan {
     return {
         offset = 0,
         length = 0,
@@ -70,8 +70,8 @@ fn bootstrap_semantic_unit_is_valid(
     unit: BootstrapSemanticUnit
 ) -> bool {
     return bootstrap_semantic_source_is_valid(unit.source) &&
-        bootstrap_token_buffer_is_valid(unit.tokens) &&
-        bootstrap_syntax_tree_is_valid(unit.tree) &&
+        lexer::token_buffer_is_valid(unit.tokens) &&
+        parser::syntax_tree_is_valid(unit.tree) &&
         unit.tokens.count == unit.tree.token_count;
 }
 
@@ -194,9 +194,9 @@ fn bootstrap_semantic_add_diagnostic(
     context: *BootstrapSemanticContext,
     kind: BootstrapSemanticDiagnosticKind,
     unit_index: usize,
-    span: BootstrapSourceSpan,
+    span: lexer::SourceSpan,
     related_unit: usize,
-    related_span: BootstrapSourceSpan,
+    related_span: lexer::SourceSpan,
     detail: usize
 ) -> bool {
     if (context->error != runtime::Error.none) {
@@ -235,8 +235,8 @@ fn bootstrap_semantic_result_is_success(
 ) -> bool {
     return result.error == runtime::Error.none &&
         result.diagnostics.count == 0 &&
-        bootstrap_type_table_is_valid(result.types, true) &&
-        bootstrap_ir_is_valid(result.ir, result.types);
+        type_info::table_is_valid(result.types, true) &&
+        ir::is_valid(result.ir, result.types);
 }
 
 fn bootstrap_semantic_release_error(
@@ -252,15 +252,15 @@ fn bootstrap_semantic_result_release(
     if (!bootstrap_semantic_diagnostics_storage_is_valid(
             result.diagnostics
         ) ||
-        !bootstrap_type_table_storage_is_valid(result.types) ||
-        !bootstrap_ir_storage_is_valid(result.ir)) {
+        !type_info::table_storage_is_valid(result.types) ||
+        !ir::storage_is_valid(result.ir)) {
         return runtime::Error.invalid_argument;
     }
     var error: runtime::Error =
-        bootstrap_type_table_release(result.types);
+        type_info::table_release(result.types);
     error = bootstrap_semantic_release_error(
         error,
-        bootstrap_ir_release(result.ir)
+        ir::release(result.ir)
     );
     error = bootstrap_semantic_release_error(
         error,
@@ -376,8 +376,8 @@ fn bootstrap_semantic_context_storage_is_valid(
         bootstrap_semantic_diagnostics_storage_is_valid(
             context->diagnostics
         ) &&
-        bootstrap_type_table_storage_is_valid(context->types) &&
-        bootstrap_ir_storage_is_valid(context->ir);
+        type_info::table_storage_is_valid(context->types) &&
+        ir::storage_is_valid(context->ir);
 }
 
 fn bootstrap_semantic_context_init(
@@ -420,8 +420,8 @@ fn bootstrap_semantic_context_init(
         pending_loop_label = bootstrap_semantic_no_id(),
         const_call_depth = 0,
         const_steps = 0,
-        types = bootstrap_type_table_empty(),
-        ir = bootstrap_ir_empty(),
+        types = type_info::table_empty(),
+        ir = ir::empty(),
         diagnostics = bootstrap_semantic_diagnostics_empty(),
         error = runtime::Error.none,
         current_function = bootstrap_semantic_no_id(),
@@ -543,12 +543,12 @@ fn bootstrap_semantic_node(
     context: *BootstrapSemanticContext,
     unit_index: usize,
     node_index: usize
-) -> BootstrapSyntaxNode {
+) -> parser::SyntaxNode {
     let unit: *const BootstrapSemanticUnit =
         bootstrap_semantic_input_unit(context, unit_index);
     if (unit == null) {
         return {
-            kind = BootstrapSyntaxKind.invalid,
+            kind = parser::SyntaxKind.invalid,
             span = bootstrap_semantic_empty_span(),
             token_index = bootstrap_semantic_no_id(),
             parent = bootstrap_semantic_no_id(),
@@ -559,8 +559,8 @@ fn bootstrap_semantic_node(
             flags = 0,
         };
     }
-    let result: BootstrapSyntaxNodeResult =
-        bootstrap_syntax_tree_get(unit->tree, node_index);
+    let result: parser::SyntaxNodeResult =
+        parser::syntax_tree_get(unit->tree, node_index);
     if (result.error != runtime::Error.none) {
         context->error = result.error;
     }
@@ -571,17 +571,17 @@ fn bootstrap_semantic_token(
     context: *BootstrapSemanticContext,
     unit_index: usize,
     token_index: usize
-) -> BootstrapToken {
+) -> lexer::Token {
     let unit: *const BootstrapSemanticUnit =
         bootstrap_semantic_input_unit(context, unit_index);
     if (unit == null) {
         return {
-            kind = BootstrapTokenKind.invalid,
+            kind = lexer::TokenKind.invalid,
             span = bootstrap_semantic_empty_span(),
         };
     }
-    let result: BootstrapTokenResult =
-        bootstrap_token_buffer_get(unit->tokens, token_index);
+    let result: lexer::TokenResult =
+        lexer::token_buffer_get(unit->tokens, token_index);
     if (result.error != runtime::Error.none) {
         context->error = result.error;
     }
@@ -591,9 +591,9 @@ fn bootstrap_semantic_token(
 fn bootstrap_semantic_text_equal(
     context: *BootstrapSemanticContext,
     left_unit: usize,
-    left_span: BootstrapSourceSpan,
+    left_span: lexer::SourceSpan,
     right_unit: usize,
-    right_span: BootstrapSourceSpan
+    right_span: lexer::SourceSpan
 ) -> bool {
     if (left_span.length != right_span.length) {
         return false;
@@ -650,15 +650,15 @@ fn bootstrap_semantic_tokens_equal(
 // Children of an import declaration beyond the dotted module name — the
 // `as` alias and the selective_import_names container — are not part of the
 // module name being matched.
-fn bootstrap_semantic_module_name_segment_count(node: BootstrapSyntaxNode) -> usize {
+fn bootstrap_semantic_module_name_segment_count(node: parser::SyntaxNode) -> usize {
     var count: usize = node.child_count;
     if ((node.flags &
-            (BootstrapSyntaxFlag.aliased_import as usize)) != 0 &&
+            (parser::SyntaxFlag.aliased_import as usize)) != 0 &&
         count != 0) {
         count -= 1;
     }
     if ((node.flags &
-            (BootstrapSyntaxFlag.selective_import as usize)) != 0 &&
+            (parser::SyntaxFlag.selective_import as usize)) != 0 &&
         count != 0) {
         count -= 1;
     }
@@ -672,9 +672,9 @@ fn bootstrap_semantic_module_names_equal(
     right_unit: usize,
     right_node: usize
 ) -> bool {
-    let left: BootstrapSyntaxNode =
+    let left: parser::SyntaxNode =
         bootstrap_semantic_node(context, left_unit, left_node);
-    let right: BootstrapSyntaxNode =
+    let right: parser::SyntaxNode =
         bootstrap_semantic_node(context, right_unit, right_node);
     let left_count: usize =
         bootstrap_semantic_module_name_segment_count(left);
@@ -687,13 +687,13 @@ fn bootstrap_semantic_module_names_equal(
     var right_child: usize = right.first_child;
     var index: usize = 0;
     while (index < left_count) {
-        let left_name: BootstrapSyntaxNode =
+        let left_name: parser::SyntaxNode =
             bootstrap_semantic_node(
                 context,
                 left_unit,
                 left_child
             );
-        let right_name: BootstrapSyntaxNode =
+        let right_name: parser::SyntaxNode =
             bootstrap_semantic_node(
                 context,
                 right_unit,
@@ -797,24 +797,24 @@ fn bootstrap_semantic_program_module_node(
 ) -> usize {
     let unit: *const BootstrapSemanticUnit =
         bootstrap_semantic_input_unit(context, unit_index);
-    let root: BootstrapSyntaxNode = bootstrap_semantic_node(
+    let root: parser::SyntaxNode = bootstrap_semantic_node(
         context,
         unit_index,
         unit->tree.root
     );
-    if (root.kind != BootstrapSyntaxKind.program ||
+    if (root.kind != parser::SyntaxKind.program ||
         root.child_count == 0) {
         context->error = runtime::Error.invalid_argument;
         return bootstrap_semantic_no_id();
     }
-    let module_declaration: BootstrapSyntaxNode =
+    let module_declaration: parser::SyntaxNode =
         bootstrap_semantic_node(
             context,
             unit_index,
             root.first_child
         );
     if (module_declaration.kind !=
-        BootstrapSyntaxKind.module_declaration) {
+        parser::SyntaxKind.module_declaration) {
         context->error = runtime::Error.invalid_argument;
         return bootstrap_semantic_no_id();
     }
@@ -971,7 +971,7 @@ fn bootstrap_semantic_import_binds_name(
         import_record.selective_node
     ).first_child;
     while (child != none) {
-        let name_node: BootstrapSyntaxNode =
+        let name_node: parser::SyntaxNode =
             bootstrap_semantic_node(
                 context,
                 import_record.source_unit,
@@ -1175,14 +1175,14 @@ fn bootstrap_semantic_find_qualifier_target(
                     import_record.alias_token
                 );
             } else {
-                let name_node: BootstrapSyntaxNode =
+                let name_node: parser::SyntaxNode =
                     bootstrap_semantic_node(
                         context,
                         modules[import_record.target_module].name_unit,
                         modules[import_record.target_module].name_node
                     );
                 if (name_node.child_count != 0) {
-                    let last_segment: BootstrapSyntaxNode =
+                    let last_segment: parser::SyntaxNode =
                         bootstrap_semantic_node(
                             context,
                             modules[import_record.target_module]
@@ -1218,7 +1218,7 @@ fn bootstrap_semantic_resolve_module_qualifier(
     context: *BootstrapSemanticContext,
     unit_index: usize,
     qualifier_token: usize,
-    qualifier_span: BootstrapSourceSpan
+    qualifier_span: lexer::SourceSpan
 ) -> usize {
     var ambiguous: bool = false;
     let target: usize = bootstrap_semantic_find_qualifier_target(
@@ -1290,7 +1290,7 @@ fn bootstrap_semantic_find_module_symbol(
 fn bootstrap_semantic_lookup_qualified_symbol(
     context: *BootstrapSemanticContext,
     unit_index: usize,
-    node: BootstrapSyntaxNode,
+    node: parser::SyntaxNode,
     kind: BootstrapSemanticSymbolKind,
     diagnose: bool
 ) -> usize {
@@ -1318,7 +1318,7 @@ fn bootstrap_semantic_lookup_qualified_symbol(
         }
         return none;
     }
-    let qualifier: BootstrapSyntaxNode = bootstrap_semantic_node(
+    let qualifier: parser::SyntaxNode = bootstrap_semantic_node(
         context,
         unit_index,
         node.first_child
@@ -1387,7 +1387,7 @@ fn bootstrap_semantic_first_declaration(
     }
     let unit: *const BootstrapSemanticUnit =
         bootstrap_semantic_input_unit(context, unit_index);
-    let root: BootstrapSyntaxNode =
+    let root: parser::SyntaxNode =
         bootstrap_semantic_node(
             context,
             unit_index,
@@ -1395,16 +1395,16 @@ fn bootstrap_semantic_first_declaration(
         );
     var child: usize = root.first_child;
     while (child != none) {
-        let node: BootstrapSyntaxNode =
+        let node: parser::SyntaxNode =
             bootstrap_semantic_node(
                 context,
                 unit_index,
                 child
             );
         if (node.kind !=
-                BootstrapSyntaxKind.module_declaration &&
+                parser::SyntaxKind.module_declaration &&
             node.kind !=
-                BootstrapSyntaxKind.import_declaration) {
+                parser::SyntaxKind.import_declaration) {
             return child;
         }
         child = node.next_sibling;
@@ -1418,14 +1418,14 @@ fn bootstrap_semantic_parse_unsigned(
     token_index: usize,
     value: *u64
 ) -> bool {
-    let token: BootstrapToken = bootstrap_semantic_token(
+    let token: lexer::Token = bootstrap_semantic_token(
         context,
         unit_index,
         token_index
     );
     let unit: *const BootstrapSemanticUnit =
         bootstrap_semantic_input_unit(context, unit_index);
-    if (token.kind != BootstrapTokenKind.integer ||
+    if (token.kind != lexer::TokenKind.integer ||
         value == null || token.span.length == 0) {
         return false;
     }
@@ -1501,14 +1501,14 @@ fn bootstrap_semantic_decode_character(
     token_index: usize,
     value: *u64
 ) -> bool {
-    let token: BootstrapToken = bootstrap_semantic_token(
+    let token: lexer::Token = bootstrap_semantic_token(
         context,
         unit_index,
         token_index
     );
     let unit: *const BootstrapSemanticUnit =
         bootstrap_semantic_input_unit(context, unit_index);
-    if (token.kind != BootstrapTokenKind.character || value == null ||
+    if (token.kind != lexer::TokenKind.character || value == null ||
         token.span.length < 3) {
         return false;
     }
@@ -1576,18 +1576,18 @@ fn bootstrap_semantic_function_pointer_type(
         context->error = runtime::Error.invalid_argument;
         return none;
     }
-    let records: *const BootstrapTypeRecord =
+    let records: *const type_info::Record =
         context->types.types.data as
-            *const BootstrapTypeRecord;
-    let fields: *const BootstrapTypeField =
+            *const type_info::Record;
+    let fields: *const type_info::Field =
         context->types.fields.data as
-            *const BootstrapTypeField;
+            *const type_info::Field;
     var candidate: usize =
-        BootstrapBuiltinType.count as usize;
+        type_info::BuiltinType.count as usize;
     while (candidate < context->types.type_count) {
-        let record: BootstrapTypeRecord = records[candidate];
+        let record: type_info::Record = records[candidate];
         if (record.kind ==
-                BootstrapTypeKind.function_pointer &&
+                type_info::Kind.function_pointer &&
             record.element_type == return_type &&
             record.field_count == parameter_count) {
             var index: usize = 0;
@@ -1606,8 +1606,8 @@ fn bootstrap_semantic_function_pointer_type(
         candidate += 1;
     }
     let type_id: usize = context->types.type_count;
-    let created: BootstrapTypeTableResult =
-        bootstrap_type_table_add_function_pointer(
+    let created: type_info::TableResult =
+        type_info::table_add_function_pointer(
             context->types,
             return_type
         );
@@ -1618,8 +1618,8 @@ fn bootstrap_semantic_function_pointer_type(
     }
     var index: usize = 0;
     while (index < parameter_count) {
-        let added: BootstrapTypeTableResult =
-            bootstrap_type_table_add_parameter(
+        let added: type_info::TableResult =
+            type_info::table_add_parameter(
                 context->types,
                 type_id,
                 parameter_types[index]
@@ -1639,7 +1639,7 @@ fn bootstrap_semantic_function_pointer_type(
         }
         index += 1;
     }
-    context->error = bootstrap_type_table_set_layout(
+    context->error = type_info::table_set_layout(
         context->types,
         type_id,
         8,
@@ -1671,15 +1671,15 @@ fn bootstrap_semantic_align_up(
 }
 
 fn bootstrap_semantic_integer_fits_type(
-    kind: BootstrapTypeKind,
+    kind: type_info::Kind,
     magnitude: u64,
     negative: bool
 ) -> bool {
-    let bits: usize = bootstrap_type_bit_width(kind);
+    let bits: usize = type_info::bit_width(kind);
     if (bits == 0 || bits > 64) {
         return false;
     }
-    if (!bootstrap_type_is_signed_integer(kind)) {
+    if (!type_info::is_signed_integer(kind)) {
         return !negative &&
             (bits == 64 ||
                 magnitude < (1 as u64) << (bits as u64));
@@ -1699,9 +1699,9 @@ fn bootstrap_semantic_integer_fits_type(
 fn bootstrap_semantic_type_record(
     context: *BootstrapSemanticContext,
     type_id: usize
-) -> BootstrapTypeRecord {
-    let result: BootstrapTypeRecordResult =
-        bootstrap_type_table_get(context->types, type_id);
+) -> type_info::Record {
+    let result: type_info::RecordResult =
+        type_info::table_get(context->types, type_id);
     if (result.error != runtime::Error.none) {
         context->error = result.error;
     }
@@ -1737,13 +1737,13 @@ fn bootstrap_semantic_current_function_is_variadic(
 }
 
 fn bootstrap_semantic_instruction(
-    opcode: BootstrapIrOpcode,
-    node: BootstrapSyntaxNode
-) -> BootstrapIrInstruction {
+    opcode: ir::Opcode,
+    node: parser::SyntaxNode
+) -> ir::Instruction {
     let none: usize = bootstrap_semantic_no_id();
     return {
         opcode = opcode,
-        operation = BootstrapTokenKind.invalid,
+        operation = lexer::TokenKind.invalid,
         type_id = none,
         result = none,
         left = none,
@@ -1760,7 +1760,7 @@ fn bootstrap_semantic_instruction(
 
 fn bootstrap_semantic_emit_value(
     context: *BootstrapSemanticContext,
-    instruction: BootstrapIrInstruction,
+    instruction: ir::Instruction,
     type_id: usize
 ) -> usize {
     let none: usize = bootstrap_semantic_no_id();
@@ -1769,7 +1769,7 @@ fn bootstrap_semantic_emit_value(
         type_id == none) {
         return none;
     }
-    let value_id: usize = bootstrap_ir_add_value(
+    let value_id: usize = ir::add_value(
         &context->ir,
         bootstrap_semantic_current_ir_function(context),
         context->current_block,
@@ -1779,11 +1779,11 @@ fn bootstrap_semantic_emit_value(
         context->error = context->ir.error;
         return none;
     }
-    var record: BootstrapIrInstruction = instruction;
+    var record: ir::Instruction = instruction;
     record.type_id = type_id;
     record.result = value_id;
     record.block_id = context->current_block;
-    if (bootstrap_ir_emit(&context->ir, record) == none) {
+    if (ir::emit(&context->ir, record) == none) {
         context->error = context->ir.error;
         return none;
     }
@@ -1792,12 +1792,12 @@ fn bootstrap_semantic_emit_value(
 
 fn bootstrap_semantic_emit_void(
     context: *BootstrapSemanticContext,
-    instruction: BootstrapIrInstruction
+    instruction: ir::Instruction
 ) -> usize {
-    var record: BootstrapIrInstruction = instruction;
+    var record: ir::Instruction = instruction;
     record.block_id = context->current_block;
     let instruction_id: usize =
-        bootstrap_ir_emit(&context->ir, record);
+        ir::emit(&context->ir, record);
     if (instruction_id == bootstrap_semantic_no_id()) {
         context->error = context->ir.error;
     }
@@ -1806,13 +1806,13 @@ fn bootstrap_semantic_emit_void(
 
 fn bootstrap_semantic_emit_integer_constant(
     context: *BootstrapSemanticContext,
-    node: BootstrapSyntaxNode,
+    node: parser::SyntaxNode,
     type_id: usize,
     value: u64
 ) -> BootstrapSemanticExpression {
-    var instruction: BootstrapIrInstruction =
+    var instruction: ir::Instruction =
         bootstrap_semantic_instruction(
-            BootstrapIrOpcode.constant_integer,
+            ir::Opcode.constant_integer,
             node
         );
     instruction.immediate = value;
@@ -1837,17 +1837,17 @@ fn bootstrap_semantic_emit_integer_constant(
 
 fn bootstrap_semantic_emit_boolean_constant(
     context: *BootstrapSemanticContext,
-    node: BootstrapSyntaxNode,
+    node: parser::SyntaxNode,
     value: bool
 ) -> BootstrapSemanticExpression {
-    var instruction: BootstrapIrInstruction =
+    var instruction: ir::Instruction =
         bootstrap_semantic_instruction(
-            BootstrapIrOpcode.constant_boolean,
+            ir::Opcode.constant_boolean,
             node
         );
     instruction.immediate = value ? 1 : 0;
     let type_id: usize =
-        BootstrapBuiltinType.boolean as usize;
+        type_info::BuiltinType.boolean as usize;
     let value_id: usize = bootstrap_semantic_emit_value(
         context,
         instruction,
@@ -1988,8 +1988,8 @@ fn bootstrap_semantic_bitfield_storage_field(
     context: *BootstrapSemanticContext,
     segment: BootstrapSemanticBitfieldSegment
 ) -> usize {
-    let fields: *const BootstrapTypeField =
-        context->types.fields.data as *const BootstrapTypeField;
+    let fields: *const type_info::Field =
+        context->types.fields.data as *const type_info::Field;
     var field_id: usize = 0;
     while (field_id < context->types.field_count) {
         if (fields[field_id].declaration_unit ==
@@ -2009,16 +2009,16 @@ fn bootstrap_semantic_lookup_bitfield_segment(
     unit_index: usize,
     name_token: usize
 ) -> usize {
-    let record: BootstrapTypeRecord =
+    let record: type_info::Record =
         bootstrap_semantic_type_record(context, owner_type);
-    let fields: *const BootstrapTypeField =
-        context->types.fields.data as *const BootstrapTypeField;
+    let fields: *const type_info::Field =
+        context->types.fields.data as *const type_info::Field;
     let segments: *const BootstrapSemanticBitfieldSegment =
         context->bitfield_segments.data as
             *const BootstrapSemanticBitfieldSegment;
     var field_index: usize = 0;
     while (field_index < record.field_count) {
-        let field: BootstrapTypeField =
+        let field: type_info::Field =
             fields[record.first_field + field_index];
         var segment_id: usize = 0;
         while (segment_id < context->bitfield_segment_count) {
@@ -2103,14 +2103,14 @@ fn bootstrap_semantic_local_in_current_scope(
 
 fn bootstrap_semantic_address_of_slot(
     context: *BootstrapSemanticContext,
-    node: BootstrapSyntaxNode,
+    node: parser::SyntaxNode,
     slot_id: usize,
     value_type: usize,
     read_only: bool,
     volatile_pointee: bool
 ) -> usize {
-    let pointer: BootstrapTypeIdResult =
-        bootstrap_type_table_pointer(
+    let pointer: type_info::IdResult =
+        type_info::table_pointer(
             &context->types,
             value_type,
             read_only,
@@ -2120,9 +2120,9 @@ fn bootstrap_semantic_address_of_slot(
         context->error = pointer.error;
         return bootstrap_semantic_no_id();
     }
-    var instruction: BootstrapIrInstruction =
+    var instruction: ir::Instruction =
         bootstrap_semantic_instruction(
-            BootstrapIrOpcode.address_of_slot,
+            ir::Opcode.address_of_slot,
             node
         );
     instruction.auxiliary = slot_id;
@@ -2135,23 +2135,23 @@ fn bootstrap_semantic_address_of_slot(
 
 fn bootstrap_semantic_load_lvalue(
     context: *BootstrapSemanticContext,
-    node: BootstrapSyntaxNode,
+    node: parser::SyntaxNode,
     expression: BootstrapSemanticExpression
 ) -> BootstrapSemanticExpression {
     if (!expression.valid || !expression.lvalue) {
         return expression;
     }
-    let type_record: BootstrapTypeRecord =
+    let type_record: type_info::Record =
         bootstrap_semantic_type_record(
             context,
             expression.type_id
         );
-    if (bootstrap_type_is_memory(type_record.kind)) {
+    if (type_info::is_memory(type_record.kind)) {
         return expression;
     }
-    var instruction: BootstrapIrInstruction =
+    var instruction: ir::Instruction =
         bootstrap_semantic_instruction(
-            BootstrapIrOpcode.load_indirect,
+            ir::Opcode.load_indirect,
             node
         );
     instruction.left = expression.address_id;
@@ -2179,7 +2179,7 @@ fn bootstrap_semantic_mask_integer(
 
 fn bootstrap_semantic_store_to_address(
     context: *BootstrapSemanticContext,
-    node: BootstrapSyntaxNode,
+    node: parser::SyntaxNode,
     destination: usize,
     type_id: usize,
     value: BootstrapSemanticExpression
@@ -2188,17 +2188,17 @@ fn bootstrap_semantic_store_to_address(
         destination == bootstrap_semantic_no_id()) {
         return false;
     }
-    let type_record: BootstrapTypeRecord =
+    let type_record: type_info::Record =
         bootstrap_semantic_type_record(context, type_id);
-    var instruction: BootstrapIrInstruction =
+    var instruction: ir::Instruction =
         bootstrap_semantic_instruction(
-            bootstrap_type_is_memory(type_record.kind) ?
-                BootstrapIrOpcode.memory_copy :
-                BootstrapIrOpcode.store_indirect,
+            type_info::is_memory(type_record.kind) ?
+                ir::Opcode.memory_copy :
+                ir::Opcode.store_indirect,
             node
         );
     instruction.left = destination;
-    instruction.right = bootstrap_type_is_memory(
+    instruction.right = type_info::is_memory(
         type_record.kind
     ) ? value.address_id : value.value_id;
     instruction.type_id = type_id;
@@ -2211,13 +2211,13 @@ fn bootstrap_semantic_store_to_address(
 
 fn bootstrap_semantic_zero_slot(
     context: *BootstrapSemanticContext,
-    node: BootstrapSyntaxNode,
+    node: parser::SyntaxNode,
     slot_id: usize,
     type_id: usize
 ) -> bool {
-    var instruction: BootstrapIrInstruction =
+    var instruction: ir::Instruction =
         bootstrap_semantic_instruction(
-            BootstrapIrOpcode.zero_slot,
+            ir::Opcode.zero_slot,
             node
         );
     instruction.type_id = type_id;
@@ -2230,12 +2230,12 @@ fn bootstrap_semantic_zero_slot(
 
 fn bootstrap_semantic_emit_jump(
     context: *BootstrapSemanticContext,
-    node: BootstrapSyntaxNode,
+    node: parser::SyntaxNode,
     target_block: usize
 ) -> bool {
-    var instruction: BootstrapIrInstruction =
+    var instruction: ir::Instruction =
         bootstrap_semantic_instruction(
-            BootstrapIrOpcode.jump,
+            ir::Opcode.jump,
             node
         );
     instruction.auxiliary = target_block;
@@ -2247,14 +2247,14 @@ fn bootstrap_semantic_emit_jump(
 
 fn bootstrap_semantic_emit_branch(
     context: *BootstrapSemanticContext,
-    node: BootstrapSyntaxNode,
+    node: parser::SyntaxNode,
     condition: usize,
     true_block: usize,
     false_block: usize
 ) -> bool {
-    var instruction: BootstrapIrInstruction =
+    var instruction: ir::Instruction =
         bootstrap_semantic_instruction(
-            BootstrapIrOpcode.branch,
+            ir::Opcode.branch,
             node
         );
     instruction.left = condition;
@@ -2269,7 +2269,7 @@ fn bootstrap_semantic_emit_branch(
 fn bootstrap_semantic_add_current_block(
     context: *BootstrapSemanticContext
 ) -> usize {
-    let block_id: usize = bootstrap_ir_add_block(
+    let block_id: usize = ir::add_block(
         &context->ir,
         bootstrap_semantic_current_ir_function(context)
     );
@@ -2283,8 +2283,8 @@ fn bootstrap_semantic_block_is_terminated(
     context: *BootstrapSemanticContext,
     block_id: usize
 ) -> bool {
-    let result: BootstrapIrBlockResult =
-        bootstrap_ir_get_block(context->ir, block_id);
+    let result: ir::BlockResult =
+        ir::get_block(context->ir, block_id);
     if (result.error != runtime::Error.none) {
         context->error = result.error;
         return true;
@@ -2294,7 +2294,7 @@ fn bootstrap_semantic_block_is_terminated(
 
 fn bootstrap_semantic_enqueue_reachable_block(
     context: *BootstrapSemanticContext,
-    function: BootstrapIrFunction,
+    function: ir::Function,
     block_id: usize,
     reached: *bytes::Buffer,
     pending: *bytes::Buffer
@@ -2324,7 +2324,7 @@ fn bootstrap_semantic_enqueue_reachable_block(
 
 fn bootstrap_semantic_block_is_reachable(
     context: *BootstrapSemanticContext,
-    function: BootstrapIrFunction,
+    function: ir::Function,
     target_block: usize
 ) -> bool {
     if (function.block_count == 0 ||
@@ -2355,12 +2355,12 @@ fn bootstrap_semantic_block_is_reachable(
         );
     }
     var cursor: usize = 0;
-    let blocks: *const BootstrapIrBlock =
+    let blocks: *const ir::Block =
         context->ir.blocks.data as
-            *const BootstrapIrBlock;
-    let instructions: *const BootstrapIrInstruction =
+            *const ir::Block;
+    let instructions: *const ir::Instruction =
         context->ir.instructions.data as
-            *const BootstrapIrInstruction;
+            *const ir::Instruction;
     while (cursor < pending.length &&
         context->error == runtime::Error.none) {
         let pending_blocks: *const usize =
@@ -2368,13 +2368,13 @@ fn bootstrap_semantic_block_is_reachable(
         let block_id: usize =
             pending_blocks[cursor / sizeof(usize)];
         cursor += sizeof(usize);
-        let block: BootstrapIrBlock =
+        let block: ir::Block =
             blocks[block_id];
         if (block.terminated) {
-            let instruction: BootstrapIrInstruction =
+            let instruction: ir::Instruction =
                 instructions[block.last_instruction];
             if (instruction.opcode ==
-                BootstrapIrOpcode.jump) {
+                ir::Opcode.jump) {
                 bootstrap_semantic_enqueue_reachable_block(
                     context,
                     function,
@@ -2383,7 +2383,7 @@ fn bootstrap_semantic_block_is_reachable(
                     &pending
                 );
             } else if (instruction.opcode ==
-                BootstrapIrOpcode.branch) {
+                ir::Opcode.branch) {
                 bootstrap_semantic_enqueue_reachable_block(
                     context,
                     function,
@@ -2420,15 +2420,15 @@ fn bootstrap_semantic_block_is_reachable(
 
 fn bootstrap_semantic_terminate_unreachable_blocks(
     context: *BootstrapSemanticContext,
-    function: BootstrapIrFunction,
-    node: BootstrapSyntaxNode
+    function: ir::Function,
+    node: parser::SyntaxNode
 ) -> bool {
     var index: usize = 0;
     while (index < function.block_count &&
         context->error == runtime::Error.none) {
         let block_id: usize = function.first_block + index;
-        let result: BootstrapIrBlockResult =
-            bootstrap_ir_get_block(context->ir, block_id);
+        let result: ir::BlockResult =
+            ir::get_block(context->ir, block_id);
         if (result.error != runtime::Error.none) {
             context->error = result.error;
             return false;
@@ -2442,9 +2442,9 @@ fn bootstrap_semantic_terminate_unreachable_blocks(
             )) {
             let saved_block: usize = context->current_block;
             context->current_block = block_id;
-            var instruction: BootstrapIrInstruction =
+            var instruction: ir::Instruction =
                 bootstrap_semantic_instruction(
-                    BootstrapIrOpcode.unreachable,
+                    ir::Opcode.unreachable,
                     node
                 );
             bootstrap_semantic_emit_void(context, instruction);
@@ -2508,7 +2508,7 @@ fn bootstrap_semantic_token_equals_bytes(
     if (bytes == null) {
         return false;
     }
-    let token: BootstrapToken = bootstrap_semantic_token(
+    let token: lexer::Token = bootstrap_semantic_token(
         context,
         unit_index,
         token_index

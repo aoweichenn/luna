@@ -1,8 +1,8 @@
 module luna.bootstrap.backend.x86_64.codegen;
 
 import luna.bootstrap.backend.x86_64.text;
-import luna.bootstrap.frontend.lexer;
-import luna.bootstrap.frontend.parser;
+import luna.bootstrap.frontend.lexer as lexer;
+import luna.bootstrap.frontend.parser as parser;
 
 enum BootstrapX8664CodegenLimit: usize {
     maximum_size = 18446744073709551615, text_limit = 4096, general_argument_registers = 6,
@@ -11,8 +11,8 @@ enum BootstrapX8664CodegenLimit: usize {
 
 struct BootstrapX8664CodegenContext {
     semantic_input: BootstrapSemanticInput;
-    ir: BootstrapTypedIr;
-    types: BootstrapTypeTable;
+    ir: ir::Store;
+    types: type_info::Table;
     abi: BootstrapX8664Abi;
     frames: BootstrapX8664FramePlan;
     text: BootstrapX8664Text;
@@ -78,13 +78,13 @@ fn bootstrap_x86_64_codegen_hex(context: *BootstrapX8664CodegenContext, value: u
     return true;
 }
 
-fn bootstrap_x86_64_codegen_type(context: *BootstrapX8664CodegenContext, type_id: usize) -> *const BootstrapTypeRecord {
+fn bootstrap_x86_64_codegen_type(context: *BootstrapX8664CodegenContext, type_id: usize) -> *const type_info::Record {
     if (context == null || type_id >= context->types.type_count) {
         bootstrap_x86_64_codegen_fail(context, runtime::Error.invalid_argument);
         return null;
     }
-    let records: *const BootstrapTypeRecord = context->types.types.data as
-            *const BootstrapTypeRecord;
+    let records: *const type_info::Record = context->types.types.data as
+            *const type_info::Record;
     return &records[type_id];
 }
 
@@ -100,41 +100,41 @@ fn bootstrap_x86_64_codegen_unit(
 }
 
 fn bootstrap_x86_64_codegen_token(
-    context: *BootstrapX8664CodegenContext, unit_id: usize, token_id: usize) -> BootstrapToken {
+    context: *BootstrapX8664CodegenContext, unit_id: usize, token_id: usize) -> lexer::Token {
     let unit: *const BootstrapSemanticUnit = bootstrap_x86_64_codegen_unit(context, unit_id);
     if (unit == null || token_id >= unit->tokens.count) {
         bootstrap_x86_64_codegen_fail(context, runtime::Error.invalid_argument);
         return {
-            kind = BootstrapTokenKind.invalid, span = {
+            kind = lexer::TokenKind.invalid, span = {
                 offset = 0, length = 0, line = 0, column = 0,
             },
         };
     }
-    let tokens: *const BootstrapToken = unit->tokens.storage.data as *const BootstrapToken;
+    let tokens: *const lexer::Token = unit->tokens.storage.data as *const lexer::Token;
     return tokens[token_id];
 }
 
 fn bootstrap_x86_64_codegen_node(
-    context: *BootstrapX8664CodegenContext, unit_id: usize, node_id: usize) -> BootstrapSyntaxNode {
+    context: *BootstrapX8664CodegenContext, unit_id: usize, node_id: usize) -> parser::SyntaxNode {
     let unit: *const BootstrapSemanticUnit = bootstrap_x86_64_codegen_unit(context, unit_id);
     if (unit == null || node_id >= unit->tree.count) {
         bootstrap_x86_64_codegen_fail(context, runtime::Error.invalid_argument);
         return {
-            kind = BootstrapSyntaxKind.invalid, span = {
+            kind = parser::SyntaxKind.invalid, span = {
                 offset = 0, length = 0, line = 0, column = 0,
             }, token_index = 0, parent = 0, first_child = 0, last_child = 0, next_sibling = 0, child_count = 0,
             flags = 0,
         };
     }
-    let nodes: *const BootstrapSyntaxNode = unit->tree.storage.data as *const BootstrapSyntaxNode;
+    let nodes: *const parser::SyntaxNode = unit->tree.storage.data as *const parser::SyntaxNode;
     return nodes[node_id];
 }
 
 fn bootstrap_x86_64_codegen_append_token_hex(
     context: *BootstrapX8664CodegenContext, unit_id: usize, token_id: usize) -> bool {
     let unit: *const BootstrapSemanticUnit = bootstrap_x86_64_codegen_unit(context, unit_id);
-    let token: BootstrapToken = bootstrap_x86_64_codegen_token(context, unit_id, token_id);
-    if (unit == null || token.kind != BootstrapTokenKind.identifier || token.span.offset > unit->source.length ||
+    let token: lexer::Token = bootstrap_x86_64_codegen_token(context, unit_id, token_id);
+    if (unit == null || token.kind != lexer::TokenKind.identifier || token.span.offset > unit->source.length ||
         token.span.length > unit->source.length - token.span.offset) {
         return bootstrap_x86_64_codegen_fail(context, runtime::Error.invalid_argument);
     }
@@ -151,17 +151,17 @@ fn bootstrap_x86_64_codegen_append_module_hex(context: *BootstrapX8664CodegenCon
     if (unit == null) {
         return false;
     }
-    let root: BootstrapSyntaxNode = bootstrap_x86_64_codegen_node(context, unit_id, unit->tree.root);
-    let declaration: BootstrapSyntaxNode = bootstrap_x86_64_codegen_node(context, unit_id, root.first_child);
-    if (root.kind != BootstrapSyntaxKind.program || declaration.kind != BootstrapSyntaxKind.module_declaration ||
+    let root: parser::SyntaxNode = bootstrap_x86_64_codegen_node(context, unit_id, unit->tree.root);
+    let declaration: parser::SyntaxNode = bootstrap_x86_64_codegen_node(context, unit_id, root.first_child);
+    if (root.kind != parser::SyntaxKind.program || declaration.kind != parser::SyntaxKind.module_declaration ||
         declaration.child_count == 0) {
         return bootstrap_x86_64_codegen_fail(context, runtime::Error.invalid_argument);
     }
     var child: usize = declaration.first_child;
     var index: usize = 0;
     while (index < declaration.child_count) {
-        let name: BootstrapSyntaxNode = bootstrap_x86_64_codegen_node(context, unit_id, child);
-        if (name.kind != BootstrapSyntaxKind.name_expression || (index != 0 &&
+        let name: parser::SyntaxNode = bootstrap_x86_64_codegen_node(context, unit_id, child);
+        if (name.kind != parser::SyntaxKind.name_expression || (index != 0 &&
                 !bootstrap_x86_64_codegen_hex(
                     context, 46, 2)) ||
             !bootstrap_x86_64_codegen_append_token_hex(
@@ -176,9 +176,9 @@ fn bootstrap_x86_64_codegen_append_module_hex(context: *BootstrapX8664CodegenCon
 
 fn bootstrap_x86_64_codegen_append_mangled_function_symbol(
     context: *BootstrapX8664CodegenContext, function_id: usize) -> bool {
-    let functions: *const BootstrapIrFunction = context->ir.functions.data as
-            *const BootstrapIrFunction;
-    let function: BootstrapIrFunction = functions[function_id];
+    let functions: *const ir::Function = context->ir.functions.data as
+            *const ir::Function;
+    let function: ir::Function = functions[function_id];
     return bootstrap_x86_64_codegen_literal(context, "_L") &&
         bootstrap_x86_64_codegen_append_module_hex(context, function.declaration_unit) &&
         bootstrap_x86_64_codegen_literal(context, "_") &&
@@ -189,15 +189,15 @@ fn bootstrap_x86_64_codegen_append_function_symbol(context: *BootstrapX8664Codeg
     if (context == null || function_id >= context->ir.function_count) {
         return bootstrap_x86_64_codegen_fail(context, runtime::Error.invalid_argument);
     }
-    let functions: *const BootstrapIrFunction = context->ir.functions.data as
-            *const BootstrapIrFunction;
-    let function: BootstrapIrFunction = functions[function_id];
+    let functions: *const ir::Function = context->ir.functions.data as
+            *const ir::Function;
+    let function: ir::Function = functions[function_id];
     // @export_name: the string literal's inner bytes are the symbol,
     // verbatim (no _L mangling). Calls and the definition agree because
     // both name the function through this routine.
     if (function.export_name_token != bootstrap_x86_64_codegen_no_id()) {
         let unit: *const BootstrapSemanticUnit = bootstrap_x86_64_codegen_unit(context, function.export_name_unit);
-        let token: BootstrapToken =
+        let token: lexer::Token =
             bootstrap_x86_64_codegen_token(context, function.export_name_unit, function.export_name_token);
         if (unit == null || token.span.length < 2 || token.span.offset > unit->source.length ||
             token.span.length > unit->source.length - token.span.offset ||
@@ -207,11 +207,11 @@ fn bootstrap_x86_64_codegen_append_function_symbol(context: *BootstrapX8664Codeg
         }
         return true;
     }
-    if (function.linkage == BootstrapIrLinkage.external_c) {
+    if (function.linkage == ir::Linkage.external_c) {
         let unit: *const BootstrapSemanticUnit = bootstrap_x86_64_codegen_unit(context, function.declaration_unit);
-        let token: BootstrapToken =
+        let token: lexer::Token =
             bootstrap_x86_64_codegen_token(context, function.declaration_unit, function.name_token);
-        if (unit == null || token.kind != BootstrapTokenKind.identifier || token.span.offset > unit->source.length ||
+        if (unit == null || token.kind != lexer::TokenKind.identifier || token.span.offset > unit->source.length ||
             token.span.length > unit->source.length - token.span.offset ||
             !bootstrap_x86_64_text_append(
                 &context->text, &unit->source.data[token.span.offset], token.span.length)) {
@@ -286,36 +286,36 @@ fn bootstrap_x86_64_codegen_append_global_label(context: *BootstrapX8664CodegenC
     return bootstrap_x86_64_codegen_literal(context, ".Lbg") && bootstrap_x86_64_codegen_usize(context, global_id);
 }
 
-fn bootstrap_x86_64_codegen_bit_width(record: *const BootstrapTypeRecord) -> usize {
+fn bootstrap_x86_64_codegen_bit_width(record: *const type_info::Record) -> usize {
     if (record == null) {
         return 0;
     }
-    if (record->kind == BootstrapTypeKind.enumeration) {
+    if (record->kind == type_info::Kind.enumeration) {
         return record->size_bytes * 8;
     }
-    if (record->kind == BootstrapTypeKind.pointer) {
+    if (record->kind == type_info::Kind.pointer) {
         return 64;
     }
-    if (bootstrap_type_is_memory(record->kind)) {
+    if (type_info::is_memory(record->kind)) {
         return 64;
     }
-    return bootstrap_type_bit_width(record->kind);
+    return type_info::bit_width(record->kind);
 }
 
 fn bootstrap_x86_64_codegen_is_signed(
-    context: *BootstrapX8664CodegenContext, record: *const BootstrapTypeRecord) -> bool {
+    context: *BootstrapX8664CodegenContext, record: *const type_info::Record) -> bool {
     if (record == null) {
         return false;
     }
-    if (record->kind == BootstrapTypeKind.enumeration) {
-        let underlying: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, record->element_type);
-        return underlying != null && bootstrap_type_is_signed_integer(underlying->kind);
+    if (record->kind == type_info::Kind.enumeration) {
+        let underlying: *const type_info::Record = bootstrap_x86_64_codegen_type(context, record->element_type);
+        return underlying != null && type_info::is_signed_integer(underlying->kind);
     }
-    return bootstrap_type_is_signed_integer(record->kind);
+    return type_info::is_signed_integer(record->kind);
 }
 
 fn bootstrap_x86_64_codegen_load_integer(
-    context: *BootstrapX8664CodegenContext, value_id: usize, record: *const BootstrapTypeRecord,
+    context: *BootstrapX8664CodegenContext, value_id: usize, record: *const type_info::Record,
     destination_32: *const u8, destination_64: *const u8, signed_value: bool) -> bool {
     let width: usize = bootstrap_x86_64_codegen_bit_width(record);
     var mnemonic: *const u8 = null;
@@ -341,17 +341,17 @@ fn bootstrap_x86_64_codegen_load_integer(
 }
 
 fn bootstrap_x86_64_codegen_load_rax(
-    context: *BootstrapX8664CodegenContext, value_id: usize, record: *const BootstrapTypeRecord) -> bool {
+    context: *BootstrapX8664CodegenContext, value_id: usize, record: *const type_info::Record) -> bool {
     return bootstrap_x86_64_codegen_load_integer(context, value_id, record, "%eax", "%rax", false);
 }
 
 fn bootstrap_x86_64_codegen_load_rcx(
-    context: *BootstrapX8664CodegenContext, value_id: usize, record: *const BootstrapTypeRecord) -> bool {
+    context: *BootstrapX8664CodegenContext, value_id: usize, record: *const type_info::Record) -> bool {
     return bootstrap_x86_64_codegen_load_integer(context, value_id, record, "%ecx", "%rcx", false);
 }
 
 fn bootstrap_x86_64_codegen_load_signed_rax(
-    context: *BootstrapX8664CodegenContext, value_id: usize, record: *const BootstrapTypeRecord) -> bool {
+    context: *BootstrapX8664CodegenContext, value_id: usize, record: *const type_info::Record) -> bool {
     let width: usize = bootstrap_x86_64_codegen_bit_width(record);
     let mnemonic: *const u8 = width == 8 ? "    movsbq " : width == 16 ? "    movswq " : width == 32 ? "    movslq " :
         width == 64 ? "    movq " : null;
@@ -364,7 +364,7 @@ fn bootstrap_x86_64_codegen_load_signed_rax(
 }
 
 fn bootstrap_x86_64_codegen_store_rax(
-    context: *BootstrapX8664CodegenContext, result: usize, record: *const BootstrapTypeRecord) -> bool {
+    context: *BootstrapX8664CodegenContext, result: usize, record: *const type_info::Record) -> bool {
     let width: usize = bootstrap_x86_64_codegen_bit_width(record);
     if (width == 8 &&
         !bootstrap_x86_64_codegen_literal(
@@ -380,15 +380,15 @@ fn bootstrap_x86_64_codegen_store_rax(
         bootstrap_x86_64_codegen_append_value(context, result) && bootstrap_x86_64_codegen_literal(context, "\n");
 }
 
-fn bootstrap_x86_64_codegen_float_move(record: *const BootstrapTypeRecord) -> *const u8 {
+fn bootstrap_x86_64_codegen_float_move(record: *const type_info::Record) -> *const u8 {
     if (record == null) {
         return null;
     }
-    return record->kind == BootstrapTypeKind.float_32 ? "movss" : "movsd";
+    return record->kind == type_info::Kind.float_32 ? "movss" : "movsd";
 }
 
 fn bootstrap_x86_64_codegen_load_xmm(
-    context: *BootstrapX8664CodegenContext, value_id: usize, record: *const BootstrapTypeRecord,
+    context: *BootstrapX8664CodegenContext, value_id: usize, record: *const type_info::Record,
     register_name: *const u8) -> bool {
     let mnemonic: *const u8 = bootstrap_x86_64_codegen_float_move(record);
     return bootstrap_x86_64_codegen_literal(context, "    ") && bootstrap_x86_64_codegen_literal(context, mnemonic) &&
@@ -398,7 +398,7 @@ fn bootstrap_x86_64_codegen_load_xmm(
 }
 
 fn bootstrap_x86_64_codegen_store_xmm(
-    context: *BootstrapX8664CodegenContext, result: usize, record: *const BootstrapTypeRecord, register_name: *const u8
+    context: *BootstrapX8664CodegenContext, result: usize, record: *const type_info::Record, register_name: *const u8
 ) -> bool {
     let mnemonic: *const u8 = bootstrap_x86_64_codegen_float_move(record);
     return bootstrap_x86_64_codegen_literal(context, "    ") && bootstrap_x86_64_codegen_literal(context, mnemonic) &&
@@ -408,17 +408,17 @@ fn bootstrap_x86_64_codegen_store_xmm(
 }
 
 fn bootstrap_x86_64_codegen_emit_constant(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction) -> bool {
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, instruction.type_id);
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction) -> bool {
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, instruction.type_id);
     if (record == null) {
         return false;
     }
-    if (instruction.opcode == BootstrapIrOpcode.constant_null) {
+    if (instruction.opcode == ir::Opcode.constant_null) {
         return bootstrap_x86_64_codegen_literal(context, "    xorq %rax, %rax\n") &&
             bootstrap_x86_64_codegen_store_rax(context, instruction.result, record);
     }
-    if (instruction.opcode == BootstrapIrOpcode.constant_boolean || instruction.opcode ==
-            BootstrapIrOpcode.constant_integer) {
+    if (instruction.opcode == ir::Opcode.constant_boolean || instruction.opcode ==
+            ir::Opcode.constant_integer) {
         let width: usize = bootstrap_x86_64_codegen_bit_width(record);
         if (width <= 32) {
             if (!bootstrap_x86_64_codegen_literal(context, "    movl $0x") ||
@@ -435,8 +435,8 @@ fn bootstrap_x86_64_codegen_emit_constant(
         }
         return bootstrap_x86_64_codegen_store_rax(context, instruction.result, record);
     }
-    if (instruction.opcode == BootstrapIrOpcode.constant_float) {
-        if (record->kind == BootstrapTypeKind.float_32) {
+    if (instruction.opcode == ir::Opcode.constant_float) {
+        if (record->kind == type_info::Kind.float_32) {
             let value: f32 = instruction.floating as f32;
             let bits: u32 = *((&value) as *const f32 as *const u32);
             return bootstrap_x86_64_codegen_literal(context, "    movl $0x") &&
@@ -456,29 +456,29 @@ fn bootstrap_x86_64_codegen_emit_constant(
 }
 
 fn bootstrap_x86_64_codegen_emit_address(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction) -> bool {
-    if (instruction.opcode == BootstrapIrOpcode.address_of_slot) {
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction) -> bool {
+    if (instruction.opcode == ir::Opcode.address_of_slot) {
         return bootstrap_x86_64_codegen_literal(context, "    leaq ") &&
             bootstrap_x86_64_codegen_append_slot(context, instruction.auxiliary) &&
             bootstrap_x86_64_codegen_literal(context, ", %rax\n") &&
             bootstrap_x86_64_codegen_store_rax(
                 context, instruction.result, bootstrap_x86_64_codegen_type(context, instruction.type_id));
     }
-    if (instruction.opcode == BootstrapIrOpcode.global_address) {
+    if (instruction.opcode == ir::Opcode.global_address) {
         return bootstrap_x86_64_codegen_literal(context, "    leaq ") &&
             bootstrap_x86_64_codegen_append_global_label(context, instruction.auxiliary) &&
             bootstrap_x86_64_codegen_literal(context, "(%rip), %rax\n") &&
             bootstrap_x86_64_codegen_store_rax(
                 context, instruction.result, bootstrap_x86_64_codegen_type(context, instruction.type_id));
     }
-    if (instruction.opcode == BootstrapIrOpcode.function_address) {
+    if (instruction.opcode == ir::Opcode.function_address) {
         return bootstrap_x86_64_codegen_literal(context, "    leaq ") &&
             bootstrap_x86_64_codegen_append_function_symbol(context, instruction.auxiliary) &&
             bootstrap_x86_64_codegen_literal(context, "(%rip), %rax\n") &&
             bootstrap_x86_64_codegen_store_rax(
                 context, instruction.result, bootstrap_x86_64_codegen_type(context, instruction.type_id));
     }
-    if (instruction.opcode == BootstrapIrOpcode.member_address) {
+    if (instruction.opcode == ir::Opcode.member_address) {
         if (!bootstrap_x86_64_codegen_load_rax(
                 context, instruction.left, bootstrap_x86_64_codegen_type(context, instruction.type_id)) ||
             !bootstrap_x86_64_codegen_literal(context, "    addq $") ||
@@ -490,14 +490,14 @@ fn bootstrap_x86_64_codegen_emit_address(
         return bootstrap_x86_64_codegen_store_rax(
             context, instruction.result, bootstrap_x86_64_codegen_type(context, instruction.type_id));
     }
-    if (instruction.opcode == BootstrapIrOpcode.pointer_offset) {
-        let values: *const BootstrapIrValue = context->ir.values.data as *const BootstrapIrValue;
-        let left_record: *const BootstrapTypeRecord =
+    if (instruction.opcode == ir::Opcode.pointer_offset) {
+        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+        let left_record: *const type_info::Record =
             bootstrap_x86_64_codegen_type(context, values[instruction.left].type_id);
-        let index_record: *const BootstrapTypeRecord =
+        let index_record: *const type_info::Record =
             bootstrap_x86_64_codegen_type(context, values[instruction.right].type_id);
-        if (left_record == null || index_record == null || (left_record->kind != BootstrapTypeKind.pointer &&
-                left_record->kind != BootstrapTypeKind.array) || instruction.auxiliary == 0 ||
+        if (left_record == null || index_record == null || (left_record->kind != type_info::Kind.pointer &&
+                left_record->kind != type_info::Kind.array) || instruction.auxiliary == 0 ||
             !bootstrap_x86_64_codegen_load_rax(context, instruction.left, left_record) ||
             !bootstrap_x86_64_codegen_load_rcx(
                 context, instruction.right, index_record)) {
@@ -516,7 +516,7 @@ fn bootstrap_x86_64_codegen_emit_address(
 }
 
 fn bootstrap_x86_64_codegen_emit_zero(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction) -> bool {
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction) -> bool {
     let slot: BootstrapX8664Storage =
         bootstrap_x86_64_codegen_storage(context, BootstrapX8664StorageKind.slot, instruction.auxiliary);
     if (context->error != runtime::Error.none) {
@@ -530,9 +530,9 @@ fn bootstrap_x86_64_codegen_emit_zero(
 }
 
 fn bootstrap_x86_64_codegen_emit_memory_copy(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction, instruction_id: usize) -> bool {
-    let values: *const BootstrapIrValue = context->ir.values.data as *const BootstrapIrValue;
-    let pointer_record: *const BootstrapTypeRecord =
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction, instruction_id: usize) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let pointer_record: *const type_info::Record =
         bootstrap_x86_64_codegen_type(context, values[instruction.left].type_id);
     if (pointer_record == null ||
         !bootstrap_x86_64_codegen_load_integer(context, instruction.left, pointer_record, "%edi", "%rdi", false) ||
@@ -559,14 +559,14 @@ fn bootstrap_x86_64_codegen_emit_memory_copy(
     return true;
 }
 
-fn bootstrap_x86_64_codegen_indirect_load_mnemonic(record: *const BootstrapTypeRecord) -> *const u8 {
+fn bootstrap_x86_64_codegen_indirect_load_mnemonic(record: *const type_info::Record) -> *const u8 {
     if (record == null) {
         return null;
     }
-    if (record->kind == BootstrapTypeKind.float_32) {
+    if (record->kind == type_info::Kind.float_32) {
         return "movss";
     }
-    if (record->kind == BootstrapTypeKind.float_64) {
+    if (record->kind == type_info::Kind.float_64) {
         return "movsd";
     }
     let width: usize = bootstrap_x86_64_codegen_bit_width(record);
@@ -583,18 +583,18 @@ fn bootstrap_x86_64_codegen_indirect_load_mnemonic(record: *const BootstrapTypeR
 }
 
 fn bootstrap_x86_64_codegen_emit_load_indirect(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction) -> bool {
-    let values: *const BootstrapIrValue = context->ir.values.data as *const BootstrapIrValue;
-    let pointer_record: *const BootstrapTypeRecord =
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let pointer_record: *const type_info::Record =
         bootstrap_x86_64_codegen_type(context, values[instruction.left].type_id);
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, instruction.type_id);
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, instruction.type_id);
     let mnemonic: *const u8 = bootstrap_x86_64_codegen_indirect_load_mnemonic(record);
     if (pointer_record == null || record == null || mnemonic == null ||
         !bootstrap_x86_64_codegen_load_rax(
             context, instruction.left, pointer_record)) {
         return false;
     }
-    if (bootstrap_type_is_float(record->kind)) {
+    if (type_info::is_float(record->kind)) {
         return bootstrap_x86_64_codegen_literal(context, "    ") &&
             bootstrap_x86_64_codegen_literal(context, mnemonic) &&
             bootstrap_x86_64_codegen_literal(context, " (%rax), %xmm0\n") &&
@@ -606,7 +606,7 @@ fn bootstrap_x86_64_codegen_emit_load_indirect(
             context, bootstrap_x86_64_codegen_bit_width(record) <= 32 ? "%eax\n" : "%rax\n")) {
         return false;
     }
-    if (record->kind == BootstrapTypeKind.boolean &&
+    if (record->kind == type_info::Kind.boolean &&
         !bootstrap_x86_64_codegen_literal(
             context, "    testl %eax, %eax\n    setne %al\n    movzbl %al, %eax\n")) {
         return false;
@@ -615,17 +615,17 @@ fn bootstrap_x86_64_codegen_emit_load_indirect(
 }
 
 fn bootstrap_x86_64_codegen_emit_store_indirect(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction) -> bool {
-    let values: *const BootstrapIrValue = context->ir.values.data as *const BootstrapIrValue;
-    let pointer_record: *const BootstrapTypeRecord =
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let pointer_record: *const type_info::Record =
         bootstrap_x86_64_codegen_type(context, values[instruction.left].type_id);
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, instruction.type_id);
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, instruction.type_id);
     if (pointer_record == null || record == null ||
         !bootstrap_x86_64_codegen_load_rax(
             context, instruction.left, pointer_record)) {
         return false;
     }
-    if (bootstrap_type_is_float(record->kind)) {
+    if (type_info::is_float(record->kind)) {
         return bootstrap_x86_64_codegen_load_xmm(context, instruction.right, record, "%xmm0") &&
             bootstrap_x86_64_codegen_literal(context, "    ") &&
             bootstrap_x86_64_codegen_literal(context, bootstrap_x86_64_codegen_float_move(record)) &&
@@ -642,13 +642,13 @@ fn bootstrap_x86_64_codegen_emit_store_indirect(
 }
 
 fn bootstrap_x86_64_codegen_emit_slot_access(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction) -> bool {
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, instruction.type_id);
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction) -> bool {
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, instruction.type_id);
     if (record == null) {
         return false;
     }
-    if (instruction.opcode == BootstrapIrOpcode.load) {
-        if (bootstrap_type_is_float(record->kind)) {
+    if (instruction.opcode == ir::Opcode.load) {
+        if (type_info::is_float(record->kind)) {
             return bootstrap_x86_64_codegen_literal(context, "    ") &&
                 bootstrap_x86_64_codegen_literal(context, bootstrap_x86_64_codegen_float_move(record)) &&
                 bootstrap_x86_64_codegen_literal(context, " ") &&
@@ -663,15 +663,15 @@ fn bootstrap_x86_64_codegen_emit_slot_access(
                 context, width <= 32 ? ", %eax\n" : ", %rax\n")) {
             return false;
         }
-        if (record->kind == BootstrapTypeKind.boolean &&
+        if (record->kind == type_info::Kind.boolean &&
             !bootstrap_x86_64_codegen_literal(
                 context, "    testl %eax, %eax\n    setne %al\n    movzbl %al, %eax\n")) {
             return false;
         }
         return bootstrap_x86_64_codegen_store_rax(context, instruction.result, record);
     }
-    if (instruction.opcode == BootstrapIrOpcode.store) {
-        if (bootstrap_type_is_float(record->kind)) {
+    if (instruction.opcode == ir::Opcode.store) {
+        if (type_info::is_float(record->kind)) {
             return bootstrap_x86_64_codegen_load_xmm(context, instruction.left, record, "%xmm0") &&
                 bootstrap_x86_64_codegen_literal(context, "    ") &&
                 bootstrap_x86_64_codegen_literal(context, bootstrap_x86_64_codegen_float_move(record)) &&
@@ -689,23 +689,23 @@ fn bootstrap_x86_64_codegen_emit_slot_access(
 }
 
 fn bootstrap_x86_64_codegen_emit_check(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction, instruction_id: usize) -> bool {
-    let values: *const BootstrapIrValue = context->ir.values.data as *const BootstrapIrValue;
-    let left_record: *const BootstrapTypeRecord =
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction, instruction_id: usize) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let left_record: *const type_info::Record =
         bootstrap_x86_64_codegen_type(context, values[instruction.left].type_id);
     if (left_record == null ||
         !bootstrap_x86_64_codegen_load_rax(
             context, instruction.left, left_record)) {
         return false;
     }
-    if (instruction.opcode == BootstrapIrOpcode.null_check) {
+    if (instruction.opcode == ir::Opcode.null_check) {
         return bootstrap_x86_64_codegen_literal(context, "    testq %rax, %rax\n    jne ") &&
             bootstrap_x86_64_codegen_instruction_label(context, instruction_id, "check_ok") &&
             bootstrap_x86_64_codegen_literal(context, "\n    ud2\n") &&
             bootstrap_x86_64_codegen_instruction_label(context, instruction_id, "check_ok") &&
             bootstrap_x86_64_codegen_literal(context, ":\n");
     }
-    let right_record: *const BootstrapTypeRecord =
+    let right_record: *const type_info::Record =
         bootstrap_x86_64_codegen_type(context, values[instruction.right].type_id);
     return right_record != null && bootstrap_x86_64_codegen_load_rcx(context, instruction.right, right_record) &&
         bootstrap_x86_64_codegen_literal(context, "    cmpq %rcx, %rax\n    jb ") &&
@@ -716,19 +716,19 @@ fn bootstrap_x86_64_codegen_emit_check(
 }
 
 fn bootstrap_x86_64_codegen_emit_unary(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction) -> bool {
-    let values: *const BootstrapIrValue = context->ir.values.data as *const BootstrapIrValue;
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, values[instruction.left].type_id);
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, values[instruction.left].type_id);
     if (record == null) {
         return false;
     }
-    if (instruction.opcode == BootstrapIrOpcode.boolean_not) {
+    if (instruction.opcode == ir::Opcode.boolean_not) {
         return bootstrap_x86_64_codegen_load_rax(context, instruction.left, record) &&
             bootstrap_x86_64_codegen_literal(context, "    testl %eax, %eax\n    sete %al\n    movzbl %al, %eax\n") &&
             bootstrap_x86_64_codegen_store_rax(
                 context, instruction.result, bootstrap_x86_64_codegen_type(context, instruction.type_id));
     }
-    if (instruction.opcode == BootstrapIrOpcode.unary_float) {
+    if (instruction.opcode == ir::Opcode.unary_float) {
         let width: usize = bootstrap_x86_64_codegen_bit_width(record);
         return bootstrap_x86_64_codegen_load_rax(context, instruction.left, record) &&
             bootstrap_x86_64_codegen_literal(
@@ -737,37 +737,37 @@ fn bootstrap_x86_64_codegen_emit_unary(
             bootstrap_x86_64_codegen_store_rax(context, instruction.result, record);
     }
     let width: usize = bootstrap_x86_64_codegen_bit_width(record);
-    let mnemonic: *const u8 = instruction.operation == BootstrapTokenKind.minus ? (width <= 32 ? "    negl %eax\n" :
+    let mnemonic: *const u8 = instruction.operation == lexer::TokenKind.minus ? (width <= 32 ? "    negl %eax\n" :
                 "    negq %rax\n") : (width <= 32 ? "    notl %eax\n" : "    notq %rax\n");
     return bootstrap_x86_64_codegen_load_rax(context, instruction.left, record) &&
         bootstrap_x86_64_codegen_literal(context, mnemonic) &&
         bootstrap_x86_64_codegen_store_rax(context, instruction.result, record);
 }
 
-fn bootstrap_x86_64_codegen_binary_mnemonic(operation: BootstrapTokenKind, width: usize) -> *const u8 {
-    if (operation == BootstrapTokenKind.plus) {
+fn bootstrap_x86_64_codegen_binary_mnemonic(operation: lexer::TokenKind, width: usize) -> *const u8 {
+    if (operation == lexer::TokenKind.plus) {
         return width <= 32 ? "addl" : "addq";
     }
-    if (operation == BootstrapTokenKind.minus) {
+    if (operation == lexer::TokenKind.minus) {
         return width <= 32 ? "subl" : "subq";
     }
-    if (operation == BootstrapTokenKind.star) {
+    if (operation == lexer::TokenKind.star) {
         return width <= 32 ? "imull" : "imulq";
     }
-    if (operation == BootstrapTokenKind.ampersand) {
+    if (operation == lexer::TokenKind.ampersand) {
         return width <= 32 ? "andl" : "andq";
     }
-    if (operation == BootstrapTokenKind.pipe) {
+    if (operation == lexer::TokenKind.pipe) {
         return width <= 32 ? "orl" : "orq";
     }
-    if (operation == BootstrapTokenKind.caret) {
+    if (operation == lexer::TokenKind.caret) {
         return width <= 32 ? "xorl" : "xorq";
     }
     return null;
 }
 
 fn bootstrap_x86_64_codegen_emit_division(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction, record: *const BootstrapTypeRecord,
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction, record: *const type_info::Record,
     instruction_id: usize) -> bool {
     let width: usize = bootstrap_x86_64_codegen_bit_width(record);
     let signed_value: bool = bootstrap_x86_64_codegen_is_signed(context, record);
@@ -802,7 +802,7 @@ fn bootstrap_x86_64_codegen_emit_division(
             return false;
         }
     }
-    if (instruction.operation == BootstrapTokenKind.percent &&
+    if (instruction.operation == lexer::TokenKind.percent &&
         !bootstrap_x86_64_codegen_literal(
             context, width <= 32 ? "    movl %edx, %eax\n" : "    movq %rdx, %rax\n")) {
         return false;
@@ -811,18 +811,18 @@ fn bootstrap_x86_64_codegen_emit_division(
 }
 
 fn bootstrap_x86_64_codegen_emit_binary_integer(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction, instruction_id: usize) -> bool {
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, instruction.type_id);
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction, instruction_id: usize) -> bool {
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, instruction.type_id);
     if (record == null) {
         return false;
     }
     let width: usize = bootstrap_x86_64_codegen_bit_width(record);
-    if (instruction.operation == BootstrapTokenKind.slash || instruction.operation == BootstrapTokenKind.percent) {
+    if (instruction.operation == lexer::TokenKind.slash || instruction.operation == lexer::TokenKind.percent) {
         return bootstrap_x86_64_codegen_emit_division(context, instruction, record, instruction_id);
     }
-    if (instruction.operation == BootstrapTokenKind.shift_left || instruction.operation ==
-            BootstrapTokenKind.shift_right) {
-        let signed_narrow_right: bool = instruction.operation == BootstrapTokenKind.shift_right &&
+    if (instruction.operation == lexer::TokenKind.shift_left || instruction.operation ==
+            lexer::TokenKind.shift_right) {
+        let signed_narrow_right: bool = instruction.operation == lexer::TokenKind.shift_right &&
             bootstrap_x86_64_codegen_is_signed(context, record) && width < 32;
         if (!(signed_narrow_right ?
                 bootstrap_x86_64_codegen_load_integer(context, instruction.left, record, "%eax", "%rax", true) :
@@ -838,7 +838,7 @@ fn bootstrap_x86_64_codegen_emit_binary_integer(
                 context, ", %ecx\n"))) {
             return false;
         }
-        let mnemonic: *const u8 = instruction.operation == BootstrapTokenKind.shift_left ?
+        let mnemonic: *const u8 = instruction.operation == lexer::TokenKind.shift_left ?
                 (width <= 32 ? "    shll %cl, %eax\n" : "    shlq %cl, %rax\n") :
                 (bootstrap_x86_64_codegen_is_signed(context, record) ?
                     (width <= 32 ? "    sarl %cl, %eax\n" : "    sarq %cl, %rax\n") : (width <= 32 ?
@@ -859,26 +859,26 @@ fn bootstrap_x86_64_codegen_emit_binary_integer(
 }
 
 fn bootstrap_x86_64_codegen_emit_binary_float(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction) -> bool {
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, instruction.type_id);
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction) -> bool {
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, instruction.type_id);
     if (record == null ||
         !bootstrap_x86_64_codegen_load_xmm(
             context, instruction.left, record, "%xmm0")) {
         return false;
     }
     var mnemonic: *const u8 = null;
-    if (instruction.opcode == BootstrapIrOpcode.float_min) {
-        mnemonic = record->kind == BootstrapTypeKind.float_32 ? "minss" : "minsd";
-    } else if (instruction.opcode == BootstrapIrOpcode.float_max) {
-        mnemonic = record->kind == BootstrapTypeKind.float_32 ? "maxss" : "maxsd";
-    } else if (instruction.operation == BootstrapTokenKind.plus) {
-        mnemonic = record->kind == BootstrapTypeKind.float_32 ? "addss" : "addsd";
-    } else if (instruction.operation == BootstrapTokenKind.minus) {
-        mnemonic = record->kind == BootstrapTypeKind.float_32 ? "subss" : "subsd";
-    } else if (instruction.operation == BootstrapTokenKind.star) {
-        mnemonic = record->kind == BootstrapTypeKind.float_32 ? "mulss" : "mulsd";
-    } else if (instruction.operation == BootstrapTokenKind.slash) {
-        mnemonic = record->kind == BootstrapTypeKind.float_32 ? "divss" : "divsd";
+    if (instruction.opcode == ir::Opcode.float_min) {
+        mnemonic = record->kind == type_info::Kind.float_32 ? "minss" : "minsd";
+    } else if (instruction.opcode == ir::Opcode.float_max) {
+        mnemonic = record->kind == type_info::Kind.float_32 ? "maxss" : "maxsd";
+    } else if (instruction.operation == lexer::TokenKind.plus) {
+        mnemonic = record->kind == type_info::Kind.float_32 ? "addss" : "addsd";
+    } else if (instruction.operation == lexer::TokenKind.minus) {
+        mnemonic = record->kind == type_info::Kind.float_32 ? "subss" : "subsd";
+    } else if (instruction.operation == lexer::TokenKind.star) {
+        mnemonic = record->kind == type_info::Kind.float_32 ? "mulss" : "mulsd";
+    } else if (instruction.operation == lexer::TokenKind.slash) {
+        mnemonic = record->kind == type_info::Kind.float_32 ? "divss" : "divsd";
     }
     if (mnemonic == null || !bootstrap_x86_64_codegen_literal(context, "    ") ||
         !bootstrap_x86_64_codegen_literal(context, mnemonic) || !bootstrap_x86_64_codegen_literal(context, " ") ||
@@ -891,11 +891,11 @@ fn bootstrap_x86_64_codegen_emit_binary_float(
 }
 
 fn bootstrap_x86_64_codegen_emit_float_sqrt(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction) -> bool {
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, instruction.type_id);
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction) -> bool {
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, instruction.type_id);
     return record != null && bootstrap_x86_64_codegen_load_xmm(context, instruction.left, record, "%xmm0") &&
         bootstrap_x86_64_codegen_literal(
-            context, record->kind == BootstrapTypeKind.float_32 ? "    sqrtss %xmm0, %xmm0\n" :
+            context, record->kind == type_info::Kind.float_32 ? "    sqrtss %xmm0, %xmm0\n" :
                 "    sqrtsd %xmm0, %xmm0\n") &&
         bootstrap_x86_64_codegen_store_xmm(context, instruction.result, record, "%xmm0");
 }
@@ -904,8 +904,8 @@ fn bootstrap_x86_64_codegen_emit_float_sqrt(
 // overflow flag, otherwise the carry flag). Every emission between that arithmetic and this setcc is a mov,
 // which does not modify flags.
 fn bootstrap_x86_64_codegen_emit_overflow_flag(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction) -> bool {
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, instruction.type_id);
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction) -> bool {
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, instruction.type_id);
     if (record == null) {
         return false;
     }
@@ -915,51 +915,51 @@ fn bootstrap_x86_64_codegen_emit_overflow_flag(
         bootstrap_x86_64_codegen_store_rax(context, instruction.result, record);
 }
 
-fn bootstrap_x86_64_codegen_condition(operation: BootstrapTokenKind, signed_value: bool) -> *const u8 {
-    if (operation == BootstrapTokenKind.equal_equal) {
+fn bootstrap_x86_64_codegen_condition(operation: lexer::TokenKind, signed_value: bool) -> *const u8 {
+    if (operation == lexer::TokenKind.equal_equal) {
         return "sete";
     }
-    if (operation == BootstrapTokenKind.bang_equal) {
+    if (operation == lexer::TokenKind.bang_equal) {
         return "setne";
     }
-    if (operation == BootstrapTokenKind.less) {
+    if (operation == lexer::TokenKind.less) {
         return signed_value ? "setl" : "setb";
     }
-    if (operation == BootstrapTokenKind.less_equal) {
+    if (operation == lexer::TokenKind.less_equal) {
         return signed_value ? "setle" : "setbe";
     }
-    if (operation == BootstrapTokenKind.greater) {
+    if (operation == lexer::TokenKind.greater) {
         return signed_value ? "setg" : "seta";
     }
-    if (operation == BootstrapTokenKind.greater_equal) {
+    if (operation == lexer::TokenKind.greater_equal) {
         return signed_value ? "setge" : "setae";
     }
     return null;
 }
 
 fn bootstrap_x86_64_codegen_emit_compare_float(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction, record: *const BootstrapTypeRecord
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction, record: *const type_info::Record
 ) -> bool {
     if (!bootstrap_x86_64_codegen_load_xmm(context, instruction.left, record, "%xmm0") ||
         !bootstrap_x86_64_codegen_literal(
-            context, record->kind == BootstrapTypeKind.float_32 ? "    ucomiss " : "    ucomisd ") ||
+            context, record->kind == type_info::Kind.float_32 ? "    ucomiss " : "    ucomisd ") ||
         !bootstrap_x86_64_codegen_append_value(context, instruction.right) ||
         !bootstrap_x86_64_codegen_literal(
             context, ", %xmm0\n")) {
         return false;
     }
     var sequence: *const u8 = null;
-    if (instruction.operation == BootstrapTokenKind.equal_equal) {
+    if (instruction.operation == lexer::TokenKind.equal_equal) {
         sequence = "    sete %al\n    setnp %cl\n    andb %cl, %al\n";
-    } else if (instruction.operation == BootstrapTokenKind.bang_equal) {
+    } else if (instruction.operation == lexer::TokenKind.bang_equal) {
         sequence = "    setne %al\n    setp %cl\n    orb %cl, %al\n";
-    } else if (instruction.operation == BootstrapTokenKind.less) {
+    } else if (instruction.operation == lexer::TokenKind.less) {
         sequence = "    setb %al\n    setnp %cl\n    andb %cl, %al\n";
-    } else if (instruction.operation == BootstrapTokenKind.less_equal) {
+    } else if (instruction.operation == lexer::TokenKind.less_equal) {
         sequence = "    setbe %al\n    setnp %cl\n    andb %cl, %al\n";
-    } else if (instruction.operation == BootstrapTokenKind.greater) {
+    } else if (instruction.operation == lexer::TokenKind.greater) {
         sequence = "    seta %al\n";
-    } else if (instruction.operation == BootstrapTokenKind.greater_equal) {
+    } else if (instruction.operation == lexer::TokenKind.greater_equal) {
         sequence = "    setae %al\n";
     }
     return sequence != null && bootstrap_x86_64_codegen_literal(context, sequence) &&
@@ -969,13 +969,13 @@ fn bootstrap_x86_64_codegen_emit_compare_float(
 }
 
 fn bootstrap_x86_64_codegen_emit_compare(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction) -> bool {
-    let values: *const BootstrapIrValue = context->ir.values.data as *const BootstrapIrValue;
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, values[instruction.left].type_id);
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, values[instruction.left].type_id);
     if (record == null) {
         return false;
     }
-    if (bootstrap_type_is_float(record->kind)) {
+    if (type_info::is_float(record->kind)) {
         return bootstrap_x86_64_codegen_emit_compare_float(context, instruction, record);
     }
     let condition: *const u8 =
@@ -1004,8 +1004,8 @@ fn bootstrap_x86_64_codegen_emit_compare(
 }
 
 fn bootstrap_x86_64_codegen_float_power_bits(
-    record: *const BootstrapTypeRecord, exponent: usize, negative: bool) -> u64 {
-    if (record->kind == BootstrapTypeKind.float_32) {
+    record: *const type_info::Record, exponent: usize, negative: bool) -> u64 {
+    if (record->kind == type_info::Kind.float_32) {
         let sign: u64 = negative ? 2147483648 : 0;
         return sign | ((exponent as u64 + 127) << 23);
     }
@@ -1013,17 +1013,17 @@ fn bootstrap_x86_64_codegen_float_power_bits(
     return sign | ((exponent as u64 + 1023) << 52);
 }
 
-fn bootstrap_x86_64_codegen_float_maximum_bits(record: *const BootstrapTypeRecord, integer_width: usize) -> u64 {
-    let precision: usize = record->kind == BootstrapTypeKind.float_32 ? 24 : 53;
-    let fraction_width: usize = record->kind == BootstrapTypeKind.float_32 ? 23 : 52;
-    let bias: usize = record->kind == BootstrapTypeKind.float_32 ? 127 : 1023;
+fn bootstrap_x86_64_codegen_float_maximum_bits(record: *const type_info::Record, integer_width: usize) -> u64 {
+    let precision: usize = record->kind == type_info::Kind.float_32 ? 24 : 53;
+    let fraction_width: usize = record->kind == type_info::Kind.float_32 ? 23 : 52;
+    let bias: usize = record->kind == type_info::Kind.float_32 ? 127 : 1023;
     let fraction: u64 = ((1 as u64 << ((integer_width - 1) as u64)) - 1) << ((precision - integer_width) as u64);
     return (((integer_width - 1 + bias) as u64) << (fraction_width as u64)) | fraction;
 }
 
 fn bootstrap_x86_64_codegen_emit_float_bits_xmm1(
-    context: *BootstrapX8664CodegenContext, record: *const BootstrapTypeRecord, bits: u64) -> bool {
-    if (record->kind == BootstrapTypeKind.float_32) {
+    context: *BootstrapX8664CodegenContext, record: *const type_info::Record, bits: u64) -> bool {
+    if (record->kind == type_info::Kind.float_32) {
         return bootstrap_x86_64_codegen_literal(context, "    movl $0x") &&
             bootstrap_x86_64_codegen_hex(context, bits & 4294967295, 8) &&
             bootstrap_x86_64_codegen_literal(context, ", %eax\n    movd %eax, %xmm1\n");
@@ -1034,8 +1034,8 @@ fn bootstrap_x86_64_codegen_emit_float_bits_xmm1(
 }
 
 fn bootstrap_x86_64_codegen_emit_integer_conversion(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction, source: *const BootstrapTypeRecord,
-    target: *const BootstrapTypeRecord) -> bool {
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction, source: *const type_info::Record,
+    target: *const type_info::Record) -> bool {
     let source_width: usize = bootstrap_x86_64_codegen_bit_width(source);
     let target_width: usize = bootstrap_x86_64_codegen_bit_width(target);
     let signed_source: bool = bootstrap_x86_64_codegen_is_signed(context, source);
@@ -1055,13 +1055,13 @@ fn bootstrap_x86_64_codegen_emit_integer_conversion(
 }
 
 fn bootstrap_x86_64_codegen_emit_integer_to_float(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction, source: *const BootstrapTypeRecord,
-    target: *const BootstrapTypeRecord, instruction_id: usize) -> bool {
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction, source: *const type_info::Record,
+    target: *const type_info::Record, instruction_id: usize) -> bool {
     let source_width: usize = bootstrap_x86_64_codegen_bit_width(source);
     let signed_source: bool = bootstrap_x86_64_codegen_is_signed(context, source);
-    let convert: *const u8 = target->kind == BootstrapTypeKind.float_32 ? "    cvtsi2ssq %rax, %xmm0\n" :
+    let convert: *const u8 = target->kind == type_info::Kind.float_32 ? "    cvtsi2ssq %rax, %xmm0\n" :
             "    cvtsi2sdq %rax, %xmm0\n";
-    let add: *const u8 = target->kind == BootstrapTypeKind.float_32 ? "    addss %xmm0, %xmm0\n" :
+    let add: *const u8 = target->kind == type_info::Kind.float_32 ? "    addss %xmm0, %xmm0\n" :
             "    addsd %xmm0, %xmm0\n";
     if (signed_source && source_width < 64) {
         if (!bootstrap_x86_64_codegen_load_signed_rax(
@@ -1095,18 +1095,18 @@ fn bootstrap_x86_64_codegen_emit_integer_to_float(
 }
 
 fn bootstrap_x86_64_codegen_emit_float_range_check(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction, source: *const BootstrapTypeRecord,
-    target: *const BootstrapTypeRecord, instruction_id: usize) -> bool {
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction, source: *const type_info::Record,
+    target: *const type_info::Record, instruction_id: usize) -> bool {
     let target_width: usize = bootstrap_x86_64_codegen_bit_width(target);
     let signed_target: bool = bootstrap_x86_64_codegen_is_signed(context, target);
     let bound_exponent: usize = signed_target ? target_width - 1 : target_width;
     let maximum_width: usize = signed_target ? target_width - 1 : target_width;
-    let precision: usize = source->kind == BootstrapTypeKind.float_32 ? 24 : 53;
+    let precision: usize = source->kind == type_info::Kind.float_32 ? 24 : 53;
     let exact_maximum: bool = maximum_width <= precision;
     let lower_bits: u64 = signed_target ? bootstrap_x86_64_codegen_float_power_bits(source, bound_exponent, true) : 0;
     let upper_bits: u64 = exact_maximum ? bootstrap_x86_64_codegen_float_maximum_bits(source, maximum_width) :
         bootstrap_x86_64_codegen_float_power_bits(source, bound_exponent, false);
-    let compare: *const u8 = source->kind == BootstrapTypeKind.float_32 ? "    ucomiss %xmm1, %xmm0\n" :
+    let compare: *const u8 = source->kind == type_info::Kind.float_32 ? "    ucomiss %xmm1, %xmm0\n" :
             "    ucomisd %xmm1, %xmm0\n";
     return bootstrap_x86_64_codegen_emit_float_bits_xmm1(context, source, lower_bits) &&
         bootstrap_x86_64_codegen_literal(context, compare) && bootstrap_x86_64_codegen_literal(context, "    jb ") &&
@@ -1120,8 +1120,8 @@ fn bootstrap_x86_64_codegen_emit_float_range_check(
 }
 
 fn bootstrap_x86_64_codegen_emit_float_to_integer(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction, source: *const BootstrapTypeRecord,
-    target: *const BootstrapTypeRecord, instruction_id: usize) -> bool {
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction, source: *const type_info::Record,
+    target: *const type_info::Record, instruction_id: usize) -> bool {
     if (!bootstrap_x86_64_codegen_load_xmm(context, instruction.left, source, "%xmm0") ||
         !bootstrap_x86_64_codegen_emit_float_range_check(
             context, instruction, source, target, instruction_id)) {
@@ -1129,9 +1129,9 @@ fn bootstrap_x86_64_codegen_emit_float_to_integer(
     }
     let target_width: usize = bootstrap_x86_64_codegen_bit_width(target);
     let signed_target: bool = bootstrap_x86_64_codegen_is_signed(context, target);
-    let convert_32: *const u8 = source->kind == BootstrapTypeKind.float_32 ? "    cvttss2si %xmm0, %eax\n" :
+    let convert_32: *const u8 = source->kind == type_info::Kind.float_32 ? "    cvttss2si %xmm0, %eax\n" :
             "    cvttsd2si %xmm0, %eax\n";
-    let convert_64: *const u8 = source->kind == BootstrapTypeKind.float_32 ? "    cvttss2siq %xmm0, %rax\n" :
+    let convert_64: *const u8 = source->kind == type_info::Kind.float_32 ? "    cvttss2siq %xmm0, %rax\n" :
             "    cvttsd2siq %xmm0, %rax\n";
     if (signed_target) {
         if (!bootstrap_x86_64_codegen_literal(
@@ -1147,11 +1147,11 @@ fn bootstrap_x86_64_codegen_emit_float_to_integer(
         let split_bits: u64 = bootstrap_x86_64_codegen_float_power_bits(source, 63, false);
         if (!bootstrap_x86_64_codegen_emit_float_bits_xmm1(context, source, split_bits) ||
             !bootstrap_x86_64_codegen_literal(
-                context, source->kind == BootstrapTypeKind.float_32 ? "    ucomiss %xmm1, %xmm0\n" :
+                context, source->kind == type_info::Kind.float_32 ? "    ucomiss %xmm1, %xmm0\n" :
                     "    ucomisd %xmm1, %xmm0\n") || !bootstrap_x86_64_codegen_literal(context, "    jb ") ||
             !bootstrap_x86_64_codegen_instruction_label(context, instruction_id, "fptoi_low") ||
             !bootstrap_x86_64_codegen_literal(
-                context, source->kind == BootstrapTypeKind.float_32 ? "\n    subss %xmm1, %xmm0\n" :
+                context, source->kind == type_info::Kind.float_32 ? "\n    subss %xmm1, %xmm0\n" :
                     "\n    subsd %xmm1, %xmm0\n") || !bootstrap_x86_64_codegen_literal(context, convert_64) ||
             !bootstrap_x86_64_codegen_literal(
                 context, "    movabsq $0x8000000000000000, %rdx\n    orq %rdx, %rax\n    jmp ") ||
@@ -1179,24 +1179,24 @@ fn bootstrap_x86_64_codegen_emit_float_to_integer(
 }
 
 fn bootstrap_x86_64_codegen_emit_convert(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction, instruction_id: usize) -> bool {
-    let values: *const BootstrapIrValue = context->ir.values.data as *const BootstrapIrValue;
-    let source: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, values[instruction.left].type_id);
-    let target: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, instruction.type_id);
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction, instruction_id: usize) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let source: *const type_info::Record = bootstrap_x86_64_codegen_type(context, values[instruction.left].type_id);
+    let target: *const type_info::Record = bootstrap_x86_64_codegen_type(context, instruction.type_id);
     if (source == null || target == null) {
         return false;
     }
-    if (bootstrap_type_is_float(source->kind) && bootstrap_type_is_float(target->kind)) {
+    if (type_info::is_float(source->kind) && type_info::is_float(target->kind)) {
         return bootstrap_x86_64_codegen_load_xmm(context, instruction.left, source, "%xmm0") &&
             bootstrap_x86_64_codegen_literal(
-                context, source->kind == BootstrapTypeKind.float_32 ? "    cvtss2sd %xmm0, %xmm0\n" :
+                context, source->kind == type_info::Kind.float_32 ? "    cvtss2sd %xmm0, %xmm0\n" :
                     "    cvtsd2ss %xmm0, %xmm0\n") &&
             bootstrap_x86_64_codegen_store_xmm(context, instruction.result, target, "%xmm0");
     }
-    if (bootstrap_type_is_float(target->kind)) {
+    if (type_info::is_float(target->kind)) {
         return bootstrap_x86_64_codegen_emit_integer_to_float(context, instruction, source, target, instruction_id);
     }
-    if (bootstrap_type_is_float(source->kind)) {
+    if (type_info::is_float(source->kind)) {
         return bootstrap_x86_64_codegen_emit_float_to_integer(context, instruction, source, target, instruction_id);
     }
     return bootstrap_x86_64_codegen_emit_integer_conversion(context, instruction, source, target);
@@ -1274,8 +1274,8 @@ fn bootstrap_x86_64_codegen_return_general_register(index: usize) -> *const u8 {
 
 fn bootstrap_x86_64_codegen_argument_at(
     context: *BootstrapX8664CodegenContext, instruction_id: usize, argument_index: usize) -> usize {
-    let arguments: *const BootstrapIrArgument = context->ir.arguments.data as
-            *const BootstrapIrArgument;
+    let arguments: *const ir::Argument = context->ir.arguments.data as
+            *const ir::Argument;
     var found: usize = 0;
     var index: usize = 0;
     while (index < context->ir.argument_count) {
@@ -1293,8 +1293,8 @@ fn bootstrap_x86_64_codegen_argument_at(
 
 fn bootstrap_x86_64_codegen_call_argument_total(
     context: *BootstrapX8664CodegenContext, instruction_id: usize) -> usize {
-    let arguments: *const BootstrapIrArgument = context->ir.arguments.data as
-            *const BootstrapIrArgument;
+    let arguments: *const ir::Argument = context->ir.arguments.data as
+            *const ir::Argument;
     var found: usize = 0;
     var index: usize = 0;
     while (index < context->ir.argument_count) {
@@ -1322,15 +1322,15 @@ fn bootstrap_x86_64_codegen_variadic_extra_parameter(
     if (general_used == null || vector_used == null || stack_cursor == null || context->error != runtime::Error.none) {
         return parameter;
     }
-    let values: *const BootstrapIrValue = context->ir.values.data as *const BootstrapIrValue;
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, values[argument].type_id);
-    if (record == null || bootstrap_type_is_memory(record->kind)) {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, values[argument].type_id);
+    if (record == null || type_info::is_memory(record->kind)) {
         return parameter;
     }
     parameter.type_id = values[argument].type_id;
     parameter.size_bytes = record->size_bytes;
     parameter.alignment_bytes = record->alignment_bytes;
-    parameter.abi_class = bootstrap_type_is_float(record->kind) ? BootstrapX8664AbiClass.sse :
+    parameter.abi_class = type_info::is_float(record->kind) ? BootstrapX8664AbiClass.sse :
             BootstrapX8664AbiClass.integer;
     if (parameter.abi_class == BootstrapX8664AbiClass.integer && *general_used <
             (BootstrapX8664CodegenLimit.general_argument_registers as usize)) {
@@ -1428,13 +1428,13 @@ fn bootstrap_x86_64_codegen_emit_store_piece(
 fn bootstrap_x86_64_codegen_emit_call_stack_argument(
     context: *BootstrapX8664CodegenContext, parameter: BootstrapX8664AbiParameter, argument: usize, external_c: bool
 ) -> bool {
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, parameter.type_id);
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, parameter.type_id);
     if (record == null) {
         return false;
     }
     if (parameter.aggregate) {
-        let values: *const BootstrapIrValue = context->ir.values.data as *const BootstrapIrValue;
-        let pointer_record: *const BootstrapTypeRecord =
+        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+        let pointer_record: *const type_info::Record =
             bootstrap_x86_64_codegen_type(context, values[argument].type_id);
         return pointer_record != null &&
             bootstrap_x86_64_codegen_load_integer(context, argument, pointer_record, "%esi", "%rsi", false) &&
@@ -1444,7 +1444,7 @@ fn bootstrap_x86_64_codegen_emit_call_stack_argument(
             bootstrap_x86_64_codegen_usize(context, parameter.size_bytes) &&
             bootstrap_x86_64_codegen_literal(context, ", %rcx\n    cld\n    rep movsb\n");
     }
-    if (bootstrap_type_is_float(record->kind)) {
+    if (type_info::is_float(record->kind)) {
         return bootstrap_x86_64_codegen_load_xmm(context, argument, record, "%xmm0") &&
             bootstrap_x86_64_codegen_literal(context, "    ") &&
             bootstrap_x86_64_codegen_literal(context, bootstrap_x86_64_codegen_float_move(record)) &&
@@ -1465,13 +1465,13 @@ fn bootstrap_x86_64_codegen_emit_call_stack_argument(
 fn bootstrap_x86_64_codegen_emit_call_register_argument(
     context: *BootstrapX8664CodegenContext, parameter: BootstrapX8664AbiParameter, argument: usize, external_c: bool
 ) -> bool {
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, parameter.type_id);
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, parameter.type_id);
     if (record == null) {
         return false;
     }
     if (parameter.aggregate) {
-        let values: *const BootstrapIrValue = context->ir.values.data as *const BootstrapIrValue;
-        let pointer_record: *const BootstrapTypeRecord =
+        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+        let pointer_record: *const type_info::Record =
             bootstrap_x86_64_codegen_type(context, values[argument].type_id);
         if (pointer_record == null ||
             !bootstrap_x86_64_codegen_load_integer(
@@ -1522,17 +1522,17 @@ fn bootstrap_x86_64_codegen_emit_call_register_argument(
 }
 
 fn bootstrap_x86_64_codegen_emit_call_result(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction, function_abi: BootstrapX8664AbiFunction
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction, function_abi: BootstrapX8664AbiFunction
 ) -> bool {
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, instruction.type_id);
-    if (record == null || record->kind == BootstrapTypeKind.type_void) {
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, instruction.type_id);
+    if (record == null || record->kind == type_info::Kind.type_void) {
         return record != null;
     }
     if (!function_abi.return_aggregate) {
-        if (bootstrap_type_is_float(record->kind)) {
+        if (type_info::is_float(record->kind)) {
             return bootstrap_x86_64_codegen_store_xmm(context, instruction.result, record, "%xmm0");
         }
-        if (record->kind == BootstrapTypeKind.boolean &&
+        if (record->kind == type_info::Kind.boolean &&
             !bootstrap_x86_64_codegen_literal(
                 context, "    testl %eax, %eax\n    setne %al\n    movzbl %al, %eax\n")) {
             return false;
@@ -1584,12 +1584,12 @@ fn bootstrap_x86_64_codegen_emit_call_result(
 
 fn bootstrap_x86_64_codegen_function_pointer_abi_index(
     context: *BootstrapX8664CodegenContext, type_id: usize) -> usize {
-    let records: *const BootstrapTypeRecord = context->types.types.data as
-            *const BootstrapTypeRecord;
+    let records: *const type_info::Record = context->types.types.data as
+            *const type_info::Record;
     var ordinal: usize = 0;
     var index: usize = 0;
     while (index < type_id) {
-        if (records[index].kind == BootstrapTypeKind.function_pointer) {
+        if (records[index].kind == type_info::Kind.function_pointer) {
             ordinal += 1;
         }
         index += 1;
@@ -1598,8 +1598,8 @@ fn bootstrap_x86_64_codegen_function_pointer_abi_index(
 }
 
 fn bootstrap_x86_64_codegen_emit_call_indirect(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction, instruction_id: usize) -> bool {
-    let values: *const BootstrapIrValue = context->ir.values.data as *const BootstrapIrValue;
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction, instruction_id: usize) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
     let callee_type: usize = values[instruction.left].type_id;
     let abi_index: usize = bootstrap_x86_64_codegen_function_pointer_abi_index(context, callee_type);
     let abi_functions: *const BootstrapX8664AbiFunction = context->abi.functions.data as
@@ -1668,16 +1668,16 @@ fn bootstrap_x86_64_codegen_emit_call_indirect(
 }
 
 fn bootstrap_x86_64_codegen_emit_call(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction, instruction_id: usize) -> bool {
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction, instruction_id: usize) -> bool {
     if (instruction.auxiliary >= context->ir.function_count) {
         return bootstrap_x86_64_codegen_fail(context, runtime::Error.invalid_argument);
     }
     let abi_functions: *const BootstrapX8664AbiFunction = context->abi.functions.data as
             *const BootstrapX8664AbiFunction;
     let function_abi: BootstrapX8664AbiFunction = abi_functions[instruction.auxiliary];
-    let functions: *const BootstrapIrFunction = context->ir.functions.data as
-            *const BootstrapIrFunction;
-    let external_c: bool = functions[instruction.auxiliary].linkage == BootstrapIrLinkage.external_c;
+    let functions: *const ir::Function = context->ir.functions.data as
+            *const ir::Function;
+    let external_c: bool = functions[instruction.auxiliary].linkage == ir::Linkage.external_c;
     let parameters: *const BootstrapX8664AbiParameter = context->abi.parameters.data as
             *const BootstrapX8664AbiParameter;
     // A variadic callee takes extra arguments past its named parameters; they
@@ -1814,9 +1814,9 @@ fn bootstrap_x86_64_codegen_emit_call(
 }
 
 fn bootstrap_x86_64_codegen_emit_parameter_register(
-    context: *BootstrapX8664CodegenContext, parameter: BootstrapX8664AbiParameter, ir_parameter: BootstrapIrParameter
+    context: *BootstrapX8664CodegenContext, parameter: BootstrapX8664AbiParameter, ir_parameter: ir::Parameter
 ) -> bool {
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, parameter.type_id);
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, parameter.type_id);
     if (record == null) {
         return false;
     }
@@ -1921,8 +1921,8 @@ fn bootstrap_x86_64_codegen_emit_register_save(context: *BootstrapX8664CodegenCo
 }
 
 fn bootstrap_x86_64_codegen_emit_va_start(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction) -> bool {
-    let values: *const BootstrapIrValue = context->ir.values.data as *const BootstrapIrValue;
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
     let abi_functions: *const BootstrapX8664AbiFunction = context->abi.functions.data as
             *const BootstrapX8664AbiFunction;
     let function_abi: BootstrapX8664AbiFunction = abi_functions[context->current_function];
@@ -1950,14 +1950,14 @@ fn bootstrap_x86_64_codegen_emit_va_start(
 }
 
 fn bootstrap_x86_64_codegen_emit_va_arg(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction, instruction_id: usize) -> bool {
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, instruction.type_id);
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction, instruction_id: usize) -> bool {
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, instruction.type_id);
     if (record == null || !bootstrap_x86_64_codegen_literal(context, "    movq ") ||
         !bootstrap_x86_64_codegen_append_value(context, instruction.left) ||
         !bootstrap_x86_64_codegen_literal(context, ", %r11\n")) {
         return false;
     }
-    if (bootstrap_type_is_float(record->kind)) {
+    if (type_info::is_float(record->kind)) {
         // SSE class: 16-byte save slots at fp_offset while it stays below
         // 176 (f32 reads the slot's low 4 bytes, f64 the low 8), then 8-byte
         // overflow slots.
@@ -2000,9 +2000,9 @@ fn bootstrap_x86_64_codegen_emit_va_arg(
 }
 
 fn bootstrap_x86_64_codegen_emit_parameter_stack(
-    context: *BootstrapX8664CodegenContext, parameter: BootstrapX8664AbiParameter, ir_parameter: BootstrapIrParameter
+    context: *BootstrapX8664CodegenContext, parameter: BootstrapX8664AbiParameter, ir_parameter: ir::Parameter
 ) -> bool {
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, parameter.type_id);
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, parameter.type_id);
     let source_offset: usize = parameter.stack_offset_bytes + 16;
     if (record == null) {
         return false;
@@ -2016,7 +2016,7 @@ fn bootstrap_x86_64_codegen_emit_parameter_stack(
             bootstrap_x86_64_codegen_usize(context, parameter.size_bytes) &&
             bootstrap_x86_64_codegen_literal(context, ", %rcx\n    cld\n    rep movsb\n");
     }
-    if (bootstrap_type_is_float(record->kind)) {
+    if (type_info::is_float(record->kind)) {
         return bootstrap_x86_64_codegen_literal(context, "    ") &&
             bootstrap_x86_64_codegen_literal(context, bootstrap_x86_64_codegen_float_move(record)) &&
             bootstrap_x86_64_codegen_literal(context, " ") && bootstrap_x86_64_codegen_usize(context, source_offset) &&
@@ -2036,12 +2036,12 @@ fn bootstrap_x86_64_codegen_emit_parameter_stack(
 }
 
 fn bootstrap_x86_64_codegen_emit_parameters(
-    context: *BootstrapX8664CodegenContext, function: BootstrapIrFunction, function_abi: BootstrapX8664AbiFunction
+    context: *BootstrapX8664CodegenContext, function: ir::Function, function_abi: BootstrapX8664AbiFunction
 ) -> bool {
     let parameters: *const BootstrapX8664AbiParameter = context->abi.parameters.data as
             *const BootstrapX8664AbiParameter;
-    let ir_parameters: *const BootstrapIrParameter = context->ir.parameters.data as
-            *const BootstrapIrParameter;
+    let ir_parameters: *const ir::Parameter = context->ir.parameters.data as
+            *const ir::Parameter;
     if (function_abi.hidden_return_pointer) {
         let storage: BootstrapX8664Storage =
             bootstrap_x86_64_codegen_storage(
@@ -2059,7 +2059,7 @@ fn bootstrap_x86_64_codegen_emit_parameters(
             let parameter: BootstrapX8664AbiParameter = parameters[function_abi.first_parameter + index];
             let is_stack: bool = parameter.location == BootstrapX8664AbiLocationKind.stack;
             if ((phase == 0 && !is_stack) || (phase == 1 && is_stack)) {
-                let ir_parameter: BootstrapIrParameter = ir_parameters[ function.first_parameter + index];
+                let ir_parameter: ir::Parameter = ir_parameters[ function.first_parameter + index];
                 let emitted: bool = is_stack ?
                     bootstrap_x86_64_codegen_emit_parameter_stack(context, parameter, ir_parameter) :
                     bootstrap_x86_64_codegen_emit_parameter_register(context, parameter, ir_parameter);
@@ -2075,18 +2075,18 @@ fn bootstrap_x86_64_codegen_emit_parameters(
 }
 
 fn bootstrap_x86_64_codegen_emit_return(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction) -> bool {
-    let functions: *const BootstrapIrFunction = context->ir.functions.data as
-            *const BootstrapIrFunction;
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction) -> bool {
+    let functions: *const ir::Function = context->ir.functions.data as
+            *const ir::Function;
     let abi_functions: *const BootstrapX8664AbiFunction = context->abi.functions.data as
             *const BootstrapX8664AbiFunction;
-    let function: BootstrapIrFunction = functions[context->current_function];
+    let function: ir::Function = functions[context->current_function];
     let function_abi: BootstrapX8664AbiFunction = abi_functions[context->current_function];
-    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, function.return_type);
+    let record: *const type_info::Record = bootstrap_x86_64_codegen_type(context, function.return_type);
     if (record == null) {
         return false;
     }
-    if (instruction.opcode == BootstrapIrOpcode.return_value && function_abi.return_aggregate) {
+    if (instruction.opcode == ir::Opcode.return_value && function_abi.return_aggregate) {
         if (!bootstrap_x86_64_codegen_load_rax(context, instruction.left, record) ||
             !bootstrap_x86_64_codegen_literal(
                 context, "    movq %rax, %r11\n")) {
@@ -2134,8 +2134,8 @@ fn bootstrap_x86_64_codegen_emit_return(
                 }
             }
         }
-    } else if (instruction.opcode == BootstrapIrOpcode.return_value) {
-        if (bootstrap_type_is_float(record->kind)) {
+    } else if (instruction.opcode == ir::Opcode.return_value) {
+        if (type_info::is_float(record->kind)) {
             if (!bootstrap_x86_64_codegen_load_xmm(
                     context, instruction.left, record, "%xmm0")) {
                 return false;
@@ -2150,15 +2150,15 @@ fn bootstrap_x86_64_codegen_emit_return(
 }
 
 fn bootstrap_x86_64_codegen_emit_control(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction) -> bool {
-    if (instruction.opcode == BootstrapIrOpcode.jump) {
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction) -> bool {
+    if (instruction.opcode == ir::Opcode.jump) {
         return bootstrap_x86_64_codegen_literal(context, "    jmp ") &&
             bootstrap_x86_64_codegen_block_label(context, instruction.auxiliary) &&
             bootstrap_x86_64_codegen_literal(context, "\n");
     }
-    if (instruction.opcode == BootstrapIrOpcode.branch) {
-        let values: *const BootstrapIrValue = context->ir.values.data as *const BootstrapIrValue;
-        let record: *const BootstrapTypeRecord =
+    if (instruction.opcode == ir::Opcode.branch) {
+        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+        let record: *const type_info::Record =
             bootstrap_x86_64_codegen_type(context, values[instruction.left].type_id);
         return record != null && bootstrap_x86_64_codegen_load_rax(context, instruction.left, record) &&
             bootstrap_x86_64_codegen_literal(context, "    testl %eax, %eax\n    jne ") &&
@@ -2171,86 +2171,86 @@ fn bootstrap_x86_64_codegen_emit_control(
 }
 
 fn bootstrap_x86_64_codegen_emit_instruction(
-    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction, instruction_id: usize) -> bool {
-    if (instruction.opcode == BootstrapIrOpcode.constant_integer || instruction.opcode ==
-            BootstrapIrOpcode.constant_float || instruction.opcode == BootstrapIrOpcode.constant_boolean ||
-        instruction.opcode == BootstrapIrOpcode.constant_null) {
+    context: *BootstrapX8664CodegenContext, instruction: ir::Instruction, instruction_id: usize) -> bool {
+    if (instruction.opcode == ir::Opcode.constant_integer || instruction.opcode ==
+            ir::Opcode.constant_float || instruction.opcode == ir::Opcode.constant_boolean ||
+        instruction.opcode == ir::Opcode.constant_null) {
         return bootstrap_x86_64_codegen_emit_constant(context, instruction);
     }
-    if (instruction.opcode == BootstrapIrOpcode.address_of_slot || instruction.opcode ==
-            BootstrapIrOpcode.member_address || instruction.opcode == BootstrapIrOpcode.global_address ||
-        instruction.opcode == BootstrapIrOpcode.function_address || instruction.opcode ==
-            BootstrapIrOpcode.pointer_offset) {
+    if (instruction.opcode == ir::Opcode.address_of_slot || instruction.opcode ==
+            ir::Opcode.member_address || instruction.opcode == ir::Opcode.global_address ||
+        instruction.opcode == ir::Opcode.function_address || instruction.opcode ==
+            ir::Opcode.pointer_offset) {
         return bootstrap_x86_64_codegen_emit_address(context, instruction);
     }
-    if (instruction.opcode == BootstrapIrOpcode.zero_slot) {
+    if (instruction.opcode == ir::Opcode.zero_slot) {
         return bootstrap_x86_64_codegen_emit_zero(context, instruction);
     }
-    if (instruction.opcode == BootstrapIrOpcode.memory_copy) {
+    if (instruction.opcode == ir::Opcode.memory_copy) {
         return bootstrap_x86_64_codegen_emit_memory_copy(context, instruction, instruction_id);
     }
-    if (instruction.opcode == BootstrapIrOpcode.load || instruction.opcode == BootstrapIrOpcode.store) {
+    if (instruction.opcode == ir::Opcode.load || instruction.opcode == ir::Opcode.store) {
         return bootstrap_x86_64_codegen_emit_slot_access(context, instruction);
     }
-    if (instruction.opcode == BootstrapIrOpcode.load_indirect) {
+    if (instruction.opcode == ir::Opcode.load_indirect) {
         return bootstrap_x86_64_codegen_emit_load_indirect(context, instruction);
     }
-    if (instruction.opcode == BootstrapIrOpcode.store_indirect) {
+    if (instruction.opcode == ir::Opcode.store_indirect) {
         return bootstrap_x86_64_codegen_emit_store_indirect(context, instruction);
     }
-    if (instruction.opcode == BootstrapIrOpcode.null_check || instruction.opcode == BootstrapIrOpcode.bounds_check) {
+    if (instruction.opcode == ir::Opcode.null_check || instruction.opcode == ir::Opcode.bounds_check) {
         return bootstrap_x86_64_codegen_emit_check(context, instruction, instruction_id);
     }
-    if (instruction.opcode == BootstrapIrOpcode.unary_integer || instruction.opcode == BootstrapIrOpcode.unary_float ||
-        instruction.opcode == BootstrapIrOpcode.boolean_not) {
+    if (instruction.opcode == ir::Opcode.unary_integer || instruction.opcode == ir::Opcode.unary_float ||
+        instruction.opcode == ir::Opcode.boolean_not) {
         return bootstrap_x86_64_codegen_emit_unary(context, instruction);
     }
-    if (instruction.opcode == BootstrapIrOpcode.convert) {
+    if (instruction.opcode == ir::Opcode.convert) {
         return bootstrap_x86_64_codegen_emit_convert(context, instruction, instruction_id);
     }
-    if (instruction.opcode == BootstrapIrOpcode.binary_integer) {
+    if (instruction.opcode == ir::Opcode.binary_integer) {
         return bootstrap_x86_64_codegen_emit_binary_integer(context, instruction, instruction_id);
     }
-    if (instruction.opcode == BootstrapIrOpcode.binary_float || instruction.opcode == BootstrapIrOpcode.float_min ||
-        instruction.opcode == BootstrapIrOpcode.float_max) {
+    if (instruction.opcode == ir::Opcode.binary_float || instruction.opcode == ir::Opcode.float_min ||
+        instruction.opcode == ir::Opcode.float_max) {
         return bootstrap_x86_64_codegen_emit_binary_float(context, instruction);
     }
-    if (instruction.opcode == BootstrapIrOpcode.float_sqrt) {
+    if (instruction.opcode == ir::Opcode.float_sqrt) {
         return bootstrap_x86_64_codegen_emit_float_sqrt(context, instruction);
     }
-    if (instruction.opcode == BootstrapIrOpcode.overflow_flag) {
+    if (instruction.opcode == ir::Opcode.overflow_flag) {
         return bootstrap_x86_64_codegen_emit_overflow_flag(context, instruction);
     }
-    if (instruction.opcode == BootstrapIrOpcode.compare) {
+    if (instruction.opcode == ir::Opcode.compare) {
         return bootstrap_x86_64_codegen_emit_compare(context, instruction);
     }
-    if (instruction.opcode == BootstrapIrOpcode.call) {
+    if (instruction.opcode == ir::Opcode.call) {
         return bootstrap_x86_64_codegen_emit_call(context, instruction, instruction_id);
     }
-    if (instruction.opcode == BootstrapIrOpcode.call_indirect) {
+    if (instruction.opcode == ir::Opcode.call_indirect) {
         return bootstrap_x86_64_codegen_emit_call_indirect(context, instruction, instruction_id);
     }
-    if (instruction.opcode == BootstrapIrOpcode.va_list_start) {
+    if (instruction.opcode == ir::Opcode.va_list_start) {
         return bootstrap_x86_64_codegen_emit_va_start(context, instruction);
     }
-    if (instruction.opcode == BootstrapIrOpcode.va_list_arg) {
+    if (instruction.opcode == ir::Opcode.va_list_arg) {
         return bootstrap_x86_64_codegen_emit_va_arg(context, instruction, instruction_id);
     }
-    if (instruction.opcode == BootstrapIrOpcode.jump || instruction.opcode == BootstrapIrOpcode.branch ||
-        instruction.opcode == BootstrapIrOpcode.return_value || instruction.opcode == BootstrapIrOpcode.return_void) {
+    if (instruction.opcode == ir::Opcode.jump || instruction.opcode == ir::Opcode.branch ||
+        instruction.opcode == ir::Opcode.return_value || instruction.opcode == ir::Opcode.return_void) {
         return bootstrap_x86_64_codegen_emit_control(context, instruction);
     }
-    if (instruction.opcode == BootstrapIrOpcode.unreachable) {
+    if (instruction.opcode == ir::Opcode.unreachable) {
         return bootstrap_x86_64_codegen_literal(context, "    ud2\n");
     }
     return bootstrap_x86_64_codegen_fail(context, runtime::Error.invalid_argument);
 }
 
 fn bootstrap_x86_64_codegen_emit_globals(context: *BootstrapX8664CodegenContext) -> bool {
-    let globals: *const BootstrapIrGlobal = context->ir.globals.data as *const BootstrapIrGlobal;
+    let globals: *const ir::Global = context->ir.globals.data as *const ir::Global;
     var global_id: usize = 0;
     while (global_id < context->ir.global_count) {
-        let global: BootstrapIrGlobal = globals[global_id];
+        let global: ir::Global = globals[global_id];
         if (!bootstrap_x86_64_codegen_literal(
                 context, global.read_only ? "    .section .rodata,\"a\",@progbits\n" : "    .data\n") ||
             !bootstrap_x86_64_codegen_literal(context, "    .balign ") ||
@@ -2287,12 +2287,12 @@ fn bootstrap_x86_64_codegen_emit_globals(context: *BootstrapX8664CodegenContext)
 }
 
 fn bootstrap_x86_64_codegen_emit_declarations(context: *BootstrapX8664CodegenContext) -> bool {
-    let functions: *const BootstrapIrFunction = context->ir.functions.data as
-            *const BootstrapIrFunction;
+    let functions: *const ir::Function = context->ir.functions.data as
+            *const ir::Function;
     var function_id: usize = 0;
     var emitted: bool = false;
     while (function_id < context->ir.function_count) {
-        let function: BootstrapIrFunction = functions[function_id];
+        let function: ir::Function = functions[function_id];
         if (!function.has_body) {
             if (!bootstrap_x86_64_codegen_literal(context, "    .extern ") ||
                 !bootstrap_x86_64_codegen_append_function_symbol(context, function_id) ||
@@ -2308,11 +2308,11 @@ fn bootstrap_x86_64_codegen_emit_declarations(context: *BootstrapX8664CodegenCon
 }
 
 fn bootstrap_x86_64_codegen_emit_entry(context: *BootstrapX8664CodegenContext) -> bool {
-    if (context->ir.entry_function == bootstrap_ir_no_id()) {
+    if (context->ir.entry_function == ir::no_id()) {
         return true;
     }
-    let functions: *const BootstrapIrFunction = context->ir.functions.data as
-            *const BootstrapIrFunction;
+    let functions: *const ir::Function = context->ir.functions.data as
+            *const ir::Function;
     let has_command_line_parameters: bool = functions[context->ir.entry_function].parameter_count == 2;
     return bootstrap_x86_64_codegen_literal(
             context, "    .globl _start\n    .type _start, @function\n_start:\n    xorl %ebp, %ebp\n") &&
@@ -2376,8 +2376,8 @@ fn bootstrap_x86_64_codegen_append_code_point(context: *BootstrapX8664CodegenCon
 fn bootstrap_x86_64_codegen_append_asm_string(
     context: *BootstrapX8664CodegenContext, unit_id: usize, token_id: usize) -> bool {
     let unit: *const BootstrapSemanticUnit = bootstrap_x86_64_codegen_unit(context, unit_id);
-    let token: BootstrapToken = bootstrap_x86_64_codegen_token(context, unit_id, token_id);
-    if (unit == null || token.kind != BootstrapTokenKind.string || token.span.length < 2 ||
+    let token: lexer::Token = bootstrap_x86_64_codegen_token(context, unit_id, token_id);
+    if (unit == null || token.kind != lexer::TokenKind.string || token.span.length < 2 ||
         token.span.offset > unit->source.length || token.span.length > unit->source.length - token.span.offset) {
         return bootstrap_x86_64_codegen_fail(context, runtime::Error.invalid_argument);
     }
@@ -2450,10 +2450,10 @@ fn bootstrap_x86_64_codegen_append_asm_string(
 // Splices the decoded string literals of an asm fn body into the emitted
 // text; the semantic pass validated the body holds nothing else.
 fn bootstrap_x86_64_codegen_emit_asm_body(
-    context: *BootstrapX8664CodegenContext, function: BootstrapIrFunction) -> bool {
+    context: *BootstrapX8664CodegenContext, function: ir::Function) -> bool {
     let unit_id: usize = function.asm_body_unit;
-    let body: BootstrapSyntaxNode = bootstrap_x86_64_codegen_node(context, unit_id, function.asm_body_node);
-    if (body.kind != BootstrapSyntaxKind.string_expression) {
+    let body: parser::SyntaxNode = bootstrap_x86_64_codegen_node(context, unit_id, function.asm_body_node);
+    if (body.kind != parser::SyntaxKind.string_expression) {
         return bootstrap_x86_64_codegen_fail(context, runtime::Error.invalid_argument);
     }
     if (!bootstrap_x86_64_codegen_append_asm_string(context, unit_id, body.token_index)) {
@@ -2462,8 +2462,8 @@ fn bootstrap_x86_64_codegen_emit_asm_body(
     var part: usize = body.first_child;
     var index: usize = 0;
     while (index < body.child_count && context->error == runtime::Error.none) {
-        let part_node: BootstrapSyntaxNode = bootstrap_x86_64_codegen_node(context, unit_id, part);
-        if (part_node.kind != BootstrapSyntaxKind.string_expression) {
+        let part_node: parser::SyntaxNode = bootstrap_x86_64_codegen_node(context, unit_id, part);
+        if (part_node.kind != parser::SyntaxKind.string_expression) {
             return bootstrap_x86_64_codegen_fail(context, runtime::Error.invalid_argument);
         }
         if (!bootstrap_x86_64_codegen_append_asm_string(context, unit_id, part_node.token_index)) {
@@ -2476,22 +2476,22 @@ fn bootstrap_x86_64_codegen_emit_asm_body(
 }
 
 fn bootstrap_x86_64_codegen_emit_function(context: *BootstrapX8664CodegenContext, function_id: usize) -> bool {
-    let functions: *const BootstrapIrFunction = context->ir.functions.data as
-            *const BootstrapIrFunction;
-    let blocks: *const BootstrapIrBlock = context->ir.blocks.data as *const BootstrapIrBlock;
-    let instructions: *const BootstrapIrInstruction = context->ir.instructions.data as
-            *const BootstrapIrInstruction;
+    let functions: *const ir::Function = context->ir.functions.data as
+            *const ir::Function;
+    let blocks: *const ir::Block = context->ir.blocks.data as *const ir::Block;
+    let instructions: *const ir::Instruction = context->ir.instructions.data as
+            *const ir::Instruction;
     let abi_functions: *const BootstrapX8664AbiFunction = context->abi.functions.data as
             *const BootstrapX8664AbiFunction;
     let frames: *const BootstrapX8664Frame = context->frames.frames.data as
             *const BootstrapX8664Frame;
-    let function: BootstrapIrFunction = functions[function_id];
+    let function: ir::Function = functions[function_id];
     if (!function.has_body) {
         return true;
     }
     context->current_function = function_id;
     context->call_frame_depth = 0;
-    if ((function.linkage == BootstrapIrLinkage.module_export ||
+    if ((function.linkage == ir::Linkage.module_export ||
             function.export_name_token != bootstrap_x86_64_codegen_no_id()) &&
         (!bootstrap_x86_64_codegen_literal(context, "    .globl ") ||
         !bootstrap_x86_64_codegen_append_function_symbol(context, function_id) ||
@@ -2503,7 +2503,7 @@ fn bootstrap_x86_64_codegen_emit_function(context: *BootstrapX8664CodegenContext
     // mangled module symbol (module consumers importing the interface
     // reference that one, since the export name lives on the
     // implementation they never see).
-    if (function.linkage == BootstrapIrLinkage.module_export &&
+    if (function.linkage == ir::Linkage.module_export &&
         function.export_name_token != bootstrap_x86_64_codegen_no_id() &&
         (!bootstrap_x86_64_codegen_literal(context, "    .globl ") ||
         !bootstrap_x86_64_codegen_append_mangled_function_symbol(context, function_id) ||
@@ -2517,7 +2517,7 @@ fn bootstrap_x86_64_codegen_emit_function(context: *BootstrapX8664CodegenContext
         !bootstrap_x86_64_codegen_literal(context, ":\n")) {
         return false;
     }
-    if (function.linkage == BootstrapIrLinkage.module_export &&
+    if (function.linkage == ir::Linkage.module_export &&
         function.export_name_token != bootstrap_x86_64_codegen_no_id() &&
         (!bootstrap_x86_64_codegen_append_mangled_function_symbol(context, function_id) ||
         !bootstrap_x86_64_codegen_literal(context, ":\n"))) {
@@ -2562,7 +2562,7 @@ fn bootstrap_x86_64_codegen_emit_function(context: *BootstrapX8664CodegenContext
     var block_index: usize = 0;
     while (block_index < function.block_count) {
         let block_id: usize = function.first_block + block_index;
-        let block: BootstrapIrBlock = blocks[block_id];
+        let block: ir::Block = blocks[block_id];
         if (!bootstrap_x86_64_codegen_block_label(context, block_id) ||
             !bootstrap_x86_64_codegen_literal(context, ":\n")) {
             return false;
@@ -2605,19 +2605,19 @@ fn bootstrap_x86_64_codegen_emit_module(context: *BootstrapX8664CodegenContext) 
 }
 
 fn bootstrap_x86_64_backend_is_success(
-    result: BootstrapX8664BackendResult, semantic_input: BootstrapSemanticInput, ir: BootstrapTypedIr,
-    types: BootstrapTypeTable) -> bool {
+    result: BootstrapX8664BackendResult, semantic_input: BootstrapSemanticInput, ir: ir::Store,
+    types: type_info::Table) -> bool {
     return result.error == runtime::Error.none && result.assembly.length != 0 &&
         bytes::is_valid(result.assembly) && bootstrap_semantic_input_is_valid(semantic_input) &&
-        bootstrap_ir_is_valid(ir, types) && bootstrap_x86_64_abi_is_valid(result.abi, ir, types) &&
+        ir::is_valid(ir, types) && bootstrap_x86_64_abi_is_valid(result.abi, ir, types) &&
         bootstrap_x86_64_frame_plan_is_valid(result.frames, ir, types, result.abi);
 }
 
 fn bootstrap_x86_64_emit_assembly(
-    semantic_input: BootstrapSemanticInput, ir: BootstrapTypedIr, types: BootstrapTypeTable
+    semantic_input: BootstrapSemanticInput, ir: ir::Store, types: type_info::Table
 ) -> BootstrapX8664BackendResult {
     var result: BootstrapX8664BackendResult = bootstrap_x86_64_backend_empty();
-    if (!bootstrap_semantic_input_is_valid(semantic_input) || !bootstrap_ir_is_valid(ir, types)) {
+    if (!bootstrap_semantic_input_is_valid(semantic_input) || !ir::is_valid(ir, types)) {
         result.error = runtime::Error.invalid_argument;
         return result;
     }

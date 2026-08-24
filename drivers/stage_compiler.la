@@ -4,12 +4,12 @@ import luna.bootstrap.backend.x86_64.abi;
 import luna.bootstrap.backend.x86_64.codegen;
 import luna.bootstrap.backend.x86_64.frame;
 import luna.bootstrap.backend.x86_64.text;
-import luna.bootstrap.frontend.lexer;
-import luna.bootstrap.frontend.parser;
-import luna.bootstrap.middleend.ir;
+import luna.bootstrap.frontend.lexer as lexer;
+import luna.bootstrap.frontend.parser as parser;
+import luna.bootstrap.middleend.ir as ir;
 import luna.bootstrap.middleend.semantic.context;
 import luna.bootstrap.middleend.sema;
-import luna.bootstrap.middleend.type;
+import luna.bootstrap.middleend.type as type_info;
 import luna.runtime;
 import luna.std.bytes;
 import luna.std.io;
@@ -112,8 +112,8 @@ fn bootstrap_stage_read_version() -> runtime::Error {
     return error == runtime::Error.none ? release_error : error;
 }
 
-fn bootstrap_stage_source_release(source: bytes::Buffer, frontend: BootstrapFrontendResult) -> runtime::Error {
-    var error: runtime::Error = bootstrap_frontend_result_release(frontend);
+fn bootstrap_stage_source_release(source: bytes::Buffer, frontend: parser::FrontendResult) -> runtime::Error {
+    var error: runtime::Error = parser::frontend_result_release(frontend);
     let source_error: runtime::Error = bytes::release(source);
     if (error == runtime::Error.none) {
         error = source_error;
@@ -122,7 +122,7 @@ fn bootstrap_stage_source_release(source: bytes::Buffer, frontend: BootstrapFron
 }
 
 fn bootstrap_stage_sources_release(
-    sources: *bytes::Buffer, frontends: *BootstrapFrontendResult, count: usize) -> runtime::Error {
+    sources: *bytes::Buffer, frontends: *parser::FrontendResult, count: usize) -> runtime::Error {
     if (sources == null || frontends == null || count > BootstrapStageLimit.maximum_units as usize) {
         return runtime::Error.invalid_argument;
     }
@@ -139,7 +139,7 @@ fn bootstrap_stage_sources_release(
 }
 
 fn bootstrap_stage_source_load(
-    path: path::Path, result_source: *bytes::Buffer, result_frontend: *BootstrapFrontendResult) -> runtime::Error {
+    path: path::Path, result_source: *bytes::Buffer, result_frontend: *parser::FrontendResult) -> runtime::Error {
     if (!path::is_valid(path) || result_source == null || result_frontend == null) {
         return runtime::Error.invalid_argument;
     }
@@ -152,13 +152,13 @@ fn bootstrap_stage_source_load(
         bytes::release(source.buffer);
         return view.error;
     }
-    let frontend: BootstrapFrontendResult = bootstrap_frontend_parse(view.view);
+    let frontend: parser::FrontendResult = parser::frontend_parse(view.view);
     *result_source = source.buffer;
     *result_frontend = frontend;
     return runtime::Error.none;
 }
 
-fn bootstrap_stage_frontend_diagnostic(frontend: BootstrapFrontendResult, lexical: *bool) -> BootstrapDiagnosticResult {
+fn bootstrap_stage_frontend_diagnostic(frontend: parser::FrontendResult, lexical: *bool) -> lexer::DiagnosticResult {
     if (lexical == null) {
         return {
             diagnostic = {}, error = runtime::Error.invalid_argument,
@@ -166,10 +166,10 @@ fn bootstrap_stage_frontend_diagnostic(frontend: BootstrapFrontendResult, lexica
     }
     var index: usize = 0;
     while (index < frontend.lex.diagnostics.count) {
-        let diagnostic: BootstrapDiagnosticResult = bootstrap_diagnostic_buffer_get(frontend.lex.diagnostics, index);
+        let diagnostic: lexer::DiagnosticResult = lexer::diagnostic_buffer_get(frontend.lex.diagnostics, index);
         if (diagnostic.error != runtime::Error.none || diagnostic.diagnostic.kind ==
-                BootstrapDiagnosticKind.nesting_limit || diagnostic.diagnostic.kind ==
-                BootstrapDiagnosticKind.resource_limit) {
+                lexer::DiagnosticKind.nesting_limit || diagnostic.diagnostic.kind ==
+                lexer::DiagnosticKind.resource_limit) {
             *lexical = true;
             return diagnostic;
         }
@@ -177,10 +177,10 @@ fn bootstrap_stage_frontend_diagnostic(frontend: BootstrapFrontendResult, lexica
     }
     index = 0;
     while (index < frontend.parse.diagnostics.count) {
-        let diagnostic: BootstrapDiagnosticResult = bootstrap_diagnostic_buffer_get(frontend.parse.diagnostics, index);
+        let diagnostic: lexer::DiagnosticResult = lexer::diagnostic_buffer_get(frontend.parse.diagnostics, index);
         if (diagnostic.error != runtime::Error.none || diagnostic.diagnostic.kind ==
-                BootstrapDiagnosticKind.nesting_limit || diagnostic.diagnostic.kind ==
-                BootstrapDiagnosticKind.resource_limit) {
+                lexer::DiagnosticKind.nesting_limit || diagnostic.diagnostic.kind ==
+                lexer::DiagnosticKind.resource_limit) {
             *lexical = false;
             return diagnostic;
         }
@@ -188,28 +188,28 @@ fn bootstrap_stage_frontend_diagnostic(frontend: BootstrapFrontendResult, lexica
     }
     if (frontend.lex.diagnostics.count != 0) {
         *lexical = true;
-        return bootstrap_diagnostic_buffer_get(frontend.lex.diagnostics, 0);
+        return lexer::diagnostic_buffer_get(frontend.lex.diagnostics, 0);
     }
     if (frontend.parse.diagnostics.count != 0) {
         *lexical = false;
-        return bootstrap_diagnostic_buffer_get(frontend.parse.diagnostics, 0);
+        return lexer::diagnostic_buffer_get(frontend.parse.diagnostics, 0);
     }
     return {
         diagnostic = {}, error = runtime::Error.not_found,
     };
 }
 
-fn bootstrap_stage_frontend_status(frontend: BootstrapFrontendResult) -> i32 {
+fn bootstrap_stage_frontend_status(frontend: parser::FrontendResult) -> i32 {
     if (frontend.error == runtime::Error.out_of_memory) {
         return BootstrapStageStatus.resource_limit as i32;
     }
     var lexical: bool = false;
-    let result: BootstrapDiagnosticResult = bootstrap_stage_frontend_diagnostic(frontend, &lexical);
+    let result: lexer::DiagnosticResult = bootstrap_stage_frontend_diagnostic(frontend, &lexical);
     if (result.error != runtime::Error.none) {
         return BootstrapStageStatus.input_error as i32;
     }
-    if (result.diagnostic.kind == BootstrapDiagnosticKind.nesting_limit || result.diagnostic.kind ==
-            BootstrapDiagnosticKind.resource_limit) {
+    if (result.diagnostic.kind == lexer::DiagnosticKind.nesting_limit || result.diagnostic.kind ==
+            lexer::DiagnosticKind.resource_limit) {
         return BootstrapStageStatus.resource_limit as i32;
     }
     return BootstrapStageStatus.input_error as i32;
@@ -233,9 +233,9 @@ fn bootstrap_stage_print_text(text: *BootstrapX8664Text) -> runtime::Error {
     return error == runtime::Error.none ? release_error : error;
 }
 
-fn bootstrap_stage_report_frontend(frontend: BootstrapFrontendResult) -> runtime::Error {
+fn bootstrap_stage_report_frontend(frontend: parser::FrontendResult) -> runtime::Error {
     var lexical: bool = false;
-    let result: BootstrapDiagnosticResult = bootstrap_stage_frontend_diagnostic(frontend, &lexical);
+    let result: lexer::DiagnosticResult = bootstrap_stage_frontend_diagnostic(frontend, &lexical);
     if (result.error == runtime::Error.not_found) {
         return runtime::Error.none;
     }
@@ -274,7 +274,7 @@ fn bootstrap_stage_report_resource(
 }
 
 fn bootstrap_stage_input_add(
-    input: *BootstrapSemanticInput, source: bytes::Buffer, frontend: BootstrapFrontendResult,
+    input: *BootstrapSemanticInput, source: bytes::Buffer, frontend: parser::FrontendResult,
     path: std_text::View) -> bool {
     if (input == null) {
         return false;
@@ -346,7 +346,7 @@ fn bootstrap_stage_run(
         return BootstrapStageStatus.input_error as i32;
     }
     var sources: [64]bytes::Buffer = {};
-    var frontends: [64]BootstrapFrontendResult = {};
+    var frontends: [64]parser::FrontendResult = {};
     var source_count: usize = 0;
     var total_source_bytes: usize = 0;
     let expected_count: usize = fixed_protocol ? BootstrapStageLimit.maximum_units as usize : input_count;
@@ -391,14 +391,14 @@ fn bootstrap_stage_run(
             return BootstrapStageStatus.resource_limit as i32;
         }
         total_source_bytes += source_length;
-        let frontend: BootstrapFrontendResult = frontends[source_count - 1];
+        let frontend: parser::FrontendResult = frontends[source_count - 1];
         if (frontend.error != runtime::Error.none || frontend.lex.diagnostics.count != 0 ||
             frontend.parse.diagnostics.count != 0) {
             let status: i32 = bootstrap_stage_frontend_status(frontend);
             var lexical: bool = false;
-            let diagnostic: BootstrapDiagnosticResult = bootstrap_stage_frontend_diagnostic(frontend, &lexical);
+            let diagnostic: lexer::DiagnosticResult = bootstrap_stage_frontend_diagnostic(frontend, &lexical);
             let has_resource_diagnostic: bool = diagnostic.error == runtime::Error.none && diagnostic.diagnostic.kind ==
-                    BootstrapDiagnosticKind.resource_limit;
+                    lexer::DiagnosticKind.resource_limit;
             if (frontend.error == runtime::Error.out_of_memory && !has_resource_diagnostic) {
                 bootstrap_stage_report_resource(
                     "frontend", 16, source_count - 1, BootstrapStageLimit.maximum_frontend_diagnostics as usize);
@@ -414,7 +414,7 @@ fn bootstrap_stage_run(
     }
     if (fixed_protocol && source_count == BootstrapStageLimit.maximum_units as usize) {
         var excess_source: bytes::Buffer = bytes::empty();
-        var excess_frontend: BootstrapFrontendResult = {};
+        var excess_frontend: parser::FrontendResult = {};
         let excess_path: path::PathResult = bootstrap_stage_unit_path(source_count);
         var excess_error: runtime::Error = excess_path.error;
         var excess_present: bool = false;

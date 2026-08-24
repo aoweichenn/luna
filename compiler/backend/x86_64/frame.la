@@ -92,16 +92,16 @@ fn bootstrap_x86_64_frame_add_storage(
 }
 
 fn bootstrap_x86_64_frame_add_slots(
-    plan: *BootstrapX8664FramePlan, frame: *BootstrapX8664Frame, ir: BootstrapTypedIr, types: BootstrapTypeTable,
+    plan: *BootstrapX8664FramePlan, frame: *BootstrapX8664Frame, ir: ir::Store, types: type_info::Table,
     function_id: usize, current_offset: *usize) -> bool {
-    let slots: *const BootstrapIrSlot = ir.slots.data as *const BootstrapIrSlot;
-    let records: *const BootstrapTypeRecord = types.types.data as *const BootstrapTypeRecord;
+    let slots: *const ir::Slot = ir.slots.data as *const ir::Slot;
+    let records: *const type_info::Record = types.types.data as *const type_info::Record;
     var slot_id: usize = 0;
     while (slot_id < ir.slot_count) {
-        let slot: BootstrapIrSlot = slots[slot_id];
+        let slot: ir::Slot = slots[slot_id];
         if (slot.function_id == function_id) {
-            let record: BootstrapTypeRecord = records[slot.type_id];
-            let memory: bool = bootstrap_type_is_memory(record.kind);
+            let record: type_info::Record = records[slot.type_id];
+            let memory: bool = type_info::is_memory(record.kind);
             let natural_alignment: usize = memory ? record.alignment_bytes : BootstrapX8664FrameLimit
                     .scalar_home_alignment as usize;
             let alignment: usize = slot.alignment_bytes > natural_alignment ? slot.alignment_bytes : natural_alignment;
@@ -118,12 +118,12 @@ fn bootstrap_x86_64_frame_add_slots(
 }
 
 fn bootstrap_x86_64_frame_add_values(
-    plan: *BootstrapX8664FramePlan, frame: *BootstrapX8664Frame, ir: BootstrapTypedIr, function: BootstrapIrFunction,
+    plan: *BootstrapX8664FramePlan, frame: *BootstrapX8664Frame, ir: ir::Store, function: ir::Function,
     function_id: usize, current_offset: *usize) -> bool {
     var index: usize = 0;
     while (index < function.value_count) {
         let value_id: usize = function.first_value + index;
-        let values: *const BootstrapIrValue = ir.values.data as *const BootstrapIrValue;
+        let values: *const ir::Value = ir.values.data as *const ir::Value;
         if (!bootstrap_x86_64_frame_add_storage(
                 plan, frame, function_id, BootstrapX8664StorageKind.value, value_id, values[value_id].type_id,
                 BootstrapX8664FrameLimit.scalar_home_size
@@ -137,19 +137,19 @@ fn bootstrap_x86_64_frame_add_values(
 }
 
 fn bootstrap_x86_64_frame_add_call_results(
-    plan: *BootstrapX8664FramePlan, frame: *BootstrapX8664Frame, ir: BootstrapTypedIr, types: BootstrapTypeTable,
+    plan: *BootstrapX8664FramePlan, frame: *BootstrapX8664Frame, ir: ir::Store, types: type_info::Table,
     function_id: usize, current_offset: *usize) -> bool {
-    let instructions: *const BootstrapIrInstruction = ir.instructions.data as *const BootstrapIrInstruction;
-    let blocks: *const BootstrapIrBlock = ir.blocks.data as *const BootstrapIrBlock;
-    let records: *const BootstrapTypeRecord = types.types.data as *const BootstrapTypeRecord;
+    let instructions: *const ir::Instruction = ir.instructions.data as *const ir::Instruction;
+    let blocks: *const ir::Block = ir.blocks.data as *const ir::Block;
+    let records: *const type_info::Record = types.types.data as *const type_info::Record;
     var instruction_id: usize = 0;
     while (instruction_id < ir.instruction_count) {
-        let instruction: BootstrapIrInstruction = instructions[instruction_id];
-        if (blocks[instruction.block_id].function_id == function_id && instruction.opcode == BootstrapIrOpcode.call &&
-            instruction.result != bootstrap_ir_no_id() &&
-            bootstrap_type_is_memory(
+        let instruction: ir::Instruction = instructions[instruction_id];
+        if (blocks[instruction.block_id].function_id == function_id && instruction.opcode == ir::Opcode.call &&
+            instruction.result != ir::no_id() &&
+            type_info::is_memory(
                 records[instruction.type_id].kind)) {
-            let record: BootstrapTypeRecord = records[instruction.type_id];
+            let record: type_info::Record = records[instruction.type_id];
             if (!bootstrap_x86_64_frame_add_storage(
                     plan, frame, function_id, BootstrapX8664StorageKind.aggregate_call_result, instruction.result,
                     instruction.type_id, record.size_bytes, record.alignment_bytes, current_offset)) {
@@ -162,18 +162,18 @@ fn bootstrap_x86_64_frame_add_call_results(
 }
 
 fn bootstrap_x86_64_frame_plan_build(
-    ir: BootstrapTypedIr, types: BootstrapTypeTable, abi: BootstrapX8664Abi) -> BootstrapX8664FramePlanResult {
+    ir: ir::Store, types: type_info::Table, abi: BootstrapX8664Abi) -> BootstrapX8664FramePlanResult {
     var plan: BootstrapX8664FramePlan = bootstrap_x86_64_frame_plan_empty();
-    if (!bootstrap_ir_is_valid(ir, types) || !bootstrap_x86_64_abi_is_valid(abi, ir, types)) {
+    if (!ir::is_valid(ir, types) || !bootstrap_x86_64_abi_is_valid(abi, ir, types)) {
         return {
             plan = plan, error = runtime::Error.invalid_argument,
         };
     }
-    let functions: *const BootstrapIrFunction = ir.functions.data as *const BootstrapIrFunction;
+    let functions: *const ir::Function = ir.functions.data as *const ir::Function;
     let abi_functions: *const BootstrapX8664AbiFunction = abi.functions.data as *const BootstrapX8664AbiFunction;
     var function_id: usize = 0;
     while (function_id < ir.function_count && plan.error == runtime::Error.none) {
-        let function: BootstrapIrFunction = functions[function_id];
+        let function: ir::Function = functions[function_id];
         var frame: BootstrapX8664Frame = {
             function_id = function_id, first_storage = function.has_body ? plan.storage_count :
                 bootstrap_x86_64_frame_no_id(), storage_count = 0, frame_size_bytes = 0, dynamic_alignment = 0,
@@ -258,7 +258,7 @@ fn bootstrap_x86_64_frame_plan_equal(left: BootstrapX8664FramePlan, right: Boots
 }
 
 fn bootstrap_x86_64_frame_plan_is_valid(
-    plan: BootstrapX8664FramePlan, ir: BootstrapTypedIr, types: BootstrapTypeTable, abi: BootstrapX8664Abi) -> bool {
+    plan: BootstrapX8664FramePlan, ir: ir::Store, types: type_info::Table, abi: BootstrapX8664Abi) -> bool {
     if (plan.error != runtime::Error.none || !bootstrap_x86_64_frame_plan_storage_is_valid(plan)) {
         return false;
     }

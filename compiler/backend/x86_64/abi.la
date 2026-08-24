@@ -65,8 +65,8 @@ fn bootstrap_x86_64_abi_set_memory(classification: *BootstrapX8664AbiClassificat
     return false;
 }
 
-fn bootstrap_x86_64_abi_scalar_class(kind: BootstrapTypeKind) -> BootstrapX8664AbiClass {
-    return bootstrap_type_is_float(kind) ? BootstrapX8664AbiClass.sse : BootstrapX8664AbiClass.integer;
+fn bootstrap_x86_64_abi_scalar_class(kind: type_info::Kind) -> BootstrapX8664AbiClass {
+    return type_info::is_float(kind) ? BootstrapX8664AbiClass.sse : BootstrapX8664AbiClass.integer;
 }
 
 fn bootstrap_x86_64_abi_merge_leaf(
@@ -93,22 +93,22 @@ fn bootstrap_x86_64_abi_merge_leaf(
 }
 
 fn bootstrap_x86_64_abi_merge_type(
-    types: BootstrapTypeTable, type_id: usize, base_offset: usize, depth: usize,
+    types: type_info::Table, type_id: usize, base_offset: usize, depth: usize,
     classification: *BootstrapX8664AbiClassification) -> bool {
     if (type_id >= types.type_count || depth > BootstrapX8664AbiLimit.maximum_type_depth as usize ||
         classification == null || classification->first == BootstrapX8664AbiClass.memory) {
         return bootstrap_x86_64_abi_set_memory(classification);
     }
-    let records: *const BootstrapTypeRecord = types.types.data as *const BootstrapTypeRecord;
-    let fields: *const BootstrapTypeField = types.fields.data as *const BootstrapTypeField;
-    let record: BootstrapTypeRecord = records[type_id];
-    if (bootstrap_type_is_scalar(record.kind)) {
+    let records: *const type_info::Record = types.types.data as *const type_info::Record;
+    let fields: *const type_info::Field = types.fields.data as *const type_info::Field;
+    let record: type_info::Record = records[type_id];
+    if (type_info::is_scalar(record.kind)) {
         return bootstrap_x86_64_abi_merge_leaf(
             classification, base_offset, record.size_bytes, record.alignment_bytes,
             bootstrap_x86_64_abi_scalar_class(record.kind));
     }
-    if (record.kind == BootstrapTypeKind.array) {
-        let element: BootstrapTypeRecord = records[record.element_type];
+    if (record.kind == type_info::Kind.array) {
+        let element: type_info::Record = records[record.element_type];
         var index: usize = 0;
         while (index < record.element_count) {
             if (index > (BootstrapX8664AbiLimit.maximum_size as usize) / element.size_bytes ||
@@ -120,10 +120,10 @@ fn bootstrap_x86_64_abi_merge_type(
         }
         return true;
     }
-    if (record.kind == BootstrapTypeKind.structure || record.kind == BootstrapTypeKind.record_union) {
+    if (record.kind == type_info::Kind.structure || record.kind == type_info::Kind.record_union) {
         var index: usize = 0;
         while (index < record.field_count) {
-            let field: BootstrapTypeField = fields[record.first_field + index];
+            let field: type_info::Field = fields[record.first_field + index];
             if (field.offset_bytes > (BootstrapX8664AbiLimit.maximum_size as usize) - base_offset ||
                 !bootstrap_x86_64_abi_merge_type(
                     types, field.type_id, base_offset + field.offset_bytes, depth + 1, classification)) {
@@ -136,16 +136,16 @@ fn bootstrap_x86_64_abi_merge_type(
     return bootstrap_x86_64_abi_set_memory(classification);
 }
 
-fn bootstrap_x86_64_abi_classify(types: BootstrapTypeTable, type_id: usize) -> BootstrapX8664AbiClassification {
+fn bootstrap_x86_64_abi_classify(types: type_info::Table, type_id: usize) -> BootstrapX8664AbiClassification {
     var result: BootstrapX8664AbiClassification = {
         eightbyte_count = 0, first = BootstrapX8664AbiClass.invalid, second = BootstrapX8664AbiClass.invalid,
     };
-    if (!bootstrap_type_table_is_valid(types, true) || type_id >= types.type_count) {
+    if (!type_info::table_is_valid(types, true) || type_id >= types.type_count) {
         return result;
     }
-    let records: *const BootstrapTypeRecord = types.types.data as *const BootstrapTypeRecord;
-    let record: BootstrapTypeRecord = records[type_id];
-    if (!bootstrap_type_is_memory(record.kind) || record.size_bytes == 0) {
+    let records: *const type_info::Record = types.types.data as *const type_info::Record;
+    let record: type_info::Record = records[type_id];
+    if (!type_info::is_memory(record.kind) || record.size_bytes == 0) {
         return result;
     }
     result.first = BootstrapX8664AbiClass.no_class;
@@ -263,12 +263,12 @@ fn bootstrap_x86_64_abi_add_stack_area(
 }
 
 fn bootstrap_x86_64_abi_build_return(
-    abi: *BootstrapX8664Abi, function: *BootstrapX8664AbiFunction, types: BootstrapTypeTable) -> bool {
-    let records: *const BootstrapTypeRecord = types.types.data as *const BootstrapTypeRecord;
-    let record: BootstrapTypeRecord = records[function->return_type];
+    abi: *BootstrapX8664Abi, function: *BootstrapX8664AbiFunction, types: type_info::Table) -> bool {
+    let records: *const type_info::Record = types.types.data as *const type_info::Record;
+    let record: type_info::Record = records[function->return_type];
     function->return_size_bytes = record.size_bytes;
     function->return_alignment_bytes = record.alignment_bytes;
-    function->return_aggregate = bootstrap_type_is_memory(record.kind);
+    function->return_aggregate = type_info::is_memory(record.kind);
     function->first_return_piece = bootstrap_x86_64_abi_no_id();
     if (!function->return_aggregate) {
         return true;
@@ -307,7 +307,7 @@ fn bootstrap_x86_64_abi_build_return(
 }
 
 fn bootstrap_x86_64_abi_build_scalar_parameter(
-    function: *BootstrapX8664AbiFunction, parameter: *BootstrapX8664AbiParameter, record: BootstrapTypeRecord) -> bool {
+    function: *BootstrapX8664AbiFunction, parameter: *BootstrapX8664AbiParameter, record: type_info::Record) -> bool {
     let abi_class: BootstrapX8664AbiClass = bootstrap_x86_64_abi_scalar_class(record.kind);
     parameter->abi_class = abi_class;
     if (abi_class == BootstrapX8664AbiClass.integer && function->general_register_count <
@@ -340,7 +340,7 @@ fn bootstrap_x86_64_abi_build_scalar_parameter(
 
 fn bootstrap_x86_64_abi_build_aggregate_parameter(
     abi: *BootstrapX8664Abi, function: *BootstrapX8664AbiFunction, parameter: *BootstrapX8664AbiParameter,
-    types: BootstrapTypeTable, record: BootstrapTypeRecord) -> bool {
+    types: type_info::Table, record: type_info::Record) -> bool {
     let classification: BootstrapX8664AbiClassification = bootstrap_x86_64_abi_classify(types, parameter->type_id);
     var required_general: usize = 0;
     var required_vector: usize = 0;
@@ -404,17 +404,17 @@ fn bootstrap_x86_64_abi_build_aggregate_parameter(
 }
 
 fn bootstrap_x86_64_abi_build_parameter(
-    abi: *BootstrapX8664Abi, function: *BootstrapX8664AbiFunction, ir_parameter: BootstrapIrParameter,
-    parameter_index: usize, types: BootstrapTypeTable) -> bool {
-    let records: *const BootstrapTypeRecord = types.types.data as *const BootstrapTypeRecord;
-    let record: BootstrapTypeRecord = records[ir_parameter.type_id];
+    abi: *BootstrapX8664Abi, function: *BootstrapX8664AbiFunction, ir_parameter: ir::Parameter,
+    parameter_index: usize, types: type_info::Table) -> bool {
+    let records: *const type_info::Record = types.types.data as *const type_info::Record;
+    let record: type_info::Record = records[ir_parameter.type_id];
     let none: usize = bootstrap_x86_64_abi_no_id();
     var parameter: BootstrapX8664AbiParameter = {
         function_id = function->function_id, parameter_index = parameter_index,
         abi_class = BootstrapX8664AbiClass.invalid, location = BootstrapX8664AbiLocationKind.invalid,
         register_index = none, stack_offset_bytes = none, stack_size_bytes = 0, type_id = ir_parameter.type_id,
         size_bytes = record.size_bytes, alignment_bytes = record.alignment_bytes, first_piece = none, piece_count = 0,
-        aggregate = bootstrap_type_is_memory(record.kind),
+        aggregate = type_info::is_memory(record.kind),
     };
     let built: bool = parameter.aggregate ?
         bootstrap_x86_64_abi_build_aggregate_parameter(abi, function, &parameter, types, record) :
@@ -422,19 +422,19 @@ fn bootstrap_x86_64_abi_build_parameter(
     return built && bootstrap_x86_64_abi_add_parameter(abi, parameter) != none;
 }
 
-fn bootstrap_x86_64_abi_analyze(ir: BootstrapTypedIr, types: BootstrapTypeTable) -> BootstrapX8664AbiResult {
+fn bootstrap_x86_64_abi_analyze(ir: ir::Store, types: type_info::Table) -> BootstrapX8664AbiResult {
     var abi: BootstrapX8664Abi = bootstrap_x86_64_abi_empty();
-    if (!bootstrap_ir_is_valid(ir, types)) {
+    if (!ir::is_valid(ir, types)) {
         return {
             abi = abi, error = runtime::Error.invalid_argument,
         };
     }
-    let functions: *const BootstrapIrFunction = ir.functions.data as *const BootstrapIrFunction;
-    let parameters: *const BootstrapIrParameter = ir.parameters.data as *const BootstrapIrParameter;
+    let functions: *const ir::Function = ir.functions.data as *const ir::Function;
+    let parameters: *const ir::Parameter = ir.parameters.data as *const ir::Parameter;
     let none: usize = bootstrap_x86_64_abi_no_id();
     var function_id: usize = 0;
     while (function_id < ir.function_count && abi.error == runtime::Error.none) {
-        let source: BootstrapIrFunction = functions[function_id];
+        let source: ir::Function = functions[function_id];
         var function: BootstrapX8664AbiFunction = {
             function_id = function_id, first_parameter = source.parameter_count == 0 ? none : abi.parameter_count,
             parameter_count = 0, first_return_piece = none, return_piece_count = 0, return_type = source.return_type,
@@ -473,12 +473,12 @@ fn bootstrap_x86_64_abi_analyze(ir: BootstrapTypedIr, types: BootstrapTypeTable)
         }
         function_id += 1;
     }
-    let type_records: *const BootstrapTypeRecord = types.types.data as *const BootstrapTypeRecord;
-    let type_fields: *const BootstrapTypeField = types.fields.data as *const BootstrapTypeField;
+    let type_records: *const type_info::Record = types.types.data as *const type_info::Record;
+    let type_fields: *const type_info::Field = types.fields.data as *const type_info::Field;
     var signature_type: usize = 0;
     while (signature_type < types.type_count && abi.error == runtime::Error.none) {
-        let record: BootstrapTypeRecord = type_records[signature_type];
-        if (record.kind != BootstrapTypeKind.function_pointer) {
+        let record: type_info::Record = type_records[signature_type];
+        if (record.kind != type_info::Kind.function_pointer) {
             signature_type += 1;
             continue;
         }
@@ -496,7 +496,7 @@ fn bootstrap_x86_64_abi_analyze(ir: BootstrapTypedIr, types: BootstrapTypeTable)
         }
         var parameter_index: usize = 0;
         while (parameter_index < record.field_count && abi.error == runtime::Error.none) {
-            var ir_parameter: BootstrapIrParameter = {
+            var ir_parameter: ir::Parameter = {
                 function_id = none, type_id = type_fields[ record.first_field + parameter_index].type_id,
                 slot_id = none, name_token = none,
             };
@@ -544,7 +544,7 @@ fn bootstrap_x86_64_abi_equal(left: BootstrapX8664Abi, right: BootstrapX8664Abi)
         bytes::equal(left.pieces, right.pieces.data as *const u8, right.pieces.length);
 }
 
-fn bootstrap_x86_64_abi_is_valid(abi: BootstrapX8664Abi, ir: BootstrapTypedIr, types: BootstrapTypeTable) -> bool {
+fn bootstrap_x86_64_abi_is_valid(abi: BootstrapX8664Abi, ir: ir::Store, types: type_info::Table) -> bool {
     if (abi.error != runtime::Error.none || !bootstrap_x86_64_abi_storage_is_valid(abi)) {
         return false;
     }
