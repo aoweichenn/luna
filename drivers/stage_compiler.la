@@ -7,8 +7,8 @@ import luna.bootstrap.backend.x86_64.text;
 import luna.bootstrap.frontend.lexer as lexer;
 import luna.bootstrap.frontend.parser as parser;
 import luna.bootstrap.middleend.ir as ir;
-import luna.bootstrap.middleend.semantic.context;
-import luna.bootstrap.middleend.sema;
+import luna.bootstrap.middleend.semantic.context as context;
+import luna.bootstrap.middleend.sema as sema;
 import luna.bootstrap.middleend.type as type_info;
 import luna.runtime;
 import luna.std.bytes;
@@ -274,39 +274,39 @@ fn bootstrap_stage_report_resource(
 }
 
 fn bootstrap_stage_input_add(
-    input: *BootstrapSemanticInput, source: bytes::Buffer, frontend: parser::FrontendResult,
+    input: *context::Input, source: bytes::Buffer, frontend: parser::FrontendResult,
     path: std_text::View) -> bool {
     if (input == null) {
         return false;
     }
     let view: std_text::ViewResult = std_text::view(source.data as *const u8, source.length);
     return view.error == runtime::Error.none &&
-        bootstrap_semantic_input_add(
+        context::input_add(
             input, {
                 source = view.view, tokens = frontend.lex.tokens, tree = frontend.parse.tree,
                 path_offset = 0, path_length = 0,
             }, path);
 }
 
-fn bootstrap_stage_semantic_status(semantic: BootstrapSemanticResult) -> i32 {
+fn bootstrap_stage_semantic_status(semantic: context::Result) -> i32 {
     if (semantic.error == runtime::Error.out_of_memory) {
         return BootstrapStageStatus.resource_limit as i32;
     }
     if (semantic.diagnostics.count == 0) {
         return BootstrapStageStatus.semantic_error as i32;
     }
-    let diagnostic: BootstrapSemanticDiagnosticResult = bootstrap_semantic_diagnostic_get(semantic.diagnostics, 0);
+    let diagnostic: context::DiagnosticResult = context::diagnostic_get(semantic.diagnostics, 0);
     if (diagnostic.error != runtime::Error.none) {
         return BootstrapStageStatus.semantic_error as i32;
     }
     return BootstrapStageStatus.semantic_diagnostic_base as i32 + diagnostic.diagnostic.kind as usize as i32;
 }
 
-fn bootstrap_stage_report_semantic(semantic: BootstrapSemanticResult) -> runtime::Error {
+fn bootstrap_stage_report_semantic(semantic: context::Result) -> runtime::Error {
     if (semantic.diagnostics.count == 0) {
         return runtime::Error.none;
     }
-    let diagnostic: BootstrapSemanticDiagnosticResult = bootstrap_semantic_diagnostic_get(semantic.diagnostics, 0);
+    let diagnostic: context::DiagnosticResult = context::diagnostic_get(semantic.diagnostics, 0);
     if (diagnostic.error != runtime::Error.none) {
         return diagnostic.error;
     }
@@ -438,7 +438,7 @@ fn bootstrap_stage_run(
         }
     }
 
-    var input: BootstrapSemanticInput = bootstrap_semantic_input_empty(executable);
+    var input: context::Input = context::input_empty(executable);
     var added: bool = true;
     var index: usize = 0;
     while (index < source_count && added) {
@@ -460,13 +460,13 @@ fn bootstrap_stage_run(
         index += 1;
     }
     if (!added) {
-        bootstrap_semantic_input_release(input);
+        context::input_release(input);
         bootstrap_stage_sources_release(&sources[0], &frontends[0], source_count);
         return BootstrapStageStatus.semantic_error as i32;
     }
 
-    let semantic: BootstrapSemanticResult = bootstrap_semantic_check(input);
-    if (!bootstrap_semantic_result_is_success(semantic)) {
+    let semantic: context::Result = sema::check(input);
+    if (!context::result_is_success(semantic)) {
         let status: i32 = bootstrap_stage_semantic_status(semantic);
         if (semantic.error == runtime::Error.out_of_memory) {
             bootstrap_stage_report_resource(
@@ -474,8 +474,8 @@ fn bootstrap_stage_run(
         } else {
             bootstrap_stage_report_semantic(semantic);
         }
-        bootstrap_semantic_result_release(semantic);
-        bootstrap_semantic_input_release(input);
+        context::result_release(semantic);
+        context::input_release(input);
         bootstrap_stage_sources_release(&sources[0], &frontends[0], source_count);
         return status;
     }
@@ -485,8 +485,8 @@ fn bootstrap_stage_run(
         let backend_status: i32 = backend.error == runtime::Error.out_of_memory ?
                 BootstrapStageStatus.resource_limit as i32 : BootstrapStageStatus.backend_error as i32;
         bootstrap_x86_64_backend_release(backend);
-        bootstrap_semantic_result_release(semantic);
-        bootstrap_semantic_input_release(input);
+        context::result_release(semantic);
+        context::input_release(input);
         bootstrap_stage_sources_release(&sources[0], &frontends[0], source_count);
         return backend_status;
     }
@@ -495,8 +495,8 @@ fn bootstrap_stage_run(
         output_path, backend.assembly.data as *const u8, backend.assembly.length);
 
     let backend_error: runtime::Error = bootstrap_x86_64_backend_release(backend);
-    let semantic_error: runtime::Error = bootstrap_semantic_result_release(semantic);
-    let input_error: runtime::Error = bootstrap_semantic_input_release(input);
+    let semantic_error: runtime::Error = context::result_release(semantic);
+    let input_error: runtime::Error = context::input_release(input);
     let sources_error: runtime::Error = bootstrap_stage_sources_release(&sources[0], &frontends[0], source_count);
     if (write_error != runtime::Error.none) {
         return BootstrapStageStatus.output_error as i32;

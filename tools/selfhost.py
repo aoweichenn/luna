@@ -408,7 +408,7 @@ SEMANTIC_DIAGNOSTIC_BASE = 64
 
 
 def semantic_diagnostic_kinds() -> dict[str, int]:
-    """Map BootstrapSemanticDiagnosticKind names to their enum ordinals."""
+    """Map context::DiagnosticKind names to their enum ordinals."""
     interface = (
         ROOT
         / "compiler"
@@ -418,10 +418,10 @@ def semantic_diagnostic_kinds() -> dict[str, int]:
     )
     text = interface.read_text(encoding="utf-8")
     match = re.search(
-        r"enum BootstrapSemanticDiagnosticKind[^}]*\{(.*?)\}", text, re.S
+        r"enum DiagnosticKind[^}]*\{(.*?)\}", text, re.S
     )
     if match is None:
-        fail("cannot locate BootstrapSemanticDiagnosticKind")
+        fail("cannot locate DiagnosticKind")
     return {
         name: ordinal
         for ordinal, name in enumerate(

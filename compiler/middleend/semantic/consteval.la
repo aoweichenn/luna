@@ -1,18 +1,18 @@
 module luna.bootstrap.middleend.semantic.consteval;
 
-fn bootstrap_const_integer(
+fn integer(
     value: u64
-) -> BootstrapConstValue {
+) -> Value {
     return {
         is_constant = true, is_boolean = false, value = value,
         error = false,
     };
 }
 
-fn bootstrap_const_boolean(
+fn boolean(
     value: bool
-) -> BootstrapConstValue {
-    var result: BootstrapConstValue = {
+) -> Value {
+    var result: Value = {
         is_constant = true, is_boolean = true, value = 0,
         error = false,
     };
@@ -22,278 +22,278 @@ fn bootstrap_const_boolean(
     return result;
 }
 
-fn bootstrap_const_not_constant() -> BootstrapConstValue {
+fn not_constant() -> Value {
     return {
         is_constant = false, is_boolean = false, value = 0,
         error = false,
     };
 }
 
-fn bootstrap_const_error() -> BootstrapConstValue {
+fn error() -> Value {
     return {
         is_constant = false, is_boolean = false, value = 0,
         error = true,
     };
 }
 
-fn bootstrap_const_eval_enum_member(
-    context: *BootstrapSemanticContext,
+fn eval_enum_member(
+    context: *context::Context,
     unit_index: usize,
     node: parser::SyntaxNode
-) -> BootstrapConstValue {
+) -> Value {
     if (node.child_count != 2) {
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
     let owner_node: parser::SyntaxNode =
-        bootstrap_semantic_node(
+        context::node(
             context, unit_index, node.first_child
         );
     let member_node: parser::SyntaxNode =
-        bootstrap_semantic_node(
+        context::node(
             context, unit_index, owner_node.next_sibling
         );
     if (owner_node.kind !=
             parser::SyntaxKind.name_expression ||
         member_node.kind !=
             parser::SyntaxKind.name_expression) {
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
     let type_symbol: usize =
-        bootstrap_semantic_lookup_qualified_symbol(
+        context::lookup_qualified_symbol(
             context,
             unit_index,
             owner_node,
-            BootstrapSemanticSymbolKind.named_type,
+            context::SymbolKind.named_type,
             false
         );
-    if (type_symbol == bootstrap_semantic_no_id()) {
-        return bootstrap_const_not_constant();
+    if (type_symbol == context::no_id()) {
+        return not_constant();
     }
-    let symbols: *const BootstrapSemanticSymbol =
+    let symbols: *const context::Symbol =
         context->symbols.data as
-            *const BootstrapSemanticSymbol;
+            *const context::Symbol;
     var type_id: usize = symbols[type_symbol].type_id;
     let alias_record: type_info::Record =
-        bootstrap_semantic_type_record(context, type_id);
+        context::type_record(context, type_id);
     if (alias_record.kind == type_info::Kind.alias &&
-        bootstrap_semantic_require_complete_type(
+        types::require_complete_type(
             context, type_id
         )) {
-        type_id = bootstrap_semantic_type_record(
+        type_id = context::type_record(
             context, type_id
         ).element_type;
     }
-    if (bootstrap_semantic_type_record(
+    if (context::type_record(
             context, type_id
         ).kind != type_info::Kind.enumeration ||
-        !bootstrap_semantic_require_complete_type(
+        !types::require_complete_type(
             context, type_id
         )) {
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
     let member_symbol: usize =
-        bootstrap_semantic_find_enum_member(
+        types::find_enum_member(
             context,
             type_id,
             unit_index,
             member_node.token_index
         );
-    if (member_symbol == bootstrap_semantic_no_id()) {
-        return bootstrap_const_not_constant();
+    if (member_symbol == context::no_id()) {
+        return not_constant();
     }
     // require_complete_type may have appended member symbols, so take a
     // fresh pointer before reading them.
-    let resolved_symbols: *const BootstrapSemanticSymbol =
-        context->symbols.data as *const BootstrapSemanticSymbol;
+    let resolved_symbols: *const context::Symbol =
+        context->symbols.data as *const context::Symbol;
     if ((resolved_symbols[member_symbol].flags &
-            (BootstrapSemanticSymbolFlag.enum_value_pending as
+            (context::SymbolFlag.enum_value_pending as
                 usize)) == 0) {
-        return bootstrap_const_integer(
+        return integer(
             resolved_symbols[member_symbol].integer_value
         );
     }
-    if (!bootstrap_semantic_resolve_enum_constant_values(
+    if (!resolve_enum_constant_values(
             context, type_id
         )) {
-        return bootstrap_const_error();
+        return error();
     }
-    let folded: *const BootstrapSemanticSymbol =
-        context->symbols.data as *const BootstrapSemanticSymbol;
+    let folded: *const context::Symbol =
+        context->symbols.data as *const context::Symbol;
     if ((folded[member_symbol].flags &
-            (BootstrapSemanticSymbolFlag.enum_value_pending as
+            (context::SymbolFlag.enum_value_pending as
                 usize)) != 0) {
-        return bootstrap_const_error();
+        return error();
     }
-    return bootstrap_const_integer(
+    return integer(
         folded[member_symbol].integer_value
     );
 }
 
-fn bootstrap_const_eval_name(
-    context: *BootstrapSemanticContext,
+fn eval_name(
+    context: *context::Context,
     unit_index: usize,
     node: parser::SyntaxNode
-) -> BootstrapConstValue {
-    let none: usize = bootstrap_semantic_no_id();
+) -> Value {
+    let none: usize = context::no_id();
     if (node.child_count == 0) {
         if (context->const_call_depth > 0) {
-            let slot: usize = bootstrap_const_env_find(
+            let slot: usize = env_find(
                 context, unit_index, node.token_index
             );
             if (slot != none) {
-                let bindings: *const BootstrapSemanticConstLocal =
+                let bindings: *const context::ConstLocal =
                     context->const_locals.data as
-                        *const BootstrapSemanticConstLocal;
-                let binding: BootstrapSemanticConstLocal = bindings[slot];
+                        *const context::ConstLocal;
+                let binding: context::ConstLocal = bindings[slot];
                 if (binding.is_boolean) {
-                    return bootstrap_const_boolean(binding.value != 0);
+                    return boolean(binding.value != 0);
                 }
-                return bootstrap_const_integer(binding.value);
+                return integer(binding.value);
             }
         }
-        let local_id: usize = bootstrap_semantic_find_local(
+        let local_id: usize = context::find_local(
             context, unit_index, node.token_index
         );
         if (local_id != none) {
-            let locals: *const BootstrapSemanticLocal =
-                context->locals.data as *const BootstrapSemanticLocal;
-            let local: BootstrapSemanticLocal = locals[local_id];
+            let locals: *const context::Local =
+                context->locals.data as *const context::Local;
+            let local: context::Local = locals[local_id];
             if (!local.constant_binding) {
-                return bootstrap_const_not_constant();
+                return not_constant();
             }
             if (local.type_id ==
                 (type_info::BuiltinType.boolean as usize)) {
-                return bootstrap_const_boolean(local.integer_value != 0);
+                return boolean(local.integer_value != 0);
             }
-            return bootstrap_const_integer(local.integer_value);
+            return integer(local.integer_value);
         }
     }
     let symbol_id: usize =
-        bootstrap_semantic_lookup_qualified_symbol(
+        context::lookup_qualified_symbol(
             context,
             unit_index,
             node,
-            BootstrapSemanticSymbolKind.constant,
+            context::SymbolKind.constant,
             false
         );
     if (symbol_id == none) {
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
-    var symbols: *const BootstrapSemanticSymbol =
-        context->symbols.data as *const BootstrapSemanticSymbol;
-    var symbol: BootstrapSemanticSymbol = symbols[symbol_id];
+    var symbols: *const context::Symbol =
+        context->symbols.data as *const context::Symbol;
+    var symbol: context::Symbol = symbols[symbol_id];
     if ((symbol.flags &
-            (BootstrapSemanticSymbolFlag.constant_resolved as
+            (context::SymbolFlag.constant_resolved as
                 usize)) == 0) {
         // Resolve the initializer on demand so constants declared anywhere
         // (including later passes' feeding sites) are visible here.
-        if (!bootstrap_semantic_resolve_constant(context, symbol_id)) {
-            return bootstrap_const_not_constant();
+        if (!resolve_constant(context, symbol_id)) {
+            return not_constant();
         }
         symbols = context->symbols.data as
-            *const BootstrapSemanticSymbol;
+            *const context::Symbol;
         symbol = symbols[symbol_id];
     }
     if (symbol.type_id == (type_info::BuiltinType.boolean as usize)) {
-        return bootstrap_const_boolean(symbol.integer_value != 0);
+        return boolean(symbol.integer_value != 0);
     }
-    return bootstrap_const_integer(symbol.integer_value);
+    return integer(symbol.integer_value);
 }
 
-fn bootstrap_const_eval_unary(
-    context: *BootstrapSemanticContext,
+fn eval_unary(
+    context: *context::Context,
     unit_index: usize,
     node: parser::SyntaxNode
-) -> BootstrapConstValue {
+) -> Value {
     if (node.child_count != 1) {
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
     let operation: lexer::TokenKind =
-        bootstrap_semantic_token(
+        context::token(
             context, unit_index, node.token_index
         ).kind;
-    let operand: BootstrapConstValue =
-        bootstrap_consteval_expression(
+    let operand: Value =
+        expression(
             context, unit_index, node.first_child
         );
     if (!operand.is_constant || operand.error) {
         return operand;
     }
     if (operation == lexer::TokenKind.minus) {
-        return bootstrap_const_integer(
+        return integer(
             (0 as u64) - operand.value
         );
     }
     if (operation == lexer::TokenKind.tilde) {
-        return bootstrap_const_integer(~(operand.value));
+        return integer(~(operand.value));
     }
     if (operation == lexer::TokenKind.bang) {
         if (!operand.is_boolean) {
-            return bootstrap_const_error();
+            return error();
         }
-        return bootstrap_const_boolean(operand.value == 0);
+        return boolean(operand.value == 0);
     }
-    return bootstrap_const_not_constant();
+    return not_constant();
 }
 
-fn bootstrap_const_eval_logical(
-    context: *BootstrapSemanticContext,
+fn eval_logical(
+    context: *context::Context,
     unit_index: usize,
     left_index: usize,
     right_index: usize,
     operation: lexer::TokenKind
-) -> BootstrapConstValue {
-    let left: BootstrapConstValue =
-        bootstrap_consteval_expression(
+) -> Value {
+    let left: Value =
+        expression(
             context, unit_index, left_index
         );
     if (!left.is_constant || left.error) {
         return left;
     }
     if (!left.is_boolean) {
-        return bootstrap_const_error();
+        return error();
     }
     if (operation == lexer::TokenKind.logical_and &&
         left.value == 0) {
-        return bootstrap_const_boolean(false);
+        return boolean(false);
     }
     if (operation == lexer::TokenKind.logical_or &&
         left.value != 0) {
-        return bootstrap_const_boolean(true);
+        return boolean(true);
     }
-    let right: BootstrapConstValue =
-        bootstrap_consteval_expression(
+    let right: Value =
+        expression(
             context, unit_index, right_index
         );
     if (!right.is_constant || right.error) {
         return right;
     }
     if (!right.is_boolean) {
-        return bootstrap_const_error();
+        return error();
     }
-    return bootstrap_const_boolean(right.value != 0);
+    return boolean(right.value != 0);
 }
 
-fn bootstrap_const_eval_binary(
-    context: *BootstrapSemanticContext,
+fn eval_binary(
+    context: *context::Context,
     unit_index: usize,
     node: parser::SyntaxNode
-) -> BootstrapConstValue {
+) -> Value {
     if (node.child_count != 2) {
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
     let operation: lexer::TokenKind =
-        bootstrap_semantic_token(
+        context::token(
             context, unit_index, node.token_index
         ).kind;
     let left_node: parser::SyntaxNode =
-        bootstrap_semantic_node(
+        context::node(
             context, unit_index, node.first_child
         );
     let right_index: usize = left_node.next_sibling;
     if (operation == lexer::TokenKind.logical_and ||
         operation == lexer::TokenKind.logical_or) {
-        return bootstrap_const_eval_logical(
+        return eval_logical(
             context,
             unit_index,
             node.first_child,
@@ -301,62 +301,62 @@ fn bootstrap_const_eval_binary(
             operation
         );
     }
-    let left: BootstrapConstValue =
-        bootstrap_consteval_expression(
+    let left: Value =
+        expression(
             context, unit_index, node.first_child
         );
     if (!left.is_constant || left.error) {
         return left;
     }
-    let right: BootstrapConstValue =
-        bootstrap_consteval_expression(
+    let right: Value =
+        expression(
             context, unit_index, right_index
         );
     if (!right.is_constant || right.error) {
         return right;
     }
     if (operation == lexer::TokenKind.plus) {
-        return bootstrap_const_integer(
+        return integer(
             left.value + right.value
         );
     }
     if (operation == lexer::TokenKind.minus) {
-        return bootstrap_const_integer(
+        return integer(
             left.value - right.value
         );
     }
     if (operation == lexer::TokenKind.star) {
-        return bootstrap_const_integer(
+        return integer(
             left.value * right.value
         );
     }
     if (operation == lexer::TokenKind.slash ||
         operation == lexer::TokenKind.percent) {
         if (right.value == 0) {
-            return bootstrap_const_error();
+            return error();
         }
         let dividend: i64 = left.value as i64;
         let divisor: i64 = right.value as i64;
         if (divisor == -1 &&
             left.value == ((1 as u64) << 63)) {
-            return bootstrap_const_error();
+            return error();
         }
         if (operation == lexer::TokenKind.slash) {
-            return bootstrap_const_integer(
+            return integer(
                 (dividend / divisor) as u64
             );
         }
-        return bootstrap_const_integer(
+        return integer(
             (dividend % divisor) as u64
         );
     }
     if (operation == lexer::TokenKind.shift_left ||
         operation == lexer::TokenKind.shift_right) {
         if (right.value >= 64) {
-            return bootstrap_const_error();
+            return error();
         }
         if (operation == lexer::TokenKind.shift_left) {
-            return bootstrap_const_integer(
+            return integer(
                 left.value << right.value
             );
         }
@@ -366,116 +366,116 @@ fn bootstrap_const_eval_binary(
             shifted = shifted |
                 ~((~((0 as u64))) >> right.value);
         }
-        return bootstrap_const_integer(shifted);
+        return integer(shifted);
     }
     if (operation == lexer::TokenKind.ampersand) {
-        return bootstrap_const_integer(
+        return integer(
             left.value & right.value
         );
     }
     if (operation == lexer::TokenKind.pipe) {
-        return bootstrap_const_integer(
+        return integer(
             left.value | right.value
         );
     }
     if (operation == lexer::TokenKind.caret) {
-        return bootstrap_const_integer(
+        return integer(
             left.value ^ right.value
         );
     }
     if (operation == lexer::TokenKind.equal_equal) {
-        return bootstrap_const_boolean(
+        return boolean(
             left.value == right.value
         );
     }
     if (operation == lexer::TokenKind.bang_equal) {
-        return bootstrap_const_boolean(
+        return boolean(
             left.value != right.value
         );
     }
     if (operation == lexer::TokenKind.less) {
-        return bootstrap_const_boolean(
+        return boolean(
             (left.value as i64) < (right.value as i64)
         );
     }
     if (operation == lexer::TokenKind.less_equal) {
-        return bootstrap_const_boolean(
+        return boolean(
             (left.value as i64) <= (right.value as i64)
         );
     }
     if (operation == lexer::TokenKind.greater) {
-        return bootstrap_const_boolean(
+        return boolean(
             (left.value as i64) > (right.value as i64)
         );
     }
     if (operation == lexer::TokenKind.greater_equal) {
-        return bootstrap_const_boolean(
+        return boolean(
             (left.value as i64) >= (right.value as i64)
         );
     }
-    return bootstrap_const_not_constant();
+    return not_constant();
 }
 
-fn bootstrap_const_eval_conditional(
-    context: *BootstrapSemanticContext,
+fn eval_conditional(
+    context: *context::Context,
     unit_index: usize,
     node: parser::SyntaxNode
-) -> BootstrapConstValue {
+) -> Value {
     if (node.child_count != 3) {
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
     let condition_node: parser::SyntaxNode =
-        bootstrap_semantic_node(
+        context::node(
             context, unit_index, node.first_child
         );
     let then_node: parser::SyntaxNode =
-        bootstrap_semantic_node(
+        context::node(
             context, unit_index, condition_node.next_sibling
         );
-    let condition: BootstrapConstValue =
-        bootstrap_consteval_expression(
+    let condition: Value =
+        expression(
             context, unit_index, node.first_child
         );
     if (!condition.is_constant || condition.error) {
         return condition;
     }
     if (!condition.is_boolean) {
-        return bootstrap_const_error();
+        return error();
     }
     if (condition.value != 0) {
-        return bootstrap_consteval_expression(
+        return expression(
             context, unit_index, condition_node.next_sibling
         );
     }
-    return bootstrap_consteval_expression(
+    return expression(
         context, unit_index, then_node.next_sibling
     );
 }
 
-fn bootstrap_const_eval_layout_query(
-    context: *BootstrapSemanticContext,
+fn eval_layout_query(
+    context: *context::Context,
     unit_index: usize,
     node: parser::SyntaxNode
-) -> BootstrapConstValue {
+) -> Value {
     if (node.child_count == 0) {
-        return bootstrap_const_error();
+        return error();
     }
     let type_id: usize =
-        bootstrap_semantic_resolve_type_node(
+        types::resolve_type_node(
             context, unit_index, node.first_child
         );
-    if (type_id == bootstrap_semantic_no_id() ||
-        !bootstrap_semantic_require_complete_type(
+    if (type_id == context::no_id() ||
+        !types::require_complete_type(
             context, type_id
         )) {
-        return bootstrap_const_error();
+        return error();
     }
     let record: type_info::Record =
-        bootstrap_semantic_type_record(context, type_id);
+        context::type_record(context, type_id);
     if (record.kind == type_info::Kind.type_void ||
         record.size_bytes == 0 ||
         record.alignment_bytes == 0) {
-        return bootstrap_const_error();
+        return error();
     }
     var value: usize = 0;
     if (node.kind == parser::SyntaxKind.sizeof_expression) {
@@ -487,7 +487,7 @@ fn bootstrap_const_eval_layout_query(
             parser::SyntaxKind.offsetof_expression &&
         node.child_count >= 2) {
         let type_node: parser::SyntaxNode =
-            bootstrap_semantic_node(
+            context::node(
                 context, unit_index, node.first_child
             );
         let fields: *const type_info::Field =
@@ -495,72 +495,72 @@ fn bootstrap_const_eval_layout_query(
                 *const type_info::Field;
         var current_type: usize = type_id;
         var member_index: usize = type_node.next_sibling;
-        while (member_index != bootstrap_semantic_no_id()) {
+        while (member_index != context::no_id()) {
             let member: parser::SyntaxNode =
-                bootstrap_semantic_node(
+                context::node(
                     context, unit_index, member_index
                 );
-            let lookup: BootstrapSemanticFieldLookup =
-                bootstrap_semantic_lookup_field(
+            let lookup: types::FieldLookup =
+                types::lookup_field(
                     context,
                     current_type,
                     unit_index,
                     member.token_index
                 );
-            if (lookup.status != BootstrapSemanticFieldStatus.found) {
-                return bootstrap_const_error();
+            if (lookup.status != types::FieldStatus.found) {
+                return error();
             }
             value += lookup.offset_bytes;
             current_type = fields[lookup.field_id].type_id;
             member_index = member.next_sibling;
         }
     } else {
-        return bootstrap_const_error();
+        return error();
     }
-    return bootstrap_const_integer(value as u64);
+    return integer(value as u64);
 }
 
-fn bootstrap_const_eval_cast(
-    context: *BootstrapSemanticContext,
+fn eval_cast(
+    context: *context::Context,
     unit_index: usize,
     node: parser::SyntaxNode
-) -> BootstrapConstValue {
+) -> Value {
     if (node.child_count != 2) {
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
     let operand_node: parser::SyntaxNode =
-        bootstrap_semantic_node(
+        context::node(
             context, unit_index, node.first_child
         );
     let target_type: usize =
-        bootstrap_semantic_resolve_type_node(
+        types::resolve_type_node(
             context, unit_index, operand_node.next_sibling
         );
-    if (target_type == bootstrap_semantic_no_id()) {
-        return bootstrap_const_error();
+    if (target_type == context::no_id()) {
+        return error();
     }
-    let operand: BootstrapConstValue =
-        bootstrap_consteval_expression(
+    let operand: Value =
+        expression(
             context, unit_index, node.first_child
         );
     if (!operand.is_constant || operand.error) {
         return operand;
     }
     let target_record: type_info::Record =
-        bootstrap_semantic_type_record(context, target_type);
+        context::type_record(context, target_type);
     if (!type_info::is_integer(target_record.kind)) {
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
     let width: usize =
         type_info::bit_width(target_record.kind);
     var value: u64 =
-        bootstrap_semantic_mask_integer(operand.value, width);
+        context::mask_integer(operand.value, width);
     if (width < 64 &&
         type_info::is_signed_integer(target_record.kind) &&
         (value & ((1 as u64) << ((width - 1) as u64))) != 0) {
         value = value | ~(((1 as u64) << (width as u64)) - 1);
     }
-    return bootstrap_const_integer(value);
+    return integer(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -568,42 +568,42 @@ fn bootstrap_const_eval_cast(
 //
 // A `const fn` call whose arguments are all constant is evaluated by
 // tree-walking the callee body with a parameter environment. Environment
-// entries share the BootstrapConstValue currency (u64 value + boolean flag)
+// entries share the Value currency (u64 value + boolean flag)
 // and live on a single stack in the context; each call frame records the
 // stack base and truncates on exit. Evaluation is bounded by a per-top-level
 // -call step budget (statements + expression nodes) and a call depth cap;
 // hitting either makes the call non-constant, and the use site diagnoses.
 
-struct BootstrapConstExec {
+struct Exec {
     valid: bool;
     returned: bool;
     is_boolean: bool;
     value: u64;
 }
 
-fn bootstrap_const_exec_invalid() -> BootstrapConstExec {
+fn exec_invalid() -> Exec {
     return {
         valid = false, returned = false, is_boolean = false, value = 0,
     };
 }
 
-fn bootstrap_const_exec_continue() -> BootstrapConstExec {
+fn exec_continue() -> Exec {
     return {
         valid = true, returned = false, is_boolean = false, value = 0,
     };
 }
 
-fn bootstrap_const_exec_return(
-    value: BootstrapConstValue
-) -> BootstrapConstExec {
+fn exec_return(
+    value: Value
+) -> Exec {
     return {
         valid = true, returned = true, is_boolean = value.is_boolean,
         value = value.value,
     };
 }
 
-fn bootstrap_const_step(
-    context: *BootstrapSemanticContext
+fn step(
+    context: *context::Context
 ) -> bool {
     if (context->const_steps == 0) {
         return false;
@@ -612,18 +612,18 @@ fn bootstrap_const_step(
     return true;
 }
 
-fn bootstrap_const_env_find(
-    context: *BootstrapSemanticContext,
+fn env_find(
+    context: *context::Context,
     unit_index: usize,
     name_token: usize
 ) -> usize {
-    let bindings: *const BootstrapSemanticConstLocal =
+    let bindings: *const context::ConstLocal =
         context->const_locals.data as
-            *const BootstrapSemanticConstLocal;
+            *const context::ConstLocal;
     var index: usize = context->const_local_count;
     while (index > 0) {
         index -= 1;
-        if (bootstrap_semantic_tokens_equal(
+        if (context::tokens_equal(
                 context,
                 unit_index,
                 name_token,
@@ -633,19 +633,19 @@ fn bootstrap_const_env_find(
             return index;
         }
     }
-    return bootstrap_semantic_no_id();
+    return context::no_id();
 }
 
-fn bootstrap_const_env_push(
-    context: *BootstrapSemanticContext,
-    binding: BootstrapSemanticConstLocal
+fn env_push(
+    context: *context::Context,
+    binding: context::ConstLocal
 ) -> bool {
-    if (!bootstrap_semantic_append_record(
+    if (!context::append_record(
             context,
             &context->const_locals,
             (&binding) as
-                *const BootstrapSemanticConstLocal as *const u8,
-            sizeof(BootstrapSemanticConstLocal)
+                *const context::ConstLocal as *const u8,
+            sizeof(context::ConstLocal)
         )) {
         return false;
     }
@@ -655,14 +655,14 @@ fn bootstrap_const_env_push(
 
 // Frame/block teardown: the buffer must shrink with the watermark so the
 // context storage invariant (count == length / sizeof) keeps holding.
-fn bootstrap_const_env_truncate(
-    context: *BootstrapSemanticContext,
+fn env_truncate(
+    context: *context::Context,
     base: usize
 ) -> bool {
     let truncated: bytes::BufferResult =
         bytes::truncate(
             context->const_locals,
-            base * sizeof(BootstrapSemanticConstLocal)
+            base * sizeof(context::ConstLocal)
         );
     context->const_locals = truncated.buffer;
     if (truncated.error != runtime::Error.none) {
@@ -675,15 +675,15 @@ fn bootstrap_const_env_truncate(
 
 // Unwraps aliases; the result is type_info::Kind.invalid unless the type
 // resolves to an integer scalar or bool.
-fn bootstrap_const_scalar_kind(
-    context: *BootstrapSemanticContext,
+fn scalar_kind(
+    context: *context::Context,
     type_id: usize
 ) -> type_info::Kind {
     var record: type_info::Record =
-        bootstrap_semantic_type_record(context, type_id);
+        context::type_record(context, type_id);
     if (record.kind == type_info::Kind.alias &&
-        bootstrap_semantic_require_complete_type(context, type_id)) {
-        record = bootstrap_semantic_type_record(
+        types::require_complete_type(context, type_id)) {
+        record = context::type_record(
             context, record.element_type
         );
     }
@@ -694,13 +694,13 @@ fn bootstrap_const_scalar_kind(
     return record.kind;
 }
 
-fn bootstrap_const_narrow_value(
+fn narrow_value(
     kind: type_info::Kind,
     value: u64
 ) -> u64 {
     let width: usize = type_info::bit_width(kind);
     var narrowed: u64 =
-        bootstrap_semantic_mask_integer(value, width);
+        context::mask_integer(value, width);
     if (width < 64 &&
         type_info::is_signed_integer(kind) &&
         (narrowed & ((1 as u64) << ((width - 1) as u64))) != 0) {
@@ -710,95 +710,95 @@ fn bootstrap_const_narrow_value(
     return narrowed;
 }
 
-fn bootstrap_const_exec_block(
-    context: *BootstrapSemanticContext,
+fn exec_block(
+    context: *context::Context,
     unit_index: usize,
     block_index: usize
-) -> BootstrapConstExec {
+) -> Exec {
     let scope_base: usize = context->const_local_count;
-    var result: BootstrapConstExec =
-        bootstrap_const_exec_continue();
-    var child: usize = bootstrap_semantic_node(
+    var result: Exec =
+        exec_continue();
+    var child: usize = context::node(
         context, unit_index, block_index
     ).first_child;
-    while (child != bootstrap_semantic_no_id() &&
+    while (child != context::no_id() &&
         result.valid && !result.returned &&
         context->error == runtime::Error.none) {
-        result = bootstrap_const_exec_statement(
+        result = exec_statement(
             context, unit_index, child
         );
-        child = bootstrap_semantic_node(
+        child = context::node(
             context, unit_index, child
         ).next_sibling;
     }
-    if (!bootstrap_const_env_truncate(context, scope_base)) {
-        return bootstrap_const_exec_invalid();
+    if (!env_truncate(context, scope_base)) {
+        return exec_invalid();
     }
     return result;
 }
 
-fn bootstrap_const_exec_statement(
-    context: *BootstrapSemanticContext,
+fn exec_statement(
+    context: *context::Context,
     unit_index: usize,
     node_index: usize
-) -> BootstrapConstExec {
-    if (!bootstrap_const_step(context)) {
-        return bootstrap_const_exec_invalid();
+) -> Exec {
+    if (!step(context)) {
+        return exec_invalid();
     }
-    let node: parser::SyntaxNode = bootstrap_semantic_node(
+    let node: parser::SyntaxNode = context::node(
         context, unit_index, node_index
     );
     if (node.kind == parser::SyntaxKind.block_statement) {
-        return bootstrap_const_exec_block(
+        return exec_block(
             context, unit_index, node_index
         );
     }
     if (node.kind == parser::SyntaxKind.variable_declaration ||
         node.kind == parser::SyntaxKind.const_declaration) {
         if (node.child_count != 2) {
-            return bootstrap_const_exec_invalid();
+            return exec_invalid();
         }
         let type_id: usize =
-            bootstrap_semantic_resolve_type_node(
+            types::resolve_type_node(
                 context, unit_index, node.first_child
             );
-        if (type_id == bootstrap_semantic_no_id()) {
-            return bootstrap_const_exec_invalid();
+        if (type_id == context::no_id()) {
+            return exec_invalid();
         }
         let kind: type_info::Kind =
-            bootstrap_const_scalar_kind(context, type_id);
+            scalar_kind(context, type_id);
         if (kind == type_info::Kind.invalid) {
-            return bootstrap_const_exec_invalid();
+            return exec_invalid();
         }
-        let initializer_id: usize = bootstrap_semantic_node(
+        let initializer_id: usize = context::node(
             context, unit_index, node.first_child
         ).next_sibling;
-        let value: BootstrapConstValue =
-            bootstrap_consteval_expression(
+        let value: Value =
+            expression(
                 context, unit_index, initializer_id
             );
         if (!value.is_constant || value.error) {
-            return bootstrap_const_exec_invalid();
+            return exec_invalid();
         }
         let is_boolean: bool =
             kind == type_info::Kind.boolean;
         if (value.is_boolean != is_boolean ||
             (!is_boolean &&
-                !bootstrap_semantic_const_integer_fits(
+                !const_integer_fits(
                     kind, value.value
                 ))) {
-            return bootstrap_const_exec_invalid();
+            return exec_invalid();
         }
         var stored: u64 = 0;
         if (value.value != 0) {
             stored = 1;
         }
         if (!is_boolean) {
-            stored = bootstrap_const_narrow_value(
+            stored = narrow_value(
                 kind, value.value
             );
         }
-        if (!bootstrap_const_env_push(
+        if (!env_push(
                 context,
                 {
                     unit_index = unit_index,
@@ -811,190 +811,190 @@ fn bootstrap_const_exec_statement(
                             usize)) != 0,
                 }
             )) {
-            return bootstrap_const_exec_invalid();
+            return exec_invalid();
         }
-        return bootstrap_const_exec_continue();
+        return exec_continue();
     }
     if (node.kind == parser::SyntaxKind.assignment_statement) {
         if (node.child_count != 2 ||
-            bootstrap_semantic_token(
+            context::token(
                 context, unit_index, node.token_index
             ).kind != lexer::TokenKind.equal) {
-            return bootstrap_const_exec_invalid();
+            return exec_invalid();
         }
         let target: parser::SyntaxNode =
-            bootstrap_semantic_node(
+            context::node(
                 context, unit_index, node.first_child
             );
         if (target.kind != parser::SyntaxKind.name_expression) {
-            return bootstrap_const_exec_invalid();
+            return exec_invalid();
         }
-        let slot: usize = bootstrap_const_env_find(
+        let slot: usize = env_find(
             context, unit_index, target.token_index
         );
-        if (slot == bootstrap_semantic_no_id()) {
-            return bootstrap_const_exec_invalid();
+        if (slot == context::no_id()) {
+            return exec_invalid();
         }
         let value_id: usize = target.next_sibling;
-        let value: BootstrapConstValue =
-            bootstrap_consteval_expression(
+        let value: Value =
+            expression(
                 context, unit_index, value_id
             );
         if (!value.is_constant || value.error) {
-            return bootstrap_const_exec_invalid();
+            return exec_invalid();
         }
         // Nested calls may have grown the binding stack; take a fresh
         // pointer before mutating.
-        let bindings: *BootstrapSemanticConstLocal =
+        let bindings: *context::ConstLocal =
             context->const_locals.data as
-                *BootstrapSemanticConstLocal;
+                *context::ConstLocal;
         let kind: type_info::Kind =
-            bootstrap_const_scalar_kind(
+            scalar_kind(
                 context, bindings[slot].type_id
             );
         if (kind == type_info::Kind.invalid ||
             !bindings[slot].mutable_binding ||
             bindings[slot].is_boolean != value.is_boolean ||
             (!value.is_boolean &&
-                !bootstrap_semantic_const_integer_fits(
+                !const_integer_fits(
                     kind, value.value
                 ))) {
-            return bootstrap_const_exec_invalid();
+            return exec_invalid();
         }
         var stored: u64 = 0;
         if (value.value != 0) {
             stored = 1;
         }
         if (!value.is_boolean) {
-            stored = bootstrap_const_narrow_value(
+            stored = narrow_value(
                 kind, value.value
             );
         }
         bindings[slot].value = stored;
-        return bootstrap_const_exec_continue();
+        return exec_continue();
     }
     if (node.kind == parser::SyntaxKind.expression_statement) {
         if (node.child_count != 1) {
-            return bootstrap_const_exec_invalid();
+            return exec_invalid();
         }
-        let value: BootstrapConstValue =
-            bootstrap_consteval_expression(
+        let value: Value =
+            expression(
                 context, unit_index, node.first_child
             );
         if (!value.is_constant || value.error) {
-            return bootstrap_const_exec_invalid();
+            return exec_invalid();
         }
-        return bootstrap_const_exec_continue();
+        return exec_continue();
     }
     if (node.kind == parser::SyntaxKind.if_statement) {
         if (node.child_count < 2 || node.child_count > 3) {
-            return bootstrap_const_exec_invalid();
+            return exec_invalid();
         }
-        let condition: BootstrapConstValue =
-            bootstrap_consteval_expression(
+        let condition: Value =
+            expression(
                 context, unit_index, node.first_child
             );
         if (!condition.is_constant || condition.error ||
             !condition.is_boolean) {
-            return bootstrap_const_exec_invalid();
+            return exec_invalid();
         }
-        let then_id: usize = bootstrap_semantic_node(
+        let then_id: usize = context::node(
             context, unit_index, node.first_child
         ).next_sibling;
         if (condition.value != 0) {
-            return bootstrap_const_exec_statement(
+            return exec_statement(
                 context, unit_index, then_id
             );
         }
         if (node.child_count == 3) {
-            return bootstrap_const_exec_statement(
+            return exec_statement(
                 context,
                 unit_index,
-                bootstrap_semantic_node(
+                context::node(
                     context, unit_index, then_id
                 ).next_sibling
             );
         }
-        return bootstrap_const_exec_continue();
+        return exec_continue();
     }
     if (node.kind == parser::SyntaxKind.return_statement) {
         if (node.child_count != 1) {
-            return bootstrap_const_exec_invalid();
+            return exec_invalid();
         }
-        let value: BootstrapConstValue =
-            bootstrap_consteval_expression(
+        let value: Value =
+            expression(
                 context, unit_index, node.first_child
             );
         if (!value.is_constant || value.error) {
-            return bootstrap_const_exec_invalid();
+            return exec_invalid();
         }
-        return bootstrap_const_exec_return(value);
+        return exec_return(value);
     }
-    return bootstrap_const_exec_invalid();
+    return exec_invalid();
 }
 
-fn bootstrap_const_eval_call(
-    context: *BootstrapSemanticContext,
+fn eval_call(
+    context: *context::Context,
     unit_index: usize,
     node: parser::SyntaxNode
-) -> BootstrapConstValue {
-    let none: usize = bootstrap_semantic_no_id();
+) -> Value {
+    let none: usize = context::no_id();
     if (node.child_count == 0) {
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
-    let callee: parser::SyntaxNode = bootstrap_semantic_node(
+    let callee: parser::SyntaxNode = context::node(
         context, unit_index, node.first_child
     );
     if (callee.kind != parser::SyntaxKind.name_expression) {
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
-    var symbol_id: usize = bootstrap_semantic_no_id();
+    var symbol_id: usize = context::no_id();
     if (callee.child_count != 0) {
-        symbol_id = bootstrap_semantic_lookup_qualified_symbol(
+        symbol_id = context::lookup_qualified_symbol(
             context,
             unit_index,
             callee,
-            BootstrapSemanticSymbolKind.const_function,
+            context::SymbolKind.const_function,
             false
         );
-    } else if (bootstrap_const_env_find(
+    } else if (env_find(
             context, unit_index, callee.token_index
         ) == none) {
-        symbol_id = bootstrap_semantic_lookup_symbol(
+        symbol_id = context::lookup_symbol(
             context,
             unit_index,
             callee.token_index,
-            BootstrapSemanticSymbolKind.const_function
+            context::SymbolKind.const_function
         );
     }
     if (symbol_id == none ||
         context->const_call_depth >=
-            BootstrapSemanticLimit.maximum_const_call_depth as
+            context::Limit.maximum_const_call_depth as
                 usize) {
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
     if (context->const_call_depth == 0) {
         context->const_steps =
-            BootstrapSemanticLimit.maximum_const_steps as usize;
+            context::Limit.maximum_const_steps as usize;
     }
-    let symbols: *const BootstrapSemanticSymbol =
-        context->symbols.data as *const BootstrapSemanticSymbol;
-    let symbol: BootstrapSemanticSymbol = symbols[symbol_id];
-    let const_functions: *const BootstrapSemanticConstFunction =
+    let symbols: *const context::Symbol =
+        context->symbols.data as *const context::Symbol;
+    let symbol: context::Symbol = symbols[symbol_id];
+    let const_functions: *const context::ConstFunction =
         context->const_functions.data as
-            *const BootstrapSemanticConstFunction;
-    let record: BootstrapSemanticConstFunction =
+            *const context::ConstFunction;
+    let record: context::ConstFunction =
         const_functions[symbol.function_id];
     if (node.child_count - 1 != record.parameter_count) {
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
     let body_unit: usize = symbol.declaration_unit;
     var body_id: usize = none;
-    var child: usize = bootstrap_semantic_node(
+    var child: usize = context::node(
         context, body_unit, symbol.declaration_node
     ).first_child;
     while (child != none) {
-        let part: parser::SyntaxNode = bootstrap_semantic_node(
+        let part: parser::SyntaxNode = context::node(
             context, body_unit, child
         );
         if (part.kind == parser::SyntaxKind.block_statement) {
@@ -1003,22 +1003,22 @@ fn bootstrap_const_eval_call(
         child = part.next_sibling;
     }
     if (body_id == none) {
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
-    let parameters: *const BootstrapSemanticParameter =
+    let parameters: *const context::Parameter =
         context->parameters.data as
-            *const BootstrapSemanticParameter;
+            *const context::Parameter;
     let frame_base: usize = context->const_local_count;
     var argument_id: usize = callee.next_sibling;
     var index: usize = 0;
     var arguments_ok: bool = true;
     while (index < record.parameter_count && arguments_ok) {
-        let parameter: BootstrapSemanticParameter =
+        let parameter: context::Parameter =
             parameters[record.first_parameter + index];
         let kind: type_info::Kind =
-            bootstrap_const_scalar_kind(context, parameter.type_id);
-        let value: BootstrapConstValue =
-            bootstrap_consteval_expression(
+            scalar_kind(context, parameter.type_id);
+        let value: Value =
+            expression(
                 context, unit_index, argument_id
             );
         let is_boolean: bool =
@@ -1027,7 +1027,7 @@ fn bootstrap_const_eval_call(
             !value.is_constant || value.error ||
             value.is_boolean != is_boolean ||
             (!is_boolean &&
-                !bootstrap_semantic_const_integer_fits(
+                !const_integer_fits(
                     kind, value.value
                 ))) {
             arguments_ok = false;
@@ -1038,11 +1038,11 @@ fn bootstrap_const_eval_call(
             stored = 1;
         }
         if (!is_boolean) {
-            stored = bootstrap_const_narrow_value(
+            stored = narrow_value(
                 kind, value.value
             );
         }
-        arguments_ok = bootstrap_const_env_push(
+        arguments_ok = env_push(
             context,
             {
                 unit_index = body_unit,
@@ -1053,77 +1053,77 @@ fn bootstrap_const_eval_call(
                 mutable_binding = false,
             }
         );
-        argument_id = bootstrap_semantic_node(
+        argument_id = context::node(
             context, unit_index, argument_id
         ).next_sibling;
         index += 1;
     }
-    var result: BootstrapConstExec =
-        bootstrap_const_exec_invalid();
+    var result: Exec =
+        exec_invalid();
     if (arguments_ok) {
         context->const_call_depth += 1;
-        result = bootstrap_const_exec_block(
+        result = exec_block(
             context, body_unit, body_id
         );
         context->const_call_depth -= 1;
     }
-    if (!bootstrap_const_env_truncate(context, frame_base)) {
-        return bootstrap_const_not_constant();
+    if (!env_truncate(context, frame_base)) {
+        return not_constant();
     }
     if (!result.valid || !result.returned) {
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
     let return_kind: type_info::Kind =
-        bootstrap_const_scalar_kind(context, record.return_type);
+        scalar_kind(context, record.return_type);
     let return_boolean: bool =
         return_kind == type_info::Kind.boolean;
     if (return_kind == type_info::Kind.invalid ||
         result.is_boolean != return_boolean ||
         (!return_boolean &&
-            !bootstrap_semantic_const_integer_fits(
+            !const_integer_fits(
                 return_kind, result.value
             ))) {
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
     if (return_boolean) {
-        return bootstrap_const_boolean(result.value != 0);
+        return boolean(result.value != 0);
     }
-    return bootstrap_const_integer(result.value);
+    return integer(result.value);
 }
 
-fn bootstrap_consteval_expression(
-    context: *BootstrapSemanticContext,
+fn expression(
+    context: *context::Context,
     unit_index: usize,
     node_index: usize
-) -> BootstrapConstValue {
+) -> Value {
     if (context->const_call_depth > 0 &&
-        !bootstrap_const_step(context)) {
-        return bootstrap_const_not_constant();
+        !step(context)) {
+        return not_constant();
     }
-    let node: parser::SyntaxNode = bootstrap_semantic_node(
+    let node: parser::SyntaxNode = context::node(
         context, unit_index, node_index
     );
     if (node.kind == parser::SyntaxKind.integer_expression) {
         var value: u64 = 0;
-        if (!bootstrap_semantic_parse_unsigned(
+        if (!context::parse_unsigned(
                 context, unit_index, node.token_index, &value
             )) {
-            return bootstrap_const_error();
+            return error();
         }
-        return bootstrap_const_integer(value);
+        return integer(value);
     }
     if (node.kind == parser::SyntaxKind.character_expression) {
         var value: u64 = 0;
-        if (!bootstrap_semantic_decode_character(
+        if (!context::decode_character(
                 context, unit_index, node.token_index, &value
             )) {
-            return bootstrap_const_error();
+            return error();
         }
-        return bootstrap_const_integer(value);
+        return integer(value);
     }
     if (node.kind == parser::SyntaxKind.boolean_expression) {
-        return bootstrap_const_boolean(
-            bootstrap_semantic_token(
+        return boolean(
+            context::token(
                 context, unit_index, node.token_index
             ).kind == lexer::TokenKind.keyword_true
         );
@@ -1131,35 +1131,35 @@ fn bootstrap_consteval_expression(
     if (node.kind ==
         parser::SyntaxKind.parenthesized_expression) {
         if (node.child_count != 1) {
-            return bootstrap_const_not_constant();
+            return not_constant();
         }
-        return bootstrap_consteval_expression(
+        return expression(
             context, unit_index, node.first_child
         );
     }
     if (node.kind == parser::SyntaxKind.member_expression) {
-        return bootstrap_const_eval_enum_member(
+        return eval_enum_member(
             context, unit_index, node
         );
     }
     if (node.kind == parser::SyntaxKind.name_expression) {
-        return bootstrap_const_eval_name(
+        return eval_name(
             context, unit_index, node
         );
     }
     if (node.kind == parser::SyntaxKind.unary_expression) {
-        return bootstrap_const_eval_unary(
+        return eval_unary(
             context, unit_index, node
         );
     }
     if (node.kind == parser::SyntaxKind.binary_expression) {
-        return bootstrap_const_eval_binary(
+        return eval_binary(
             context, unit_index, node
         );
     }
     if (node.kind ==
         parser::SyntaxKind.conditional_expression) {
-        return bootstrap_const_eval_conditional(
+        return eval_conditional(
             context, unit_index, node
         );
     }
@@ -1167,81 +1167,81 @@ fn bootstrap_consteval_expression(
         node.kind == parser::SyntaxKind.alignof_expression ||
         node.kind ==
             parser::SyntaxKind.offsetof_expression) {
-        return bootstrap_const_eval_layout_query(
+        return eval_layout_query(
             context, unit_index, node
         );
     }
     if (node.kind == parser::SyntaxKind.cast_expression) {
-        return bootstrap_const_eval_cast(
+        return eval_cast(
             context, unit_index, node
         );
     }
     if (node.kind == parser::SyntaxKind.call_expression) {
-        return bootstrap_const_eval_call(
+        return eval_call(
             context, unit_index, node
         );
     }
     if (node.kind == parser::SyntaxKind.intrinsic_expression) {
         // @line() is a constant; @file() is a pointer and never folds.
         if (node.child_count == 0 &&
-            bootstrap_semantic_token_equals_bytes(
+            context::token_equals_bytes(
                 context, unit_index, node.token_index, "line", 4
             )) {
-            return bootstrap_const_integer(node.span.line as u64);
+            return integer(node.span.line as u64);
         }
-        return bootstrap_const_not_constant();
+        return not_constant();
     }
-    return bootstrap_const_not_constant();
+    return not_constant();
 }
 
-fn bootstrap_semantic_alignment_value_is_valid(
+fn alignment_value_is_valid(
     value: u64
 ) -> bool {
     return value != 0 &&
         value <=
-            BootstrapSemanticLimit.maximum_attribute_alignment as
+            context::Limit.maximum_attribute_alignment as
                 usize as u64 &&
         (value & (value - 1)) == 0;
 }
 
-fn bootstrap_semantic_declaration_alignment(
-    context: *BootstrapSemanticContext,
+fn declaration_alignment(
+    context: *context::Context,
     unit_index: usize,
     declaration_node: usize
-) -> BootstrapSemanticAlignment {
+) -> Alignment {
     let declaration: parser::SyntaxNode =
-        bootstrap_semantic_node(
+        context::node(
             context, unit_index, declaration_node
         );
     let argument: usize =
-        bootstrap_semantic_declaration_attribute_argument(
+        attributes::declaration_attribute_argument(
             context,
             unit_index,
             declaration,
-            BootstrapSemanticAttribute.align
+            attributes::Attribute.align
         );
-    if (argument == bootstrap_semantic_no_id()) {
+    if (argument == context::no_id()) {
         return {
             alignment = 0, valid = true,
         };
     }
     let argument_node: parser::SyntaxNode =
-        bootstrap_semantic_node(context, unit_index, argument);
-    let value: BootstrapConstValue =
-        bootstrap_consteval_expression(
+        context::node(context, unit_index, argument);
+    let value: Value =
+        expression(
             context, unit_index, argument
         );
     if (value.error || !value.is_constant || value.is_boolean ||
-        !bootstrap_semantic_alignment_value_is_valid(
+        !alignment_value_is_valid(
             value.value
         )) {
-        bootstrap_semantic_add_diagnostic(
+        context::add_diagnostic(
             context,
-            BootstrapSemanticDiagnosticKind.invalid_alignment,
+            context::DiagnosticKind.invalid_alignment,
             unit_index,
             argument_node.span,
-            bootstrap_semantic_no_id(),
-            bootstrap_semantic_empty_span(),
+            context::no_id(),
+            context::empty_span(),
             declaration_node
         );
         return {
@@ -1253,27 +1253,27 @@ fn bootstrap_semantic_declaration_alignment(
     };
 }
 
-fn bootstrap_semantic_resolve_alignment_attributes(
-    context: *BootstrapSemanticContext
+fn resolve_alignment_attributes(
+    context: *context::Context
 ) -> bool {
-    let none: usize = bootstrap_semantic_no_id();
-    let symbols: *const BootstrapSemanticSymbol =
-        context->symbols.data as *const BootstrapSemanticSymbol;
+    let none: usize = context::no_id();
+    let symbols: *const context::Symbol =
+        context->symbols.data as *const context::Symbol;
     var valid: bool = true;
     var symbol_id: usize = 0;
     while (symbol_id < context->symbol_count &&
         context->error == runtime::Error.none) {
-        let symbol: BootstrapSemanticSymbol = symbols[symbol_id];
+        let symbol: context::Symbol = symbols[symbol_id];
         if (symbol.kind ==
-            BootstrapSemanticSymbolKind.named_type) {
+            context::SymbolKind.named_type) {
             let record: type_info::Record =
-                bootstrap_semantic_type_record(
+                context::type_record(
                     context, symbol.type_id
                 );
             if (record.kind == type_info::Kind.structure ||
                 record.kind == type_info::Kind.record_union) {
-                let type_alignment: BootstrapSemanticAlignment =
-                    bootstrap_semantic_declaration_alignment(
+                let type_alignment: Alignment =
+                    declaration_alignment(
                         context,
                         symbol.declaration_unit,
                         symbol.declaration_node
@@ -1281,7 +1281,7 @@ fn bootstrap_semantic_resolve_alignment_attributes(
                 if (!type_alignment.valid) {
                     valid = false;
                 } else if (type_alignment.alignment != 0) {
-                    bootstrap_semantic_append_alignment_override(
+                    context::append_alignment_override(
                         context,
                         symbol.declaration_unit,
                         symbol.declaration_node,
@@ -1289,7 +1289,7 @@ fn bootstrap_semantic_resolve_alignment_attributes(
                     );
                 }
                 let declaration: parser::SyntaxNode =
-                    bootstrap_semantic_node(
+                    context::node(
                         context,
                         symbol.declaration_unit,
                         symbol.declaration_node
@@ -1298,7 +1298,7 @@ fn bootstrap_semantic_resolve_alignment_attributes(
                 while (child != none &&
                     context->error == runtime::Error.none) {
                     let node: parser::SyntaxNode =
-                        bootstrap_semantic_node(
+                        context::node(
                             context,
                             symbol.declaration_unit,
                             child
@@ -1306,8 +1306,8 @@ fn bootstrap_semantic_resolve_alignment_attributes(
                     if (node.kind ==
                         parser::SyntaxKind.field_declaration) {
                         let field_alignment:
-                            BootstrapSemanticAlignment =
-                                bootstrap_semantic_declaration_alignment(
+                            Alignment =
+                                declaration_alignment(
                                     context,
                                     symbol.declaration_unit,
                                     child
@@ -1315,7 +1315,7 @@ fn bootstrap_semantic_resolve_alignment_attributes(
                         if (!field_alignment.valid) {
                             valid = false;
                         } else if (field_alignment.alignment != 0) {
-                            bootstrap_semantic_append_alignment_override(
+                            context::append_alignment_override(
                                 context,
                                 symbol.declaration_unit,
                                 child,
@@ -1332,16 +1332,16 @@ fn bootstrap_semantic_resolve_alignment_attributes(
     return valid && context->error == runtime::Error.none;
 }
 
-fn bootstrap_semantic_resolve_bitfield_attribute(
-    context: *BootstrapSemanticContext,
+fn resolve_bitfield_attribute(
+    context: *context::Context,
     unit_index: usize,
     attribute_node: parser::SyntaxNode
 ) -> bool {
-    let none: usize = bootstrap_semantic_no_id();
+    let none: usize = context::no_id();
     if (attribute_node.parent == none) {
         return true;
     }
-    let parent: parser::SyntaxNode = bootstrap_semantic_node(
+    let parent: parser::SyntaxNode = context::node(
         context, unit_index, attribute_node.parent
     );
     if (parent.kind != parser::SyntaxKind.field_declaration) {
@@ -1353,31 +1353,31 @@ fn bootstrap_semantic_resolve_bitfield_attribute(
     var child: usize = attribute_node.first_child;
     while (child != none && context->error == runtime::Error.none) {
         let argument: parser::SyntaxNode =
-            bootstrap_semantic_node(context, unit_index, child);
+            context::node(context, unit_index, child);
         if (argument.kind != parser::SyntaxKind.named_argument ||
             argument.child_count != 1) {
-            bootstrap_semantic_add_diagnostic(
+            context::add_diagnostic(
                 context,
-                BootstrapSemanticDiagnosticKind.invalid_bitfield,
+                context::DiagnosticKind.invalid_bitfield,
                 unit_index,
                 argument.span,
                 none,
-                bootstrap_semantic_empty_span(),
+                context::empty_span(),
                 child
             );
             valid = false;
             break;
         }
-        let segments: *const BootstrapSemanticBitfieldSegment =
+        let segments: *const context::BitfieldSegment =
             context->bitfield_segments.data as
-                *const BootstrapSemanticBitfieldSegment;
+                *const context::BitfieldSegment;
         var duplicate: bool = false;
         var segment_id: usize = 0;
         while (segment_id < context->bitfield_segment_count) {
             if (segments[segment_id].declaration_unit == unit_index &&
                 segments[segment_id].declaration_node ==
                     attribute_node.parent &&
-                bootstrap_semantic_tokens_equal(
+                context::tokens_equal(
                     context,
                     unit_index,
                     argument.token_index,
@@ -1388,26 +1388,26 @@ fn bootstrap_semantic_resolve_bitfield_attribute(
             }
             segment_id += 1;
         }
-        let width: BootstrapConstValue =
-            bootstrap_consteval_expression(
+        let width: Value =
+            expression(
                 context, unit_index, argument.first_child
             );
         if (duplicate || width.error || !width.is_constant ||
             width.is_boolean || width.value == 0 ||
             width.value > 64) {
-            bootstrap_semantic_add_diagnostic(
+            context::add_diagnostic(
                 context,
-                BootstrapSemanticDiagnosticKind.invalid_bitfield,
+                context::DiagnosticKind.invalid_bitfield,
                 unit_index,
                 argument.span,
                 none,
-                bootstrap_semantic_empty_span(),
+                context::empty_span(),
                 child
             );
             valid = false;
             break;
         }
-        if (!bootstrap_semantic_append_bitfield_segment(
+        if (!context::append_bitfield_segment(
                 context,
                 {
                     declaration_unit = unit_index,
@@ -1425,27 +1425,27 @@ fn bootstrap_semantic_resolve_bitfield_attribute(
     return valid && context->error == runtime::Error.none;
 }
 
-fn bootstrap_semantic_resolve_bitfield_attributes(
-    context: *BootstrapSemanticContext
+fn resolve_bitfield_attributes(
+    context: *context::Context
 ) -> bool {
     var valid: bool = true;
     var unit_index: usize = 0;
     while (unit_index < context->input.unit_count &&
         context->error == runtime::Error.none) {
-        let unit: *const BootstrapSemanticUnit =
-            bootstrap_semantic_input_unit(context, unit_index);
+        let unit: *const context::Unit =
+            context::input_unit(context, unit_index);
         var node_index: usize = 0;
         while (node_index < unit->tree.count &&
             context->error == runtime::Error.none) {
             let node: parser::SyntaxNode =
-                bootstrap_semantic_node(
+                context::node(
                     context, unit_index, node_index
                 );
             if (node.kind == parser::SyntaxKind.attribute &&
-                bootstrap_semantic_find_attribute(
+                attributes::find_attribute(
                     context, unit_index, node.token_index
-                ) == (BootstrapSemanticAttribute.bits as usize) &&
-                !bootstrap_semantic_resolve_bitfield_attribute(
+                ) == (attributes::Attribute.bits as usize) &&
+                !resolve_bitfield_attribute(
                     context, unit_index, node
                 )) {
                 valid = false;
@@ -1459,20 +1459,20 @@ fn bootstrap_semantic_resolve_bitfield_attributes(
 
 // The storage type is only known after layout resolution, so the integer
 // kind and exact width-sum checks live in a second pass.
-fn bootstrap_semantic_validate_bitfields(
-    context: *BootstrapSemanticContext
+fn validate_bitfields(
+    context: *context::Context
 ) -> bool {
-    let none: usize = bootstrap_semantic_no_id();
-    let segments: *const BootstrapSemanticBitfieldSegment =
+    let none: usize = context::no_id();
+    let segments: *const context::BitfieldSegment =
         context->bitfield_segments.data as
-            *const BootstrapSemanticBitfieldSegment;
+            *const context::BitfieldSegment;
     let fields: *const type_info::Field =
         context->types.fields.data as *const type_info::Field;
     var valid: bool = true;
     var index: usize = 0;
     while (index < context->bitfield_segment_count &&
         context->error == runtime::Error.none) {
-        let first: BootstrapSemanticBitfieldSegment = segments[index];
+        let first: context::BitfieldSegment = segments[index];
         var total: usize = 0;
         var group_end: usize = index;
         while (group_end < context->bitfield_segment_count &&
@@ -1484,26 +1484,26 @@ fn bootstrap_semantic_validate_bitfields(
             group_end += 1;
         }
         let field_id: usize =
-            bootstrap_semantic_bitfield_storage_field(context, first);
+            context::bitfield_storage_field(context, first);
         if (field_id != none) {
             let field_record: type_info::Record =
-                bootstrap_semantic_type_record(
+                context::type_record(
                     context, fields[field_id].type_id
                 );
             if (!type_info::is_integer(field_record.kind) ||
                 total !=
                     type_info::bit_width(field_record.kind)) {
-                bootstrap_semantic_add_diagnostic(
+                context::add_diagnostic(
                     context,
-                    BootstrapSemanticDiagnosticKind.invalid_bitfield,
+                    context::DiagnosticKind.invalid_bitfield,
                     first.declaration_unit,
-                    bootstrap_semantic_node(
+                    context::node(
                         context,
                         first.declaration_unit,
                         first.declaration_node
                     ).span,
                     none,
-                    bootstrap_semantic_empty_span(),
+                    context::empty_span(),
                     field_id
                 );
                 valid = false;
@@ -1514,41 +1514,41 @@ fn bootstrap_semantic_validate_bitfields(
     return valid && context->error == runtime::Error.none;
 }
 
-fn bootstrap_semantic_check_assert(
-    context: *BootstrapSemanticContext,
+fn check_assert(
+    context: *context::Context,
     unit_index: usize,
     node_index: usize
 ) -> bool {
-    let node: parser::SyntaxNode = bootstrap_semantic_node(
+    let node: parser::SyntaxNode = context::node(
         context, unit_index, node_index
     );
     if (node.child_count != 1) {
         return true;
     }
-    let result: BootstrapConstValue =
-        bootstrap_consteval_expression(
+    let result: Value =
+        expression(
             context, unit_index, node.first_child
         );
     if (result.error || !result.is_constant) {
-        bootstrap_semantic_add_diagnostic(
+        context::add_diagnostic(
             context,
-            BootstrapSemanticDiagnosticKind.invalid_assert,
+            context::DiagnosticKind.invalid_assert,
             unit_index,
             node.span,
-            bootstrap_semantic_no_id(),
-            bootstrap_semantic_empty_span(),
+            context::no_id(),
+            context::empty_span(),
             0
         );
         return false;
     }
     if (result.value == 0) {
-        bootstrap_semantic_add_diagnostic(
+        context::add_diagnostic(
             context,
-            BootstrapSemanticDiagnosticKind.assertion_failed,
+            context::DiagnosticKind.assertion_failed,
             unit_index,
             node.span,
-            bootstrap_semantic_no_id(),
-            bootstrap_semantic_empty_span(),
+            context::no_id(),
+            context::empty_span(),
             0
         );
         return false;
@@ -1556,25 +1556,25 @@ fn bootstrap_semantic_check_assert(
     return true;
 }
 
-fn bootstrap_semantic_check_module_asserts(
-    context: *BootstrapSemanticContext
+fn check_module_asserts(
+    context: *context::Context
 ) -> bool {
     var unit_index: usize = 0;
     while (unit_index < context->input.unit_count &&
         context->error == runtime::Error.none) {
         var declaration_id: usize =
-            bootstrap_semantic_first_declaration(
+            context::first_declaration(
                 context, unit_index
             );
-        while (declaration_id != bootstrap_semantic_no_id() &&
+        while (declaration_id != context::no_id() &&
             context->error == runtime::Error.none) {
             let declaration: parser::SyntaxNode =
-                bootstrap_semantic_node(
+                context::node(
                     context, unit_index, declaration_id
                 );
             if (declaration.kind ==
                 parser::SyntaxKind.assert_statement) {
-                bootstrap_semantic_check_assert(
+                check_assert(
                     context, unit_index, declaration_id
                 );
             }
@@ -1585,7 +1585,7 @@ fn bootstrap_semantic_check_module_asserts(
     return context->error == runtime::Error.none;
 }
 
-fn bootstrap_semantic_const_integer_fits(
+fn const_integer_fits(
     kind: type_info::Kind,
     value: u64
 ) -> bool {
@@ -1593,7 +1593,7 @@ fn bootstrap_semantic_const_integer_fits(
     if (width >= 64) {
         return true;
     }
-    let masked: u64 = bootstrap_semantic_mask_integer(value, width);
+    let masked: u64 = context::mask_integer(value, width);
     if (!type_info::is_signed_integer(kind)) {
         return masked == value;
     }
@@ -1604,39 +1604,39 @@ fn bootstrap_semantic_const_integer_fits(
     return extended == value;
 }
 
-fn bootstrap_semantic_const_value_conforms(
-    context: *BootstrapSemanticContext,
+fn const_value_conforms(
+    context: *context::Context,
     unit_index: usize,
     span: lexer::SourceSpan,
     type_id: usize,
-    value: BootstrapConstValue
+    value: Value
 ) -> bool {
     let record: type_info::Record =
-        bootstrap_semantic_type_record(context, type_id);
+        context::type_record(context, type_id);
     let boolean_type: bool = record.kind == type_info::Kind.boolean;
     if (value.is_boolean != boolean_type) {
-        bootstrap_semantic_add_diagnostic(
+        context::add_diagnostic(
             context,
-            BootstrapSemanticDiagnosticKind.type_mismatch,
+            context::DiagnosticKind.type_mismatch,
             unit_index,
             span,
-            bootstrap_semantic_no_id(),
-            bootstrap_semantic_empty_span(),
+            context::no_id(),
+            context::empty_span(),
             type_id
         );
         return false;
     }
     if (!boolean_type &&
-        !bootstrap_semantic_const_integer_fits(
+        !const_integer_fits(
             record.kind, value.value
         )) {
-        bootstrap_semantic_add_diagnostic(
+        context::add_diagnostic(
             context,
-            BootstrapSemanticDiagnosticKind.integer_overflow,
+            context::DiagnosticKind.integer_overflow,
             unit_index,
             span,
-            bootstrap_semantic_no_id(),
-            bootstrap_semantic_empty_span(),
+            context::no_id(),
+            context::empty_span(),
             type_id
         );
         return false;
@@ -1644,48 +1644,48 @@ fn bootstrap_semantic_const_value_conforms(
     return true;
 }
 
-fn bootstrap_semantic_collect_constant_declaration(
-    context: *BootstrapSemanticContext,
+fn collect_constant_declaration(
+    context: *context::Context,
     module_id: usize,
     unit_index: usize,
     declaration_id: usize,
     declaration: parser::SyntaxNode,
     interface_unit: bool
 ) -> bool {
-    let none: usize = bootstrap_semantic_no_id();
+    let none: usize = context::no_id();
     let exported: bool =
         (declaration.flags &
             (parser::SyntaxFlag.exported as usize)) != 0;
     if (!interface_unit && exported) {
-        bootstrap_semantic_add_diagnostic(
+        context::add_diagnostic(
             context,
-            BootstrapSemanticDiagnosticKind.invalid_export,
+            context::DiagnosticKind.invalid_export,
             unit_index,
             declaration.span,
             none,
-            bootstrap_semantic_empty_span(),
+            context::empty_span(),
             0
         );
     }
     let duplicate: usize =
-        bootstrap_semantic_find_any_local_symbol(
+        context::find_any_local_symbol(
             context,
             module_id,
             unit_index,
             declaration.token_index
         );
     if (duplicate != none) {
-        let symbols: *const BootstrapSemanticSymbol =
-            context->symbols.data as *const BootstrapSemanticSymbol;
-        bootstrap_semantic_add_diagnostic(
+        let symbols: *const context::Symbol =
+            context->symbols.data as *const context::Symbol;
+        context::add_diagnostic(
             context,
-            BootstrapSemanticDiagnosticKind.duplicate_name,
+            context::DiagnosticKind.duplicate_name,
             unit_index,
-            bootstrap_semantic_token(
+            context::token(
                 context, unit_index, declaration.token_index
             ).span,
             symbols[duplicate].declaration_unit,
-            bootstrap_semantic_token(
+            context::token(
                 context,
                 symbols[duplicate].declaration_unit,
                 symbols[duplicate].name_token
@@ -1698,41 +1698,41 @@ fn bootstrap_semantic_collect_constant_declaration(
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    let type_id: usize = bootstrap_semantic_resolve_type_node(
+    let type_id: usize = types::resolve_type_node(
         context, unit_index, declaration.first_child
     );
     if (type_id == none) {
         return context->error == runtime::Error.none;
     }
     let record: type_info::Record =
-        bootstrap_semantic_type_record(context, type_id);
+        context::type_record(context, type_id);
     if (!type_info::is_integer(record.kind) &&
         record.kind != type_info::Kind.boolean) {
-        bootstrap_semantic_add_diagnostic(
+        context::add_diagnostic(
             context,
-            BootstrapSemanticDiagnosticKind.type_mismatch,
+            context::DiagnosticKind.type_mismatch,
             unit_index,
-            bootstrap_semantic_node(
+            context::node(
                 context, unit_index, declaration.first_child
             ).span,
             none,
-            bootstrap_semantic_empty_span(),
+            context::empty_span(),
             type_id
         );
         return context->error == runtime::Error.none;
     }
-    var flags: usize = BootstrapSemanticSymbolFlag.none as usize;
+    var flags: usize = context::SymbolFlag.none as usize;
     if (exported) {
-        flags |= BootstrapSemanticSymbolFlag.exported as usize;
+        flags |= context::SymbolFlag.exported as usize;
     }
     if (interface_unit) {
         flags |=
-            BootstrapSemanticSymbolFlag.interface_declaration as usize;
+            context::SymbolFlag.interface_declaration as usize;
     }
-    return bootstrap_semantic_append_symbol(
+    return context::append_symbol(
         context,
         {
-            kind = BootstrapSemanticSymbolKind.constant,
+            kind = context::SymbolKind.constant,
             module_id = module_id,
             declaration_unit = unit_index,
             declaration_node = declaration_id,
@@ -1745,27 +1745,27 @@ fn bootstrap_semantic_collect_constant_declaration(
     ) != none;
 }
 
-fn bootstrap_semantic_collect_constants_in_unit(
-    context: *BootstrapSemanticContext,
+fn collect_constants_in_unit(
+    context: *context::Context,
     module_id: usize,
     unit_index: usize,
     interface_unit: bool
 ) -> bool {
-    let none: usize = bootstrap_semantic_no_id();
+    let none: usize = context::no_id();
     if (unit_index == none) {
         return true;
     }
     var declaration_id: usize =
-        bootstrap_semantic_first_declaration(context, unit_index);
+        context::first_declaration(context, unit_index);
     while (declaration_id != none &&
         context->error == runtime::Error.none) {
         let declaration: parser::SyntaxNode =
-            bootstrap_semantic_node(
+            context::node(
                 context, unit_index, declaration_id
             );
         if (declaration.kind ==
                 parser::SyntaxKind.const_declaration &&
-            !bootstrap_semantic_collect_constant_declaration(
+            !collect_constant_declaration(
                 context,
                 module_id,
                 unit_index,
@@ -1784,58 +1784,58 @@ fn bootstrap_semantic_collect_constants_in_unit(
 // checks conformance and marks it resolved. The resolving flag breaks
 // initializer cycles (A through B back to A), which simply fail as
 // non-constant; the fixpoint below reports whatever stays unresolved.
-fn bootstrap_semantic_resolve_constant(
-    context: *BootstrapSemanticContext,
+fn resolve_constant(
+    context: *context::Context,
     symbol_id: usize
 ) -> bool {
     let resolved_flag: usize =
-        BootstrapSemanticSymbolFlag.constant_resolved as usize;
+        context::SymbolFlag.constant_resolved as usize;
     let resolving_flag: usize =
-        BootstrapSemanticSymbolFlag.constant_resolving as usize;
-    let symbols: *const BootstrapSemanticSymbol =
-        context->symbols.data as *const BootstrapSemanticSymbol;
-    let symbol: BootstrapSemanticSymbol = symbols[symbol_id];
+        context::SymbolFlag.constant_resolving as usize;
+    let symbols: *const context::Symbol =
+        context->symbols.data as *const context::Symbol;
+    let symbol: context::Symbol = symbols[symbol_id];
     if ((symbol.flags & resolved_flag) != 0) {
         return true;
     }
     if ((symbol.flags & resolving_flag) != 0) {
         return false;
     }
-    let writable: *BootstrapSemanticSymbol =
-        context->symbols.data as *BootstrapSemanticSymbol;
+    let writable: *context::Symbol =
+        context->symbols.data as *context::Symbol;
     writable[symbol_id].flags |= resolving_flag;
     let declaration: parser::SyntaxNode =
-        bootstrap_semantic_node(
+        context::node(
             context,
             symbol.declaration_unit,
             symbol.declaration_node
         );
     let initializer_id: usize =
-        bootstrap_semantic_node(
+        context::node(
             context,
             symbol.declaration_unit,
             declaration.first_child
         ).next_sibling;
-    let value: BootstrapConstValue =
-        bootstrap_consteval_expression(
+    let value: Value =
+        expression(
             context,
             symbol.declaration_unit,
             initializer_id
         );
     // Consteval may complete enum layouts and append member symbols, so
     // take a fresh pointer before mutating.
-    let fresh: *BootstrapSemanticSymbol =
-        context->symbols.data as *BootstrapSemanticSymbol;
+    let fresh: *context::Symbol =
+        context->symbols.data as *context::Symbol;
     fresh[symbol_id].flags =
         fresh[symbol_id].flags & ~resolving_flag;
     if (!value.is_constant || value.error) {
         return false;
     }
     fresh[symbol_id].flags |= resolved_flag;
-    if (bootstrap_semantic_const_value_conforms(
+    if (const_value_conforms(
             context,
             symbol.declaration_unit,
-            bootstrap_semantic_node(
+            context::node(
                 context,
                 symbol.declaration_unit,
                 initializer_id
@@ -1852,24 +1852,24 @@ fn bootstrap_semantic_resolve_constant(
 // another module, so evaluation runs as a fixpoint: every resolved constant
 // enables more evaluations, and whatever remains unresolved afterwards is
 // diagnosed as non-constant (including cyclic definitions).
-fn bootstrap_semantic_resolve_constants(
-    context: *BootstrapSemanticContext
+fn resolve_constants(
+    context: *context::Context
 ) -> bool {
     let resolved_flag: usize =
-        BootstrapSemanticSymbolFlag.constant_resolved as usize;
+        context::SymbolFlag.constant_resolved as usize;
     var progress: bool = true;
     while (progress && context->error == runtime::Error.none) {
         progress = false;
         var symbol_id: usize = 0;
         while (symbol_id < context->symbol_count &&
             context->error == runtime::Error.none) {
-            let symbols: *const BootstrapSemanticSymbol =
+            let symbols: *const context::Symbol =
                 context->symbols.data as
-                    *const BootstrapSemanticSymbol;
-            let symbol: BootstrapSemanticSymbol = symbols[symbol_id];
-            if (symbol.kind == BootstrapSemanticSymbolKind.constant &&
+                    *const context::Symbol;
+            let symbol: context::Symbol = symbols[symbol_id];
+            if (symbol.kind == context::SymbolKind.constant &&
                 (symbol.flags & resolved_flag) == 0 &&
-                bootstrap_semantic_resolve_constant(
+                resolve_constant(
                     context, symbol_id
                 )) {
                 progress = true;
@@ -1880,23 +1880,23 @@ fn bootstrap_semantic_resolve_constants(
     var symbol_id: usize = 0;
     while (symbol_id < context->symbol_count &&
         context->error == runtime::Error.none) {
-        let symbols: *const BootstrapSemanticSymbol =
-            context->symbols.data as *const BootstrapSemanticSymbol;
-        let symbol: BootstrapSemanticSymbol = symbols[symbol_id];
-        if (symbol.kind == BootstrapSemanticSymbolKind.constant &&
+        let symbols: *const context::Symbol =
+            context->symbols.data as *const context::Symbol;
+        let symbol: context::Symbol = symbols[symbol_id];
+        if (symbol.kind == context::SymbolKind.constant &&
             (symbol.flags & resolved_flag) == 0) {
-            bootstrap_semantic_add_diagnostic(
+            context::add_diagnostic(
                 context,
-                BootstrapSemanticDiagnosticKind
+                context::DiagnosticKind
                     .non_constant_expression,
                 symbol.declaration_unit,
-                bootstrap_semantic_node(
+                context::node(
                     context,
                     symbol.declaration_unit,
                     symbol.declaration_node
                 ).span,
-                bootstrap_semantic_no_id(),
-                bootstrap_semantic_empty_span(),
+                context::no_id(),
+                context::empty_span(),
                 symbol_id
             );
         }
@@ -1905,21 +1905,21 @@ fn bootstrap_semantic_resolve_constants(
     return context->error == runtime::Error.none;
 }
 
-fn bootstrap_semantic_collect_constant_declarations(
-    context: *BootstrapSemanticContext
+fn collect_constant_declarations(
+    context: *context::Context
 ) -> bool {
     var module_id: usize = 0;
     while (module_id < context->module_count &&
         context->error == runtime::Error.none) {
-        let modules: *const BootstrapSemanticModule =
-            context->modules.data as *const BootstrapSemanticModule;
-        if (!bootstrap_semantic_collect_constants_in_unit(
+        let modules: *const context::Module =
+            context->modules.data as *const context::Module;
+        if (!collect_constants_in_unit(
                 context,
                 module_id,
                 modules[module_id].interface_unit,
                 true
             ) ||
-            !bootstrap_semantic_collect_constants_in_unit(
+            !collect_constants_in_unit(
                 context,
                 module_id,
                 modules[module_id].implementation_unit,
@@ -1934,32 +1934,32 @@ fn bootstrap_semantic_collect_constant_declarations(
 
 // Array length expressions are folded here because type resolution cannot
 // import consteval (consteval already imports types); the cached values are
-// read back by bootstrap_semantic_resolve_type_node. The walk covers every
+// read back by types::resolve_type_node. The walk covers every
 // node of every unit, including function bodies.
-fn bootstrap_semantic_prescan_array_lengths(
-    context: *BootstrapSemanticContext
+fn prescan_array_lengths(
+    context: *context::Context
 ) -> bool {
     var unit_index: usize = 0;
     while (unit_index < context->input.unit_count &&
         context->error == runtime::Error.none) {
-        let unit: *const BootstrapSemanticUnit =
-            bootstrap_semantic_input_unit(context, unit_index);
+        let unit: *const context::Unit =
+            context::input_unit(context, unit_index);
         var node_index: usize = 0;
         while (node_index < unit->tree.count &&
             context->error == runtime::Error.none) {
             let node: parser::SyntaxNode =
-                bootstrap_semantic_node(
+                context::node(
                     context, unit_index, node_index
                 );
             if (node.kind == parser::SyntaxKind.type_array &&
                 (node.flags &
                     (parser::SyntaxFlag.flexible as usize)) == 0 &&
                 node.child_count == 2) {
-                let value: BootstrapConstValue =
-                    bootstrap_consteval_expression(
+                let value: Value =
+                    expression(
                         context, unit_index, node.first_child
                     );
-                var entry: BootstrapSemanticArrayLength = {
+                var entry: context::ArrayLength = {
                     unit_index = unit_index,
                     node_index = node_index,
                     value = 0,
@@ -1970,13 +1970,13 @@ fn bootstrap_semantic_prescan_array_lengths(
                     entry.value = value.value;
                     entry.valid = true;
                 }
-                if (!bootstrap_semantic_append_record(
+                if (!context::append_record(
                         context,
                         &context->array_lengths,
                         (&entry) as
-                            *const BootstrapSemanticArrayLength as
+                            *const context::ArrayLength as
                                 *const u8,
-                        sizeof(BootstrapSemanticArrayLength)
+                        sizeof(context::ArrayLength)
                     )) {
                     return false;
                 }
@@ -1993,25 +1993,25 @@ fn bootstrap_semantic_prescan_array_lengths(
 // (anything beyond signed integer literals) in declaration order, so
 // implicit members continue from the value of their explicit predecessor.
 // The resolving flag on the type symbol breaks discriminant cycles.
-fn bootstrap_semantic_resolve_enum_constant_values(
-    context: *BootstrapSemanticContext,
+fn resolve_enum_constant_values(
+    context: *context::Context,
     type_id: usize
 ) -> bool {
-    let none: usize = bootstrap_semantic_no_id();
+    let none: usize = context::no_id();
     let pending_flag: usize =
-        BootstrapSemanticSymbolFlag.enum_value_pending as usize;
+        context::SymbolFlag.enum_value_pending as usize;
     let resolving_flag: usize =
-        BootstrapSemanticSymbolFlag.enum_values_resolving as usize;
-    if (!bootstrap_semantic_require_complete_type(context, type_id)) {
+        context::SymbolFlag.enum_values_resolving as usize;
+    if (!types::require_complete_type(context, type_id)) {
         return false;
     }
     var has_pending: bool = false;
     var scan: usize = 0;
-    let all_symbols: *const BootstrapSemanticSymbol =
-        context->symbols.data as *const BootstrapSemanticSymbol;
+    let all_symbols: *const context::Symbol =
+        context->symbols.data as *const context::Symbol;
     while (scan < context->symbol_count) {
-        let candidate: BootstrapSemanticSymbol = all_symbols[scan];
-        if (candidate.kind == BootstrapSemanticSymbolKind.enum_member &&
+        let candidate: context::Symbol = all_symbols[scan];
+        if (candidate.kind == context::SymbolKind.enum_member &&
             candidate.type_id == type_id &&
             (candidate.flags & pending_flag) != 0) {
             has_pending = true;
@@ -2022,37 +2022,37 @@ fn bootstrap_semantic_resolve_enum_constant_values(
         return true;
     }
     let type_symbol: usize =
-        bootstrap_semantic_find_type_symbol(context, type_id);
+        types::find_type_symbol(context, type_id);
     if (type_symbol == none) {
         return false;
     }
-    let symbols: *BootstrapSemanticSymbol =
-        context->symbols.data as *BootstrapSemanticSymbol;
+    let symbols: *context::Symbol =
+        context->symbols.data as *context::Symbol;
     if ((symbols[type_symbol].flags & resolving_flag) != 0) {
         return false;
     }
     symbols[type_symbol].flags |= resolving_flag;
     let record: type_info::Record =
-        bootstrap_semantic_type_record(context, type_id);
+        context::type_record(context, type_id);
     let underlying_kind: type_info::Kind =
-        bootstrap_semantic_type_record(
+        context::type_record(
             context, record.element_type
         ).kind;
     let bits: usize = type_info::bit_width(underlying_kind);
     var success: bool = true;
     var next_value: u64 = 0;
     var next_value_valid: bool = true;
-    var member_id: usize = bootstrap_semantic_node(
+    var member_id: usize = context::node(
         context,
         record.declaration_unit,
-        bootstrap_semantic_node(
+        context::node(
             context, record.declaration_unit, record.declaration_node
         ).first_child
     ).next_sibling;
     while (member_id != none && success &&
         context->error == runtime::Error.none) {
         let member: parser::SyntaxNode =
-            bootstrap_semantic_node(
+            context::node(
                 context, record.declaration_unit, member_id
             );
         if (member.kind == parser::SyntaxKind.attribute) {
@@ -2061,13 +2061,13 @@ fn bootstrap_semantic_resolve_enum_constant_values(
         }
         var member_symbol: usize = none;
         var index: usize = 0;
-        let members: *const BootstrapSemanticSymbol =
+        let members: *const context::Symbol =
             context->symbols.data as
-                *const BootstrapSemanticSymbol;
+                *const context::Symbol;
         while (index < context->symbol_count) {
-            let candidate: BootstrapSemanticSymbol = members[index];
+            let candidate: context::Symbol = members[index];
             if (candidate.kind ==
-                    BootstrapSemanticSymbolKind.enum_member &&
+                    context::SymbolKind.enum_member &&
                 candidate.type_id == type_id &&
                 candidate.declaration_node == member_id) {
                 member_symbol = index;
@@ -2079,13 +2079,13 @@ fn bootstrap_semantic_resolve_enum_constant_values(
             member_id = member.next_sibling;
             continue;
         }
-        let current: BootstrapSemanticSymbol = members[member_symbol];
+        let current: context::Symbol = members[member_symbol];
         if ((current.flags & pending_flag) == 0) {
-            next_value = bootstrap_semantic_mask_integer(
+            next_value = context::mask_integer(
                 current.integer_value + 1, bits
             );
             next_value_valid =
-                bootstrap_semantic_enum_can_increment(
+                types::enum_can_increment(
                     underlying_kind, current.integer_value
                 );
         } else {
@@ -2096,41 +2096,41 @@ fn bootstrap_semantic_resolve_enum_constant_values(
                     break;
                 }
             } else {
-                let evaluated: BootstrapConstValue =
-                    bootstrap_consteval_expression(
+                let evaluated: Value =
+                    expression(
                         context,
                         record.declaration_unit,
                         member.first_child
                     );
                 if (!evaluated.is_constant || evaluated.error ||
                     evaluated.is_boolean ||
-                    !bootstrap_semantic_const_integer_fits(
+                    !const_integer_fits(
                         underlying_kind, evaluated.value
                     )) {
                     success = false;
                     break;
                 }
-                value = bootstrap_semantic_mask_integer(
+                value = context::mask_integer(
                     evaluated.value, bits
                 );
             }
-            let fresh: *BootstrapSemanticSymbol =
-                context->symbols.data as *BootstrapSemanticSymbol;
+            let fresh: *context::Symbol =
+                context->symbols.data as *context::Symbol;
             fresh[member_symbol].integer_value = value;
             fresh[member_symbol].flags =
                 fresh[member_symbol].flags & ~pending_flag;
-            next_value = bootstrap_semantic_mask_integer(
+            next_value = context::mask_integer(
                 value + 1, bits
             );
             next_value_valid =
-                bootstrap_semantic_enum_can_increment(
+                types::enum_can_increment(
                     underlying_kind, value
                 );
         }
         member_id = member.next_sibling;
     }
-    let done: *BootstrapSemanticSymbol =
-        context->symbols.data as *BootstrapSemanticSymbol;
+    let done: *context::Symbol =
+        context->symbols.data as *context::Symbol;
     done[type_symbol].flags =
         done[type_symbol].flags & ~resolving_flag;
     return success && context->error == runtime::Error.none;
@@ -2139,36 +2139,36 @@ fn bootstrap_semantic_resolve_enum_constant_values(
 // Forces every enum with pending discriminants to fold them; enums nothing
 // referenced during type resolution still get their values (or an
 // invalid_enum_value diagnostic) here.
-fn bootstrap_semantic_finalize_enum_constants(
-    context: *BootstrapSemanticContext
+fn finalize_enum_constants(
+    context: *context::Context
 ) -> bool {
     var symbol_id: usize = 0;
     while (symbol_id < context->symbol_count &&
         context->error == runtime::Error.none) {
-        let symbols: *const BootstrapSemanticSymbol =
-            context->symbols.data as *const BootstrapSemanticSymbol;
-        let symbol: BootstrapSemanticSymbol = symbols[symbol_id];
-        if (symbol.kind == BootstrapSemanticSymbolKind.named_type &&
-            bootstrap_semantic_type_record(
+        let symbols: *const context::Symbol =
+            context->symbols.data as *const context::Symbol;
+        let symbol: context::Symbol = symbols[symbol_id];
+        if (symbol.kind == context::SymbolKind.named_type &&
+            context::type_record(
                 context, symbol.type_id
             ).kind == type_info::Kind.enumeration &&
-            bootstrap_semantic_require_complete_type(
+            types::require_complete_type(
                 context, symbol.type_id
             ) &&
-            !bootstrap_semantic_resolve_enum_constant_values(
+            !resolve_enum_constant_values(
                 context, symbol.type_id
             )) {
-            bootstrap_semantic_add_diagnostic(
+            context::add_diagnostic(
                 context,
-                BootstrapSemanticDiagnosticKind.invalid_enum_value,
+                context::DiagnosticKind.invalid_enum_value,
                 symbol.declaration_unit,
-                bootstrap_semantic_node(
+                context::node(
                     context,
                     symbol.declaration_unit,
                     symbol.declaration_node
                 ).span,
-                bootstrap_semantic_no_id(),
-                bootstrap_semantic_empty_span(),
+                context::no_id(),
+                context::empty_span(),
                 symbol.type_id
             );
         }
