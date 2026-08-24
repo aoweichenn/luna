@@ -72,7 +72,7 @@ fn bootstrap_syntax_tree_is_valid(tree: BootstrapSyntaxTree) -> bool {
     var node_index: usize = 0;
     while (node_index < tree.count) {
         let node: BootstrapSyntaxNode = nodes[node_index];
-        if ((node.kind as usize) > (BootstrapSyntaxKind.named_argument as usize) || node.flags > 4095 ||
+        if ((node.kind as usize) > (BootstrapSyntaxKind.character_expression as usize) || node.flags > 4095 ||
             node.span.line == 0 || node.span.column == 0 || node.span.length >
                 (BootstrapParserLimit.maximum_size as usize) - node.span.offset || (node.token_index != none &&
                 node.token_index >= tree.token_count)) {
@@ -502,13 +502,18 @@ fn bootstrap_parser_parse_integer_token(state: *BootstrapParserState, token: Boo
     return true;
 }
 
-fn bootstrap_parser_scan_float_digits(state: *BootstrapParserState, token: BootstrapToken, start: usize) -> usize {
+fn bootstrap_parser_is_hex_digit(byte: u8) -> bool {
+    return (byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 70) || (byte >= 97 && byte <= 102);
+}
+
+fn bootstrap_parser_scan_float_digits(
+    state: *BootstrapParserState, token: BootstrapToken, start: usize, hexadecimal: bool) -> usize {
     var index: usize = start;
     var saw_digit: bool = false;
     var previous_separator: bool = false;
     while (index < token.span.length) {
         let byte: u8 = state->source.data[token.span.offset + index];
-        if (byte >= 48 && byte <= 57) {
+        if ((hexadecimal && bootstrap_parser_is_hex_digit(byte)) || (!hexadecimal && byte >= 48 && byte <= 57)) {
             saw_digit = true;
             previous_separator = false;
             index += 1;
@@ -519,7 +524,7 @@ fn bootstrap_parser_scan_float_digits(state: *BootstrapParserState, token: Boots
                 return bootstrap_syntax_no_index();
             }
             let next: u8 = state->source.data[token.span.offset + index + 1];
-            if (next < 48 || next > 57) {
+            if (!bootstrap_parser_is_hex_digit(next) && (hexadecimal || next < 48 || next > 57)) {
                 return bootstrap_syntax_no_index();
             }
             previous_separator = true;
@@ -534,14 +539,64 @@ fn bootstrap_parser_scan_float_digits(state: *BootstrapParserState, token: Boots
     return index;
 }
 
-fn bootstrap_parser_validate_float(state: *BootstrapParserState, token: BootstrapToken) -> bool {
+fn bootstrap_parser_validate_hex_float(state: *BootstrapParserState, token: BootstrapToken) -> bool {
     let none: usize = bootstrap_syntax_no_index();
-    var index: usize = bootstrap_parser_scan_float_digits(state, token, 0);
+    var index: usize = 2;
+    var saw_mantissa: bool = false;
+    let integer_end: usize = bootstrap_parser_scan_float_digits(state, token, index, true);
+    if (integer_end != none) {
+        saw_mantissa = true;
+        index = integer_end;
+    }
+    if (index < token.span.length && state->source.data[token.span.offset + index] == 46) {
+        let fraction_end: usize = bootstrap_parser_scan_float_digits(state, token, index + 1, true);
+        if (fraction_end == none) {
+            bootstrap_parser_add_diagnostic(
+                state, BootstrapDiagnosticKind.invalid_floating, token.span, BootstrapTokenKind.floating, token.kind, 0);
+            return false;
+        }
+        saw_mantissa = true;
+        index = fraction_end;
+    }
+    var valid: bool = saw_mantissa;
+    if (valid && index < token.span.length) {
+        let exponent: u8 = state->source.data[token.span.offset + index];
+        if (exponent == 112 || exponent == 80) {
+            index += 1;
+            if (index < token.span.length) {
+                let sign: u8 = state->source.data[token.span.offset + index];
+                if (sign == 43 || sign == 45) {
+                    index += 1;
+                }
+            }
+            index = bootstrap_parser_scan_float_digits(state, token, index, false);
+            valid = index == token.span.length;
+        } else {
+            valid = false;
+        }
+    } else {
+        valid = false;
+    }
+    if (!valid) {
+        bootstrap_parser_add_diagnostic(
+            state, BootstrapDiagnosticKind.invalid_floating, token.span, BootstrapTokenKind.floating, token.kind, 0);
+        return false;
+    }
+    return true;
+}
+
+fn bootstrap_parser_validate_float(state: *BootstrapParserState, token: BootstrapToken) -> bool {
+    if (token.span.length >= 2 && state->source.data[token.span.offset] == 48 &&
+        (state->source.data[token.span.offset + 1] == 120 || state->source.data[token.span.offset + 1] == 88)) {
+        return bootstrap_parser_validate_hex_float(state, token);
+    }
+    let none: usize = bootstrap_syntax_no_index();
+    var index: usize = bootstrap_parser_scan_float_digits(state, token, 0, false);
     var has_fraction: bool = false;
     var has_exponent: bool = false;
     if (index != none && index < token.span.length && state->source.data[token.span.offset + index] == 46) {
         has_fraction = true;
-        index = bootstrap_parser_scan_float_digits(state, token, index + 1);
+        index = bootstrap_parser_scan_float_digits(state, token, index + 1, false);
     }
     if (index != none && index < token.span.length) {
         let exponent: u8 = state->source.data[token.span.offset + index];
@@ -554,7 +609,7 @@ fn bootstrap_parser_validate_float(state: *BootstrapParserState, token: Bootstra
                     index += 1;
                 }
             }
-            index = bootstrap_parser_scan_float_digits(state, token, index);
+            index = bootstrap_parser_scan_float_digits(state, token, index, false);
         }
     }
     if (index == none || index != token.span.length || (!has_fraction && !has_exponent)) {
@@ -884,6 +939,10 @@ fn bootstrap_parser_parse_primary_expression(state: *BootstrapParserState) -> us
         bootstrap_parser_advance(state);
         bootstrap_parser_validate_float(state, token);
         return bootstrap_parser_new_node(state, BootstrapSyntaxKind.floating_expression, token.span, token_index);
+    }
+    if (token.kind == BootstrapTokenKind.character) {
+        bootstrap_parser_advance(state);
+        return bootstrap_parser_new_node(state, BootstrapSyntaxKind.character_expression, token.span, token_index);
     }
     if (token.kind == BootstrapTokenKind.keyword_true || token.kind == BootstrapTokenKind.keyword_false) {
         bootstrap_parser_advance(state);

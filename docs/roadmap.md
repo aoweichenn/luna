@@ -164,7 +164,7 @@ feature has executable tests plus a green `verify` fixed point.
 
 - [ ] `char` spelling, string width prefixes (`u16"`, `u32"`),
       adjacent literal concatenation, `\u{...}` escapes
-- [ ] binary (`0b`) and hexadecimal floating literals
+- [x] binary (`0b`) and hexadecimal floating literals
 - [ ] positional and indexed array initializer lists
 - [ ] nested `offsetof` designators
 - [ ] initializer type inference for `let`/`var`

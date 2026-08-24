@@ -1011,6 +1011,96 @@ fn bootstrap_semantic_parse_unsigned(
     return true;
 }
 
+fn bootstrap_semantic_hex_digit_value(
+    byte: u8
+) -> usize {
+    if (byte >= 48 && byte <= 57) {
+        return (byte - 48) as usize;
+    }
+    if (byte >= 65 && byte <= 70) {
+        return (byte - 65 + 10) as usize;
+    }
+    if (byte >= 97 && byte <= 102) {
+        return (byte - 97 + 10) as usize;
+    }
+    return bootstrap_semantic_no_id();
+}
+
+// Decodes a character literal token (quotes included in the span) into its
+// single code unit. The escape set matches string literals; anything that
+// does not decode to exactly one code unit (empty, multi-code-unit content or
+// an unknown escape) is rejected so C-style multi-character constants never
+// reach lowering.
+fn bootstrap_semantic_decode_character(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    token_index: usize,
+    value: *u64
+) -> bool {
+    let token: BootstrapToken = bootstrap_semantic_token(
+        context,
+        unit_index,
+        token_index
+    );
+    let unit: *const BootstrapSemanticUnit =
+        bootstrap_semantic_input_unit(context, unit_index);
+    if (token.kind != BootstrapTokenKind.character || value == null ||
+        token.span.length < 3) {
+        return false;
+    }
+    var code: u64 = 0;
+    var next: usize = 0;
+    let first: u8 = unit->source.data[token.span.offset + 1];
+    if (first != 92) {
+        code = first as u64;
+        next = 2;
+    } else {
+        if (token.span.length < 4) {
+            return false;
+        }
+        let escape: u8 = unit->source.data[token.span.offset + 2];
+        if (escape == 110) {
+            code = 10;
+            next = 3;
+        } else if (escape == 114) {
+            code = 13;
+            next = 3;
+        } else if (escape == 116) {
+            code = 9;
+            next = 3;
+        } else if (escape == 48) {
+            code = 0;
+            next = 3;
+        } else if (escape == 92 || escape == 39 || escape == 34) {
+            code = escape as u64;
+            next = 3;
+        } else if (escape == 120) {
+            if (token.span.length < 6) {
+                return false;
+            }
+            let high: usize = bootstrap_semantic_hex_digit_value(
+                unit->source.data[token.span.offset + 3]
+            );
+            let low: usize = bootstrap_semantic_hex_digit_value(
+                unit->source.data[token.span.offset + 4]
+            );
+            if (high == bootstrap_semantic_no_id() ||
+                low == bootstrap_semantic_no_id()) {
+                return false;
+            }
+            code = (high * 16 + low) as u64;
+            next = 5;
+        } else {
+            return false;
+        }
+    }
+    if (next != token.span.length - 1) {
+        return false;
+    }
+    *value = code;
+    return true;
+}
+
 fn bootstrap_semantic_function_pointer_type(
     context: *BootstrapSemanticContext,
     return_type: usize,

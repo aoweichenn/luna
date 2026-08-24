@@ -636,7 +636,14 @@ writable and adjacent literal concatenation is not implicit.
 An unsuffixed integer literal takes the integer type required by its
 declaration, return, argument or enclosing integer expression. It defaults to
 `i32` when no integer context exists. This rule applies only to literals and
-does not convert an already typed value.
+does not convert an already typed value. Integer literals may be decimal,
+hexadecimal (`0x`) or binary (`0b`), with `_` digit separators.
+
+A character literal is an integer literal whose value is one code unit:
+`'a'` is 97, `'\n'` is 10, `'\x41'` is 65. It supports the string escape
+set and follows the same contextual typing with the same `i32` default.
+A character literal must decode to exactly one code unit — `'ab'` is
+rejected; there are no multi-character constants.
 
 A decimal floating-point literal has either a decimal point with digits on
 both sides or an exponent:
@@ -652,6 +659,13 @@ parts. A floating-point literal takes the `f32` or `f64` type required by its
 declaration, return, argument or enclosing floating-point expression. It
 defaults to `f64` when no floating-point context exists. An `f32` literal is
 rounded directly to binary32 rather than first being rounded to binary64.
+
+A hexadecimal floating-point literal carries an exact binary value:
+`0x1.8p3` is 12.0 and `0x1.fp-2` is 0.484375. The mantissa is hexadecimal
+with an optional fractional part, the binary exponent `p` is mandatory,
+and rounding to the target precision happens directly — round to nearest,
+ties to even — so the literal never passes through a decimal
+representation.
 
 Binary operators, from tighter to looser groups, are:
 

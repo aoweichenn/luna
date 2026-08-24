@@ -84,6 +84,66 @@ fn bootstrap_semantic_lower_integer_literal(
     );
 }
 
+fn bootstrap_semantic_lower_character_literal(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    expected_type: usize
+) -> BootstrapSemanticExpression {
+    var value: u64 = 0;
+    if (!bootstrap_semantic_decode_character(
+            context,
+            context->current_unit,
+            node.token_index,
+            &value
+        )) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.invalid_character,
+            context->current_unit,
+            node.span,
+            bootstrap_semantic_no_id(),
+            bootstrap_semantic_empty_span(),
+            0
+        );
+        return bootstrap_semantic_invalid_expression();
+    }
+    let type_id: usize =
+        bootstrap_semantic_type_for_integer_literal(
+            context,
+            expected_type
+        );
+    let kind: BootstrapTypeKind =
+        bootstrap_semantic_type_record(
+            context,
+            type_id
+        ).kind;
+    if (!bootstrap_semantic_integer_fits_type(
+            kind,
+            value,
+            false
+        )) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.integer_overflow,
+            context->current_unit,
+            node.span,
+            bootstrap_semantic_no_id(),
+            bootstrap_semantic_empty_span(),
+            type_id
+        );
+        return bootstrap_semantic_invalid_expression();
+    }
+    return bootstrap_semantic_emit_integer_constant(
+        context,
+        node,
+        type_id,
+        bootstrap_semantic_mask_integer(
+            value,
+            bootstrap_type_bit_width(kind)
+        )
+    );
+}
+
 fn bootstrap_semantic_lower_negative_integer_literal(
     context: *BootstrapSemanticContext,
     unary_node: BootstrapSyntaxNode,
@@ -772,6 +832,182 @@ fn bootstrap_semantic_prepare_decimal_floating(
     return true;
 }
 
+// Rounds `mantissa` (a binary fraction numerator) to the quantum implied by
+// `shift`: kept = mantissa / 2^shift, ties to even, with `sticky` recording
+// any value already lost below the mantissa's least significant bit.
+fn bootstrap_semantic_round_hex_mantissa(
+    mantissa: u64,
+    shift: i64,
+    sticky: bool
+) -> u64 {
+    if (shift <= 0) {
+        return mantissa << (((0 as i64) - shift) as u64);
+    }
+    if (shift > 64) {
+        return 0;
+    }
+    let amount: u64 = shift as u64;
+    var kept: u64 = 0;
+    var round_bit: u64 = 0;
+    var below: bool = false;
+    if (amount == 64) {
+        round_bit = mantissa >> 63;
+        below = (mantissa & 9223372036854775807) != 0;
+    } else {
+        kept = mantissa >> amount;
+        round_bit = (mantissa >> (amount - 1)) & 1;
+        if (amount >= 2) {
+            below = (mantissa & (((1 as u64) << (amount - 1)) - 1)) != 0;
+        }
+    }
+    if (round_bit == 1 && (sticky || below || (kept & 1) == 1)) {
+        kept += 1;
+    }
+    return kept;
+}
+
+// Hexadecimal floating literals are exact binary fractions by construction,
+// so parsing accumulates the mantissa into a 64-bit significand (extra bits
+// fold into a sticky flag) and rounds directly at the target precision with
+// no decimal round-trip.
+fn bootstrap_semantic_parse_hex_floating_bits(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    single: bool,
+    bits: *u64
+) -> bool {
+    let unit: *const BootstrapSemanticUnit =
+        bootstrap_semantic_input_unit(
+            context,
+            context->current_unit
+        );
+    let token: BootstrapToken = bootstrap_semantic_token(
+        context,
+        context->current_unit,
+        node.token_index
+    );
+    if (bits == null || token.span.length < 4) {
+        return false;
+    }
+    var mantissa: u64 = 0;
+    var exponent: i64 = 0;
+    var exponent_value: i64 = 0;
+    var exponent_negative: bool = false;
+    var sticky: bool = false;
+    var after_dot: bool = false;
+    var in_exponent: bool = false;
+    var index: usize = 2;
+    while (index < token.span.length) {
+        let byte: u8 =
+            unit->source.data[token.span.offset + index];
+        if (byte == 95) {
+            index += 1;
+            continue;
+        }
+        if (byte == 46 && !in_exponent) {
+            after_dot = true;
+            index += 1;
+            continue;
+        }
+        if ((byte == 112 || byte == 80) && !in_exponent) {
+            in_exponent = true;
+            index += 1;
+            if (index < token.span.length) {
+                let sign: u8 =
+                    unit->source.data[token.span.offset + index];
+                if (sign == 43 || sign == 45) {
+                    exponent_negative = sign == 45;
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if (in_exponent) {
+            if (byte < 48 || byte > 57) {
+                return false;
+            }
+            if (exponent_value <= 100000) {
+                exponent_value =
+                    exponent_value * 10 + (byte - 48) as i64;
+            }
+            index += 1;
+            continue;
+        }
+        let digit: usize = bootstrap_semantic_decode_hex(byte);
+        if (digit == bootstrap_semantic_no_id()) {
+            return false;
+        }
+        if (mantissa == 0 && digit == 0) {
+            if (after_dot) {
+                exponent -= 4;
+            }
+            index += 1;
+            continue;
+        }
+        if (mantissa > (18446744073709551615 - 15) / 16) {
+            if (digit != 0) {
+                sticky = true;
+            }
+            if (!after_dot) {
+                exponent += 4;
+            }
+            index += 1;
+            continue;
+        }
+        mantissa = mantissa * 16 + digit as u64;
+        if (after_dot) {
+            exponent -= 4;
+        }
+        index += 1;
+    }
+    if (exponent_negative) {
+        exponent_value = (0 as i64) - exponent_value;
+    }
+    exponent += exponent_value;
+    if (mantissa == 0) {
+        *bits = 0;
+        return true;
+    }
+    var top: usize = 63;
+    while (top > 0 && (mantissa >> (top as u64)) == 0) {
+        top -= 1;
+    }
+    let precision: i64 = single ? 24 : 53;
+    let exponent_maximum: i64 = single ? 127 : 1023;
+    let exponent_minimum: i64 = single ? 0 - 126 : 0 - 1022;
+    let bias: i64 = single ? 127 : 1023;
+    var value_exponent: i64 = exponent + top as i64;
+    if (value_exponent > exponent_maximum) {
+        return false;
+    }
+    var kept: u64 = 0;
+    if (value_exponent >= exponent_minimum) {
+        kept = bootstrap_semantic_round_hex_mantissa(
+            mantissa,
+            top as i64 - (precision - 1),
+            sticky
+        );
+        if ((kept >> (precision as u64)) != 0) {
+            kept = kept >> 1;
+            value_exponent += 1;
+            if (value_exponent > exponent_maximum) {
+                return false;
+            }
+        }
+        *bits = ((value_exponent + bias) as u64 <<
+            ((precision - 1) as u64)) |
+            (kept & (((1 as u64) << ((precision - 1) as u64)) - 1));
+        return true;
+    }
+    kept = bootstrap_semantic_round_hex_mantissa(
+        mantissa,
+        exponent_minimum - (precision - 1) - exponent,
+        sticky
+    );
+    *bits = kept;
+    return true;
+}
+
 fn bootstrap_semantic_parse_floating_bits(
     context: *BootstrapSemanticContext,
     node: BootstrapSyntaxNode,
@@ -780,6 +1016,27 @@ fn bootstrap_semantic_parse_floating_bits(
 ) -> bool {
     if (bits == null) {
         return false;
+    }
+    let unit: *const BootstrapSemanticUnit =
+        bootstrap_semantic_input_unit(
+            context,
+            context->current_unit
+        );
+    let token: BootstrapToken = bootstrap_semantic_token(
+        context,
+        context->current_unit,
+        node.token_index
+    );
+    if (token.span.length >= 2 &&
+        unit->source.data[token.span.offset] == 48 &&
+        (unit->source.data[token.span.offset + 1] == 120 ||
+            unit->source.data[token.span.offset + 1] == 88)) {
+        return bootstrap_semantic_parse_hex_floating_bits(
+            context,
+            node,
+            single,
+            bits
+        );
     }
     var decimal: BootstrapSemanticDecimalFloating = {};
     var zero: bool = false;
@@ -3258,6 +3515,10 @@ fn bootstrap_semantic_default_literal_family(
         return BootstrapSemanticLiteralFamily.integer;
     }
     if (node.kind ==
+        BootstrapSyntaxKind.character_expression) {
+        return BootstrapSemanticLiteralFamily.integer;
+    }
+    if (node.kind ==
         BootstrapSyntaxKind.floating_expression) {
         return BootstrapSemanticLiteralFamily.floating;
     }
@@ -4367,6 +4628,14 @@ fn bootstrap_semantic_lower_expression(
     if (node.kind ==
         BootstrapSyntaxKind.integer_expression) {
         return bootstrap_semantic_lower_integer_literal(
+            context,
+            node,
+            expected_type
+        );
+    }
+    if (node.kind ==
+        BootstrapSyntaxKind.character_expression) {
+        return bootstrap_semantic_lower_character_literal(
             context,
             node,
             expected_type
