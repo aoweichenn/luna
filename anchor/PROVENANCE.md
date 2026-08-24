@@ -117,3 +117,15 @@ artifact byte-identical between the two stages, and `test` passed
 165/165. The stage-fixed executables were copied here and `SHA256SUMS`
 refreshed. This linker skips its syscall injection when an input object
 already defines the stubs.
+
+## 2026-08-24: promotion to the m1.8 toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`bce9e4107b859eca9de695ed28565fd47488bcf2`
+(`feat(m1.8): migrate syscall stubs to asm fn source`). Provenance
+chain: the previous anchor (above) built `out/stage-next`, which
+rebuilt itself into `out/stage-fixed`; `verify` confirmed every
+artifact byte-identical between the two stages, and `test` passed
+165/165. The stage-fixed executables were copied here and `SHA256SUMS`
+refreshed. The syscall stubs now come from asm fn source in
+library/linux/syscall.luna; the linker injects nothing.
