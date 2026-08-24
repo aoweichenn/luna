@@ -39,7 +39,7 @@ struct BootstrapLinkImage {
     data_address: usize;
     bss_address: usize;
     entry_address: usize;
-    error: RuntimeError;
+    error: runtime::Error;
     input_index: usize;
 }
 
@@ -48,12 +48,12 @@ fn bootstrap_linker_image_empty() -> BootstrapLinkImage {
         text = std_byte_buffer_empty(), rodata = std_byte_buffer_empty(), data = std_byte_buffer_empty(),
         globals = std_byte_buffer_empty(), bss_size = 0, text_alignment = 1, rodata_alignment = 1, data_alignment = 1,
         bss_alignment = 1, text_address = 0, rodata_address = 0, data_address = 0, bss_address = 0, entry_address = 0,
-        error = RuntimeError.none, input_index = 0,
+        error = runtime::Error.none, input_index = 0,
     };
 }
 
-fn bootstrap_linker_fail(image: *BootstrapLinkImage, error: RuntimeError, input_index: usize) -> bool {
-    if (image != null && image->error == RuntimeError.none) {
+fn bootstrap_linker_fail(image: *BootstrapLinkImage, error: runtime::Error, input_index: usize) -> bool {
+    if (image != null && image->error == runtime::Error.none) {
         image->error = error;
         image->input_index = input_index;
     }
@@ -82,7 +82,7 @@ fn bootstrap_linker_append_u8(output: *StdByteBuffer, value: u8) -> bool {
     }
     let appended: StdByteBufferResult = std_byte_buffer_push(*output, value);
     *output = appended.buffer;
-    return appended.error == RuntimeError.none;
+    return appended.error == runtime::Error.none;
 }
 
 fn bootstrap_linker_append_u16(output: *StdByteBuffer, value: u16) -> bool {
@@ -127,7 +127,7 @@ fn bootstrap_linker_append_bytes(output: *StdByteBuffer, data: *const u8, length
     }
     let appended: StdByteBufferResult = std_byte_buffer_append(*output, data, length);
     *output = appended.buffer;
-    return appended.error == RuntimeError.none;
+    return appended.error == runtime::Error.none;
 }
 
 fn bootstrap_linker_append_padding(output: *StdByteBuffer, count: usize, fill: u8) -> bool {
@@ -156,7 +156,7 @@ fn bootstrap_linker_region_append(
         !bootstrap_linker_append_padding(destination, aligned - destination->length, fill) ||
         !bootstrap_linker_append_bytes(
             destination, source.data as *const u8, source.length)) {
-        return bootstrap_linker_fail(image, RuntimeError.out_of_memory, input_index);
+        return bootstrap_linker_fail(image, runtime::Error.out_of_memory, input_index);
     }
     *placement = aligned;
     return true;
@@ -192,17 +192,17 @@ fn bootstrap_linker_collect_globals(
         var symbol_index: usize = 0;
         while (symbol_index < bootstrap_object_symbol_count(object)) {
             let result: BootstrapObjectSymbolResult = bootstrap_object_get_symbol(object, symbol_index);
-            if (result.error != RuntimeError.none) {
+            if (result.error != runtime::Error.none) {
                 return bootstrap_linker_fail(image, result.error, object_index);
             }
             let symbol: BootstrapObjectSymbol = result.symbol;
             if (symbol.defined && symbol.global) {
                 let name: StdTextViewResult = bootstrap_object_symbol_name(object, symbol);
                 var previous: BootstrapLinkGlobal = {};
-                if (name.error != RuntimeError.none ||
+                if (name.error != runtime::Error.none ||
                     bootstrap_linker_find_global(
                         image as *const BootstrapLinkImage, name.view, &previous)) {
-                    return bootstrap_linker_fail(image, RuntimeError.exists, object_index);
+                    return bootstrap_linker_fail(image, runtime::Error.exists, object_index);
                 }
                 let global: BootstrapLinkGlobal = {
                     name = name.view, object_index = object_index, symbol_index = symbol_index,
@@ -212,7 +212,7 @@ fn bootstrap_linker_collect_globals(
                         image->globals, (&global) as *const BootstrapLinkGlobal as *const u8,
                         sizeof(BootstrapLinkGlobal));
                 image->globals = appended.buffer;
-                if (appended.error != RuntimeError.none) {
+                if (appended.error != runtime::Error.none) {
                     return bootstrap_linker_fail(image, appended.error, object_index);
                 }
             }
@@ -230,7 +230,7 @@ fn bootstrap_linker_layout_regions(
     while (object_index < object_count) {
         let object: BootstrapObject = objects[object_index];
         if (!bootstrap_object_is_valid(object)) {
-            return bootstrap_linker_fail(image, RuntimeError.invalid_argument, object_index);
+            return bootstrap_linker_fail(image, runtime::Error.invalid_argument, object_index);
         }
         if (!bootstrap_linker_region_append(
                 image, &image->text, object.text, object.text_alignment, 144, object_index,
@@ -246,7 +246,7 @@ fn bootstrap_linker_layout_regions(
         var bss_offset: usize = 0;
         if (!bootstrap_linker_align(image->bss_size, object.bss_alignment, &bss_offset) ||
             object.bss_size > (BootstrapLinkerLimit.maximum_output as usize) - bss_offset) {
-            return bootstrap_linker_fail(image, RuntimeError.out_of_memory, object_index);
+            return bootstrap_linker_fail(image, runtime::Error.out_of_memory, object_index);
         }
         placements[object_index].bss = bss_offset;
         image->bss_size = bss_offset + object.bss_size;
@@ -276,14 +276,14 @@ fn bootstrap_linker_layout_image(image: *BootstrapLinkImage) -> bool {
     if (!bootstrap_linker_align(text_offset + image->text.length, page, &rodata_offset) ||
         !bootstrap_linker_align(rodata_offset + image->rodata.length, page, &data_offset) ||
         data_offset > 18446744073709551615 as usize - base) {
-        return bootstrap_linker_fail(image, RuntimeError.out_of_memory, image->input_index);
+        return bootstrap_linker_fail(image, runtime::Error.out_of_memory, image->input_index);
     }
     image->text_address = base + text_offset;
     image->rodata_address = base + rodata_offset;
     image->data_address = base + data_offset;
     if (!bootstrap_linker_align(
             image->data_address + image->data.length, image->bss_alignment, &image->bss_address)) {
-        return bootstrap_linker_fail(image, RuntimeError.out_of_memory, image->input_index);
+        return bootstrap_linker_fail(image, runtime::Error.out_of_memory, image->input_index);
     }
     return true;
 }
@@ -317,7 +317,7 @@ fn bootstrap_linker_symbol_address(
     image: *const BootstrapLinkImage, objects: *const BootstrapObject, placements: *const BootstrapLinkPlacement,
     object_index: usize, symbol_index: usize, result: *usize) -> bool {
     let symbol_result: BootstrapObjectSymbolResult = bootstrap_object_get_symbol(objects[object_index], symbol_index);
-    if (symbol_result.error != RuntimeError.none || !symbol_result.symbol.defined) {
+    if (symbol_result.error != runtime::Error.none || !symbol_result.symbol.defined) {
         return false;
     }
     var section_address: usize = 0;
@@ -335,7 +335,7 @@ fn bootstrap_linker_resolve_symbol(
     object_index: usize, symbol_index: usize, result: *usize) -> bool {
     let object: BootstrapObject = objects[object_index];
     let symbol_result: BootstrapObjectSymbolResult = bootstrap_object_get_symbol(object, symbol_index);
-    if (symbol_result.error != RuntimeError.none) {
+    if (symbol_result.error != runtime::Error.none) {
         return false;
     }
     if (symbol_result.symbol.defined) {
@@ -343,7 +343,7 @@ fn bootstrap_linker_resolve_symbol(
     }
     let name: StdTextViewResult = bootstrap_object_symbol_name(object, symbol_result.symbol);
     var global: BootstrapLinkGlobal = {};
-    return name.error == RuntimeError.none && bootstrap_linker_find_global(image, name.view, &global) &&
+    return name.error == runtime::Error.none && bootstrap_linker_find_global(image, name.view, &global) &&
         bootstrap_linker_symbol_address(image, objects, placements, global.object_index, global.symbol_index, result);
 }
 
@@ -402,7 +402,7 @@ fn bootstrap_linker_apply_relocations(
         var relocation_index: usize = 0;
         while (relocation_index < bootstrap_object_relocation_count(object)) {
             let result: BootstrapObjectRelocationResult = bootstrap_object_get_relocation(object, relocation_index);
-            if (result.error != RuntimeError.none) {
+            if (result.error != runtime::Error.none) {
                 return bootstrap_linker_fail(image, result.error, object_index);
             }
             let relocation: BootstrapObjectRelocation = result.relocation;
@@ -410,7 +410,7 @@ fn bootstrap_linker_apply_relocations(
             if (!bootstrap_linker_resolve_symbol(
                     image as *const BootstrapLinkImage, objects, placements, object_index, relocation.symbol_index,
                     &symbol_address)) {
-                return bootstrap_linker_fail(image, RuntimeError.not_found, object_index);
+                return bootstrap_linker_fail(image, runtime::Error.not_found, object_index);
             }
             var placement_offset: usize = 0;
             var region_address: usize = 0;
@@ -420,26 +420,26 @@ fn bootstrap_linker_apply_relocations(
             if (region == null || relocation.offset > region->length || placement_offset > region->length ||
                 relocation.offset > region->length - placement_offset || width > region->length -
                         placement_offset - relocation.offset) {
-                return bootstrap_linker_fail(image, RuntimeError.invalid_argument, object_index);
+                return bootstrap_linker_fail(image, runtime::Error.invalid_argument, object_index);
             }
             let output_offset: usize = placement_offset + relocation.offset;
             if (relocation.kind == BootstrapObjectRelocationKind.pc32 || relocation.kind ==
                     BootstrapObjectRelocationKind.plt32) {
                 if (symbol_address > 9223372036854775807 as usize || region_address >
                         9223372036854775807 as usize - output_offset) {
-                    return bootstrap_linker_fail(image, RuntimeError.invalid_argument, object_index);
+                    return bootstrap_linker_fail(image, runtime::Error.invalid_argument, object_index);
                 }
                 let place: isize = (region_address + output_offset) as isize;
                 let difference: isize = symbol_address as isize - place;
                 if ((relocation.addend > 0 && difference > 9223372036854775807 as isize - relocation.addend) ||
                     (relocation.addend < 0 && difference < -9223372036854775807 as isize - 1 - relocation.addend)) {
-                    return bootstrap_linker_fail(image, RuntimeError.invalid_argument, object_index);
+                    return bootstrap_linker_fail(image, runtime::Error.invalid_argument, object_index);
                 }
                 let value: isize = difference + relocation.addend;
                 if (value < -2147483648 || value > 2147483647 ||
                     !bootstrap_linker_store_u32(
                         &region->data[output_offset], value as u32)) {
-                    return bootstrap_linker_fail(image, RuntimeError.invalid_argument, object_index);
+                    return bootstrap_linker_fail(image, runtime::Error.invalid_argument, object_index);
                 }
             } else if (relocation.kind == BootstrapObjectRelocationKind.absolute64) {
                 let signed_symbol: isize = symbol_address as isize;
@@ -448,7 +448,7 @@ fn bootstrap_linker_apply_relocations(
                         -9223372036854775807 as isize - 1 - relocation.addend) ||
                     !bootstrap_linker_store_u64(
                         &region->data[output_offset], (signed_symbol + relocation.addend) as u64)) {
-                    return bootstrap_linker_fail(image, RuntimeError.invalid_argument, object_index);
+                    return bootstrap_linker_fail(image, runtime::Error.invalid_argument, object_index);
                 }
             } else if (relocation.kind == BootstrapObjectRelocationKind.absolute32 || relocation.kind ==
                     BootstrapObjectRelocationKind.signed32) {
@@ -456,7 +456,7 @@ fn bootstrap_linker_apply_relocations(
                 if (symbol_address > 9223372036854775807 as usize || (relocation.addend > 0 && signed_symbol >
                         9223372036854775807 as isize - relocation.addend) || (relocation.addend < 0 && signed_symbol <
                         -9223372036854775807 as isize - 1 - relocation.addend)) {
-                    return bootstrap_linker_fail(image, RuntimeError.invalid_argument, object_index);
+                    return bootstrap_linker_fail(image, runtime::Error.invalid_argument, object_index);
                 }
                 let value: isize = signed_symbol + relocation.addend;
                 if ((relocation.kind == BootstrapObjectRelocationKind.absolute32 && (value < 0 || value >
@@ -464,10 +464,10 @@ fn bootstrap_linker_apply_relocations(
                         -2147483648 || value > 2147483647)) ||
                     !bootstrap_linker_store_u32(
                         &region->data[output_offset], value as u32)) {
-                    return bootstrap_linker_fail(image, RuntimeError.invalid_argument, object_index);
+                    return bootstrap_linker_fail(image, runtime::Error.invalid_argument, object_index);
                 }
             } else {
-                return bootstrap_linker_fail(image, RuntimeError.not_supported, object_index);
+                return bootstrap_linker_fail(image, runtime::Error.not_supported, object_index);
             }
             relocation_index += 1;
         }
@@ -480,18 +480,18 @@ fn bootstrap_linker_resolve_entry(
     image: *BootstrapLinkImage, objects: *const BootstrapObject, placements: *const BootstrapLinkPlacement) -> bool {
     let entry: StdTextViewResult = std_text_view("_start", 6);
     var global: BootstrapLinkGlobal = {};
-    if (entry.error != RuntimeError.none ||
+    if (entry.error != runtime::Error.none ||
         !bootstrap_linker_find_global(image as *const BootstrapLinkImage, entry.view, &global) ||
         !bootstrap_linker_symbol_address(
             image as *const BootstrapLinkImage, objects, placements, global.object_index, global.symbol_index,
             &image->entry_address)) {
-        return bootstrap_linker_fail(image, RuntimeError.not_found, image->input_index);
+        return bootstrap_linker_fail(image, runtime::Error.not_found, image->input_index);
     }
     let symbol: BootstrapObjectSymbolResult =
         bootstrap_object_get_symbol(objects[global.object_index], global.symbol_index);
-    if (symbol.error != RuntimeError.none || symbol.symbol.section != BootstrapObjectSection.text ||
+    if (symbol.error != runtime::Error.none || symbol.symbol.section != BootstrapObjectSection.text ||
         symbol.symbol.kind != BootstrapObjectSymbolKind.function) {
-        return bootstrap_linker_fail(image, RuntimeError.invalid_argument, global.object_index);
+        return bootstrap_linker_fail(image, runtime::Error.invalid_argument, global.object_index);
     }
     return true;
 }
@@ -532,7 +532,7 @@ fn bootstrap_linker_serialize(image: *const BootstrapLinkImage) -> StdByteBuffer
             BootstrapLinkerLimit.text_offset as usize, image->text_address, image->text.length, image->text.length)) {
         std_byte_buffer_release(output);
         return {
-            buffer = std_byte_buffer_empty(), error = RuntimeError.out_of_memory,
+            buffer = std_byte_buffer_empty(), error = runtime::Error.out_of_memory,
         };
     }
     let base: usize = BootstrapLinkerLimit.image_base as usize;
@@ -544,7 +544,7 @@ fn bootstrap_linker_serialize(image: *const BootstrapLinkImage) -> StdByteBuffer
             image->rodata.length, image->rodata.length)) {
         std_byte_buffer_release(output);
         return {
-            buffer = std_byte_buffer_empty(), error = RuntimeError.out_of_memory,
+            buffer = std_byte_buffer_empty(), error = runtime::Error.out_of_memory,
         };
     }
     if (has_data) {
@@ -555,7 +555,7 @@ fn bootstrap_linker_serialize(image: *const BootstrapLinkImage) -> StdByteBuffer
                 image->data_address, image->data.length, memory_size)) {
             std_byte_buffer_release(output);
             return {
-                buffer = std_byte_buffer_empty(), error = RuntimeError.out_of_memory,
+                buffer = std_byte_buffer_empty(), error = runtime::Error.out_of_memory,
             };
         }
     }
@@ -569,26 +569,26 @@ fn bootstrap_linker_serialize(image: *const BootstrapLinkImage) -> StdByteBuffer
             &output, image->data.data as *const u8, image->data.length)))) {
         std_byte_buffer_release(output);
         return {
-            buffer = std_byte_buffer_empty(), error = RuntimeError.out_of_memory,
+            buffer = std_byte_buffer_empty(), error = runtime::Error.out_of_memory,
         };
     }
     return {
-        buffer = output, error = RuntimeError.none,
+        buffer = output, error = runtime::Error.none,
     };
 }
 
-fn bootstrap_linker_image_release(image: BootstrapLinkImage) -> RuntimeError {
-    var error: RuntimeError = std_byte_buffer_release(image.globals);
-    let data_error: RuntimeError = std_byte_buffer_release(image.data);
-    let rodata_error: RuntimeError = std_byte_buffer_release(image.rodata);
-    let text_error: RuntimeError = std_byte_buffer_release(image.text);
-    if (error == RuntimeError.none) {
+fn bootstrap_linker_image_release(image: BootstrapLinkImage) -> runtime::Error {
+    var error: runtime::Error = std_byte_buffer_release(image.globals);
+    let data_error: runtime::Error = std_byte_buffer_release(image.data);
+    let rodata_error: runtime::Error = std_byte_buffer_release(image.rodata);
+    let text_error: runtime::Error = std_byte_buffer_release(image.text);
+    if (error == runtime::Error.none) {
         error = data_error;
     }
-    if (error == RuntimeError.none) {
+    if (error == runtime::Error.none) {
         error = rodata_error;
     }
-    if (error == RuntimeError.none) {
+    if (error == runtime::Error.none) {
         error = text_error;
     }
     return error;
@@ -598,12 +598,12 @@ fn bootstrap_x86_64_link(objects: *const BootstrapObject, object_count: usize) -
     var image: BootstrapLinkImage = bootstrap_linker_image_empty();
     if (objects == null || object_count == 0 || object_count > BootstrapLinkerLimit.maximum_inputs as usize) {
         return {
-            executable = std_byte_buffer_empty(), error = RuntimeError.invalid_argument, input_index = 0,
+            executable = std_byte_buffer_empty(), error = runtime::Error.invalid_argument, input_index = 0,
         };
     }
     var placements: [65]BootstrapLinkPlacement = {};
     var executable: StdByteBufferResult = {
-        buffer = std_byte_buffer_empty(), error = RuntimeError.invalid_argument,
+        buffer = std_byte_buffer_empty(), error = runtime::Error.invalid_argument,
     };
     if (bootstrap_linker_collect_globals(&image, objects, object_count) &&
         bootstrap_linker_layout_regions(&image, objects, object_count, &placements[0]) &&
@@ -613,19 +613,20 @@ fn bootstrap_x86_64_link(objects: *const BootstrapObject, object_count: usize) -
         bootstrap_linker_resolve_entry(
             &image, objects, &placements[0] as *const BootstrapLinkPlacement)) {
         executable = bootstrap_linker_serialize(&image as *const BootstrapLinkImage);
-        if (executable.error != RuntimeError.none) {
+        if (executable.error != runtime::Error.none) {
             image.error = executable.error;
         }
     }
-    let image_error: RuntimeError = bootstrap_linker_image_release(image);
-    if (image.error == RuntimeError.none && executable.error == RuntimeError.none && image_error != RuntimeError.none) {
+    let image_error: runtime::Error = bootstrap_linker_image_release(image);
+    if (image.error == runtime::Error.none && executable.error == runtime::Error.none &&
+        image_error != runtime::Error.none) {
         std_byte_buffer_release(executable.buffer);
         return {
             executable = std_byte_buffer_empty(), error = image_error, input_index = image.input_index,
         };
     }
-    if (image.error != RuntimeError.none) {
-        if (executable.error == RuntimeError.none) {
+    if (image.error != runtime::Error.none) {
+        if (executable.error == runtime::Error.none) {
             std_byte_buffer_release(executable.buffer);
         }
         return {

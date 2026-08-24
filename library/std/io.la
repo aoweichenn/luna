@@ -4,36 +4,37 @@ enum StdIoLimit: usize {
     read_chunk = 4096, maximum_size = 18446744073709551615,
 }
 
-fn std_io_write_all(file: RuntimeFile, data: *const u8, length: usize) -> RuntimeError {
+fn std_io_write_all(file: runtime::File, data: *const u8, length: usize) -> runtime::Error {
     if (length != 0 && data == null) {
-        return RuntimeError.bad_address;
+        return runtime::Error.bad_address;
     }
 
     var written: usize = 0;
     while (written < length) {
-        let result: RuntimeIoResult = runtime_file_write(file, &data[written], length - written);
-        if (result.error == RuntimeError.interrupted) {
+        let result: runtime::IoResult = runtime::file_write(file, &data[written], length - written);
+        if (result.error == runtime::Error.interrupted) {
             continue;
         }
-        if (result.error != RuntimeError.none) {
+        if (result.error != runtime::Error.none) {
             return result.error;
         }
         if (result.count == 0) {
-            return RuntimeError.io;
+            return runtime::Error.io;
         }
         written += result.count;
     }
-    return RuntimeError.none;
+    return runtime::Error.none;
 }
 
-fn std_io_read_to_end(file: RuntimeFile, buffer: StdByteBuffer) -> StdByteBufferResult {
+fn std_io_read_to_end(file: runtime::File, buffer: StdByteBuffer) -> StdByteBufferResult {
     return std_io_read_to_end_limited(file, buffer, StdIoLimit.maximum_size as usize);
 }
 
-fn std_io_read_to_end_limited(file: RuntimeFile, buffer: StdByteBuffer, maximum_length: usize) -> StdByteBufferResult {
+fn std_io_read_to_end_limited(file: runtime::File, buffer: StdByteBuffer, maximum_length: usize)
+    -> StdByteBufferResult {
     if (!std_byte_buffer_is_valid(buffer) || buffer.length > maximum_length) {
         return {
-            buffer = buffer, error = RuntimeError.invalid_argument,
+            buffer = buffer, error = runtime::Error.invalid_argument,
         };
     }
 
@@ -41,24 +42,24 @@ fn std_io_read_to_end_limited(file: RuntimeFile, buffer: StdByteBuffer, maximum_
     while (true) {
         if (result_buffer.length == maximum_length) {
             var excess: u8 = 0;
-            let read: RuntimeIoResult = runtime_file_read(file, &excess, 1);
-            if (read.error == RuntimeError.interrupted) {
+            let read: runtime::IoResult = runtime::file_read(file, &excess, 1);
+            if (read.error == runtime::Error.interrupted) {
                 continue;
             }
-            if (read.error != RuntimeError.none) {
+            if (read.error != runtime::Error.none) {
                 return {
                     buffer = result_buffer, error = read.error,
                 };
             }
             return {
-                buffer = result_buffer, error = read.count == 0 ? RuntimeError.none : RuntimeError.out_of_memory,
+                buffer = result_buffer, error = read.count == 0 ? runtime::Error.none : runtime::Error.out_of_memory,
             };
         }
         if (result_buffer.capacity == result_buffer.length) {
             let remaining: usize = maximum_length - result_buffer.length;
             let growth: usize = remaining < StdIoLimit.read_chunk as usize ? remaining : StdIoLimit.read_chunk as usize;
             let reserved: StdByteBufferResult = std_byte_buffer_reserve(result_buffer, result_buffer.length + growth);
-            if (reserved.error != RuntimeError.none) {
+            if (reserved.error != runtime::Error.none) {
                 return reserved;
             }
             result_buffer = reserved.buffer;
@@ -67,24 +68,24 @@ fn std_io_read_to_end_limited(file: RuntimeFile, buffer: StdByteBuffer, maximum_
         let writable: usize = result_buffer.capacity - result_buffer.length;
         let remaining: usize = maximum_length - result_buffer.length;
         let read_length: usize = writable < remaining ? writable : remaining;
-        let read: RuntimeIoResult = runtime_file_read(file, &result_buffer.data[result_buffer.length], read_length);
-        if (read.error == RuntimeError.interrupted) {
+        let read: runtime::IoResult = runtime::file_read(file, &result_buffer.data[result_buffer.length], read_length);
+        if (read.error == runtime::Error.interrupted) {
             continue;
         }
-        if (read.error != RuntimeError.none) {
+        if (read.error != runtime::Error.none) {
             return {
                 buffer = result_buffer, error = read.error,
             };
         }
         if (read.count == 0) {
             return {
-                buffer = result_buffer, error = RuntimeError.none,
+                buffer = result_buffer, error = runtime::Error.none,
             };
         }
         result_buffer.length += read.count;
     }
     return {
-        buffer = result_buffer, error = RuntimeError.io,
+        buffer = result_buffer, error = runtime::Error.io,
     };
 }
 
@@ -95,25 +96,25 @@ fn std_io_read_file(path: StdPath) -> StdByteBufferResult {
 fn std_io_read_file_limited(path: StdPath, maximum_length: usize) -> StdByteBufferResult {
     if (!std_path_is_valid(path)) {
         return {
-            buffer = std_byte_buffer_empty(), error = RuntimeError.invalid_argument,
+            buffer = std_byte_buffer_empty(), error = runtime::Error.invalid_argument,
         };
     }
-    let opened: RuntimeFileResult = runtime_file_open_read(std_path_as_c_string(path));
-    if (opened.error != RuntimeError.none) {
+    let opened: runtime::FileResult = runtime::file_open_read(std_path_as_c_string(path));
+    if (opened.error != runtime::Error.none) {
         return {
             buffer = std_byte_buffer_empty(), error = opened.error,
         };
     }
 
     let read: StdByteBufferResult = std_io_read_to_end_limited(opened.file, std_byte_buffer_empty(), maximum_length);
-    let close_error: RuntimeError = runtime_file_close(opened.file);
-    if (read.error != RuntimeError.none) {
+    let close_error: runtime::Error = runtime::file_close(opened.file);
+    if (read.error != runtime::Error.none) {
         std_byte_buffer_release(read.buffer);
         return {
             buffer = std_byte_buffer_empty(), error = read.error,
         };
     }
-    if (close_error != RuntimeError.none) {
+    if (close_error != runtime::Error.none) {
         std_byte_buffer_release(read.buffer);
         return {
             buffer = std_byte_buffer_empty(), error = close_error,
@@ -122,46 +123,46 @@ fn std_io_read_file_limited(path: StdPath, maximum_length: usize) -> StdByteBuff
     return read;
 }
 
-fn std_io_write_file(path: StdPath, data: *const u8, length: usize) -> RuntimeError {
+fn std_io_write_file(path: StdPath, data: *const u8, length: usize) -> runtime::Error {
     if (!std_path_is_valid(path)) {
-        return RuntimeError.invalid_argument;
+        return runtime::Error.invalid_argument;
     }
     if (length != 0 && data == null) {
-        return RuntimeError.bad_address;
+        return runtime::Error.bad_address;
     }
-    let opened: RuntimeFileResult = runtime_file_create(std_path_as_c_string(path));
-    if (opened.error != RuntimeError.none) {
+    let opened: runtime::FileResult = runtime::file_create(std_path_as_c_string(path));
+    if (opened.error != runtime::Error.none) {
         return opened.error;
     }
 
-    let write_error: RuntimeError = std_io_write_all(opened.file, data, length);
-    let close_error: RuntimeError = runtime_file_close(opened.file);
-    if (write_error != RuntimeError.none) {
+    let write_error: runtime::Error = std_io_write_all(opened.file, data, length);
+    let close_error: runtime::Error = runtime::file_close(opened.file);
+    if (write_error != runtime::Error.none) {
         return write_error;
     }
     return close_error;
 }
 
-fn std_io_write_executable_file(path: StdPath, data: *const u8, length: usize) -> RuntimeError {
+fn std_io_write_executable_file(path: StdPath, data: *const u8, length: usize) -> runtime::Error {
     if (!std_path_is_valid(path)) {
-        return RuntimeError.invalid_argument;
+        return runtime::Error.invalid_argument;
     }
     if (length != 0 && data == null) {
-        return RuntimeError.bad_address;
+        return runtime::Error.bad_address;
     }
-    let opened: RuntimeFileResult = runtime_file_create_executable(std_path_as_c_string(path));
-    if (opened.error != RuntimeError.none) {
+    let opened: runtime::FileResult = runtime::file_create_executable(std_path_as_c_string(path));
+    if (opened.error != runtime::Error.none) {
         return opened.error;
     }
-    let write_error: RuntimeError = std_io_write_all(opened.file, data, length);
-    let close_error: RuntimeError = runtime_file_close(opened.file);
-    if (write_error != RuntimeError.none) {
+    let write_error: runtime::Error = std_io_write_all(opened.file, data, length);
+    let close_error: runtime::Error = runtime::file_close(opened.file);
+    if (write_error != runtime::Error.none) {
         return write_error;
     }
     return close_error;
 }
 
-fn std_io_invalid_path_result(error: RuntimeError) -> StdPathResult {
+fn std_io_invalid_path_result(error: runtime::Error) -> StdPathResult {
     return {
         path = {
             storage = std_byte_buffer_empty(), length = 0,
@@ -171,19 +172,19 @@ fn std_io_invalid_path_result(error: RuntimeError) -> StdPathResult {
 
 fn std_io_atomic_temporary_path(path: StdPath) -> StdPathResult {
     let path_text: StdTextViewResult = std_path_text(path);
-    if (path_text.error != RuntimeError.none) {
+    if (path_text.error != runtime::Error.none) {
         return std_io_invalid_path_result(path_text.error);
     }
-    let process: RuntimeProcessIdResult = runtime_process_id();
-    if (process.error != RuntimeError.none) {
+    let process: runtime::ProcessIdResult = runtime::process_id();
+    if (process.error != runtime::Error.none) {
         return std_io_invalid_path_result(process.error);
     }
     var bytes: StdByteBufferResult = std_byte_buffer_from(path_text.view.data, path_text.view.length);
-    if (bytes.error != RuntimeError.none) {
+    if (bytes.error != runtime::Error.none) {
         return std_io_invalid_path_result(bytes.error);
     }
     bytes = std_byte_buffer_append(bytes.buffer, ".luna-tmp-", 10);
-    if (bytes.error != RuntimeError.none) {
+    if (bytes.error != runtime::Error.none) {
         std_byte_buffer_release(bytes.buffer);
         return std_io_invalid_path_result(bytes.error);
     }
@@ -201,17 +202,17 @@ fn std_io_atomic_temporary_path(path: StdPath) -> StdPathResult {
         value >>= 4;
     }
     bytes = std_byte_buffer_append(bytes.buffer, &digits[0] as *const u8, 16);
-    if (bytes.error != RuntimeError.none) {
+    if (bytes.error != runtime::Error.none) {
         std_byte_buffer_release(bytes.buffer);
         return std_io_invalid_path_result(bytes.error);
     }
     let temporary_text: StdTextViewResult = std_text_view(bytes.buffer.data as *const u8, bytes.buffer.length);
     var result: StdPathResult = std_io_invalid_path_result(temporary_text.error);
-    if (temporary_text.error == RuntimeError.none) {
+    if (temporary_text.error == runtime::Error.none) {
         result = std_path_from_text(temporary_text.view);
     }
-    let release_error: RuntimeError = std_byte_buffer_release(bytes.buffer);
-    if (result.error == RuntimeError.none && release_error != RuntimeError.none) {
+    let release_error: runtime::Error = std_byte_buffer_release(bytes.buffer);
+    if (result.error == runtime::Error.none && release_error != runtime::Error.none) {
         std_path_release(result.path);
         return std_io_invalid_path_result(release_error);
     }
@@ -219,66 +220,66 @@ fn std_io_atomic_temporary_path(path: StdPath) -> StdPathResult {
 }
 
 fn std_io_write_file_atomic_implementation(
-    path: StdPath, data: *const u8, length: usize, executable: bool) -> RuntimeError {
+    path: StdPath, data: *const u8, length: usize, executable: bool) -> runtime::Error {
     if (!std_path_is_valid(path)) {
-        return RuntimeError.invalid_argument;
+        return runtime::Error.invalid_argument;
     }
     if (length != 0 && data == null) {
-        return RuntimeError.bad_address;
+        return runtime::Error.bad_address;
     }
     let temporary: StdPathResult = std_io_atomic_temporary_path(path);
-    if (temporary.error != RuntimeError.none) {
+    if (temporary.error != runtime::Error.none) {
         return temporary.error;
     }
-    var opened: RuntimeFileResult = runtime_file_create_exclusive(std_path_as_c_string(temporary.path));
-    if (opened.error == RuntimeError.exists) {
-        let remove_error: RuntimeError = runtime_path_remove(std_path_as_c_string(temporary.path));
-        if (remove_error == RuntimeError.none || remove_error == RuntimeError.not_found) {
-            opened = runtime_file_create_exclusive(std_path_as_c_string(temporary.path));
+    var opened: runtime::FileResult = runtime::file_create_exclusive(std_path_as_c_string(temporary.path));
+    if (opened.error == runtime::Error.exists) {
+        let remove_error: runtime::Error = runtime::path_remove(std_path_as_c_string(temporary.path));
+        if (remove_error == runtime::Error.none || remove_error == runtime::Error.not_found) {
+            opened = runtime::file_create_exclusive(std_path_as_c_string(temporary.path));
         }
     }
-    if (opened.error != RuntimeError.none) {
+    if (opened.error != runtime::Error.none) {
         std_path_release(temporary.path);
         return opened.error;
     }
 
-    var error: RuntimeError = std_io_write_all(opened.file, data, length);
-    if (error == RuntimeError.none && executable) {
-        error = runtime_file_make_executable(opened.file);
+    var error: runtime::Error = std_io_write_all(opened.file, data, length);
+    if (error == runtime::Error.none && executable) {
+        error = runtime::file_make_executable(opened.file);
     }
-    let close_error: RuntimeError = runtime_file_close(opened.file);
-    if (error == RuntimeError.none) {
+    let close_error: runtime::Error = runtime::file_close(opened.file);
+    if (error == runtime::Error.none) {
         error = close_error;
     }
-    if (error == RuntimeError.none) {
-        error = runtime_path_replace(std_path_as_c_string(temporary.path), std_path_as_c_string(path));
+    if (error == runtime::Error.none) {
+        error = runtime::path_replace(std_path_as_c_string(temporary.path), std_path_as_c_string(path));
     }
-    if (error != RuntimeError.none) {
-        runtime_path_remove(std_path_as_c_string(temporary.path));
+    if (error != runtime::Error.none) {
+        runtime::path_remove(std_path_as_c_string(temporary.path));
     }
-    let release_error: RuntimeError = std_path_release(temporary.path);
-    return error == RuntimeError.none ? release_error : error;
+    let release_error: runtime::Error = std_path_release(temporary.path);
+    return error == runtime::Error.none ? release_error : error;
 }
 
-fn std_io_write_file_atomic(path: StdPath, data: *const u8, length: usize) -> RuntimeError {
+fn std_io_write_file_atomic(path: StdPath, data: *const u8, length: usize) -> runtime::Error {
     return std_io_write_file_atomic_implementation(path, data, length, false);
 }
 
-fn std_io_write_executable_file_atomic(path: StdPath, data: *const u8, length: usize) -> RuntimeError {
+fn std_io_write_executable_file_atomic(path: StdPath, data: *const u8, length: usize) -> runtime::Error {
     return std_io_write_file_atomic_implementation(path, data, length, true);
 }
 
-fn std_io_print(text: StdTextView) -> RuntimeError {
+fn std_io_print(text: StdTextView) -> runtime::Error {
     if (!std_text_is_valid_utf8(text)) {
-        return RuntimeError.invalid_argument;
+        return runtime::Error.invalid_argument;
     }
-    return std_io_write_all(runtime_standard_output(), text.data, text.length);
+    return std_io_write_all(runtime::standard_output(), text.data, text.length);
 }
 
-fn std_io_print_error(text: StdTextView) -> RuntimeError {
+fn std_io_print_error(text: StdTextView) -> runtime::Error {
     if (!std_text_is_valid_utf8(text)) {
-        return RuntimeError.invalid_argument;
+        return runtime::Error.invalid_argument;
     }
-    return std_io_write_all(runtime_standard_error(), text.data, text.length);
+    return std_io_write_all(runtime::standard_error(), text.data, text.length);
 }
 

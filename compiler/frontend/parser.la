@@ -13,7 +13,7 @@ struct BootstrapParserState {
     previous: BootstrapToken;
     tree: BootstrapSyntaxTree;
     diagnostics: BootstrapDiagnosticBuffer;
-    error: RuntimeError;
+    error: runtime::Error;
     nesting_depth: usize;
 }
 
@@ -144,18 +144,18 @@ fn bootstrap_syntax_tree_is_valid(tree: BootstrapSyntaxTree) -> bool {
 fn bootstrap_syntax_tree_get(tree: BootstrapSyntaxTree, index: usize) -> BootstrapSyntaxNodeResult {
     if (!bootstrap_syntax_tree_storage_is_valid(tree) || index >= tree.count) {
         return {
-            node = bootstrap_parser_invalid_node(), error = RuntimeError.invalid_argument,
+            node = bootstrap_parser_invalid_node(), error = runtime::Error.invalid_argument,
         };
     }
     let nodes: *const BootstrapSyntaxNode = tree.storage.data as *const BootstrapSyntaxNode;
     return {
-        node = nodes[index], error = RuntimeError.none,
+        node = nodes[index], error = runtime::Error.none,
     };
 }
 
-fn bootstrap_syntax_tree_release(tree: BootstrapSyntaxTree) -> RuntimeError {
+fn bootstrap_syntax_tree_release(tree: BootstrapSyntaxTree) -> runtime::Error {
     if (!bootstrap_syntax_tree_storage_is_valid(tree)) {
-        return RuntimeError.invalid_argument;
+        return runtime::Error.invalid_argument;
     }
     return std_byte_buffer_release(tree.storage);
 }
@@ -191,7 +191,7 @@ fn bootstrap_parser_input_is_valid(source: StdTextView, tokens: BootstrapTokenBu
     var index: usize = 0;
     while (index < tokens.count) {
         let token_result: BootstrapTokenResult = bootstrap_token_buffer_get(tokens, index);
-        if (token_result.error != RuntimeError.none) {
+        if (token_result.error != runtime::Error.none) {
             return false;
         }
         let token: BootstrapToken = token_result.token;
@@ -239,7 +239,7 @@ fn bootstrap_parser_join_spans(first: BootstrapSourceSpan, last: BootstrapSource
 fn bootstrap_parser_add_diagnostic(
     state: *BootstrapParserState, kind: BootstrapDiagnosticKind, span: BootstrapSourceSpan,
     expected: BootstrapTokenKind, found: BootstrapTokenKind, detail: usize) -> bool {
-    if (state->error != RuntimeError.none) {
+    if (state->error != runtime::Error.none) {
         return false;
     }
     let added: BootstrapDiagnosticBufferResult =
@@ -249,24 +249,24 @@ fn bootstrap_parser_add_diagnostic(
             });
     state->diagnostics = added.buffer;
     state->error = added.error;
-    return added.error == RuntimeError.none;
+    return added.error == runtime::Error.none;
 }
 
 fn bootstrap_parser_new_node(
     state: *BootstrapParserState, kind: BootstrapSyntaxKind, span: BootstrapSourceSpan, token_index: usize) -> usize {
     let none: usize = bootstrap_syntax_no_index();
-    if (state->error != RuntimeError.none) {
+    if (state->error != runtime::Error.none) {
         return none;
     }
     if (!bootstrap_syntax_tree_storage_is_valid(state->tree)) {
-        state->error = RuntimeError.invalid_argument;
+        state->error = runtime::Error.invalid_argument;
         return none;
     }
     if (state->tree.count >= BootstrapParserLimit.maximum_nodes as usize) {
         bootstrap_parser_add_diagnostic(
             state, BootstrapDiagnosticKind.resource_limit, span, BootstrapTokenKind.invalid, state->current.kind,
             BootstrapParserLimit.maximum_nodes as usize);
-        state->error = RuntimeError.out_of_memory;
+        state->error = runtime::Error.out_of_memory;
         return none;
     }
     let node: BootstrapSyntaxNode = {
@@ -277,7 +277,7 @@ fn bootstrap_parser_new_node(
         state->tree.storage, (&node) as *const BootstrapSyntaxNode as *const u8, sizeof(BootstrapSyntaxNode));
     state->tree.storage = appended.buffer;
     state->error = appended.error;
-    if (appended.error != RuntimeError.none) {
+    if (appended.error != runtime::Error.none) {
         return none;
     }
     let index: usize = state->tree.count;
@@ -286,12 +286,12 @@ fn bootstrap_parser_new_node(
 }
 
 fn bootstrap_parser_node_pointer(state: *BootstrapParserState, index: usize) -> *BootstrapSyntaxNode {
-    if (state->error != RuntimeError.none) {
+    if (state->error != runtime::Error.none) {
         return null;
     }
     if (index >= state->tree.count) {
-        if (state->error == RuntimeError.none) {
-            state->error = RuntimeError.invalid_argument;
+        if (state->error == runtime::Error.none) {
+            state->error = runtime::Error.invalid_argument;
         }
         return null;
     }
@@ -319,20 +319,20 @@ fn bootstrap_parser_add_node_flags(state: *BootstrapParserState, index: usize, f
 
 fn bootstrap_parser_add_child(state: *BootstrapParserState, parent_index: usize, child_index: usize) -> bool {
     let none: usize = bootstrap_syntax_no_index();
-    if (state->error != RuntimeError.none) {
+    if (state->error != runtime::Error.none) {
         return false;
     }
     if (parent_index >= state->tree.count || child_index >= state->tree.count || parent_index == child_index) {
-        if (state->error == RuntimeError.none) {
-            state->error = RuntimeError.invalid_argument;
+        if (state->error == runtime::Error.none) {
+            state->error = runtime::Error.invalid_argument;
         }
         return false;
     }
     let nodes: *BootstrapSyntaxNode = state->tree.storage.data as *BootstrapSyntaxNode;
     if (nodes[child_index].parent != none || nodes[child_index].next_sibling != none ||
         nodes[parent_index].child_count == BootstrapParserLimit.maximum_size as usize) {
-        if (state->error == RuntimeError.none) {
-            state->error = RuntimeError.invalid_argument;
+        if (state->error == runtime::Error.none) {
+            state->error = runtime::Error.invalid_argument;
         }
         return false;
     }
@@ -348,13 +348,13 @@ fn bootstrap_parser_add_child(state: *BootstrapParserState, parent_index: usize,
 }
 
 fn bootstrap_parser_advance(state: *BootstrapParserState) -> void {
-    if (state->error != RuntimeError.none) {
+    if (state->error != runtime::Error.none) {
         return;
     }
     state->previous = state->current;
     while (state->cursor < state->tokens.count) {
         let token_result: BootstrapTokenResult = bootstrap_token_buffer_get(state->tokens, state->cursor);
-        if (token_result.error != RuntimeError.none) {
+        if (token_result.error != runtime::Error.none) {
             state->error = token_result.error;
             return;
         }
@@ -365,7 +365,7 @@ fn bootstrap_parser_advance(state: *BootstrapParserState) -> void {
             return;
         }
     }
-    state->error = RuntimeError.invalid_argument;
+    state->error = runtime::Error.invalid_argument;
 }
 
 fn bootstrap_parser_check(state: *BootstrapParserState, kind: BootstrapTokenKind) -> bool {
@@ -376,7 +376,7 @@ fn bootstrap_parser_peek_kind(state: *BootstrapParserState) -> BootstrapTokenKin
     var cursor: usize = state->cursor;
     while (cursor < state->tokens.count) {
         let token_result: BootstrapTokenResult = bootstrap_token_buffer_get(state->tokens, cursor);
-        if (token_result.error != RuntimeError.none) {
+        if (token_result.error != runtime::Error.none) {
             state->error = token_result.error;
             return BootstrapTokenKind.invalid;
         }
@@ -419,8 +419,8 @@ fn bootstrap_parser_enter_nesting(state: *BootstrapParserState, span: BootstrapS
 
 fn bootstrap_parser_leave_nesting(state: *BootstrapParserState) -> void {
     if (state->nesting_depth == 0) {
-        if (state->error == RuntimeError.none) {
-            state->error = RuntimeError.invalid_argument;
+        if (state->error == runtime::Error.none) {
+            state->error = runtime::Error.invalid_argument;
         }
         return;
     }
@@ -647,7 +647,7 @@ fn bootstrap_parser_parse_qualified_name(
     let node: usize = bootstrap_parser_new_node(state, kind, first.span, first_index);
     var segment: BootstrapToken = first;
     var segment_index: usize = first_index;
-    while (state->error == RuntimeError.none && state->current.kind == BootstrapTokenKind.colon_colon) {
+    while (state->error == runtime::Error.none && state->current.kind == BootstrapTokenKind.colon_colon) {
         bootstrap_parser_advance(state);
         let name: BootstrapToken = state->current;
         let name_index: usize = state->current_index;
@@ -683,7 +683,7 @@ fn bootstrap_parser_parse_type(state: *BootstrapParserState) -> usize {
         let node: usize = bootstrap_parser_new_node(state, BootstrapSyntaxKind.type_function, start.span, start_index);
         bootstrap_parser_expect(state, BootstrapTokenKind.left_parenthesis);
         if (state->current.kind != BootstrapTokenKind.right_parenthesis) {
-            while (state->error == RuntimeError.none) {
+            while (state->error == runtime::Error.none) {
                 // A `...` tail marks a variadic signature; the semantic layer
                 // rejects it on every non-function mount (fn-pointer types
                 // included) with invalid_variadic.
@@ -720,7 +720,7 @@ fn bootstrap_parser_parse_type(state: *BootstrapParserState) -> usize {
         var seen_const: bool = false;
         var seen_volatile: bool = false;
         var qualifiers_done: bool = false;
-        while (!qualifiers_done && state->error == RuntimeError.none) {
+        while (!qualifiers_done && state->error == runtime::Error.none) {
             if (state->current.kind == BootstrapTokenKind.keyword_const) {
                 if (seen_const) {
                     bootstrap_parser_add_diagnostic(
@@ -839,7 +839,7 @@ fn bootstrap_parser_parse_aggregate_initializer(
             state, left_brace.span)) {
         return initializer;
     }
-    while (state->error == RuntimeError.none && state->current.kind != BootstrapTokenKind.right_brace &&
+    while (state->error == runtime::Error.none && state->current.kind != BootstrapTokenKind.right_brace &&
         state->current.kind != BootstrapTokenKind.end) {
         let offset_before: usize = state->current.span.offset;
         if (state->current.kind == BootstrapTokenKind.left_bracket) {
@@ -930,7 +930,7 @@ fn bootstrap_parser_parse_call(
         return call;
     }
     if (state->current.kind != BootstrapTokenKind.right_parenthesis) {
-        while (state->error == RuntimeError.none) {
+        while (state->error == runtime::Error.none) {
             let argument: usize = bootstrap_parser_parse_expression(state);
             if (argument != none) {
                 bootstrap_parser_add_child(state, call, argument);
@@ -961,7 +961,7 @@ fn bootstrap_parser_parse_intrinsic_expression(state: *BootstrapParserState, at_
             return intrinsic;
         }
         if (state->current.kind != BootstrapTokenKind.right_parenthesis) {
-            while (state->error == RuntimeError.none) {
+            while (state->error == runtime::Error.none) {
                 let argument: usize = bootstrap_parser_parse_expression(state);
                 if (argument != none) {
                     bootstrap_parser_add_child(state, intrinsic, argument);
@@ -1152,7 +1152,7 @@ fn bootstrap_parser_parse_primary_expression(state: *BootstrapParserState) -> us
 fn bootstrap_parser_parse_postfix_expression(state: *BootstrapParserState) -> usize {
     let none: usize = bootstrap_syntax_no_index();
     var expression: usize = bootstrap_parser_parse_primary_expression(state);
-    while (expression != none && state->error == RuntimeError.none) {
+    while (expression != none && state->error == runtime::Error.none) {
         if (state->current.kind == BootstrapTokenKind.left_parenthesis) {
             let operator: BootstrapToken = state->current;
             let operator_index: usize = state->current_index;
@@ -1308,7 +1308,7 @@ fn bootstrap_parser_parse_binary_expression(state: *BootstrapParserState, minimu
     if (left == none) {
         return none;
     }
-    while (state->error == RuntimeError.none) {
+    while (state->error == runtime::Error.none) {
         let precedence: usize = bootstrap_parser_binary_precedence(state->current.kind);
         if (precedence < minimum_precedence) {
             break;
@@ -1426,7 +1426,7 @@ fn bootstrap_parser_parse_attributes(
     }
     *first_attribute = none;
     *attribute_count = 0;
-    while (state->error == RuntimeError.none && state->current.kind == BootstrapTokenKind.at_sign) {
+    while (state->error == runtime::Error.none && state->current.kind == BootstrapTokenKind.at_sign) {
         let at_token: BootstrapToken = state->current;
         bootstrap_parser_advance(state);
         let name: BootstrapToken = state->current;
@@ -1447,7 +1447,7 @@ fn bootstrap_parser_parse_attributes(
         if (bootstrap_parser_match(
                 state, BootstrapTokenKind.left_parenthesis)) {
             if (state->current.kind != BootstrapTokenKind.right_parenthesis) {
-                while (state->error == RuntimeError.none) {
+                while (state->error == runtime::Error.none) {
                     var argument: usize = none;
                     if (state->current.kind == BootstrapTokenKind.identifier &&
                         bootstrap_parser_token_at(state, state->current_index + 1).kind == BootstrapTokenKind.colon) {
@@ -1488,7 +1488,7 @@ fn bootstrap_parser_parse_attributes(
                 state, attribute, bootstrap_parser_join_spans(at_token.span, state->previous.span));
         }
     }
-    return state->error == RuntimeError.none;
+    return state->error == runtime::Error.none;
 }
 
 fn bootstrap_parser_attach_attributes(
@@ -1592,7 +1592,7 @@ fn bootstrap_parser_parse_asm_body(state: *BootstrapParserState) -> usize {
         let token_index: usize = state->current_index;
         bootstrap_parser_advance(state);
         body = bootstrap_parser_new_node(state, BootstrapSyntaxKind.string_expression, token.span, token_index);
-        while (state->error == RuntimeError.none &&
+        while (state->error == runtime::Error.none &&
             (state->current.kind == BootstrapTokenKind.string ||
                 state->current.kind == BootstrapTokenKind.string_u16 ||
                 state->current.kind == BootstrapTokenKind.string_u32)) {
@@ -1607,7 +1607,7 @@ fn bootstrap_parser_parse_asm_body(state: *BootstrapParserState) -> usize {
     } else if (state->current.kind != BootstrapTokenKind.right_brace) {
         body = bootstrap_parser_new_node(
             state, BootstrapSyntaxKind.invalid, state->current.span, state->current_index);
-        while (state->error == RuntimeError.none && state->current.kind != BootstrapTokenKind.right_brace &&
+        while (state->error == runtime::Error.none && state->current.kind != BootstrapTokenKind.right_brace &&
             state->current.kind != BootstrapTokenKind.end) {
             bootstrap_parser_advance(state);
         }
@@ -1631,7 +1631,7 @@ fn bootstrap_parser_parse_block(state: *BootstrapParserState) -> usize {
             state, left_brace.span)) {
         return block;
     }
-    while (state->error == RuntimeError.none && state->current.kind != BootstrapTokenKind.right_brace &&
+    while (state->error == runtime::Error.none && state->current.kind != BootstrapTokenKind.right_brace &&
         state->current.kind != BootstrapTokenKind.end) {
         let index_before: usize = state->current_index;
         let statement: usize = bootstrap_parser_parse_statement(state);
@@ -1886,7 +1886,7 @@ fn bootstrap_parser_parse_switch_statement(
     }
     bootstrap_parser_expect(state, BootstrapTokenKind.right_parenthesis);
     bootstrap_parser_expect(state, BootstrapTokenKind.left_brace);
-    while (state->error == RuntimeError.none && state->current.kind != BootstrapTokenKind.right_brace &&
+    while (state->error == runtime::Error.none && state->current.kind != BootstrapTokenKind.right_brace &&
         state->current.kind != BootstrapTokenKind.end) {
         let arm_token: BootstrapToken = state->current;
         let arm_index: usize = state->current_index;
@@ -1904,7 +1904,7 @@ fn bootstrap_parser_parse_switch_statement(
         if (is_default) {
             bootstrap_parser_add_node_flags(state, arm, BootstrapSyntaxFlag.default_arm as usize);
         } else {
-            while (state->error == RuntimeError.none) {
+            while (state->error == runtime::Error.none) {
                 let label: usize = bootstrap_parser_parse_switch_label(state);
                 if (label != none) {
                     bootstrap_parser_add_child(state, arm, label);
@@ -2126,7 +2126,7 @@ fn bootstrap_parser_parse_statement(state: *BootstrapParserState) -> usize {
 
 fn bootstrap_parser_parse_module_name(state: *BootstrapParserState, declaration: usize) -> bool {
     var saw_name: bool = false;
-    while (state->error == RuntimeError.none) {
+    while (state->error == runtime::Error.none) {
         let name: BootstrapToken = state->current;
         let name_index: usize = state->current_index;
         if (!bootstrap_parser_expect(
@@ -2167,7 +2167,7 @@ fn bootstrap_parser_parse_field(state: *BootstrapParserState, owner: usize) -> u
             bootstrap_parser_attach_attributes(state, owner, first_attribute, attribute_count);
             return field;
         }
-        while (state->error == RuntimeError.none && state->current.kind != BootstrapTokenKind.right_brace &&
+        while (state->error == runtime::Error.none && state->current.kind != BootstrapTokenKind.right_brace &&
             state->current.kind != BootstrapTokenKind.end) {
             let index_before: usize = state->current_index;
             let nested: usize = bootstrap_parser_parse_field(state, declaration);
@@ -2217,7 +2217,7 @@ fn bootstrap_parser_parse_aggregate_declaration(
     let declaration: usize = bootstrap_parser_new_node(state, declaration_kind, start.span, name_index);
     bootstrap_parser_add_node_flags(state, declaration, flags);
     bootstrap_parser_expect(state, BootstrapTokenKind.left_brace);
-    while (state->error == RuntimeError.none && state->current.kind != BootstrapTokenKind.right_brace &&
+    while (state->error == runtime::Error.none && state->current.kind != BootstrapTokenKind.right_brace &&
         state->current.kind != BootstrapTokenKind.end) {
         let index_before: usize = state->current_index;
         let field: usize = bootstrap_parser_parse_field(state, declaration);
@@ -2250,7 +2250,7 @@ fn bootstrap_parser_parse_enum_declaration(
         bootstrap_parser_add_child(state, declaration, underlying_type);
     }
     bootstrap_parser_expect(state, BootstrapTokenKind.left_brace);
-    while (state->error == RuntimeError.none && state->current.kind != BootstrapTokenKind.right_brace &&
+    while (state->error == runtime::Error.none && state->current.kind != BootstrapTokenKind.right_brace &&
         state->current.kind != BootstrapTokenKind.end) {
         let index_before: usize = state->current_index;
         let member_name: BootstrapToken = state->current;
@@ -2328,7 +2328,7 @@ fn bootstrap_parser_parse_function_declaration(
     bootstrap_parser_add_node_flags(state, function, flags);
     bootstrap_parser_expect(state, BootstrapTokenKind.left_parenthesis);
     if (state->current.kind != BootstrapTokenKind.right_parenthesis) {
-        while (state->error == RuntimeError.none) {
+        while (state->error == runtime::Error.none) {
             if (state->current.kind == BootstrapTokenKind.dot_dot_dot) {
                 bootstrap_parser_advance(state);
                 bootstrap_parser_add_node_flags(state, function, BootstrapSyntaxFlag.variadic as usize);
@@ -2384,8 +2384,8 @@ fn bootstrap_parser_parse_function_declaration(
 
 fn bootstrap_parser_token_at(state: *BootstrapParserState, index: usize) -> BootstrapToken {
     let result: BootstrapTokenResult = bootstrap_token_buffer_get(state->tokens, index);
-    if (result.error != RuntimeError.none) {
-        if (state->error == RuntimeError.none) {
+    if (result.error != runtime::Error.none) {
+        if (state->error == runtime::Error.none) {
             state->error = result.error;
         }
         return {
@@ -2610,7 +2610,7 @@ fn bootstrap_parser_parse_program(state: *BootstrapParserState) -> usize {
                     state, BootstrapSyntaxKind.selective_import_names, colons.span, colons_index);
             if (bootstrap_parser_expect(
                     state, BootstrapTokenKind.left_brace)) {
-                while (state->error == RuntimeError.none &&
+                while (state->error == runtime::Error.none &&
                     state->current.kind == BootstrapTokenKind.identifier) {
                     let selective_name: BootstrapToken = state->current;
                     let selective_name_index: usize = state->current_index;
@@ -2638,7 +2638,7 @@ fn bootstrap_parser_parse_program(state: *BootstrapParserState) -> usize {
         bootstrap_parser_add_child(state, program, import_declaration);
     }
 
-    while (state->error == RuntimeError.none && state->current.kind != BootstrapTokenKind.end) {
+    while (state->error == runtime::Error.none && state->current.kind != BootstrapTokenKind.end) {
         let index_before: usize = state->current_index;
         let declaration: usize = bootstrap_parser_parse_top_level_declaration(state);
         if (declaration != none) {
@@ -2658,32 +2658,32 @@ fn bootstrap_parse(source: StdTextView, tokens: BootstrapTokenBuffer) -> Bootstr
     if (!bootstrap_parser_input_is_valid(source, tokens)) {
         return {
             tree = bootstrap_syntax_tree_empty(), diagnostics = bootstrap_diagnostic_buffer_empty(),
-            error = RuntimeError.invalid_argument,
+            error = runtime::Error.invalid_argument,
         };
     }
     var state: BootstrapParserState = {
         source = source, tokens = tokens, cursor = 0, current = bootstrap_parser_invalid_token(),
         current_index = bootstrap_syntax_no_index(), previous = bootstrap_parser_invalid_token(),
         tree = bootstrap_syntax_tree_empty(), diagnostics = bootstrap_diagnostic_buffer_empty(),
-        error = RuntimeError.none, nesting_depth = 0,
+        error = runtime::Error.none, nesting_depth = 0,
     };
     state.tree.token_count = tokens.count;
     bootstrap_parser_advance(&state);
-    if (state.error == RuntimeError.none) {
+    if (state.error == runtime::Error.none) {
         bootstrap_parser_parse_program(&state);
     }
-    if (state.error == RuntimeError.none && !bootstrap_syntax_tree_is_valid(state.tree)) {
-        state.error = RuntimeError.io;
+    if (state.error == runtime::Error.none && !bootstrap_syntax_tree_is_valid(state.tree)) {
+        state.error = runtime::Error.io;
     }
     return {
         tree = state.tree, diagnostics = state.diagnostics, error = state.error,
     };
 }
 
-fn bootstrap_parse_result_release(result: BootstrapParseResult) -> RuntimeError {
-    let tree_error: RuntimeError = bootstrap_syntax_tree_release(result.tree);
-    let diagnostic_error: RuntimeError = bootstrap_diagnostic_buffer_release(result.diagnostics);
-    if (tree_error != RuntimeError.none) {
+fn bootstrap_parse_result_release(result: BootstrapParseResult) -> runtime::Error {
+    let tree_error: runtime::Error = bootstrap_syntax_tree_release(result.tree);
+    let diagnostic_error: runtime::Error = bootstrap_diagnostic_buffer_release(result.diagnostics);
+    if (tree_error != runtime::Error.none) {
         return tree_error;
     }
     return diagnostic_error;
@@ -2691,7 +2691,7 @@ fn bootstrap_parse_result_release(result: BootstrapParseResult) -> RuntimeError 
 
 fn bootstrap_frontend_parse(source: StdTextView) -> BootstrapFrontendResult {
     let lex: BootstrapLexResult = bootstrap_lex(source);
-    if (lex.error != RuntimeError.none) {
+    if (lex.error != runtime::Error.none) {
         return {
             lex = lex, parse = {
                 tree = bootstrap_syntax_tree_empty(), diagnostics = bootstrap_diagnostic_buffer_empty(),
@@ -2705,10 +2705,10 @@ fn bootstrap_frontend_parse(source: StdTextView) -> BootstrapFrontendResult {
     };
 }
 
-fn bootstrap_frontend_result_release(result: BootstrapFrontendResult) -> RuntimeError {
-    let parse_error: RuntimeError = bootstrap_parse_result_release(result.parse);
-    let lex_error: RuntimeError = bootstrap_lex_result_release(result.lex);
-    if (parse_error != RuntimeError.none) {
+fn bootstrap_frontend_result_release(result: BootstrapFrontendResult) -> runtime::Error {
+    let parse_error: runtime::Error = bootstrap_parse_result_release(result.parse);
+    let lex_error: runtime::Error = bootstrap_lex_result_release(result.lex);
+    if (parse_error != runtime::Error.none) {
         return parse_error;
     }
     return lex_error;

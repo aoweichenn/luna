@@ -70,7 +70,7 @@ struct BootstrapAssembler {
     fixups: StdByteBuffer;
     numeric_labels: StdByteBuffer;
     line: usize;
-    error: RuntimeError;
+    error: runtime::Error;
 }
 
 fn bootstrap_assembler_empty_register()
@@ -102,8 +102,8 @@ fn bootstrap_assembler_empty_operands()
     return result;
 }
 
-fn bootstrap_assembler_fail(assembler: *BootstrapAssembler, error: RuntimeError) -> bool {
-    if (assembler != null && assembler->error == RuntimeError.none) {
+fn bootstrap_assembler_fail(assembler: *BootstrapAssembler, error: runtime::Error) -> bool {
+    if (assembler != null && assembler->error == runtime::Error.none) {
         assembler->error = error;
     }
     return false;
@@ -542,7 +542,7 @@ fn bootstrap_assembler_append_u8(assembler: *BootstrapAssembler, value: u8) -> b
         !bootstrap_object_append_u8(
             &assembler->object, assembler->section, value)) {
         return bootstrap_assembler_fail(
-            assembler, assembler == null ? RuntimeError.invalid_argument : assembler->object.error);
+            assembler, assembler == null ? runtime::Error.invalid_argument : assembler->object.error);
     }
     return true;
 }
@@ -608,7 +608,7 @@ fn bootstrap_assembler_add_fixup(
     assembler: *BootstrapAssembler, target: StdTextView, offset: usize, kind: BootstrapAssemblerFixupKind) -> bool {
     if (assembler == null || assembler->fixups.length / sizeof(BootstrapAssemblerFixup) >=
                 BootstrapAssemblerLimit.maximum_fixups as usize) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.out_of_memory);
+        return bootstrap_assembler_fail(assembler, runtime::Error.out_of_memory);
     }
     var fixup: BootstrapAssemblerFixup = {
         target = target, section = assembler->section, offset = offset, line = assembler->line, kind = kind,
@@ -618,7 +618,7 @@ fn bootstrap_assembler_add_fixup(
     let appended: StdByteBufferResult = std_byte_buffer_append(
         assembler->fixups, (&fixup) as *const BootstrapAssemblerFixup as *const u8, sizeof(BootstrapAssemblerFixup));
     assembler->fixups = appended.buffer;
-    if (appended.error != RuntimeError.none) {
+    if (appended.error != runtime::Error.none) {
         return bootstrap_assembler_fail(assembler, appended.error);
     }
     return true;
@@ -1416,7 +1416,7 @@ fn bootstrap_assembler_symbol_name_is_valid(name: StdTextView) -> bool {
 
 fn bootstrap_assembler_get_symbol(assembler: *BootstrapAssembler, name: StdTextView) -> BootstrapObjectIndexResult {
     let result: BootstrapObjectIndexResult = bootstrap_object_add_symbol(&assembler->object, name);
-    if (result.error != RuntimeError.none) {
+    if (result.error != runtime::Error.none) {
         bootstrap_assembler_fail(assembler, result.error);
     }
     return result;
@@ -1425,7 +1425,7 @@ fn bootstrap_assembler_get_symbol(assembler: *BootstrapAssembler, name: StdTextV
 fn bootstrap_assembler_define_label(assembler: *BootstrapAssembler, name: StdTextView) -> bool {
     let section: *StdByteBuffer = bootstrap_assembler_section_buffer(assembler);
     if (section == null || name.length == 0) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
     var numeric: bool = true;
     var index: usize = 0;
@@ -1436,7 +1436,7 @@ fn bootstrap_assembler_define_label(assembler: *BootstrapAssembler, name: StdTex
         } else if (numeric) {
             let digit: usize = (name.data[index] - 48) as usize;
             if (number > (18446744073709551615 as usize - digit) / 10) {
-                return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+                return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
             }
             number = number * 10 + digit;
         }
@@ -1450,21 +1450,21 @@ fn bootstrap_assembler_define_label(assembler: *BootstrapAssembler, name: StdTex
             assembler->numeric_labels, (&label) as *const BootstrapAssemblerNumericLabel as *const u8,
             sizeof(BootstrapAssemblerNumericLabel));
         assembler->numeric_labels = appended.buffer;
-        if (appended.error != RuntimeError.none) {
+        if (appended.error != runtime::Error.none) {
             return bootstrap_assembler_fail(assembler, appended.error);
         }
         return true;
     }
     if (!bootstrap_assembler_symbol_name_is_valid(name)) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
     let found: BootstrapObjectIndexResult = bootstrap_assembler_get_symbol(assembler, name);
-    if (found.error != RuntimeError.none) {
+    if (found.error != runtime::Error.none) {
         return false;
     }
     let symbol: *BootstrapObjectSymbol = bootstrap_object_symbol_mut(&assembler->object, found.index);
     if (symbol == null || symbol->defined || symbol->external) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
     symbol->defined = true;
     symbol->section = assembler->section;
@@ -1475,15 +1475,15 @@ fn bootstrap_assembler_define_label(assembler: *BootstrapAssembler, name: StdTex
 fn bootstrap_assembler_mark_symbol(assembler: *BootstrapAssembler, input: StdTextView, external: bool) -> bool {
     let name: StdTextView = bootstrap_assembler_trim(input);
     if (!bootstrap_assembler_symbol_name_is_valid(name)) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
     let found: BootstrapObjectIndexResult = bootstrap_assembler_get_symbol(assembler, name);
-    if (found.error != RuntimeError.none) {
+    if (found.error != runtime::Error.none) {
         return false;
     }
     let symbol: *BootstrapObjectSymbol = bootstrap_object_symbol_mut(&assembler->object, found.index);
     if (symbol == null || (external && symbol->defined)) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
     symbol->global = true;
     symbol->external = external;
@@ -1493,17 +1493,17 @@ fn bootstrap_assembler_mark_symbol(assembler: *BootstrapAssembler, input: StdTex
 fn bootstrap_assembler_symbol_type(assembler: *BootstrapAssembler, input: StdTextView) -> bool {
     let comma: usize = bootstrap_assembler_find(input, 44);
     if (comma == input.length) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
     let name: StdTextView = bootstrap_assembler_trim(bootstrap_assembler_slice(input, 0, comma));
     let kind: StdTextView = bootstrap_assembler_trim(
         bootstrap_assembler_slice(input, comma + 1, input.length - comma - 1));
     if (!bootstrap_assembler_symbol_name_is_valid(name)) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
     let found: BootstrapObjectIndexResult = bootstrap_assembler_get_symbol(assembler, name);
     let symbol: *BootstrapObjectSymbol = bootstrap_object_symbol_mut(&assembler->object, found.index);
-    if (found.error != RuntimeError.none || symbol == null) {
+    if (found.error != runtime::Error.none || symbol == null) {
         return false;
     }
     if (bootstrap_assembler_equal(kind, "@function", 9)) {
@@ -1514,13 +1514,13 @@ fn bootstrap_assembler_symbol_type(assembler: *BootstrapAssembler, input: StdTex
         symbol->kind = BootstrapObjectSymbolKind.object;
         return true;
     }
-    return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+    return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
 }
 
 fn bootstrap_assembler_symbol_size(assembler: *BootstrapAssembler, input: StdTextView) -> bool {
     let comma: usize = bootstrap_assembler_find(input, 44);
     if (comma == input.length) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
     let name: StdTextView = bootstrap_assembler_trim(bootstrap_assembler_slice(input, 0, comma));
     let expression: StdTextView = bootstrap_assembler_trim(
@@ -1528,20 +1528,20 @@ fn bootstrap_assembler_symbol_size(assembler: *BootstrapAssembler, input: StdTex
     let found: BootstrapObjectIndexResult = bootstrap_object_find_symbol(assembler->object, name);
     let symbol: *BootstrapObjectSymbol = bootstrap_object_symbol_mut(&assembler->object, found.index);
     let section: *StdByteBuffer = bootstrap_assembler_section_buffer(assembler);
-    if (!found.found || found.error != RuntimeError.none || symbol == null || !symbol->defined ||
+    if (!found.found || found.error != runtime::Error.none || symbol == null || !symbol->defined ||
         symbol->section != assembler->section || section == null || expression.length != name.length + 2 ||
         expression.data[0] != 46 || expression.data[1] != 45) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
     var index: usize = 0;
     while (index < name.length) {
         if (expression.data[index + 2] != name.data[index]) {
-            return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+            return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
         }
         index += 1;
     }
     if (symbol->value > section->length) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
     symbol->size = section->length - symbol->value;
     return true;
@@ -1550,17 +1550,17 @@ fn bootstrap_assembler_symbol_size(assembler: *BootstrapAssembler, input: StdTex
 fn bootstrap_assembler_alignment(assembler: *BootstrapAssembler, input: StdTextView, exponent: bool) -> bool {
     var parsed: usize = 0;
     if (!bootstrap_assembler_parse_usize(input, &parsed) || (exponent && parsed > 12)) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
     let alignment: usize = exponent ? 1 << parsed : parsed;
     if (alignment == 0 || (alignment & (alignment - 1)) != 0 ||
         !bootstrap_object_set_alignment(
             &assembler->object, assembler->section, alignment)) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
     let output: *StdByteBuffer = bootstrap_assembler_section_buffer(assembler);
     if (output == null) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
     let remainder: usize = output->length & (alignment - 1);
     var padding: usize = remainder == 0 ? 0 : alignment - remainder;
@@ -1610,7 +1610,7 @@ fn bootstrap_assembler_directive(assembler: *BootstrapAssembler, line: StdTextVi
             assembler->section = BootstrapObjectSection.undefined;
             return true;
         }
-        return bootstrap_assembler_fail(assembler, RuntimeError.not_supported);
+        return bootstrap_assembler_fail(assembler, runtime::Error.not_supported);
     }
     if (bootstrap_assembler_equal(directive, ".globl", 6)) {
         return bootstrap_assembler_mark_symbol(assembler, arguments, false);
@@ -1636,12 +1636,12 @@ fn bootstrap_assembler_directive(assembler: *BootstrapAssembler, line: StdTextVi
     if (bootstrap_assembler_equal(directive, ".balign", 7)) {
         return bootstrap_assembler_alignment(assembler, arguments, false);
     }
-    return bootstrap_assembler_fail(assembler, RuntimeError.not_supported);
+    return bootstrap_assembler_fail(assembler, runtime::Error.not_supported);
 }
 
 fn bootstrap_assembler_instruction(assembler: *BootstrapAssembler, line: StdTextView) -> bool {
     if (assembler->section != BootstrapObjectSection.text) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
     var split: usize = 0;
     while (split < line.length && !bootstrap_assembler_is_space(line.data[split])) {
@@ -1654,7 +1654,7 @@ fn bootstrap_assembler_instruction(assembler: *BootstrapAssembler, line: StdText
     if (!bootstrap_assembler_parse_operands(raw_operands, &operands) ||
         !bootstrap_assembler_encode(
             assembler, mnemonic, raw_operands, &operands as *const BootstrapAssemblerOperands)) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.not_supported);
+        return bootstrap_assembler_fail(assembler, runtime::Error.not_supported);
     }
     return true;
 }
@@ -1679,11 +1679,11 @@ fn bootstrap_assembler_patch(assembler: *BootstrapAssembler, fixup: BootstrapAss
         fixup.section == BootstrapObjectSection.data ? &assembler->object.data : null;
     if (output == null || fixup.offset > output->length || (4 as usize) > output->length - fixup.offset ||
         target > 9223372036854775807 as usize || fixup.offset > 9223372036854775803 as usize) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
     let displacement: isize = target as isize - (fixup.offset + 4) as isize;
     if (displacement < -2147483648 || displacement > 2147483647) {
-        return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
     let bits: u32 = displacement as u32;
     var index: usize = 0;
@@ -1734,7 +1734,7 @@ fn bootstrap_assembler_resolve_fixups(assembler: *BootstrapAssembler) -> bool {
                 !bootstrap_assembler_numeric_target(assembler as *const BootstrapAssembler, fixup, &target) ||
                 !bootstrap_assembler_patch(
                     assembler, fixup, target)) {
-                return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+                return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
             }
             index += 1;
             continue;
@@ -1748,12 +1748,12 @@ fn bootstrap_assembler_resolve_fixups(assembler: *BootstrapAssembler) -> bool {
                 created->external = true;
             }
         }
-        if (found.error != RuntimeError.none || !found.found && fixup.kind != BootstrapAssemblerFixupKind.call) {
-            return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+        if (found.error != runtime::Error.none || !found.found && fixup.kind != BootstrapAssemblerFixupKind.call) {
+            return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
         }
         let symbol: *BootstrapObjectSymbol = bootstrap_object_symbol_mut(&assembler->object, found.index);
         if (symbol == null) {
-            return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+            return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
         }
         if (symbol->defined && symbol->section == fixup.section) {
             if (!bootstrap_assembler_patch(
@@ -1764,7 +1764,7 @@ fn bootstrap_assembler_resolve_fixups(assembler: *BootstrapAssembler) -> bool {
             continue;
         }
         if (fixup.kind == BootstrapAssemblerFixupKind.branch) {
-            return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+            return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
         }
         if (!symbol->defined) {
             symbol->global = true;
@@ -1787,9 +1787,9 @@ fn bootstrap_assembler_validate_symbols(assembler: *BootstrapAssembler) -> bool 
     var index: usize = 0;
     while (index < count) {
         let result: BootstrapObjectSymbolResult = bootstrap_object_get_symbol(assembler->object, index);
-        if (result.error != RuntimeError.none || (!result.symbol.defined && !result.symbol.global &&
+        if (result.error != runtime::Error.none || (!result.symbol.defined && !result.symbol.global &&
              !result.symbol.external)) {
-            return bootstrap_assembler_fail(assembler, RuntimeError.invalid_argument);
+            return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
         }
         index += 1;
     }
@@ -1799,13 +1799,13 @@ fn bootstrap_assembler_validate_symbols(assembler: *BootstrapAssembler) -> bool 
 fn bootstrap_x86_64_assemble(assembly: StdTextView) -> BootstrapAssemblerResult {
     var assembler: BootstrapAssembler = {
         object = bootstrap_object_empty(), section = BootstrapObjectSection.undefined, fixups = std_byte_buffer_empty(),
-        numeric_labels = std_byte_buffer_empty(), line = 1, error = RuntimeError.none,
+        numeric_labels = std_byte_buffer_empty(), line = 1, error = runtime::Error.none,
     };
     if (!std_text_is_valid_utf8(assembly) || assembly.length > BootstrapAssemblerLimit.maximum_source as usize) {
-        assembler.error = RuntimeError.invalid_argument;
+        assembler.error = runtime::Error.invalid_argument;
     }
     var offset: usize = 0;
-    while (assembler.error == RuntimeError.none && offset < assembly.length) {
+    while (assembler.error == runtime::Error.none && offset < assembly.length) {
         var end: usize = offset;
         while (end < assembly.length && assembly.data[end] != 10) {
             end += 1;
@@ -1813,8 +1813,8 @@ fn bootstrap_x86_64_assemble(assembly: StdTextView) -> BootstrapAssemblerResult 
         if (end - offset > BootstrapAssemblerLimit.maximum_line as usize ||
             !bootstrap_assembler_line(
                 &assembler, bootstrap_assembler_slice(assembly, offset, end - offset))) {
-            if (assembler.error == RuntimeError.none) {
-                assembler.error = RuntimeError.invalid_argument;
+            if (assembler.error == runtime::Error.none) {
+                assembler.error = runtime::Error.invalid_argument;
             }
             break;
         }
@@ -1825,21 +1825,21 @@ fn bootstrap_x86_64_assemble(assembly: StdTextView) -> BootstrapAssemblerResult 
             assembler.line += 1;
         }
     }
-    if (assembler.error == RuntimeError.none && (!bootstrap_assembler_resolve_fixups(&assembler) ||
+    if (assembler.error == runtime::Error.none && (!bootstrap_assembler_resolve_fixups(&assembler) ||
          !bootstrap_assembler_validate_symbols(&assembler) || !bootstrap_object_is_valid(assembler.object))) {
-        if (assembler.error == RuntimeError.none) {
-            assembler.error = RuntimeError.invalid_argument;
+        if (assembler.error == runtime::Error.none) {
+            assembler.error = runtime::Error.invalid_argument;
         }
     }
-    let fixup_error: RuntimeError = std_byte_buffer_release(assembler.fixups);
-    let label_error: RuntimeError = std_byte_buffer_release(assembler.numeric_labels);
-    if (assembler.error == RuntimeError.none && fixup_error != RuntimeError.none) {
+    let fixup_error: runtime::Error = std_byte_buffer_release(assembler.fixups);
+    let label_error: runtime::Error = std_byte_buffer_release(assembler.numeric_labels);
+    if (assembler.error == runtime::Error.none && fixup_error != runtime::Error.none) {
         assembler.error = fixup_error;
     }
-    if (assembler.error == RuntimeError.none && label_error != RuntimeError.none) {
+    if (assembler.error == runtime::Error.none && label_error != runtime::Error.none) {
         assembler.error = label_error;
     }
-    if (assembler.error != RuntimeError.none) {
+    if (assembler.error != runtime::Error.none) {
         bootstrap_object_release(assembler.object);
         assembler.object = bootstrap_object_empty();
     }
