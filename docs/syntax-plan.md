@@ -409,7 +409,7 @@ search: for (var row: usize = 0; row < rows; row += 1) {
 }
 
 cleanup:
-    std_memory_release(allocation);
+    memory::release(allocation);
     goto cleanup;                       // forward/backward, validated
 ```
 
@@ -506,7 +506,7 @@ only the qualifier and is the escape from flat binding and from colliding
 last segments; `::{x, y}` flat-binds only the listed, validated exports.
 Qualification resolves in expression, type and interface positions and
 composes with enum member access (`io::Error.none`). This is the namespace
-mechanism that lets m1.13 retire the manual `std_text_`-style prefixes.
+mechanism that let m1.13 retire the manual `std_text_`-style prefixes.
 
 ## Explicitly out of scope
 

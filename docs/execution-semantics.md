@@ -333,7 +333,7 @@ The `luna.linux.syscall` module exposes raw zero-to-six-argument wrappers.
 `lunalink` supplies their verified implementation, which converts System V
 registers to the x86-64 Linux kernel ABI and executes `syscall` directly.
 Negative kernel error results are preserved without `errno` translation. The
-`luna.runtime` module converts them to the scoped `RuntimeError` representation
+`luna.runtime` module converts them to the scoped `runtime::Error` representation
 and supplies named file and memory resources. Its read and write operations
 perform exactly one system call, expose short counts and do not hide
 `interrupted` or `would_block`.

@@ -690,7 +690,7 @@ must already be live at the `goto`:
 ```luna
     goto cleanup;
 cleanup:
-    std_memory_release(allocation);
+    memory::release(allocation);
 ```
 
 A `break`/`continue` naming a label that is not an enclosing loop, a

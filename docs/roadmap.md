@@ -212,11 +212,13 @@ feature has executable tests plus a green `verify` fixed point.
 - [x] `import a.b.c::{x, y};` flat-binds only the listed exports, still
   binding the `c::` qualifier
 
-### m1.13 de-prefixed exports (planned)
+### m1.13 de-prefixed exports
 
-- [ ] migrate every library/compiler module off manual name prefixes
-  (`std_text_view` → `text::view`), consumers switch to qualified or
-  selective imports, one module per gated slice
+- [x] every library/compiler module migrated off manual name prefixes
+  (`std_text_view` → `text::view`, `BootstrapSemanticContext` →
+  `context::Context`, `bootstrap_x86_64_text_append_c_string` →
+  `asm_text::append_c_string`); consumers use qualified or alias imports,
+  landed one module family per gated slice
 
 ## Explicitly deferred
 
