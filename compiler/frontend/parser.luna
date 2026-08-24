@@ -72,7 +72,7 @@ fn bootstrap_syntax_tree_is_valid(tree: BootstrapSyntaxTree) -> bool {
     var node_index: usize = 0;
     while (node_index < tree.count) {
         let node: BootstrapSyntaxNode = nodes[node_index];
-        if ((node.kind as usize) > (BootstrapSyntaxKind.const_declaration as usize) || node.flags > 32767 ||
+        if ((node.kind as usize) > (BootstrapSyntaxKind.goto_statement as usize) || node.flags > 32767 ||
             node.span.line == 0 || node.span.column == 0 || node.span.length >
                 (BootstrapParserLimit.maximum_size as usize) - node.span.offset || (node.token_index != none &&
                 node.token_index >= tree.token_count)) {
@@ -195,7 +195,7 @@ fn bootstrap_parser_input_is_valid(source: StdTextView, tokens: BootstrapTokenBu
             return false;
         }
         let token: BootstrapToken = token_result.token;
-        if ((token.kind as usize) > (BootstrapTokenKind.keyword_volatile as usize) ||
+        if ((token.kind as usize) > (BootstrapTokenKind.keyword_goto as usize) ||
             !bootstrap_parser_span_is_valid(source, token.span) || token.span.offset < previous_end) {
             return false;
         }
@@ -370,6 +370,22 @@ fn bootstrap_parser_advance(state: *BootstrapParserState) -> void {
 
 fn bootstrap_parser_check(state: *BootstrapParserState, kind: BootstrapTokenKind) -> bool {
     return state->current.kind == kind;
+}
+
+fn bootstrap_parser_peek_kind(state: *BootstrapParserState) -> BootstrapTokenKind {
+    var cursor: usize = state->cursor;
+    while (cursor < state->tokens.count) {
+        let token_result: BootstrapTokenResult = bootstrap_token_buffer_get(state->tokens, cursor);
+        if (token_result.error != RuntimeError.none) {
+            state->error = token_result.error;
+            return BootstrapTokenKind.invalid;
+        }
+        if (token_result.token.kind != BootstrapTokenKind.invalid) {
+            return token_result.token.kind;
+        }
+        cursor += 1;
+    }
+    return BootstrapTokenKind.invalid;
 }
 
 fn bootstrap_parser_match(state: *BootstrapParserState, kind: BootstrapTokenKind) -> bool {
@@ -1797,11 +1813,52 @@ fn bootstrap_parser_parse_assert_statement(state: *BootstrapParserState) -> usiz
     return statement;
 }
 
+fn bootstrap_parser_parse_goto_statement(state: *BootstrapParserState) -> usize {
+    let keyword: BootstrapToken = state->current;
+    let keyword_index: usize = state->current_index;
+    bootstrap_parser_advance(state);
+    let statement: usize = bootstrap_parser_new_node(
+        state, BootstrapSyntaxKind.goto_statement, keyword.span, keyword_index);
+    let name: BootstrapToken = state->current;
+    let name_index: usize = state->current_index;
+    if (bootstrap_parser_expect(state, BootstrapTokenKind.identifier)) {
+        bootstrap_parser_add_child(
+            state, statement,
+            bootstrap_parser_new_node(state, BootstrapSyntaxKind.name_expression, name.span, name_index));
+    }
+    bootstrap_parser_expect(state, BootstrapTokenKind.semicolon);
+    bootstrap_parser_set_node_span(state, statement, bootstrap_parser_join_spans(keyword.span, state->previous.span));
+    return statement;
+}
+
+fn bootstrap_parser_parse_labeled_statement(
+    state: *BootstrapParserState, name: BootstrapToken, name_index: usize) -> usize {
+    let none: usize = bootstrap_syntax_no_index();
+    let statement: usize = bootstrap_parser_new_node(
+        state, BootstrapSyntaxKind.labeled_statement, name.span, name_index);
+    bootstrap_parser_expect(state, BootstrapTokenKind.colon);
+    let inner: usize = bootstrap_parser_parse_statement(state);
+    if (inner != none) {
+        bootstrap_parser_add_child(state, statement, inner);
+        let inner_node: *BootstrapSyntaxNode = bootstrap_parser_node_pointer(state, inner);
+        if (inner_node != null) {
+            bootstrap_parser_set_node_span(
+                state, statement, bootstrap_parser_join_spans(name.span, inner_node->span));
+        }
+    }
+    return statement;
+}
+
 fn bootstrap_parser_parse_statement(state: *BootstrapParserState) -> usize {
     let token: BootstrapToken = state->current;
     let token_index: usize = state->current_index;
     if (token.kind == BootstrapTokenKind.left_brace) {
         return bootstrap_parser_parse_block(state);
+    }
+    if (token.kind == BootstrapTokenKind.identifier &&
+        bootstrap_parser_peek_kind(state) == BootstrapTokenKind.colon) {
+        bootstrap_parser_advance(state);
+        return bootstrap_parser_parse_labeled_statement(state, token, token_index);
     }
     if (token.kind == BootstrapTokenKind.keyword_let || token.kind == BootstrapTokenKind.keyword_var) {
         bootstrap_parser_advance(state);
@@ -1872,11 +1929,24 @@ fn bootstrap_parser_parse_statement(state: *BootstrapParserState) -> usize {
     }
     if (token.kind == BootstrapTokenKind.keyword_break || token.kind == BootstrapTokenKind.keyword_continue) {
         bootstrap_parser_advance(state);
-        bootstrap_parser_expect(state, BootstrapTokenKind.semicolon);
-        return bootstrap_parser_new_node(
+        let statement: usize = bootstrap_parser_new_node(
             state, token.kind == BootstrapTokenKind.keyword_break ? BootstrapSyntaxKind.break_statement :
-                BootstrapSyntaxKind.continue_statement, bootstrap_parser_join_spans(token.span, state->previous.span),
-            token_index);
+                BootstrapSyntaxKind.continue_statement, token.span, token_index);
+        if (state->current.kind == BootstrapTokenKind.identifier) {
+            let name: BootstrapToken = state->current;
+            let name_index: usize = state->current_index;
+            bootstrap_parser_advance(state);
+            bootstrap_parser_add_child(
+                state, statement,
+                bootstrap_parser_new_node(state, BootstrapSyntaxKind.name_expression, name.span, name_index));
+        }
+        bootstrap_parser_expect(state, BootstrapTokenKind.semicolon);
+        bootstrap_parser_set_node_span(
+            state, statement, bootstrap_parser_join_spans(token.span, state->previous.span));
+        return statement;
+    }
+    if (token.kind == BootstrapTokenKind.keyword_goto) {
+        return bootstrap_parser_parse_goto_statement(state);
     }
     if (token.kind == BootstrapTokenKind.keyword_return) {
         bootstrap_parser_advance(state);

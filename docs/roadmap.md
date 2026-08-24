@@ -176,8 +176,8 @@ feature has executable tests plus a green `verify` fixed point.
 
 ### m1.6 labels and goto
 
-- [ ] labeled `break`/`continue`
-- [ ] validated `goto` (`defer` shelved, see syntax-plan decision 2)
+- [x] labeled `break`/`continue`
+- [x] validated `goto` (`defer` shelved, see syntax-plan decision 2)
 
 ### m1.7 variadic functions
 

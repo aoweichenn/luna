@@ -402,7 +402,7 @@ same evaluator that m1.2's `assert` seeded.
 ## Milestone m1.6 — labels and goto
 
 ```luna
-search: for (row: usize = 0; row < rows; row += 1) {
+search: for (var row: usize = 0; row < rows; row += 1) {
     if (found(row)) {
         break search;
     }

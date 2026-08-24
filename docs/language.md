@@ -585,9 +585,33 @@ such as `-1` and `255` in a `u8` switch. There may be at most one `default`,
 and it may appear anywhere among the cases.
 
 The jump statements are `break`, `continue`, `return` and `return value`.
-`break` exits the innermost loop or switch. `continue` targets the innermost
-enclosing loop even when it appears inside a switch nested in that loop. There
-are no labels or `goto` in Luna 0.
+`break` exits the innermost loop or switch. `continue` targets the
+innermost enclosing loop even when it appears inside a switch nested in
+that loop. Loops may carry labels, and `break`/`continue` may name an
+enclosing labeled loop:
+
+```luna
+search: for (var row: usize = 0; row < rows; row += 1) {
+    if (found(row)) {
+        break search;
+    }
+}
+```
+
+Labels share function scope. `goto name;` jumps to the statement a label
+marks, forward or backward, with one validation rule: a jump may not
+enter the extent of an initialization — every local live at the label
+must already be live at the `goto`:
+
+```luna
+    goto cleanup;
+cleanup:
+    std_memory_release(allocation);
+```
+
+A `break`/`continue` naming a label that is not an enclosing loop, a
+`goto` bypassing an initialization, an undefined label and a duplicate
+label are all compile-time errors.
 
 ## Expressions
 

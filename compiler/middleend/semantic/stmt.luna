@@ -740,6 +740,8 @@ fn bootstrap_semantic_lower_while(
     let saved_continue: usize = context->continue_block;
     context->break_block = exit_block;
     context->continue_block = condition_block;
+    let pushed_label: bool =
+        bootstrap_semantic_push_loop_label(context);
     context->current_block = body_block;
     bootstrap_semantic_lower_block(
         context,
@@ -754,6 +756,9 @@ fn bootstrap_semantic_lower_while(
             node,
             condition_block
         );
+    }
+    if (pushed_label) {
+        bootstrap_semantic_pop_loop_label(context);
     }
     context->break_block = saved_break;
     context->continue_block = saved_continue;
@@ -785,6 +790,8 @@ fn bootstrap_semantic_lower_do(
     let saved_continue: usize = context->continue_block;
     context->break_block = exit_block;
     context->continue_block = condition_block;
+    let pushed_label: bool =
+        bootstrap_semantic_push_loop_label(context);
     context->current_block = body_block;
     bootstrap_semantic_lower_block(
         context,
@@ -819,6 +826,9 @@ fn bootstrap_semantic_lower_do(
         body_block,
         exit_block
     );
+    if (pushed_label) {
+        bootstrap_semantic_pop_loop_label(context);
+    }
     context->break_block = saved_break;
     context->continue_block = saved_continue;
     context->current_block = exit_block;
@@ -841,6 +851,8 @@ fn bootstrap_semantic_lower_loop(
     let saved_continue: usize = context->continue_block;
     context->break_block = exit_block;
     context->continue_block = body_block;
+    let pushed_label: bool =
+        bootstrap_semantic_push_loop_label(context);
     context->current_block = body_block;
     bootstrap_semantic_lower_block(
         context,
@@ -855,6 +867,9 @@ fn bootstrap_semantic_lower_loop(
             node,
             body_block
         );
+    }
+    if (pushed_label) {
+        bootstrap_semantic_pop_loop_label(context);
     }
     context->break_block = saved_break;
     context->continue_block = saved_continue;
@@ -993,6 +1008,8 @@ fn bootstrap_semantic_lower_for(
     let saved_continue: usize = context->continue_block;
     context->break_block = exit_block;
     context->continue_block = update_block;
+    let pushed_label: bool =
+        bootstrap_semantic_push_loop_label(context);
     context->current_block = body_block;
     bootstrap_semantic_lower_block(
         context,
@@ -1022,6 +1039,9 @@ fn bootstrap_semantic_lower_for(
             node,
             condition_block
         );
+    }
+    if (pushed_label) {
+        bootstrap_semantic_pop_loop_label(context);
     }
     context->break_block = saved_break;
     context->continue_block = saved_continue;
@@ -1418,6 +1438,508 @@ fn bootstrap_semantic_lower_return(
     return true;
 }
 
+fn bootstrap_semantic_find_label(
+    context: *BootstrapSemanticContext,
+    name_token: usize
+) -> usize {
+    let labels: *const BootstrapSemanticLabel =
+        context->labels.data as *const BootstrapSemanticLabel;
+    var index: usize = 0;
+    while (index < context->label_count) {
+        if (bootstrap_semantic_tokens_equal(
+                context,
+                context->current_unit,
+                name_token,
+                context->current_unit,
+                labels[index].name_token
+            )) {
+            return index;
+        }
+        index += 1;
+    }
+    return bootstrap_semantic_no_id();
+}
+
+fn bootstrap_semantic_append_label(
+    context: *BootstrapSemanticContext,
+    label: BootstrapSemanticLabel
+) -> usize {
+    let result: usize = context->label_count;
+    if (!bootstrap_semantic_append_record(
+            context,
+            &context->labels,
+            (&label) as *const BootstrapSemanticLabel as *const u8,
+            sizeof(BootstrapSemanticLabel)
+        )) {
+        return bootstrap_semantic_no_id();
+    }
+    context->label_count += 1;
+    return result;
+}
+
+// Appends the declaration-node identity of every live local of the current
+// function to destination and returns the index of the first identity.
+fn bootstrap_semantic_snapshot_locals(
+    context: *BootstrapSemanticContext,
+    destination: *StdByteBuffer
+) -> usize {
+    let first: usize = destination->length / sizeof(usize);
+    let locals: *const BootstrapSemanticLocal =
+        context->locals.data as *const BootstrapSemanticLocal;
+    var index: usize = 0;
+    while (index < context->local_count &&
+        context->error == RuntimeError.none) {
+        let identity: usize = locals[index].declaration_node;
+        let appended: StdByteBufferResult =
+            std_byte_buffer_append(
+                *destination,
+                (&identity) as *const usize as *const u8,
+                sizeof(usize)
+            );
+        *destination = appended.buffer;
+        context->error = appended.error;
+        index += 1;
+    }
+    return first;
+}
+
+// The label's live-local set must be a subset of the locals live right now
+// (a backward goto may not land inside the extent of an initialization it
+// jumps over).
+fn bootstrap_semantic_label_subset_of_current(
+    context: *BootstrapSemanticContext,
+    label: BootstrapSemanticLabel
+) -> bool {
+    let identities: *const usize =
+        context->label_locals.data as *const usize;
+    let locals: *const BootstrapSemanticLocal =
+        context->locals.data as *const BootstrapSemanticLocal;
+    var index: usize = 0;
+    while (index < label.local_count) {
+        let identity: usize = identities[label.first_local + index];
+        var found: bool = false;
+        var local_index: usize = 0;
+        while (local_index < context->local_count) {
+            if (locals[local_index].declaration_node == identity) {
+                found = true;
+                break;
+            }
+            local_index += 1;
+        }
+        if (!found) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+// Same subset rule for a forward goto, whose live-local set was snapshotted
+// into goto_locals when the jump was lowered.
+fn bootstrap_semantic_label_subset_of_goto(
+    context: *BootstrapSemanticContext,
+    label: BootstrapSemanticLabel,
+    pending: BootstrapSemanticPendingGoto
+) -> bool {
+    let identities: *const usize =
+        context->label_locals.data as *const usize;
+    let live: *const usize = context->goto_locals.data as *const usize;
+    var index: usize = 0;
+    while (index < label.local_count) {
+        let identity: usize = identities[label.first_local + index];
+        var found: bool = false;
+        var local_index: usize = 0;
+        while (local_index < pending.local_count) {
+            if (live[pending.first_local + local_index] == identity) {
+                found = true;
+                break;
+            }
+            local_index += 1;
+        }
+        if (!found) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+// Pushes the label carried by pending_loop_label (set when a labeled
+// statement wraps a loop) onto the loop-label stack; returns whether an
+// entry was pushed so the caller can pop it when the loop is done.
+fn bootstrap_semantic_push_loop_label(
+    context: *BootstrapSemanticContext
+) -> bool {
+    if (context->pending_loop_label == bootstrap_semantic_no_id()) {
+        return false;
+    }
+    let entry: BootstrapSemanticLoopLabel = {
+        name_token = context->pending_loop_label,
+        break_block = context->break_block,
+        continue_block = context->continue_block,
+    };
+    context->pending_loop_label = bootstrap_semantic_no_id();
+    if (!bootstrap_semantic_append_record(
+            context,
+            &context->loop_labels,
+            (&entry) as *const BootstrapSemanticLoopLabel as *const u8,
+            sizeof(BootstrapSemanticLoopLabel)
+        )) {
+        return false;
+    }
+    context->loop_label_count += 1;
+    return true;
+}
+
+fn bootstrap_semantic_pop_loop_label(
+    context: *BootstrapSemanticContext
+) -> bool {
+    if (context->loop_label_count == 0) {
+        context->error = RuntimeError.invalid_argument;
+        return false;
+    }
+    let truncated: StdByteBufferResult =
+        std_byte_buffer_truncate(
+            context->loop_labels,
+            (context->loop_label_count - 1) *
+                sizeof(BootstrapSemanticLoopLabel)
+        );
+    context->loop_labels = truncated.buffer;
+    context->error = truncated.error;
+    context->loop_label_count -= 1;
+    return context->error == RuntimeError.none;
+}
+
+fn bootstrap_semantic_lower_labeled_control(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    is_break: bool
+) -> bool {
+    let none: usize = bootstrap_semantic_no_id();
+    let name_node: BootstrapSyntaxNode =
+        bootstrap_semantic_node(
+            context,
+            context->current_unit,
+            node.first_child
+        );
+    let entries: *const BootstrapSemanticLoopLabel =
+        context->loop_labels.data as *const BootstrapSemanticLoopLabel;
+    var index: usize = context->loop_label_count;
+    while (index != 0) {
+        index -= 1;
+        if (bootstrap_semantic_tokens_equal(
+                context,
+                context->current_unit,
+                name_node.token_index,
+                context->current_unit,
+                entries[index].name_token
+            )) {
+            bootstrap_semantic_emit_jump(
+                context,
+                node,
+                is_break ?
+                    entries[index].break_block :
+                    entries[index].continue_block
+            );
+            context->current_block =
+                bootstrap_semantic_add_current_block(context);
+            return context->error == RuntimeError.none;
+        }
+    }
+    bootstrap_semantic_add_diagnostic(
+        context,
+        bootstrap_semantic_find_label(context, name_node.token_index) !=
+            none ?
+            BootstrapSemanticDiagnosticKind.non_loop_label :
+            BootstrapSemanticDiagnosticKind.unknown_label,
+        context->current_unit,
+        name_node.span,
+        none,
+        bootstrap_semantic_empty_span(),
+        0
+    );
+    return false;
+}
+
+fn bootstrap_semantic_lower_labeled(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode
+) -> bool {
+    let none: usize = bootstrap_semantic_no_id();
+    if (node.child_count != 1) {
+        context->error = RuntimeError.invalid_argument;
+        return false;
+    }
+    let statement: BootstrapSyntaxNode =
+        bootstrap_semantic_node(
+            context,
+            context->current_unit,
+            node.first_child
+        );
+    let is_loop: bool =
+        statement.kind == BootstrapSyntaxKind.while_statement ||
+        statement.kind == BootstrapSyntaxKind.do_statement ||
+        statement.kind == BootstrapSyntaxKind.for_statement ||
+        statement.kind == BootstrapSyntaxKind.loop_statement;
+    var label_index: usize =
+        bootstrap_semantic_find_label(context, node.token_index);
+    if (label_index != none) {
+        let labels: *BootstrapSemanticLabel =
+            context->labels.data as *BootstrapSemanticLabel;
+        if (labels[label_index].defined) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.duplicate_label,
+                context->current_unit,
+                node.span,
+                context->current_unit,
+                labels[label_index].span,
+                label_index
+            );
+            return false;
+        }
+        labels[label_index].defined = true;
+        labels[label_index].is_loop = is_loop;
+        labels[label_index].span = node.span;
+    } else {
+        let block: usize = bootstrap_semantic_add_current_block(context);
+        if (block == none) {
+            return false;
+        }
+        label_index = bootstrap_semantic_append_label(
+            context,
+            {
+                name_token = node.token_index,
+                span = node.span,
+                block = block,
+                first_local = 0,
+                local_count = 0,
+                is_loop = is_loop,
+                defined = true,
+            }
+        );
+        if (label_index == none) {
+            return false;
+        }
+    }
+    let labels: *BootstrapSemanticLabel =
+        context->labels.data as *BootstrapSemanticLabel;
+    let first_local: usize =
+        bootstrap_semantic_snapshot_locals(
+            context,
+            &context->label_locals
+        );
+    if (context->error != RuntimeError.none) {
+        return false;
+    }
+    labels[label_index].first_local = first_local;
+    labels[label_index].local_count = context->local_count;
+    let label: BootstrapSemanticLabel = labels[label_index];
+    let pendings: *BootstrapSemanticPendingGoto =
+        context->pending_gotos.data as *BootstrapSemanticPendingGoto;
+    var pending_index: usize = 0;
+    while (pending_index < context->pending_goto_count) {
+        if (!pendings[pending_index].resolved &&
+            bootstrap_semantic_tokens_equal(
+                context,
+                context->current_unit,
+                pendings[pending_index].label_token,
+                context->current_unit,
+                label.name_token
+            )) {
+            if (!bootstrap_semantic_label_subset_of_goto(
+                    context,
+                    label,
+                    pendings[pending_index]
+                )) {
+                bootstrap_semantic_add_diagnostic(
+                    context,
+                    BootstrapSemanticDiagnosticKind.invalid_goto,
+                    context->current_unit,
+                    pendings[pending_index].span,
+                    context->current_unit,
+                    label.span,
+                    label_index
+                );
+            }
+            pendings[pending_index].resolved = true;
+        }
+        pending_index += 1;
+    }
+    if (!bootstrap_semantic_block_is_terminated(
+            context,
+            context->current_block
+        )) {
+        bootstrap_semantic_emit_jump(context, node, label.block);
+    }
+    context->current_block = label.block;
+    if (is_loop) {
+        context->pending_loop_label = node.token_index;
+    }
+    let result: bool =
+        bootstrap_semantic_lower_statement(context, node.first_child);
+    context->pending_loop_label = none;
+    return result;
+}
+
+fn bootstrap_semantic_lower_goto(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode
+) -> bool {
+    let none: usize = bootstrap_semantic_no_id();
+    if (node.child_count != 1) {
+        context->error = RuntimeError.invalid_argument;
+        return false;
+    }
+    let name_node: BootstrapSyntaxNode =
+        bootstrap_semantic_node(
+            context,
+            context->current_unit,
+            node.first_child
+        );
+    var label_index: usize =
+        bootstrap_semantic_find_label(context, name_node.token_index);
+    if (label_index != none) {
+        let labels: *const BootstrapSemanticLabel =
+            context->labels.data as *const BootstrapSemanticLabel;
+        if (labels[label_index].defined) {
+            if (!bootstrap_semantic_label_subset_of_current(
+                    context,
+                    labels[label_index]
+                )) {
+                bootstrap_semantic_add_diagnostic(
+                    context,
+                    BootstrapSemanticDiagnosticKind.invalid_goto,
+                    context->current_unit,
+                    name_node.span,
+                    context->current_unit,
+                    labels[label_index].span,
+                    label_index
+                );
+                return false;
+            }
+            bootstrap_semantic_emit_jump(
+                context,
+                node,
+                labels[label_index].block
+            );
+            context->current_block =
+                bootstrap_semantic_add_current_block(context);
+            return context->error == RuntimeError.none;
+        }
+    }
+    var block: usize = none;
+    if (label_index == none) {
+        block = bootstrap_semantic_add_current_block(context);
+        if (block == none) {
+            return false;
+        }
+        label_index = bootstrap_semantic_append_label(
+            context,
+            {
+                name_token = name_node.token_index,
+                span = name_node.span,
+                block = block,
+                first_local = 0,
+                local_count = 0,
+                is_loop = false,
+                defined = false,
+            }
+        );
+        if (label_index == none) {
+            return false;
+        }
+    } else {
+        let labels: *const BootstrapSemanticLabel =
+            context->labels.data as *const BootstrapSemanticLabel;
+        block = labels[label_index].block;
+    }
+    let first_local: usize =
+        bootstrap_semantic_snapshot_locals(context, &context->goto_locals);
+    if (context->error != RuntimeError.none) {
+        return false;
+    }
+    let pending: BootstrapSemanticPendingGoto = {
+        label_token = name_node.token_index,
+        span = name_node.span,
+        first_local = first_local,
+        local_count = context->local_count,
+        resolved = false,
+    };
+    if (!bootstrap_semantic_append_record(
+            context,
+            &context->pending_gotos,
+            (&pending) as *const BootstrapSemanticPendingGoto as *const u8,
+            sizeof(BootstrapSemanticPendingGoto)
+        )) {
+        return false;
+    }
+    context->pending_goto_count += 1;
+    bootstrap_semantic_emit_jump(context, node, block);
+    context->current_block = bootstrap_semantic_add_current_block(context);
+    return context->error == RuntimeError.none;
+}
+
+fn bootstrap_semantic_validate_labels(
+    context: *BootstrapSemanticContext
+) -> bool {
+    let none: usize = bootstrap_semantic_no_id();
+    let labels: *const BootstrapSemanticLabel =
+        context->labels.data as *const BootstrapSemanticLabel;
+    var index: usize = 0;
+    while (index < context->label_count) {
+        if (!labels[index].defined) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.unknown_label,
+                context->current_unit,
+                labels[index].span,
+                none,
+                bootstrap_semantic_empty_span(),
+                index
+            );
+        }
+        index += 1;
+    }
+    return context->error == RuntimeError.none;
+}
+
+fn bootstrap_semantic_clear_label_state(
+    context: *BootstrapSemanticContext
+) -> bool {
+    var error: RuntimeError = RuntimeError.none;
+    let cleared_labels: StdByteBufferResult =
+        std_byte_buffer_clear(context->labels);
+    context->labels = cleared_labels.buffer;
+    error = bootstrap_semantic_release_error(error, cleared_labels.error);
+    let cleared_label_locals: StdByteBufferResult =
+        std_byte_buffer_clear(context->label_locals);
+    context->label_locals = cleared_label_locals.buffer;
+    error =
+        bootstrap_semantic_release_error(error, cleared_label_locals.error);
+    let cleared_gotos: StdByteBufferResult =
+        std_byte_buffer_clear(context->pending_gotos);
+    context->pending_gotos = cleared_gotos.buffer;
+    error = bootstrap_semantic_release_error(error, cleared_gotos.error);
+    let cleared_goto_locals: StdByteBufferResult =
+        std_byte_buffer_clear(context->goto_locals);
+    context->goto_locals = cleared_goto_locals.buffer;
+    error =
+        bootstrap_semantic_release_error(error, cleared_goto_locals.error);
+    let cleared_loops: StdByteBufferResult =
+        std_byte_buffer_clear(context->loop_labels);
+    context->loop_labels = cleared_loops.buffer;
+    error = bootstrap_semantic_release_error(error, cleared_loops.error);
+    context->label_count = 0;
+    context->pending_goto_count = 0;
+    context->loop_label_count = 0;
+    context->pending_loop_label = bootstrap_semantic_no_id();
+    if (context->error == RuntimeError.none) {
+        context->error = error;
+    }
+    return context->error == RuntimeError.none;
+}
+
 fn bootstrap_semantic_lower_statement(
     context: *BootstrapSemanticContext,
     node_id: usize
@@ -1484,6 +2006,13 @@ fn bootstrap_semantic_lower_statement(
         return bootstrap_semantic_lower_switch(context, node);
     }
     if (node.kind == BootstrapSyntaxKind.break_statement) {
+        if (node.child_count == 1) {
+            return bootstrap_semantic_lower_labeled_control(
+                context,
+                node,
+                true
+            );
+        }
         if (context->break_block ==
             bootstrap_semantic_no_id()) {
             bootstrap_semantic_add_diagnostic(
@@ -1509,6 +2038,13 @@ fn bootstrap_semantic_lower_statement(
     }
     if (node.kind ==
         BootstrapSyntaxKind.continue_statement) {
+        if (node.child_count == 1) {
+            return bootstrap_semantic_lower_labeled_control(
+                context,
+                node,
+                false
+            );
+        }
         if (context->continue_block ==
             bootstrap_semantic_no_id()) {
             bootstrap_semantic_add_diagnostic(
@@ -1534,6 +2070,12 @@ fn bootstrap_semantic_lower_statement(
     }
     if (node.kind == BootstrapSyntaxKind.return_statement) {
         return bootstrap_semantic_lower_return(context, node);
+    }
+    if (node.kind == BootstrapSyntaxKind.labeled_statement) {
+        return bootstrap_semantic_lower_labeled(context, node);
+    }
+    if (node.kind == BootstrapSyntaxKind.goto_statement) {
+        return bootstrap_semantic_lower_goto(context, node);
     }
     if (node.kind == BootstrapSyntaxKind.assert_statement) {
         return bootstrap_semantic_check_assert(
@@ -1703,6 +2245,7 @@ fn bootstrap_semantic_lower_function(
         std_byte_buffer_clear(context->locals);
     context->locals = cleared.buffer;
     context->error = cleared.error;
+    bootstrap_semantic_clear_label_state(context);
     context->break_block = bootstrap_semantic_no_id();
     context->continue_block = bootstrap_semantic_no_id();
     context->current_block =
@@ -1712,6 +2255,7 @@ fn bootstrap_semantic_lower_function(
         function_id
     );
     bootstrap_semantic_lower_block(context, body_node);
+    bootstrap_semantic_validate_labels(context);
     let return_record: BootstrapTypeRecord =
         bootstrap_semantic_type_record(
             context,
