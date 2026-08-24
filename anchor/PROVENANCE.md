@@ -82,3 +82,14 @@ stage-fixed executables were copied here and `SHA256SUMS` refreshed.
 Compiler sources may now adopt m1.4-m1.6 syntax: character/binary/hex
 literals, wide strings, array initializer lists, let/var inference,
 typed const, const fn, labels and goto.
+
+## 2026-08-24: promotion to the m1.8-feature toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`521a40641f8e1a582f16733ad86eaf333a3b3ceb`
+(`feat(m1.8): asm fn naked assembly functions`). Provenance chain: the
+previous m1.6-era anchor (above) built `out/stage-next`, which rebuilt
+itself into `out/stage-fixed`; `verify` confirmed every artifact
+byte-identical between the two stages, and `test` passed 165/165. The
+stage-fixed executables were copied here and `SHA256SUMS` refreshed.
+The new anchor can parse `asm fn`, unlocking the syscall stub migration.
