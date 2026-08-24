@@ -7,8 +7,11 @@ fn bootstrap_semantic_lower_variable(
     node: BootstrapSyntaxNode
 ) -> bool {
     let none: usize = bootstrap_semantic_no_id();
+    let inferred: bool =
+        (node.flags &
+            (BootstrapSyntaxFlag.inferred_type as usize)) != 0;
     if (node.child_count !=
-        2 + bootstrap_semantic_count_attribute_children(
+        (inferred ? 1 : 2) + bootstrap_semantic_count_attribute_children(
             context,
             context->current_unit,
             node
@@ -41,20 +44,54 @@ fn bootstrap_semantic_lower_variable(
         );
         return false;
     }
-    let type_node: BootstrapSyntaxNode =
-        bootstrap_semantic_node(
-            context,
-            context->current_unit,
-            node.first_child
-        );
-    let type_id: usize =
-        bootstrap_semantic_resolve_type_node(
-            context,
-            context->current_unit,
-            node.first_child
-        );
-    if (type_id == none) {
-        return false;
+    var type_id: usize = none;
+    var initializer: BootstrapSemanticExpression =
+        bootstrap_semantic_invalid_expression();
+    if (inferred) {
+        let inferred_node: BootstrapSyntaxNode =
+            bootstrap_semantic_node(
+                context,
+                context->current_unit,
+                node.first_child
+            );
+        if (inferred_node.kind ==
+                BootstrapSyntaxKind.zero_initializer ||
+            inferred_node.kind ==
+                BootstrapSyntaxKind.aggregate_initializer ||
+            inferred_node.kind ==
+                BootstrapSyntaxKind.null_expression) {
+            // These forms are context-directed and have no standalone type.
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.invalid_initializer,
+                context->current_unit,
+                inferred_node.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                none
+            );
+            return false;
+        }
+        initializer =
+            bootstrap_semantic_lower_expression(
+                context,
+                node.first_child,
+                none
+            );
+        if (!initializer.valid || initializer.type_id == none) {
+            return false;
+        }
+        type_id = initializer.type_id;
+    } else {
+        type_id =
+            bootstrap_semantic_resolve_type_node(
+                context,
+                context->current_unit,
+                node.first_child
+            );
+        if (type_id == none) {
+            return false;
+        }
     }
     let type_record: BootstrapTypeRecord =
         bootstrap_semantic_type_record(context, type_id);
@@ -73,58 +110,66 @@ fn bootstrap_semantic_lower_variable(
         );
         return false;
     }
-    let initializer_node: BootstrapSyntaxNode =
-        bootstrap_semantic_node(
-            context,
-            context->current_unit,
-            type_node.next_sibling
-        );
-    if (bootstrap_type_is_memory(type_record.kind) &&
-        initializer_node.kind !=
-            BootstrapSyntaxKind.zero_initializer &&
-        initializer_node.kind !=
-            BootstrapSyntaxKind.aggregate_initializer &&
-        initializer_node.kind !=
-            BootstrapSyntaxKind.name_expression &&
-        initializer_node.kind !=
-            BootstrapSyntaxKind.member_expression &&
-        initializer_node.kind !=
-            BootstrapSyntaxKind.index_expression &&
-        initializer_node.kind !=
-            BootstrapSyntaxKind.call_expression &&
-        initializer_node.kind !=
-            BootstrapSyntaxKind.conditional_expression &&
-        initializer_node.kind !=
-            BootstrapSyntaxKind.parenthesized_expression) {
-        bootstrap_semantic_add_diagnostic(
-            context,
-            BootstrapSemanticDiagnosticKind.invalid_initializer,
-            context->current_unit,
-            initializer_node.span,
-            none,
-            bootstrap_semantic_empty_span(),
-            type_id
-        );
-        return false;
-    }
-    let initializer: BootstrapSemanticExpression =
-        bootstrap_semantic_lower_expression(
-            context,
-            type_node.next_sibling,
-            type_id
-        );
-    if (!initializer.valid ||
-        initializer.type_id != type_id) {
-        bootstrap_semantic_add_diagnostic(
-            context,
-            BootstrapSemanticDiagnosticKind.type_mismatch,
-            context->current_unit,
-            node.span,
-            none,
-            bootstrap_semantic_empty_span(),
-            type_id
-        );
-        return false;
+    if (!inferred) {
+        let type_node: BootstrapSyntaxNode =
+            bootstrap_semantic_node(
+                context,
+                context->current_unit,
+                node.first_child
+            );
+        let initializer_node: BootstrapSyntaxNode =
+            bootstrap_semantic_node(
+                context,
+                context->current_unit,
+                type_node.next_sibling
+            );
+        if (bootstrap_type_is_memory(type_record.kind) &&
+            initializer_node.kind !=
+                BootstrapSyntaxKind.zero_initializer &&
+            initializer_node.kind !=
+                BootstrapSyntaxKind.aggregate_initializer &&
+            initializer_node.kind !=
+                BootstrapSyntaxKind.name_expression &&
+            initializer_node.kind !=
+                BootstrapSyntaxKind.member_expression &&
+            initializer_node.kind !=
+                BootstrapSyntaxKind.index_expression &&
+            initializer_node.kind !=
+                BootstrapSyntaxKind.call_expression &&
+            initializer_node.kind !=
+                BootstrapSyntaxKind.conditional_expression &&
+            initializer_node.kind !=
+                BootstrapSyntaxKind.parenthesized_expression) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.invalid_initializer,
+                context->current_unit,
+                initializer_node.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                type_id
+            );
+            return false;
+        }
+        initializer =
+            bootstrap_semantic_lower_expression(
+                context,
+                type_node.next_sibling,
+                type_id
+            );
+        if (!initializer.valid ||
+            initializer.type_id != type_id) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.type_mismatch,
+                context->current_unit,
+                node.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                type_id
+            );
+            return false;
+        }
     }
     let mutable_binding: bool =
         (node.flags &

@@ -1664,6 +1664,22 @@ fn bootstrap_semantic_validate_initializer_fields(
                 context->current_unit,
                 child
             );
+        if (initializer.kind ==
+            BootstrapSyntaxKind.initializer_element) {
+            // Positional and indexed entries are only valid for arrays.
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.invalid_initializer,
+                context->current_unit,
+                initializer.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                expected_type
+            );
+            valid = false;
+            child = initializer.next_sibling;
+            continue;
+        }
         let lookup: BootstrapSemanticFieldLookup =
             bootstrap_semantic_lookup_field(
                 context,
@@ -1759,6 +1775,234 @@ fn bootstrap_semantic_validate_initializer_fields(
     return valid && context->error == RuntimeError.none;
 }
 
+fn bootstrap_semantic_lower_array_initializer(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    address_id: usize,
+    expected_type: usize,
+    type_record: BootstrapTypeRecord
+) -> bool {
+    let none: usize = bootstrap_semantic_no_id();
+    let element_type: usize = type_record.element_type;
+    let element_count: usize = type_record.element_count;
+    let element_record: BootstrapTypeRecord =
+        bootstrap_semantic_type_record(context, element_type);
+    let pointer: BootstrapTypeIdResult =
+        bootstrap_type_table_pointer(
+            &context->types,
+            element_type,
+            false,
+            false
+        );
+    context->error = pointer.error;
+    if (context->error != RuntimeError.none) {
+        return false;
+    }
+    var seen_indices: StdByteBuffer =
+        std_byte_buffer_empty();
+    var cursor: usize = 0;
+    var valid: bool = true;
+    var child: usize = node.first_child;
+    while (child != none &&
+        context->error == RuntimeError.none) {
+        let element: BootstrapSyntaxNode =
+            bootstrap_semantic_node(
+                context,
+                context->current_unit,
+                child
+            );
+        if (element.kind !=
+            BootstrapSyntaxKind.initializer_element) {
+            // Named `field =` entries are only valid for records.
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.invalid_initializer,
+                context->current_unit,
+                element.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                expected_type
+            );
+            valid = false;
+            child = element.next_sibling;
+            continue;
+        }
+        var position: u64 = cursor as u64;
+        var value_child: usize = element.first_child;
+        if ((element.flags &
+                (BootstrapSyntaxFlag.indexed as usize)) != 0) {
+            if (element.child_count != 2) {
+                context->error = RuntimeError.invalid_argument;
+                break;
+            }
+            let index: BootstrapConstValue =
+                bootstrap_consteval_expression(
+                    context,
+                    context->current_unit,
+                    element.first_child
+                );
+            if (!index.is_constant || index.error ||
+                index.is_boolean) {
+                bootstrap_semantic_add_diagnostic(
+                    context,
+                    BootstrapSemanticDiagnosticKind.invalid_index,
+                    context->current_unit,
+                    bootstrap_semantic_node(
+                        context,
+                        context->current_unit,
+                        element.first_child
+                    ).span,
+                    none,
+                    bootstrap_semantic_empty_span(),
+                    expected_type
+                );
+                valid = false;
+                child = element.next_sibling;
+                continue;
+            }
+            position = index.value;
+            value_child =
+                bootstrap_semantic_node(
+                    context,
+                    context->current_unit,
+                    element.first_child
+                ).next_sibling;
+        }
+        if (position >= element_count as u64) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.invalid_index,
+                context->current_unit,
+                element.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                expected_type
+            );
+            valid = false;
+            child = element.next_sibling;
+            continue;
+        }
+        let slot: usize = position as usize;
+        let seen: *const usize =
+            seen_indices.data as *const usize;
+        var duplicate: bool = false;
+        var seen_index: usize = 0;
+        while (seen_index <
+            seen_indices.length / sizeof(usize)) {
+            if (seen[seen_index] == slot) {
+                duplicate = true;
+                break;
+            }
+            seen_index += 1;
+        }
+        if (duplicate) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind
+                    .duplicate_initializer_field,
+                context->current_unit,
+                element.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                expected_type
+            );
+            valid = false;
+            child = element.next_sibling;
+            continue;
+        }
+        let appended: StdByteBufferResult =
+            std_byte_buffer_append(
+                seen_indices,
+                (&slot) as *const usize as *const u8,
+                sizeof(usize)
+            );
+        seen_indices = appended.buffer;
+        context->error = appended.error;
+        cursor = slot + 1;
+        let value_node: BootstrapSyntaxNode =
+            bootstrap_semantic_node(
+                context,
+                context->current_unit,
+                value_child
+            );
+        if (element_record.kind == BootstrapTypeKind.array &&
+            value_node.kind ==
+                BootstrapSyntaxKind.aggregate_initializer) {
+            // Nested array-of-array lists are deferred.
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.invalid_initializer,
+                context->current_unit,
+                value_node.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                expected_type
+            );
+            valid = false;
+            child = element.next_sibling;
+            continue;
+        }
+        // Element addresses use pointer_offset with a constant index, the
+        // same instruction shape as array indexing; member_address only
+        // validates against record fields.
+        let index_constant: BootstrapSemanticExpression =
+            bootstrap_semantic_emit_integer_constant(
+                context,
+                element,
+                BootstrapBuiltinType.unsigned_size as usize,
+                slot as u64
+            );
+        var element_instruction: BootstrapIrInstruction =
+            bootstrap_semantic_instruction(
+                BootstrapIrOpcode.pointer_offset,
+                element
+            );
+        element_instruction.left = address_id;
+        element_instruction.right = index_constant.value_id;
+        element_instruction.auxiliary =
+            element_record.size_bytes;
+        let element_address: usize =
+            bootstrap_semantic_emit_value(
+                context,
+                element_instruction,
+                pointer.type_id
+            );
+        let value: BootstrapSemanticExpression =
+            bootstrap_semantic_lower_expression(
+                context,
+                value_child,
+                element_type
+            );
+        if (value.type_id != element_type) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.type_mismatch,
+                context->current_unit,
+                element.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                element_type
+            );
+            valid = false;
+        } else {
+            bootstrap_semantic_store_to_address(
+                context,
+                element,
+                element_address,
+                element_type,
+                value
+            );
+        }
+        child = element.next_sibling;
+    }
+    let release_error: RuntimeError =
+        std_byte_buffer_release(seen_indices);
+    if (context->error == RuntimeError.none) {
+        context->error = release_error;
+    }
+    return valid && context->error == RuntimeError.none;
+}
+
 fn bootstrap_semantic_lower_initializer(
     context: *BootstrapSemanticContext,
     node_id: usize,
@@ -1779,7 +2023,8 @@ fn bootstrap_semantic_lower_initializer(
             BootstrapSyntaxKind.aggregate_initializer &&
         type_record.kind != BootstrapTypeKind.structure &&
         type_record.kind !=
-            BootstrapTypeKind.record_union) {
+            BootstrapTypeKind.record_union &&
+        type_record.kind != BootstrapTypeKind.array) {
         bootstrap_semantic_add_diagnostic(
             context,
             BootstrapSemanticDiagnosticKind.invalid_initializer,
@@ -1793,6 +2038,7 @@ fn bootstrap_semantic_lower_initializer(
     }
     if (node.kind ==
             BootstrapSyntaxKind.aggregate_initializer &&
+        type_record.kind != BootstrapTypeKind.array &&
         !bootstrap_semantic_validate_initializer_fields(
             context,
             node,
@@ -1852,6 +2098,18 @@ fn bootstrap_semantic_lower_initializer(
         return bootstrap_semantic_invalid_expression();
     }
     if (node.kind ==
+            BootstrapSyntaxKind.aggregate_initializer &&
+        type_record.kind == BootstrapTypeKind.array) {
+        if (!bootstrap_semantic_lower_array_initializer(
+                context,
+                node,
+                address_id,
+                expected_type,
+                type_record
+            )) {
+            return bootstrap_semantic_invalid_expression();
+        }
+    } else if (node.kind ==
         BootstrapSyntaxKind.aggregate_initializer) {
         let fields: *const BootstrapTypeField =
             context->types.fields.data as
@@ -4819,28 +5077,50 @@ fn bootstrap_semantic_lower_layout_query(
         value = record.alignment_bytes;
     } else if (node.kind ==
         BootstrapSyntaxKind.offsetof_expression &&
-        node.child_count == 2) {
+        node.child_count >= 2) {
         let type_node: BootstrapSyntaxNode =
             bootstrap_semantic_node(
                 context,
                 context->current_unit,
                 node.first_child
             );
-        let member: BootstrapSyntaxNode =
-            bootstrap_semantic_node(
-                context,
-                context->current_unit,
-                type_node.next_sibling
-            );
-        let lookup: BootstrapSemanticFieldLookup =
-            bootstrap_semantic_lookup_field(
-                context,
-                type_id,
-                context->current_unit,
-                member.token_index
-            );
-        if (lookup.status ==
-            BootstrapSemanticFieldStatus.ambiguous) {
+        let fields: *const BootstrapTypeField =
+            context->types.fields.data as
+                *const BootstrapTypeField;
+        var current_type: usize = type_id;
+        var member_index: usize = type_node.next_sibling;
+        var ambiguous: bool = false;
+        var failed: bool = false;
+        while (member_index != bootstrap_semantic_no_id() &&
+            !ambiguous && !failed) {
+            let member: BootstrapSyntaxNode =
+                bootstrap_semantic_node(
+                    context,
+                    context->current_unit,
+                    member_index
+                );
+            let lookup: BootstrapSemanticFieldLookup =
+                bootstrap_semantic_lookup_field(
+                    context,
+                    current_type,
+                    context->current_unit,
+                    member.token_index
+                );
+            if (lookup.status ==
+                BootstrapSemanticFieldStatus.ambiguous) {
+                ambiguous = true;
+            } else if (lookup.status !=
+                BootstrapSemanticFieldStatus.found) {
+                // Missing fields and bitfield segments (which have no byte
+                // offset) both reject the query.
+                failed = true;
+            } else {
+                value += lookup.offset_bytes;
+                current_type = fields[lookup.field_id].type_id;
+            }
+            member_index = member.next_sibling;
+        }
+        if (ambiguous) {
             bootstrap_semantic_add_diagnostic(
                 context,
                 BootstrapSemanticDiagnosticKind
@@ -4849,11 +5129,11 @@ fn bootstrap_semantic_lower_layout_query(
                 node.span,
                 bootstrap_semantic_no_id(),
                 bootstrap_semantic_empty_span(),
-                type_id
+                current_type
             );
             return bootstrap_semantic_invalid_expression();
         }
-        if (lookup.status != BootstrapSemanticFieldStatus.found) {
+        if (failed) {
             bootstrap_semantic_add_diagnostic(
                 context,
                 BootstrapSemanticDiagnosticKind
@@ -4862,11 +5142,10 @@ fn bootstrap_semantic_lower_layout_query(
                 node.span,
                 bootstrap_semantic_no_id(),
                 bootstrap_semantic_empty_span(),
-                type_id
+                current_type
             );
             return bootstrap_semantic_invalid_expression();
         }
-        value = lookup.offset_bytes;
     } else {
         return bootstrap_semantic_invalid_expression();
     }

@@ -72,7 +72,7 @@ fn bootstrap_syntax_tree_is_valid(tree: BootstrapSyntaxTree) -> bool {
     var node_index: usize = 0;
     while (node_index < tree.count) {
         let node: BootstrapSyntaxNode = nodes[node_index];
-        if ((node.kind as usize) > (BootstrapSyntaxKind.character_expression as usize) || node.flags > 4095 ||
+        if ((node.kind as usize) > (BootstrapSyntaxKind.initializer_element as usize) || node.flags > 16383 ||
             node.span.line == 0 || node.span.column == 0 || node.span.length >
                 (BootstrapParserLimit.maximum_size as usize) - node.span.offset || (node.token_index != none &&
                 node.token_index >= tree.token_count)) {
@@ -778,14 +778,34 @@ fn bootstrap_parser_parse_aggregate_initializer(
     while (state->error == RuntimeError.none && state->current.kind != BootstrapTokenKind.right_brace &&
         state->current.kind != BootstrapTokenKind.end) {
         let offset_before: usize = state->current.span.offset;
-        let name: BootstrapToken = state->current;
-        let name_index: usize = state->current_index;
-        if (!bootstrap_parser_expect(
-                state, BootstrapTokenKind.identifier)) {
-            if (state->current.kind != BootstrapTokenKind.end) {
-                bootstrap_parser_advance(state);
+        if (state->current.kind == BootstrapTokenKind.left_bracket) {
+            let bracket: BootstrapToken = state->current;
+            let bracket_index: usize = state->current_index;
+            bootstrap_parser_advance(state);
+            let element: usize = bootstrap_parser_new_node(
+                state, BootstrapSyntaxKind.initializer_element, bracket.span, bracket_index);
+            bootstrap_parser_add_node_flags(state, element, BootstrapSyntaxFlag.indexed as usize);
+            let index: usize = bootstrap_parser_parse_expression(state);
+            if (index != none) {
+                bootstrap_parser_add_child(state, element, index);
             }
-        } else {
+            bootstrap_parser_expect(state, BootstrapTokenKind.right_bracket);
+            bootstrap_parser_expect(state, BootstrapTokenKind.equal);
+            let indexed_value: usize = bootstrap_parser_parse_expression(state);
+            if (indexed_value != none) {
+                bootstrap_parser_add_child(state, element, indexed_value);
+                let value_node: *BootstrapSyntaxNode = bootstrap_parser_node_pointer(state, indexed_value);
+                if (value_node != null) {
+                    bootstrap_parser_set_node_span(
+                        state, element, bootstrap_parser_join_spans(bracket.span, value_node->span));
+                }
+            }
+            bootstrap_parser_add_child(state, initializer, element);
+        } else if (state->current.kind == BootstrapTokenKind.identifier &&
+            bootstrap_parser_token_at(state, state->current_index + 1).kind == BootstrapTokenKind.equal) {
+            let name: BootstrapToken = state->current;
+            let name_index: usize = state->current_index;
+            bootstrap_parser_advance(state);
             let field: usize = bootstrap_parser_new_node(
                 state, BootstrapSyntaxKind.initializer_field, name.span, name_index);
             bootstrap_parser_expect(state, BootstrapTokenKind.equal);
@@ -799,6 +819,19 @@ fn bootstrap_parser_parse_aggregate_initializer(
                 }
             }
             bootstrap_parser_add_child(state, initializer, field);
+        } else {
+            let value_index: usize = state->current_index;
+            let value: usize = bootstrap_parser_parse_expression(state);
+            if (value != none) {
+                let value_node: *BootstrapSyntaxNode = bootstrap_parser_node_pointer(state, value);
+                let element: usize = bootstrap_parser_new_node(
+                    state, BootstrapSyntaxKind.initializer_element,
+                    value_node == null ? state->previous.span : value_node->span, value_index);
+                bootstrap_parser_add_child(state, element, value);
+                bootstrap_parser_add_child(state, initializer, element);
+            } else if (state->current.kind != BootstrapTokenKind.end) {
+                bootstrap_parser_advance(state);
+            }
         }
 
         if (!bootstrap_parser_match(
@@ -910,6 +943,17 @@ fn bootstrap_parser_parse_layout_query(
             let member_node: usize = bootstrap_parser_new_node(
                 state, BootstrapSyntaxKind.name_expression, member.span, member_index);
             bootstrap_parser_add_child(state, query, member_node);
+        }
+        while (bootstrap_parser_match(state, BootstrapTokenKind.dot)) {
+            let nested: BootstrapToken = state->current;
+            let nested_index: usize = state->current_index;
+            if (!bootstrap_parser_expect(
+                    state, BootstrapTokenKind.identifier)) {
+                break;
+            }
+            let nested_node: usize = bootstrap_parser_new_node(
+                state, BootstrapSyntaxKind.name_expression, nested.span, nested_index);
+            bootstrap_parser_add_child(state, query, nested_node);
         }
     }
     bootstrap_parser_expect(state, BootstrapTokenKind.right_parenthesis);
@@ -1373,10 +1417,13 @@ fn bootstrap_parser_parse_variable_declaration(
     if (is_volatile) {
         bootstrap_parser_add_node_flags(state, declaration, BootstrapSyntaxFlag.volatile_ as usize);
     }
-    bootstrap_parser_expect(state, BootstrapTokenKind.colon);
-    let type_node: usize = bootstrap_parser_parse_type(state);
-    if (type_node != none) {
-        bootstrap_parser_add_child(state, declaration, type_node);
+    if (bootstrap_parser_match(state, BootstrapTokenKind.colon)) {
+        let type_node: usize = bootstrap_parser_parse_type(state);
+        if (type_node != none) {
+            bootstrap_parser_add_child(state, declaration, type_node);
+        }
+    } else {
+        bootstrap_parser_add_node_flags(state, declaration, BootstrapSyntaxFlag.inferred_type as usize);
     }
     bootstrap_parser_expect(state, BootstrapTokenKind.equal);
     let initializer: usize = bootstrap_parser_parse_expression(state);

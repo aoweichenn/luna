@@ -97,7 +97,16 @@ const BUFFER_SIZE: usize = 4096;
 ```
 
 All declarations have an explicit type and initializer. `let` bindings cannot
-be reassigned; `var` bindings can.
+be reassigned; `var` bindings can. The type may be omitted when the
+initializer has a standalone type, which the binding then takes:
+
+```luna
+let cursor = list_head(list);        // type from the initializer
+var total = compute(values);
+```
+
+Context-directed forms have no standalone type and still require the
+annotation: `let x = {};` and `let p = null;` are rejected.
 
 ```luna
 struct Token {
@@ -378,9 +387,11 @@ let payload_offset: usize = offsetof(Packet, payload);
 
 All three expressions have type `usize` and are replaced by constants during
 semantic lowering. `sizeof` and `alignof` accept any type with a complete
-target layout. `offsetof` accepts a structure or union type and the name of
-one of its immediate fields. These forms take a type, never a run-time
-expression; `sizeof(value)` is intentionally not supported.
+target layout. `offsetof` accepts a structure or union type and a field
+designator, which may descend through nested fields with dots
+(`offsetof(Packet, header.tag)`) and through anonymous members. These
+forms take a type, never a run-time expression; `sizeof(value)` is
+intentionally not supported.
 
 Local structures and unions support context-directed named initialization.
 Fields may appear once in any order; omitted fields and all padding bytes are
@@ -799,7 +810,16 @@ redundant typed `Point { ... }` expression form.
 
 For an array, `{}` initializes every byte of the object to zero. Array
 elements may be assigned through indexing, and exact same-typed arrays may be
-copied locally:
+copied locally. An array may also be initialized from a list: positional
+entries fill consecutive elements, indexed entries `[i] = value` fill the
+given constant index in any order, and every omitted element is zero:
+
+```luna
+var fib: [4]u32 = {1, 1, 2, 3};
+var sparse: [8]u32 = {[3] = 7, [6] = 9};
+```
+
+Duplicate or out-of-bounds indices are compile-time errors.
 
 ```luna
 var values: [4]i32 = {};

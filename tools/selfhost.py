@@ -108,7 +108,7 @@ LIBRARIES = {
         "luna.bootstrap.middleend.semantic.expr",
         "compiler/middleend/semantic/expr",
         ("runtime", "bytes", "text", "lexer", "parser", "type", "ir",
-         "sem_ctx", "sem_types", "sem_intrinsics"),
+         "sem_ctx", "sem_types", "sem_consteval", "sem_intrinsics"),
     ),
     "sem_stmt": (
         "luna.bootstrap.middleend.semantic.stmt",
