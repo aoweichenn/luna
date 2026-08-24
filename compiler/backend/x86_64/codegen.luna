@@ -5,7 +5,8 @@ import luna.bootstrap.frontend.lexer;
 import luna.bootstrap.frontend.parser;
 
 enum BootstrapX8664CodegenLimit: usize {
-    maximum_size = 18446744073709551615, text_limit = 4096,
+    maximum_size = 18446744073709551615, text_limit = 4096, general_argument_registers = 6,
+    vector_argument_registers = 8, variadic_stack_slot = 8, call_stack_alignment = 16,
 }
 
 struct BootstrapX8664CodegenContext {
@@ -1264,6 +1265,68 @@ fn bootstrap_x86_64_codegen_argument_at(
     return bootstrap_x86_64_codegen_no_id();
 }
 
+fn bootstrap_x86_64_codegen_call_argument_total(
+    context: *BootstrapX8664CodegenContext, instruction_id: usize) -> usize {
+    let arguments: *const BootstrapIrArgument = context->ir.arguments.data as
+            *const BootstrapIrArgument;
+    var found: usize = 0;
+    var index: usize = 0;
+    while (index < context->ir.argument_count) {
+        if (arguments[index].instruction_id == instruction_id) {
+            found += 1;
+        }
+        index += 1;
+    }
+    return found;
+}
+
+// Classifies one scalar variadic extra against the running register/stack
+// cursors, continuing where the named parameters left off, and synthesizes
+// the ABI parameter record the call argument emitters already consume.
+fn bootstrap_x86_64_codegen_variadic_extra_parameter(
+    context: *BootstrapX8664CodegenContext, argument: usize, general_used: *usize, vector_used: *usize,
+    stack_cursor: *usize) -> BootstrapX8664AbiParameter {
+    let none: usize = bootstrap_x86_64_codegen_no_id();
+    var parameter: BootstrapX8664AbiParameter = {
+        function_id = none, parameter_index = none, abi_class = BootstrapX8664AbiClass.invalid,
+        location = BootstrapX8664AbiLocationKind.invalid, register_index = none, stack_offset_bytes = none,
+        stack_size_bytes = 0, type_id = none, size_bytes = 0, alignment_bytes = 0, first_piece = none, piece_count = 0,
+        aggregate = false,
+    };
+    if (general_used == null || vector_used == null || stack_cursor == null || context->error != RuntimeError.none) {
+        return parameter;
+    }
+    let values: *const BootstrapIrValue = context->ir.values.data as *const BootstrapIrValue;
+    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, values[argument].type_id);
+    if (record == null || bootstrap_type_is_memory(record->kind)) {
+        return parameter;
+    }
+    parameter.type_id = values[argument].type_id;
+    parameter.size_bytes = record->size_bytes;
+    parameter.alignment_bytes = record->alignment_bytes;
+    parameter.abi_class = bootstrap_type_is_float(record->kind) ? BootstrapX8664AbiClass.sse :
+            BootstrapX8664AbiClass.integer;
+    if (parameter.abi_class == BootstrapX8664AbiClass.integer && *general_used <
+            (BootstrapX8664CodegenLimit.general_argument_registers as usize)) {
+        parameter.location = BootstrapX8664AbiLocationKind.general_register;
+        parameter.register_index = *general_used;
+        *general_used += 1;
+        return parameter;
+    }
+    if (parameter.abi_class == BootstrapX8664AbiClass.sse && *vector_used <
+            (BootstrapX8664CodegenLimit.vector_argument_registers as usize)) {
+        parameter.location = BootstrapX8664AbiLocationKind.vector_register;
+        parameter.register_index = *vector_used;
+        *vector_used += 1;
+        return parameter;
+    }
+    parameter.location = BootstrapX8664AbiLocationKind.stack;
+    parameter.stack_offset_bytes = *stack_cursor;
+    parameter.stack_size_bytes = BootstrapX8664CodegenLimit.variadic_stack_slot as usize;
+    *stack_cursor += BootstrapX8664CodegenLimit.variadic_stack_slot as usize;
+    return parameter;
+}
+
 fn bootstrap_x86_64_codegen_emit_load_piece(
     context: *BootstrapX8664CodegenContext, piece: BootstrapX8664AbiPiece, destination: *const u8) -> bool {
     if (piece.size_bytes == 8) {
@@ -1591,13 +1654,40 @@ fn bootstrap_x86_64_codegen_emit_call(
     let external_c: bool = functions[instruction.auxiliary].linkage == BootstrapIrLinkage.external_c;
     let parameters: *const BootstrapX8664AbiParameter = context->abi.parameters.data as
             *const BootstrapX8664AbiParameter;
-    if (function_abi.call_frame_size_bytes != 0 && (!bootstrap_x86_64_codegen_literal(context, "    subq $") ||
-        !bootstrap_x86_64_codegen_usize(context, function_abi.call_frame_size_bytes) ||
+    // A variadic callee takes extra arguments past its named parameters; they
+    // classify against cursors continuing where the named list stopped, and
+    // the call must set %al to the total number of vector registers used.
+    let variadic: bool = functions[instruction.auxiliary].variadic;
+    var extra_count: usize = 0;
+    var vector_count: usize = function_abi.vector_register_count;
+    var frame_size: usize = function_abi.call_frame_size_bytes;
+    if (variadic) {
+        extra_count = bootstrap_x86_64_codegen_call_argument_total(context, instruction_id) -
+            function_abi.parameter_count;
+        var general_used: usize = function_abi.general_register_count;
+        var stack_cursor: usize = function_abi.stack_argument_size_bytes;
+        var extra: usize = 0;
+        while (extra < extra_count) {
+            let argument: usize = bootstrap_x86_64_codegen_argument_at(
+                context, instruction_id, function_abi.parameter_count + extra);
+            if (argument == bootstrap_x86_64_codegen_no_id() ||
+                bootstrap_x86_64_codegen_variadic_extra_parameter(
+                        context, argument, &general_used, &vector_count, &stack_cursor).location ==
+                    BootstrapX8664AbiLocationKind.invalid) {
+                return bootstrap_x86_64_codegen_fail(context, RuntimeError.invalid_argument);
+            }
+            extra += 1;
+        }
+        frame_size = (stack_cursor + (BootstrapX8664CodegenLimit.call_stack_alignment as usize) - 1) &
+            ~((BootstrapX8664CodegenLimit.call_stack_alignment as usize) - 1);
+    }
+    if (frame_size != 0 && (!bootstrap_x86_64_codegen_literal(context, "    subq $") ||
+        !bootstrap_x86_64_codegen_usize(context, frame_size) ||
         !bootstrap_x86_64_codegen_literal(
             context, ", %rsp\n"))) {
         return false;
     }
-    context->call_frame_depth += function_abi.call_frame_size_bytes;
+    context->call_frame_depth += frame_size;
     var index: usize = 0;
     while (index < function_abi.parameter_count) {
         let parameter: BootstrapX8664AbiParameter = parameters[function_abi.first_parameter + index];
@@ -1610,6 +1700,27 @@ fn bootstrap_x86_64_codegen_emit_call(
             }
         }
         index += 1;
+    }
+    if (variadic) {
+        var general_used: usize = function_abi.general_register_count;
+        var vector_used: usize = function_abi.vector_register_count;
+        var stack_cursor: usize = function_abi.stack_argument_size_bytes;
+        var extra: usize = 0;
+        while (extra < extra_count) {
+            let argument: usize = bootstrap_x86_64_codegen_argument_at(
+                context, instruction_id, function_abi.parameter_count + extra);
+            let parameter: BootstrapX8664AbiParameter = bootstrap_x86_64_codegen_variadic_extra_parameter(
+                context, argument, &general_used, &vector_used, &stack_cursor);
+            if (parameter.location == BootstrapX8664AbiLocationKind.invalid) {
+                return bootstrap_x86_64_codegen_fail(context, RuntimeError.invalid_argument);
+            }
+            if (parameter.location == BootstrapX8664AbiLocationKind.stack &&
+                !bootstrap_x86_64_codegen_emit_call_stack_argument(
+                    context, parameter, argument, external_c)) {
+                return false;
+            }
+            extra += 1;
+        }
     }
     if (function_abi.hidden_return_pointer) {
         let destination: BootstrapX8664Storage =
@@ -1635,14 +1746,40 @@ fn bootstrap_x86_64_codegen_emit_call(
         }
         index += 1;
     }
+    if (variadic) {
+        var general_used: usize = function_abi.general_register_count;
+        var vector_used: usize = function_abi.vector_register_count;
+        var stack_cursor: usize = function_abi.stack_argument_size_bytes;
+        var extra: usize = 0;
+        while (extra < extra_count) {
+            let argument: usize = bootstrap_x86_64_codegen_argument_at(
+                context, instruction_id, function_abi.parameter_count + extra);
+            let parameter: BootstrapX8664AbiParameter = bootstrap_x86_64_codegen_variadic_extra_parameter(
+                context, argument, &general_used, &vector_used, &stack_cursor);
+            if (parameter.location == BootstrapX8664AbiLocationKind.invalid) {
+                return bootstrap_x86_64_codegen_fail(context, RuntimeError.invalid_argument);
+            }
+            if (parameter.location != BootstrapX8664AbiLocationKind.stack &&
+                !bootstrap_x86_64_codegen_emit_call_register_argument(
+                    context, parameter, argument, external_c)) {
+                return false;
+            }
+            extra += 1;
+        }
+        if (!bootstrap_x86_64_codegen_literal(context, "    movb $") ||
+            !bootstrap_x86_64_codegen_usize(context, vector_count) ||
+            !bootstrap_x86_64_codegen_literal(context, ", %al\n")) {
+            return false;
+        }
+    }
     if (!bootstrap_x86_64_codegen_literal(context, "    call ") ||
         !bootstrap_x86_64_codegen_append_function_symbol(context, instruction.auxiliary) ||
         !bootstrap_x86_64_codegen_literal(context, "\n")) {
         return false;
     }
-    context->call_frame_depth -= function_abi.call_frame_size_bytes;
-    if (function_abi.call_frame_size_bytes != 0 && (!bootstrap_x86_64_codegen_literal(context, "    addq $") ||
-        !bootstrap_x86_64_codegen_usize(context, function_abi.call_frame_size_bytes) ||
+    context->call_frame_depth -= frame_size;
+    if (frame_size != 0 && (!bootstrap_x86_64_codegen_literal(context, "    addq $") ||
+        !bootstrap_x86_64_codegen_usize(context, frame_size) ||
         !bootstrap_x86_64_codegen_literal(
             context, ", %rsp\n"))) {
         return false;

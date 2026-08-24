@@ -20,7 +20,7 @@ fn bootstrap_ir_invalid_function() -> BootstrapIrFunction {
     return {
         declaration_unit = none, declaration_node = none, name_token = none, linkage = BootstrapIrLinkage.internal,
         return_type = none, first_parameter = none, parameter_count = 0, first_slot = none, slot_count = 0,
-        first_block = none, block_count = 0, first_value = none, value_count = 0, has_body = false,
+        first_block = none, block_count = 0, first_value = none, value_count = 0, has_body = false, variadic = false,
     };
 }
 
@@ -1038,8 +1038,10 @@ fn bootstrap_ir_is_valid(ir: BootstrapTypedIr, types: BootstrapTypeTable) -> boo
         }
         if (instruction.opcode == BootstrapIrOpcode.call || instruction.opcode == BootstrapIrOpcode.call_indirect) {
             var call_parameter_count: usize = 0;
+            var call_variadic: bool = false;
             if (instruction.opcode == BootstrapIrOpcode.call) {
                 call_parameter_count = functions[instruction.auxiliary].parameter_count;
+                call_variadic = functions[instruction.auxiliary].variadic;
             } else {
                 let callee_records: *const
                     BootstrapTypeRecord = types.types.data as
@@ -1052,33 +1054,45 @@ fn bootstrap_ir_is_valid(ir: BootstrapTypedIr, types: BootstrapTypeTable) -> boo
             while (argument_index < ir.argument_count) {
                 let argument: BootstrapIrArgument = arguments[argument_index];
                 if (argument.instruction_id == index) {
-                    var parameter_type: usize = bootstrap_ir_no_id();
-                    if (instruction.opcode == BootstrapIrOpcode.call) {
-                        let parameters: *const
-                            BootstrapIrParameter = ir.parameters.data as
-                                *const BootstrapIrParameter;
-                        parameter_type = parameters[ functions[instruction.auxiliary].first_parameter +
-                                    call_argument_count].type_id;
-                    } else {
-                        let fields: *const BootstrapTypeField = types.fields.data as
-                                *const BootstrapTypeField;
-                        let records: *const
-                            BootstrapTypeRecord = types.types.data as
-                                *const BootstrapTypeRecord;
-                        let callee: BootstrapTypeRecord = records[ values[instruction.left].type_id];
-                        parameter_type = fields[ callee.first_field + call_argument_count].type_id;
-                    }
-                    if (call_argument_count >= call_parameter_count || argument.value_id >= ir.value_count ||
+                    if (argument.value_id >= ir.value_count ||
                         values[argument.value_id].function_id != blocks[ instruction.block_id].function_id ||
-                        !bootstrap_ir_carrier_matches_type(types, values[argument.value_id].type_id, parameter_type) ||
                         values[argument.value_id].definition >= index) {
                         return false;
+                    }
+                    // Variadic extras carry no declared parameter type; the
+                    // call site classifies them at their own width instead.
+                    if (call_argument_count >= call_parameter_count) {
+                        if (!call_variadic) {
+                            return false;
+                        }
+                    } else {
+                        var parameter_type: usize = bootstrap_ir_no_id();
+                        if (instruction.opcode == BootstrapIrOpcode.call) {
+                            let parameters: *const
+                                BootstrapIrParameter = ir.parameters.data as
+                                    *const BootstrapIrParameter;
+                            parameter_type = parameters[ functions[instruction.auxiliary].first_parameter +
+                                        call_argument_count].type_id;
+                        } else {
+                            let fields: *const BootstrapTypeField = types.fields.data as
+                                    *const BootstrapTypeField;
+                            let records: *const
+                                BootstrapTypeRecord = types.types.data as
+                                    *const BootstrapTypeRecord;
+                            let callee: BootstrapTypeRecord = records[ values[instruction.left].type_id];
+                            parameter_type = fields[ callee.first_field + call_argument_count].type_id;
+                        }
+                        if (!bootstrap_ir_carrier_matches_type(
+                                types, values[argument.value_id].type_id, parameter_type)) {
+                            return false;
+                        }
                     }
                     call_argument_count += 1;
                 }
                 argument_index += 1;
             }
-            if (call_argument_count != call_parameter_count) {
+            if (call_variadic ? call_argument_count < call_parameter_count : call_argument_count !=
+                    call_parameter_count) {
                 return false;
             }
         }

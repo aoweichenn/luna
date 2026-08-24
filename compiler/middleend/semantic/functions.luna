@@ -399,6 +399,12 @@ fn bootstrap_semantic_add_function_declaration(
     let bodyless: bool =
         (declaration.flags &
             (BootstrapSyntaxFlag.bodyless as usize)) != 0;
+    // A `...` tail is legal only on extern declarations and only after at
+    // least one named parameter; Luna-defined variadic functions are rejected
+    // here (their callees arrive with variadic definitions, a later slice).
+    let variadic: bool =
+        (declaration.flags &
+            (BootstrapSyntaxFlag.variadic as usize)) != 0;
     if ((!interface_unit && exported) ||
         (external && !bodyless) ||
         (interface_unit && !bodyless)) {
@@ -414,6 +420,17 @@ fn bootstrap_semantic_add_function_declaration(
             0
         );
     }
+    if (variadic && (!external || parameter_count == 0)) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.invalid_variadic,
+            unit_index,
+            declaration.span,
+            none,
+            bootstrap_semantic_empty_span(),
+            0
+        );
+    }
     var flags: usize =
         BootstrapSemanticSymbolFlag.none as usize;
     if (exported) {
@@ -421,6 +438,9 @@ fn bootstrap_semantic_add_function_declaration(
     }
     if (external) {
         flags |= BootstrapSemanticSymbolFlag.external as usize;
+    }
+    if (variadic && external && parameter_count != 0) {
+        flags |= BootstrapSemanticSymbolFlag.variadic as usize;
     }
     if (interface_unit) {
         flags |= BootstrapSemanticSymbolFlag
@@ -557,6 +577,13 @@ fn bootstrap_semantic_function_signature_matches(
     let function: BootstrapSemanticFunction =
         functions[function_id];
     if (parameter_count != function.parameter_count) {
+        return false;
+    }
+    let variadic: bool =
+        (declaration.flags &
+            (BootstrapSyntaxFlag.variadic as usize)) != 0;
+    if (variadic != ((function.flags &
+            (BootstrapSemanticSymbolFlag.variadic as usize)) != 0)) {
         return false;
     }
     let actual_return: usize = return_node == none ?
@@ -1026,6 +1053,19 @@ fn bootstrap_semantic_collect_const_function(
             &body_node
         )) {
         return false;
+    }
+    if ((declaration.flags &
+            (BootstrapSyntaxFlag.variadic as usize)) != 0) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.invalid_variadic,
+            unit_index,
+            declaration.span,
+            bootstrap_semantic_no_id(),
+            bootstrap_semantic_empty_span(),
+            0
+        );
+        return context->error == RuntimeError.none;
     }
     if (body_node == none || return_node == none) {
         bootstrap_semantic_report_invalid_const_function(
@@ -1504,6 +1544,8 @@ fn bootstrap_semantic_ir_function_record(
         first_value = none,
         value_count = 0,
         has_body = has_body,
+        variadic = (function.flags &
+            (BootstrapSemanticSymbolFlag.variadic as usize)) != 0,
     };
 }
 

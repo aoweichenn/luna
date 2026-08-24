@@ -3318,6 +3318,7 @@ fn bootstrap_semantic_lower_call(
     var first_parameter: usize = none;
     var parameters_from_fields: bool = false;
     var callee_no_return: bool = false;
+    var callee_variadic: bool = false;
     let symbols: *const BootstrapSemanticSymbol =
         context->symbols.data as
             *const BootstrapSemanticSymbol;
@@ -3333,6 +3334,8 @@ fn bootstrap_semantic_lower_call(
         first_parameter = function.first_parameter;
         callee_no_return = (function.flags &
             (BootstrapSemanticSymbolFlag.no_return as usize)) != 0;
+        callee_variadic = (function.flags &
+            (BootstrapSemanticSymbolFlag.variadic as usize)) != 0;
     } else {
         let callee: BootstrapSemanticExpression =
             bootstrap_semantic_lower_expression(
@@ -3367,7 +3370,9 @@ fn bootstrap_semantic_lower_call(
         first_parameter = callee_record.first_field;
         parameters_from_fields = true;
     }
-    if (node.child_count - 1 != parameter_count) {
+    let argument_total: usize = node.child_count - 1;
+    if ((!callee_variadic && argument_total != parameter_count) ||
+        (callee_variadic && argument_total < parameter_count)) {
         bootstrap_semantic_add_diagnostic(
             context,
             BootstrapSemanticDiagnosticKind.argument_count,
@@ -3390,19 +3395,61 @@ fn bootstrap_semantic_lower_call(
         std_byte_buffer_empty();
     var child: usize = callee_node.next_sibling;
     var index: usize = 0;
-    while (index < parameter_count &&
+    while (index < argument_total &&
         context->error == RuntimeError.none) {
+        let variadic_extra: bool = index >= parameter_count;
         let parameter_type: usize =
-            parameters_from_fields ?
-                type_fields[first_parameter + index].type_id :
-                parameters[first_parameter + index].type_id;
+            variadic_extra ?
+                none :
+                (parameters_from_fields ?
+                    type_fields[first_parameter + index].type_id :
+                    parameters[first_parameter + index].type_id);
         let argument: BootstrapSemanticExpression =
             bootstrap_semantic_lower_expression(
                 context,
                 child,
                 parameter_type
             );
-        if (!argument.valid ||
+        if (variadic_extra) {
+            // Variadic extras pass at their declared width — no C default
+            // argument promotions — and must classify to a single register or
+            // stack slot, so aggregates are rejected.
+            var extra_scalar: bool = false;
+            if (argument.valid) {
+                let extra_record: BootstrapTypeRecord =
+                    bootstrap_semantic_type_record(
+                        context,
+                        argument.type_id
+                    );
+                extra_scalar = bootstrap_type_is_scalar(extra_record.kind);
+            }
+            if (!extra_scalar) {
+                bootstrap_semantic_add_diagnostic(
+                    context,
+                    BootstrapSemanticDiagnosticKind.invalid_call,
+                    context->current_unit,
+                    bootstrap_semantic_node(
+                        context,
+                        context->current_unit,
+                        child
+                    ).span,
+                    none,
+                    bootstrap_semantic_empty_span(),
+                    argument.valid ? argument.type_id : none
+                );
+            } else {
+                var extra_value: usize = argument.value_id;
+                let extra_appended: StdByteBufferResult =
+                    std_byte_buffer_append(
+                        argument_values,
+                        (&extra_value) as
+                            *const usize as *const u8,
+                        sizeof(usize)
+                    );
+                argument_values = extra_appended.buffer;
+                context->error = extra_appended.error;
+            }
+        } else if (!argument.valid ||
             argument.type_id != parameter_type) {
             bootstrap_semantic_add_diagnostic(
                 context,

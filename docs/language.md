@@ -490,11 +490,25 @@ use `void` as the return type and may pass and return scalars, pointers,
 structures or unions. The backend classifies aggregates into System V
 eightbytes, performs whole-value register rollback, stack copies,
 multi-register results and hidden-pointer results. Fixed arrays are rejected
-at this boundary because C function types do not pass arrays by value.
-Variadic calls remain deferred. Luna does not implicitly link a C runtime or
-any library—the final linker invocation must supply an object or library that
-defines every referenced
+at this boundary because C function types do not pass arrays by value. Luna
+does not implicitly link a C runtime or any library—the final linker
+invocation must supply an object or library that defines every referenced
 external symbol.
+
+An `extern fn` may be variadic, with `...` after at least one named
+parameter:
+
+```luna
+extern fn ioctl(descriptor: i32, request: u64, ...) -> i32;
+```
+
+Call sites pass extra scalar arguments after the named ones, classified
+into System V registers and stack slots like named arguments, and the
+compiler emits the `%al` vector-register count before the call. Variadic
+arguments pass at their declared width — Luna deliberately does not
+perform C's default argument promotions (no float-to-double, no
+narrow-integer widening) at this boundary. Aggregate and `void` variadic
+arguments are rejected. `...` is not legal on Luna-defined functions.
 
 For `x86_64-unknown-linux-gnu`, the interoperable C23 spellings are:
 

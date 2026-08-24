@@ -1,0 +1,35 @@
+module tests.variadic_calls;
+
+// The linker's built-in syscall stubs forward argument registers to the
+// kernel, which makes them observable variadic callees: an extra landing in
+// the wrong register (or missing from the stack) changes syscall behavior.
+
+extern fn luna_linux_syscall1(number: usize, argument0: usize, ...) -> isize;
+extern fn luna_linux_syscall3(number: usize, argument0: usize, argument1: usize, ...) -> isize;
+extern fn luna_linux_syscall6(
+    number: usize, argument0: usize, argument1: usize, argument2: usize, argument3: usize, ...) -> isize;
+
+fn main() -> i32 {
+    // write(1, "variadic\n", 9): the byte count is a variadic extra, so it
+    // must land in %rcx for the stub to forward it as the third argument.
+    let message: *const u8 = "variadic\n";
+    let written: isize = luna_linux_syscall3(1, 1, message as usize, 9 as usize);
+    if (written != 9) {
+        return 1;
+    }
+    // getpid: the extras are ignored by the kernel but exercise an integer
+    // register extra and an SSE register extra (movb $1, %al before the call).
+    let pid: isize = luna_linux_syscall1(39, 0 as usize, 7 as usize, 2.5);
+    if (pid <= 0) {
+        return 2;
+    }
+    // mmap(0, 4096, read|write, private|anonymous, -1, 0): the descriptor
+    // extra goes in %r9 and the offset extra goes on the stack, past every
+    // named parameter register.
+    let address: isize = luna_linux_syscall6(
+        9, 0 as usize, 4096 as usize, 3 as usize, 0x22 as usize, -1 as isize as usize, 0 as usize);
+    if (address < 0) {
+        return 3;
+    }
+    return 42;
+}
