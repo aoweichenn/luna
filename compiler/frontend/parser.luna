@@ -72,7 +72,7 @@ fn bootstrap_syntax_tree_is_valid(tree: BootstrapSyntaxTree) -> bool {
     var node_index: usize = 0;
     while (node_index < tree.count) {
         let node: BootstrapSyntaxNode = nodes[node_index];
-        if ((node.kind as usize) > (BootstrapSyntaxKind.va_arg_expression as usize) || node.flags > 65535 ||
+        if ((node.kind as usize) > (BootstrapSyntaxKind.va_arg_expression as usize) || node.flags > 131071 ||
             node.span.line == 0 || node.span.column == 0 || node.span.length >
                 (BootstrapParserLimit.maximum_size as usize) - node.span.offset || (node.token_index != none &&
                 node.token_index >= tree.token_count)) {
@@ -195,7 +195,7 @@ fn bootstrap_parser_input_is_valid(source: StdTextView, tokens: BootstrapTokenBu
             return false;
         }
         let token: BootstrapToken = token_result.token;
-        if ((token.kind as usize) > (BootstrapTokenKind.keyword_va_arg as usize) ||
+        if ((token.kind as usize) > (BootstrapTokenKind.keyword_asm as usize) ||
             !bootstrap_parser_span_is_valid(source, token.span) || token.span.offset < previous_end) {
             return false;
         }
@@ -1518,6 +1518,54 @@ fn bootstrap_parser_parse_const_declaration(
     return declaration;
 }
 
+// An asm fn body is one or more adjacent string literals between braces
+// and nothing else (no semicolons; m1.4 concatenation keeps long bodies
+// readable). Non-string content is carried as an invalid node so the
+// semantic pass rejects it with invalid_asm_function instead of the parse
+// failing here.
+fn bootstrap_parser_parse_asm_body(state: *BootstrapParserState) -> usize {
+    let none: usize = bootstrap_syntax_no_index();
+    let left_brace: BootstrapToken = state->current;
+    if (!bootstrap_parser_expect(
+            state, BootstrapTokenKind.left_brace)) {
+        return none;
+    }
+    if (!bootstrap_parser_enter_nesting(
+            state, left_brace.span)) {
+        return none;
+    }
+    var body: usize = none;
+    if (state->current.kind == BootstrapTokenKind.string || state->current.kind == BootstrapTokenKind.string_u16 ||
+        state->current.kind == BootstrapTokenKind.string_u32) {
+        let token: BootstrapToken = state->current;
+        let token_index: usize = state->current_index;
+        bootstrap_parser_advance(state);
+        body = bootstrap_parser_new_node(state, BootstrapSyntaxKind.string_expression, token.span, token_index);
+        while (state->error == RuntimeError.none &&
+            (state->current.kind == BootstrapTokenKind.string ||
+                state->current.kind == BootstrapTokenKind.string_u16 ||
+                state->current.kind == BootstrapTokenKind.string_u32)) {
+            let part: BootstrapToken = state->current;
+            let part_index: usize = state->current_index;
+            bootstrap_parser_advance(state);
+            bootstrap_parser_add_child(
+                state, body,
+                bootstrap_parser_new_node(state, BootstrapSyntaxKind.string_expression, part.span, part_index));
+            bootstrap_parser_set_node_span(state, body, bootstrap_parser_join_spans(token.span, state->previous.span));
+        }
+    } else if (state->current.kind != BootstrapTokenKind.right_brace) {
+        body = bootstrap_parser_new_node(
+            state, BootstrapSyntaxKind.invalid, state->current.span, state->current_index);
+        while (state->error == RuntimeError.none && state->current.kind != BootstrapTokenKind.right_brace &&
+            state->current.kind != BootstrapTokenKind.end) {
+            bootstrap_parser_advance(state);
+        }
+    }
+    bootstrap_parser_expect(state, BootstrapTokenKind.right_brace);
+    bootstrap_parser_leave_nesting(state);
+    return body;
+}
+
 fn bootstrap_parser_parse_block(state: *BootstrapParserState) -> usize {
     let none: usize = bootstrap_syntax_no_index();
     let left_brace: BootstrapToken = state->current;
@@ -2257,6 +2305,16 @@ fn bootstrap_parser_parse_function_declaration(
     if (bootstrap_parser_match(
             state, BootstrapTokenKind.semicolon)) {
         bootstrap_parser_add_node_flags(state, function, BootstrapSyntaxFlag.bodyless as usize);
+    } else if ((flags & (BootstrapSyntaxFlag.asm_function as usize)) != 0) {
+        let body: usize = bootstrap_parser_parse_asm_body(state);
+        if (body != none) {
+            bootstrap_parser_add_child(state, function, body);
+        }
+        if ((flags & (BootstrapSyntaxFlag.external as usize)) != 0) {
+            bootstrap_parser_add_diagnostic(
+                state, BootstrapDiagnosticKind.invalid_external_declaration, start.span, BootstrapTokenKind.semicolon,
+                BootstrapTokenKind.left_brace, 0);
+        }
     } else {
         let body: usize = bootstrap_parser_parse_block(state);
         if (body != none) {
@@ -2388,6 +2446,13 @@ fn bootstrap_parser_parse_top_level_declaration(state: *BootstrapParserState) ->
     if (bootstrap_parser_match(
             state, BootstrapTokenKind.keyword_fn)) {
         return bootstrap_parser_parse_function_declaration(state, start, flags, first_attribute, attribute_count);
+    }
+    if (state->current.kind == BootstrapTokenKind.keyword_asm &&
+        bootstrap_parser_token_at(state, state->current_index + 1).kind == BootstrapTokenKind.keyword_fn) {
+        bootstrap_parser_advance(state);
+        bootstrap_parser_advance(state);
+        return bootstrap_parser_parse_function_declaration(
+            state, start, flags | (BootstrapSyntaxFlag.asm_function as usize), first_attribute, attribute_count);
     }
     if (state->current.kind == BootstrapTokenKind.keyword_const) {
         if (bootstrap_parser_token_at(

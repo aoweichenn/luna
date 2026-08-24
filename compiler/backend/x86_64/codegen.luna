@@ -174,6 +174,17 @@ fn bootstrap_x86_64_codegen_append_module_hex(context: *BootstrapX8664CodegenCon
     return true;
 }
 
+fn bootstrap_x86_64_codegen_append_mangled_function_symbol(
+    context: *BootstrapX8664CodegenContext, function_id: usize) -> bool {
+    let functions: *const BootstrapIrFunction = context->ir.functions.data as
+            *const BootstrapIrFunction;
+    let function: BootstrapIrFunction = functions[function_id];
+    return bootstrap_x86_64_codegen_literal(context, "_L") &&
+        bootstrap_x86_64_codegen_append_module_hex(context, function.declaration_unit) &&
+        bootstrap_x86_64_codegen_literal(context, "_") &&
+        bootstrap_x86_64_codegen_append_token_hex(context, function.declaration_unit, function.name_token);
+}
+
 fn bootstrap_x86_64_codegen_append_function_symbol(context: *BootstrapX8664CodegenContext, function_id: usize) -> bool {
     if (context == null || function_id >= context->ir.function_count) {
         return bootstrap_x86_64_codegen_fail(context, RuntimeError.invalid_argument);
@@ -208,10 +219,7 @@ fn bootstrap_x86_64_codegen_append_function_symbol(context: *BootstrapX8664Codeg
         }
         return true;
     }
-    return bootstrap_x86_64_codegen_literal(context, "_L") &&
-        bootstrap_x86_64_codegen_append_module_hex(context, function.declaration_unit) &&
-        bootstrap_x86_64_codegen_literal(context, "_") &&
-        bootstrap_x86_64_codegen_append_token_hex(context, function.declaration_unit, function.name_token);
+    return bootstrap_x86_64_codegen_append_mangled_function_symbol(context, function_id);
 }
 
 fn bootstrap_x86_64_codegen_storage(
@@ -2319,6 +2327,154 @@ fn bootstrap_x86_64_codegen_emit_entry(context: *BootstrapX8664CodegenContext) -
             context, "\n    movl %eax, %edi\n    movl $60, %eax\n    syscall\n    .size _start, .-_start\n\n");
 }
 
+fn bootstrap_x86_64_codegen_append_byte(context: *BootstrapX8664CodegenContext, value: u8) -> bool {
+    var byte: u8 = value;
+    if (!bootstrap_x86_64_text_append(&context->text, (&byte) as *const u8, 1)) {
+        context->error = context->text.error;
+        return false;
+    }
+    return true;
+}
+
+fn bootstrap_x86_64_codegen_hex_digit(byte: u8) -> usize {
+    if (byte >= 48 && byte <= 57) {
+        return (byte - 48) as usize;
+    }
+    if (byte >= 65 && byte <= 70) {
+        return (byte - 65 + 10) as usize;
+    }
+    if (byte >= 97 && byte <= 102) {
+        return (byte - 97 + 10) as usize;
+    }
+    return 16;
+}
+
+// Appends one code point to the emitted text, UTF-8 encoded (asm bodies
+// are plain-width strings, mirroring the semantic width-1 decoding).
+fn bootstrap_x86_64_codegen_append_code_point(context: *BootstrapX8664CodegenContext, code_point: usize) -> bool {
+    if (code_point < 128) {
+        return bootstrap_x86_64_codegen_append_byte(context, code_point as u8);
+    }
+    if (code_point < 2048) {
+        return bootstrap_x86_64_codegen_append_byte(context, ((code_point >> 6) + 192) as u8) &&
+            bootstrap_x86_64_codegen_append_byte(context, ((code_point & 63) + 128) as u8);
+    }
+    if (code_point < 65536) {
+        return bootstrap_x86_64_codegen_append_byte(context, ((code_point >> 12) + 224) as u8) &&
+            bootstrap_x86_64_codegen_append_byte(context, (((code_point >> 6) & 63) + 128) as u8) &&
+            bootstrap_x86_64_codegen_append_byte(context, ((code_point & 63) + 128) as u8);
+    }
+    return bootstrap_x86_64_codegen_append_byte(context, ((code_point >> 18) + 240) as u8) &&
+        bootstrap_x86_64_codegen_append_byte(context, (((code_point >> 12) & 63) + 128) as u8) &&
+        bootstrap_x86_64_codegen_append_byte(context, (((code_point >> 6) & 63) + 128) as u8) &&
+        bootstrap_x86_64_codegen_append_byte(context, ((code_point & 63) + 128) as u8);
+}
+
+// Decodes one plain string literal token of an asm fn body (the span
+// includes the quotes) into the emitted text, resolving the usual escape
+// sequences; the semantic pass already restricted bodies to plain strings.
+fn bootstrap_x86_64_codegen_append_asm_string(
+    context: *BootstrapX8664CodegenContext, unit_id: usize, token_id: usize) -> bool {
+    let unit: *const BootstrapSemanticUnit = bootstrap_x86_64_codegen_unit(context, unit_id);
+    let token: BootstrapToken = bootstrap_x86_64_codegen_token(context, unit_id, token_id);
+    if (unit == null || token.kind != BootstrapTokenKind.string || token.span.length < 2 ||
+        token.span.offset > unit->source.length || token.span.length > unit->source.length - token.span.offset) {
+        return bootstrap_x86_64_codegen_fail(context, RuntimeError.invalid_argument);
+    }
+    var index: usize = 1;
+    while (index + 1 < token.span.length && context->error == RuntimeError.none) {
+        var byte: u8 = unit->source.data[token.span.offset + index];
+        if (byte != 92) {
+            if (!bootstrap_x86_64_codegen_append_byte(context, byte)) {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+        index += 1;
+        byte = unit->source.data[token.span.offset + index];
+        if (byte == 120) {
+            if (index + 3 >= token.span.length) {
+                return bootstrap_x86_64_codegen_fail(context, RuntimeError.invalid_argument);
+            }
+            let high: usize = bootstrap_x86_64_codegen_hex_digit(unit->source.data[token.span.offset + index + 1]);
+            let low: usize = bootstrap_x86_64_codegen_hex_digit(unit->source.data[token.span.offset + index + 2]);
+            if (high >= 16 || low >= 16 ||
+                !bootstrap_x86_64_codegen_append_byte(context, (high * 16 + low) as u8)) {
+                return bootstrap_x86_64_codegen_fail(context, RuntimeError.invalid_argument);
+            }
+            index += 3;
+            continue;
+        }
+        if (byte == 117) {
+            var code_point: usize = 0;
+            index += 1;
+            if (index + 1 >= token.span.length || unit->source.data[token.span.offset + index] != 123) {
+                return bootstrap_x86_64_codegen_fail(context, RuntimeError.invalid_argument);
+            }
+            index += 1;
+            while (index + 1 < token.span.length && unit->source.data[token.span.offset + index] != 125) {
+                let digit: usize = bootstrap_x86_64_codegen_hex_digit(unit->source.data[token.span.offset + index]);
+                if (digit >= 16) {
+                    return bootstrap_x86_64_codegen_fail(context, RuntimeError.invalid_argument);
+                }
+                code_point = code_point * 16 + digit;
+                index += 1;
+            }
+            if (index + 1 >= token.span.length) {
+                return bootstrap_x86_64_codegen_fail(context, RuntimeError.invalid_argument);
+            }
+            index += 1;
+            if (!bootstrap_x86_64_codegen_append_code_point(context, code_point)) {
+                return false;
+            }
+            continue;
+        }
+        if (byte == 110) {
+            byte = 10;
+        } else if (byte == 114) {
+            byte = 13;
+        } else if (byte == 116) {
+            byte = 9;
+        } else if (byte == 48) {
+            byte = 0;
+        }
+        if (!bootstrap_x86_64_codegen_append_byte(context, byte)) {
+            return false;
+        }
+        index += 1;
+    }
+    return context->error == RuntimeError.none;
+}
+
+// Splices the decoded string literals of an asm fn body into the emitted
+// text; the semantic pass validated the body holds nothing else.
+fn bootstrap_x86_64_codegen_emit_asm_body(
+    context: *BootstrapX8664CodegenContext, function: BootstrapIrFunction) -> bool {
+    let unit_id: usize = function.asm_body_unit;
+    let body: BootstrapSyntaxNode = bootstrap_x86_64_codegen_node(context, unit_id, function.asm_body_node);
+    if (body.kind != BootstrapSyntaxKind.string_expression) {
+        return bootstrap_x86_64_codegen_fail(context, RuntimeError.invalid_argument);
+    }
+    if (!bootstrap_x86_64_codegen_append_asm_string(context, unit_id, body.token_index)) {
+        return false;
+    }
+    var part: usize = body.first_child;
+    var index: usize = 0;
+    while (index < body.child_count && context->error == RuntimeError.none) {
+        let part_node: BootstrapSyntaxNode = bootstrap_x86_64_codegen_node(context, unit_id, part);
+        if (part_node.kind != BootstrapSyntaxKind.string_expression) {
+            return bootstrap_x86_64_codegen_fail(context, RuntimeError.invalid_argument);
+        }
+        if (!bootstrap_x86_64_codegen_append_asm_string(context, unit_id, part_node.token_index)) {
+            return false;
+        }
+        part = part_node.next_sibling;
+        index += 1;
+    }
+    return context->error == RuntimeError.none;
+}
+
 fn bootstrap_x86_64_codegen_emit_function(context: *BootstrapX8664CodegenContext, function_id: usize) -> bool {
     let functions: *const BootstrapIrFunction = context->ir.functions.data as
             *const BootstrapIrFunction;
@@ -2342,12 +2498,43 @@ fn bootstrap_x86_64_codegen_emit_function(context: *BootstrapX8664CodegenContext
         !bootstrap_x86_64_codegen_literal(context, "\n"))) {
         return false;
     }
+    // An exported @export_name definition answers to two names: the
+    // verbatim export symbol (extern consumers resolve it by name) and the
+    // mangled module symbol (module consumers importing the interface
+    // reference that one, since the export name lives on the
+    // implementation they never see).
+    if (function.linkage == BootstrapIrLinkage.module_export &&
+        function.export_name_token != bootstrap_x86_64_codegen_no_id() &&
+        (!bootstrap_x86_64_codegen_literal(context, "    .globl ") ||
+        !bootstrap_x86_64_codegen_append_mangled_function_symbol(context, function_id) ||
+        !bootstrap_x86_64_codegen_literal(context, "\n"))) {
+        return false;
+    }
     if (!bootstrap_x86_64_codegen_literal(context, "    .p2align 4\n    .type ") ||
         !bootstrap_x86_64_codegen_append_function_symbol(context, function_id) ||
         !bootstrap_x86_64_codegen_literal(context, ", @function\n") ||
         !bootstrap_x86_64_codegen_append_function_symbol(context, function_id) ||
-        !bootstrap_x86_64_codegen_literal(
-            context, ":\n    pushq %rbp\n    movq %rsp, %rbp\n")) {
+        !bootstrap_x86_64_codegen_literal(context, ":\n")) {
+        return false;
+    }
+    if (function.linkage == BootstrapIrLinkage.module_export &&
+        function.export_name_token != bootstrap_x86_64_codegen_no_id() &&
+        (!bootstrap_x86_64_codegen_append_mangled_function_symbol(context, function_id) ||
+        !bootstrap_x86_64_codegen_literal(context, ":\n"))) {
+        return false;
+    }
+    // An asm fn is naked: the decoded body follows the label directly, and
+    // register use, stack discipline and the return sequence belong to the
+    // author (luna-as validates and encodes every instruction).
+    if (function.asm_body_node != bootstrap_x86_64_codegen_no_id()) {
+        return bootstrap_x86_64_codegen_emit_asm_body(context, function) &&
+            bootstrap_x86_64_codegen_literal(context, "    .size ") &&
+            bootstrap_x86_64_codegen_append_function_symbol(context, function_id) &&
+            bootstrap_x86_64_codegen_literal(context, ", .-") &&
+            bootstrap_x86_64_codegen_append_function_symbol(context, function_id) &&
+            bootstrap_x86_64_codegen_literal(context, "\n\n");
+    }
+    if (!bootstrap_x86_64_codegen_literal(context, "    pushq %rbp\n    movq %rsp, %rbp\n")) {
         return false;
     }
     if (frames[function_id].dynamic_alignment != 0 &&

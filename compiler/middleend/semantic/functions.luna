@@ -77,6 +77,16 @@ fn bootstrap_semantic_function_parts(
                 BootstrapSyntaxKind.block_statement &&
             *body_node == none) {
             *body_node = child;
+        } else if ((node.kind ==
+                    BootstrapSyntaxKind.string_expression ||
+                node.kind == BootstrapSyntaxKind.invalid) &&
+            *body_node == none &&
+            (declaration.flags &
+                (BootstrapSyntaxFlag.asm_function as usize)) != 0) {
+            // An asm fn body is one string_expression (adjacent literals
+            // concatenate in the parser); a non-string body was carried as
+            // an invalid node for the semantic diagnostic.
+            *body_node = child;
         } else if (node.kind != BootstrapSyntaxKind.attribute) {
             context->error = RuntimeError.invalid_argument;
             return false;
@@ -368,6 +378,61 @@ fn bootstrap_semantic_find_module_function(
     return bootstrap_semantic_no_id();
 }
 
+// An `asm fn` is an implementation-unit definition whose entire body is
+// one or more adjacent string literals (m1.4 concatenation included) and
+// nothing else, carried as one string_expression of plain-width literals.
+// Interface-unit, extern or bodyless asm declarations and any other body
+// content are invalid_asm_function.
+fn bootstrap_semantic_validate_asm_function(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    declaration: BootstrapSyntaxNode,
+    interface_unit: bool
+) -> bool {
+    let none: usize = bootstrap_semantic_no_id();
+    if ((declaration.flags &
+            (BootstrapSyntaxFlag.asm_function as usize)) == 0) {
+        return true;
+    }
+    var valid: bool = !interface_unit &&
+        (declaration.flags &
+            ((BootstrapSyntaxFlag.external as usize) |
+                (BootstrapSyntaxFlag.bodyless as usize))) == 0;
+    var parameter_count: usize = 0;
+    var return_node: usize = none;
+    var body_node: usize = none;
+    if (valid && !bootstrap_semantic_function_parts(
+            context, unit_index, declaration, &parameter_count, &return_node, &body_node)) {
+        return false;
+    }
+    if (valid && body_node != none) {
+        let body: BootstrapSyntaxNode = bootstrap_semantic_node(context, unit_index, body_node);
+        if (body.kind != BootstrapSyntaxKind.string_expression ||
+            bootstrap_semantic_token(context, unit_index, body.token_index).kind != BootstrapTokenKind.string) {
+            valid = false;
+        }
+        var part: usize = body.first_child;
+        while (valid && part != none) {
+            let part_node: BootstrapSyntaxNode = bootstrap_semantic_node(context, unit_index, part);
+            if (part_node.kind != BootstrapSyntaxKind.string_expression ||
+                bootstrap_semantic_token(context, unit_index, part_node.token_index).kind !=
+                    BootstrapTokenKind.string) {
+                valid = false;
+                break;
+            }
+            part = part_node.next_sibling;
+        }
+    } else if (valid) {
+        valid = false;
+    }
+    if (!valid) {
+        bootstrap_semantic_add_diagnostic(
+            context, BootstrapSemanticDiagnosticKind.invalid_asm_function, unit_index, declaration.span, none,
+            bootstrap_semantic_empty_span(), 0);
+    }
+    return context->error == RuntimeError.none;
+}
+
 fn bootstrap_semantic_add_function_declaration(
     context: *BootstrapSemanticContext,
     module_id: usize,
@@ -441,6 +506,10 @@ fn bootstrap_semantic_add_function_declaration(
     }
     if (variadic && parameter_count != 0) {
         flags |= BootstrapSemanticSymbolFlag.variadic as usize;
+    }
+    if ((declaration.flags &
+            (BootstrapSyntaxFlag.asm_function as usize)) != 0) {
+        flags |= BootstrapSemanticSymbolFlag.asm_function as usize;
     }
     if (interface_unit) {
         flags |= BootstrapSemanticSymbolFlag
@@ -1285,6 +1354,12 @@ fn bootstrap_semantic_collect_functions_in_unit(
                 BootstrapSyntaxKind.function_declaration &&
             (declaration.flags &
                 (BootstrapSyntaxFlag.const_function as usize)) == 0) {
+            bootstrap_semantic_validate_asm_function(
+                context,
+                unit_index,
+                declaration,
+                interface_unit
+            );
             let duplicate_name: usize =
                 bootstrap_semantic_find_any_local_symbol(
                     context,
@@ -1368,6 +1443,13 @@ fn bootstrap_semantic_collect_functions_in_unit(
                         .implementation_unit = unit_index;
                     functions[existing_function]
                         .implementation_node = declaration_id;
+                    // The interface declaration was collected without the
+                    // asm flag; the implementation carries it.
+                    if ((declaration.flags &
+                            (BootstrapSyntaxFlag.asm_function as usize)) != 0) {
+                        functions[existing_function].flags |=
+                            BootstrapSemanticSymbolFlag.asm_function as usize;
+                    }
                 }
             } else if (duplicate_name != none) {
                 let symbols: *const BootstrapSemanticSymbol =
@@ -1623,6 +1705,7 @@ fn bootstrap_semantic_ir_function_record(
         (function.flags &
             (BootstrapSemanticSymbolFlag.exported as usize)) != 0;
     var has_body: bool = false;
+    var asm_body_node: usize = none;
     if (function.implementation_unit != none &&
         !external) {
         let implementation: BootstrapSyntaxNode =
@@ -1634,6 +1717,22 @@ fn bootstrap_semantic_ir_function_record(
         has_body =
             (implementation.flags &
                 (BootstrapSyntaxFlag.bodyless as usize)) == 0;
+        // An asm fn's body stays a syntax reference (unit + string node);
+        // the backend decodes and splices the string literals verbatim.
+        if (has_body &&
+            (function.flags &
+                (BootstrapSemanticSymbolFlag.asm_function as usize)) != 0) {
+            var ignored_count: usize = 0;
+            var ignored_return: usize = none;
+            bootstrap_semantic_function_parts(
+                context,
+                function.implementation_unit,
+                implementation,
+                &ignored_count,
+                &ignored_return,
+                &asm_body_node
+            );
+        }
     }
     let export_name_token: usize =
         bootstrap_semantic_function_export_name_token(context, function);
@@ -1661,6 +1760,9 @@ fn bootstrap_semantic_ir_function_record(
         export_name_unit = export_name_token == none ?
             none : function.implementation_unit,
         export_name_token = export_name_token,
+        asm_body_unit = asm_body_node == none ?
+            none : function.implementation_unit,
+        asm_body_node = asm_body_node,
     };
 }
 
