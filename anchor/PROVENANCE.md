@@ -129,3 +129,14 @@ artifact byte-identical between the two stages, and `test` passed
 165/165. The stage-fixed executables were copied here and `SHA256SUMS`
 refreshed. The syscall stubs now come from asm fn source in
 library/linux/syscall.luna; the linker injects nothing.
+
+## 2026-08-24: promotion to the m1.10 toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`bffea2717a470e7991acad650e6f9a0ab0d0c6be`
+(`feat(m1.10): @embed compile-time file embedding`). Provenance chain:
+the previous anchor (above) built `out/stage-next`, which rebuilt
+itself into `out/stage-fixed`; `verify` confirmed every artifact
+byte-identical between the two stages, and `test` passed 170/170. The
+stage-fixed executables were copied here and `SHA256SUMS` refreshed.
+The m1 milestone series (m1.1-m1.10) is complete with this toolchain.
