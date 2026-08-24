@@ -32,6 +32,7 @@ fn bootstrap_semantic_input_empty(
 ) -> BootstrapSemanticInput {
     return {
         units = std_byte_buffer_empty(),
+        paths = std_byte_buffer_empty(),
         unit_count = 0,
         executable = executable,
     };
@@ -41,6 +42,7 @@ fn bootstrap_semantic_input_storage_is_valid(
     input: BootstrapSemanticInput
 ) -> bool {
     return std_byte_buffer_is_valid(input.units) &&
+        std_byte_buffer_is_valid(input.paths) &&
         input.units.length % sizeof(BootstrapSemanticUnit) == 0 &&
         input.unit_count <=
             BootstrapSemanticLimit.maximum_modules as usize * 2 &&
@@ -86,7 +88,10 @@ fn bootstrap_semantic_input_is_valid(
         input.units.data as *const BootstrapSemanticUnit;
     var index: usize = 0;
     while (index < input.unit_count) {
-        if (!bootstrap_semantic_unit_is_valid(units[index])) {
+        if (!bootstrap_semantic_unit_is_valid(units[index]) ||
+            units[index].path_length > input.paths.length ||
+            units[index].path_offset >
+                input.paths.length - units[index].path_length) {
             return false;
         }
         index += 1;
@@ -96,18 +101,32 @@ fn bootstrap_semantic_input_is_valid(
 
 fn bootstrap_semantic_input_add(
     input: *BootstrapSemanticInput,
-    unit: BootstrapSemanticUnit
+    unit: BootstrapSemanticUnit,
+    path: StdTextView
 ) -> bool {
     if (input == null ||
         !bootstrap_semantic_input_storage_is_valid(*input) ||
         !bootstrap_semantic_unit_is_valid(unit) ||
+        (path.length != 0 && path.data == null) ||
         input->unit_count >=
             BootstrapSemanticLimit.maximum_modules as usize * 2) {
         return false;
     }
+    var record: BootstrapSemanticUnit = unit;
+    record.path_offset = input->paths.length;
+    record.path_length = path.length;
+    let path_appended: StdByteBufferResult = std_byte_buffer_append(
+        input->paths,
+        path.data,
+        path.length
+    );
+    input->paths = path_appended.buffer;
+    if (path_appended.error != RuntimeError.none) {
+        return false;
+    }
     let appended: StdByteBufferResult = std_byte_buffer_append(
         input->units,
-        (&unit) as *const BootstrapSemanticUnit as *const u8,
+        (&record) as *const BootstrapSemanticUnit as *const u8,
         sizeof(BootstrapSemanticUnit)
     );
     input->units = appended.buffer;
@@ -124,7 +143,9 @@ fn bootstrap_semantic_input_release(
     if (!bootstrap_semantic_input_storage_is_valid(input)) {
         return RuntimeError.invalid_argument;
     }
-    return std_byte_buffer_release(input.units);
+    let units_error: RuntimeError = std_byte_buffer_release(input.units);
+    let paths_error: RuntimeError = std_byte_buffer_release(input.paths);
+    return units_error != RuntimeError.none ? units_error : paths_error;
 }
 
 fn bootstrap_semantic_diagnostics_empty()
@@ -500,6 +521,22 @@ fn bootstrap_semantic_input_unit(
         context->input.units.data as
             *const BootstrapSemanticUnit;
     return &units[unit_index];
+}
+
+fn bootstrap_semantic_unit_path(
+    context: *BootstrapSemanticContext,
+    unit_index: usize
+) -> StdTextView {
+    let unit: *const BootstrapSemanticUnit =
+        bootstrap_semantic_input_unit(context, unit_index);
+    if (unit == null || unit->path_length == 0) {
+        return { data = null, length = 0 };
+    }
+    let paths: *const u8 = context->input.paths.data as *const u8;
+    return {
+        data = &paths[unit->path_offset],
+        length = unit->path_length,
+    };
 }
 
 fn bootstrap_semantic_node(

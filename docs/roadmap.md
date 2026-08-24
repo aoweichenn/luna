@@ -194,7 +194,7 @@ feature has executable tests plus a green `verify` fixed point.
 
 ### m1.9 source position intrinsics
 
-- [ ] `@file()`/`@line()` source position builtins
+- [x] `@file()`/`@line()` source position builtins
 
 ### m1.10 embedded binary data
 

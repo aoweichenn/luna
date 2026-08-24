@@ -991,6 +991,23 @@ the same integer scalar type and a mutable pointer of that exact type.
 The result is `bool` — true when the operation overflowed — and the
 wrapped value is always stored through the pointer, overflow or not.
 
+`@file()` and `@line()` report the source position where they appear:
+`@file()` yields the unit's path as `*const u8` (named as the compiler
+received it, NUL-terminated) and `@line()` the 1-based line number as
+`usize`, constant-folded so it also works in `assert`. Position is
+lexical — there is no macro expansion to forward it — so helpers receive
+it explicitly at the call site:
+
+```luna
+fn check(condition: bool, file: *const u8, line: usize, what: *const u8) {
+    if (!condition) {
+        log_error(file, line, what);
+    }
+}
+
+check(x == expected, @file(), @line(), "x should equal expected");
+```
+
 ## Compile-time surface
 
 The compile-time surface in Luna 0 consists of typed constants, enum values
