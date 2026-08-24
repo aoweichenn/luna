@@ -105,3 +105,15 @@ byte-identical between the two stages, and `test` passed 165/165. The
 stage-fixed executables were copied here and `SHA256SUMS` refreshed.
 This linker's injection is conditional, allowing the syscall stubs to
 move to asm fn source without duplicate definitions.
+
+## 2026-08-24: promotion to the corrected conditional-injection toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`9c5be703ed974ad183a0929718d7aeddbea05c32`
+(`fix(linker): correct syscall0 probe length in conditional injection`).
+Provenance chain: the previous anchor (above) built `out/stage-next`,
+which rebuilt itself into `out/stage-fixed`; `verify` confirmed every
+artifact byte-identical between the two stages, and `test` passed
+165/165. The stage-fixed executables were copied here and `SHA256SUMS`
+refreshed. This linker skips its syscall injection when an input object
+already defines the stubs.
