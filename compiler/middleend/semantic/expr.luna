@@ -5138,6 +5138,103 @@ fn bootstrap_semantic_lower_conditional(
     return final_result;
 }
 
+fn bootstrap_semantic_lower_va_arg(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode
+) -> BootstrapSemanticExpression {
+    let none: usize = bootstrap_semantic_no_id();
+    if (node.child_count != 2) {
+        context->error = RuntimeError.invalid_argument;
+        return bootstrap_semantic_invalid_expression();
+    }
+    if (!bootstrap_semantic_current_function_is_variadic(context)) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.invalid_va_list,
+            context->current_unit,
+            node.span,
+            none,
+            bootstrap_semantic_empty_span(),
+            0
+        );
+        return bootstrap_semantic_invalid_expression();
+    }
+    let list: BootstrapSemanticExpression =
+        bootstrap_semantic_lower_expression(
+            context,
+            node.first_child,
+            none
+        );
+    if (!list.valid) {
+        return list;
+    }
+    if (!list.lvalue || !list.mutable_lvalue ||
+        list.type_id != (BootstrapBuiltinType.va_list_type as usize)) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.invalid_va_list,
+            context->current_unit,
+            node.span,
+            none,
+            bootstrap_semantic_empty_span(),
+            0
+        );
+        return bootstrap_semantic_invalid_expression();
+    }
+    let type_id: usize =
+        bootstrap_semantic_resolve_type_node(
+            context,
+            context->current_unit,
+            bootstrap_semantic_node(
+                context,
+                context->current_unit,
+                node.first_child
+            ).next_sibling
+        );
+    if (type_id == none) {
+        return bootstrap_semantic_invalid_expression();
+    }
+    let record: BootstrapTypeRecord =
+        bootstrap_semantic_type_record(context, type_id);
+    // Extraction is by argument class only, so the requested type must be a
+    // scalar; aggregates have no register-save slot shape to read.
+    if (!bootstrap_type_is_scalar(record.kind)) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.type_mismatch,
+            context->current_unit,
+            node.span,
+            none,
+            bootstrap_semantic_empty_span(),
+            type_id
+        );
+        return bootstrap_semantic_invalid_expression();
+    }
+    var instruction: BootstrapIrInstruction =
+        bootstrap_semantic_instruction(
+            BootstrapIrOpcode.va_list_arg,
+            node
+        );
+    instruction.left = list.address_id;
+    let value_id: usize = bootstrap_semantic_emit_value(
+        context,
+        instruction,
+        type_id
+    );
+    return {
+        type_id = type_id,
+        value_id = value_id,
+        address_id = none,
+        constant_value = 0,
+        has_constant = false,
+        lvalue = false,
+        mutable_lvalue = false,
+        volatile_lvalue = false,
+        valid = value_id != none,
+        bitfield_segment = none,
+    };
+}
+
 fn bootstrap_semantic_lower_layout_query(
     context: *BootstrapSemanticContext,
     node: BootstrapSyntaxNode
@@ -5473,6 +5570,12 @@ fn bootstrap_semantic_lower_expression(
         node.kind == BootstrapSyntaxKind.alignof_expression ||
         node.kind == BootstrapSyntaxKind.offsetof_expression) {
         return bootstrap_semantic_lower_layout_query(
+            context,
+            node
+        );
+    }
+    if (node.kind == BootstrapSyntaxKind.va_arg_expression) {
+        return bootstrap_semantic_lower_va_arg(
             context,
             node
         );

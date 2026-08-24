@@ -523,7 +523,32 @@ compiler emits the `%al` vector-register count before the call. Variadic
 arguments pass at their declared width — Luna deliberately does not
 perform C's default argument promotions (no float-to-double, no
 narrow-integer widening) at this boundary. Aggregate and `void` variadic
-arguments are rejected. `...` is not legal on Luna-defined functions.
+arguments are rejected.
+
+Luna functions may also be defined variadically, reading the extra
+arguments through the System V `va_list` protocol:
+
+```luna
+fn sum(count: i32, ...) -> i32 {
+    var args: va_list = {};
+    va_start(args);
+    var total: i32 = 0;
+    for (var i: i32 = 0; i < count; i += 1) {
+        total += va_arg(args, i32);
+    }
+    return total;
+}
+```
+
+`va_list` is a built-in 24-byte type, declarable only as a local `var`
+inside a variadic function. `va_start(args);` initializes it against the
+register save area the function's prologue builds (all six integer
+argument registers, plus the vector registers when `%al` is nonzero).
+`va_arg(args, T)` extracts the next argument of scalar type `T` by its
+System V argument class, reading at the requested width — matching the
+declared-width calling convention above. Re-initializing with a second
+`va_start` walks the arguments again. Function-pointer types may not
+contain `...`.
 
 For `x86_64-unknown-linux-gnu`, the interoperable C23 spellings are:
 

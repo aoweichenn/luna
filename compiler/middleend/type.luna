@@ -136,6 +136,9 @@ fn bootstrap_type_builtin_kind(index: usize) -> BootstrapTypeKind {
     if (index == BootstrapBuiltinType.float_64 as usize) {
         return BootstrapTypeKind.float_64;
     }
+    if (index == BootstrapBuiltinType.va_list_type as usize) {
+        return BootstrapTypeKind.va_list_type;
+    }
     return BootstrapTypeKind.invalid;
 }
 
@@ -143,7 +146,19 @@ fn bootstrap_type_builtin_size(index: usize) -> usize {
     if (index == BootstrapBuiltinType.type_void as usize || index == BootstrapBuiltinType.invalid as usize) {
         return 0;
     }
+    // The System V va_list object: u32 gp_offset, u32 fp_offset, then the
+    // overflow_arg_area and reg_save_area pointers.
+    if (index == BootstrapBuiltinType.va_list_type as usize) {
+        return 24;
+    }
     return bootstrap_type_bit_width(bootstrap_type_builtin_kind(index)) / 8;
+}
+
+fn bootstrap_type_builtin_alignment(index: usize) -> usize {
+    if (index == BootstrapBuiltinType.va_list_type as usize) {
+        return 8;
+    }
+    return bootstrap_type_builtin_size(index);
 }
 
 fn bootstrap_type_table_create() -> BootstrapTypeTableResult {
@@ -153,7 +168,8 @@ fn bootstrap_type_table_create() -> BootstrapTypeTableResult {
         let size_bytes: usize = bootstrap_type_builtin_size(index);
         let added: BootstrapTypeTableResult =
             bootstrap_type_append_record(
-                table, bootstrap_type_builtin_record(bootstrap_type_builtin_kind(index), size_bytes, size_bytes));
+                table, bootstrap_type_builtin_record(
+                    bootstrap_type_builtin_kind(index), size_bytes, bootstrap_type_builtin_alignment(index)));
         table = added.table;
         if (added.error != RuntimeError.none) {
             bootstrap_type_table_release(table);
@@ -589,7 +605,7 @@ fn bootstrap_type_is_scalar(kind: BootstrapTypeKind) -> bool {
 
 fn bootstrap_type_is_memory(kind: BootstrapTypeKind) -> bool {
     return kind == BootstrapTypeKind.array || kind == BootstrapTypeKind.structure ||
-        kind == BootstrapTypeKind.record_union;
+        kind == BootstrapTypeKind.record_union || kind == BootstrapTypeKind.va_list_type;
 }
 
 fn bootstrap_type_bit_width(kind: BootstrapTypeKind) -> usize {
@@ -622,7 +638,7 @@ fn bootstrap_type_table_is_valid(table: BootstrapTypeTable, require_complete: bo
     var index: usize = 0;
     while (index < table.type_count) {
         let record: BootstrapTypeRecord = records[index];
-        if ((record.kind as usize) > (BootstrapTypeKind.function_pointer as usize) || record.flags > 255) {
+        if ((record.kind as usize) > (BootstrapTypeKind.va_list_type as usize) || record.flags > 255) {
             return false;
         }
         if (index < BootstrapBuiltinType.count as usize) {
@@ -631,7 +647,7 @@ fn bootstrap_type_table_is_valid(table: BootstrapTypeTable, require_complete: bo
                 record.declaration_node != bootstrap_type_no_id() || record.name_token != bootstrap_type_no_id() ||
                 record.first_field != bootstrap_type_no_id() || record.field_count != 0 || record.flags !=
                     BootstrapTypeFlag.complete as usize || record.size_bytes != bootstrap_type_builtin_size(index) ||
-                record.alignment_bytes != bootstrap_type_builtin_size(index)) {
+                record.alignment_bytes != bootstrap_type_builtin_alignment(index)) {
                 return false;
             }
         } else if (record.kind == BootstrapTypeKind.pointer) {

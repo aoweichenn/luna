@@ -1,0 +1,148 @@
+module tests.variadic_define;
+
+// Luna-defined variadic functions: the prologue builds the System V register
+// save area, va_start binds a local va_list to it, and va_arg walks the
+// extras at their declared widths (no C promotions).
+
+fn sum_long(count: i32, ...) -> i64 {
+    var args: va_list = {};
+    va_start(args);
+    var total: i64 = 0;
+    for (var i: i32 = 0; i < count; i += 1) {
+        total += va_arg(args, i64);
+    }
+    return total;
+}
+
+fn sum_double(count: i32, ...) -> f64 {
+    var args: va_list = {};
+    va_start(args);
+    var total: f64 = 0.0;
+    for (var i: i32 = 0; i < count; i += 1) {
+        total += va_arg(args, f64);
+    }
+    return total;
+}
+
+fn sum_single(count: i32, ...) -> f32 {
+    var args: va_list = {};
+    va_start(args);
+    var total: f32 = 0.0 as f32;
+    for (var i: i32 = 0; i < count; i += 1) {
+        total += va_arg(args, f32);
+    }
+    return total;
+}
+
+fn mixed(first: i32, second: f64, ...) -> i64 {
+    var args: va_list = {};
+    va_start(args);
+    var total: i64 = first as i64;
+    total += second as i64;
+    total += va_arg(args, i64);
+    total += va_arg(args, f64) as i64;
+    total += va_arg(args, i64);
+    total += va_arg(args, f64) as i64;
+    return total;
+}
+
+fn narrow(count: i32, ...) -> i32 {
+    var args: va_list = {};
+    va_start(args);
+    var total: i32 = 0;
+    total += va_arg(args, i8) as i32;
+    total += va_arg(args, i16) as i32;
+    total += va_arg(args, i8) as i32;
+    return total;
+}
+
+fn count_set(first: bool, ...) -> i32 {
+    var args: va_list = {};
+    va_start(args);
+    var total: i32 = 0;
+    if (first) {
+        total += 1;
+    }
+    if (va_arg(args, bool)) {
+        total += 1;
+    }
+    if (va_arg(args, bool)) {
+        total += 1;
+    }
+    return total;
+}
+
+fn first_bytes(count: i32, ...) -> i32 {
+    var args: va_list = {};
+    va_start(args);
+    var total: i32 = 0;
+    for (var i: i32 = 0; i < count; i += 1) {
+        let text: *const u8 = va_arg(args, *const u8);
+        total += text[0] as i32;
+    }
+    return total;
+}
+
+// A variadic function forwarding extras it read to another variadic callee.
+fn forward(count: i32, ...) -> i64 {
+    var args: va_list = {};
+    va_start(args);
+    let left: i64 = va_arg(args, i64);
+    let right: i64 = va_arg(args, i64);
+    return sum_long(count, left, right);
+}
+
+// A second va_start re-initializes the list and walks the extras again.
+fn twice(count: i32, ...) -> i64 {
+    var args: va_list = {};
+    va_start(args);
+    var first: i64 = 0;
+    for (var i: i32 = 0; i < count; i += 1) {
+        first += va_arg(args, i64);
+    }
+    va_start(args);
+    var second: i64 = 0;
+    for (var i: i32 = 0; i < count; i += 1) {
+        second += va_arg(args, i64);
+    }
+    return first + second;
+}
+
+fn main() -> i32 {
+    // Ten i64 extras: five in gp registers, five overflowing to the stack.
+    if (sum_long(
+            10, 1 as i64, 2 as i64, 3 as i64, 4 as i64, 5 as i64, 6 as i64, 7 as i64, 8 as i64, 9 as i64,
+            10 as i64) != 55) {
+        return 1;
+    }
+    // Nine f64 extras: eight in xmm registers, one on the stack.
+    if (sum_double(9, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0) != 45.0) {
+        return 2;
+    }
+    // f32 extras read from the low 4 bytes of their 16-byte save slots.
+    if (sum_single(3, 1.5 as f32, 2.5 as f32, 38.0 as f32) != 42.0 as f32) {
+        return 3;
+    }
+    // Interleaved gp/SSE extras continue where the named parameters stopped.
+    if (mixed(1, 2.0, 10 as i64, 20.0, 30 as i64, 40.0) != 103) {
+        return 4;
+    }
+    // Narrow extras are read back at their declared width, sign included.
+    if (narrow(3, (0 - 1) as i8, (0 - 2) as i16, 45 as i8) != 42) {
+        return 5;
+    }
+    if (count_set(true, false, true) != 2) {
+        return 6;
+    }
+    // Pointer extras ride the gp class like any integer.
+    if (first_bytes(2, "(", ")") != 81) {
+        return 7;
+    }
+    if (forward(2, 40 as i64, 2 as i64) != 42) {
+        return 8;
+    }
+    if (twice(3, 5 as i64, 6 as i64, 7 as i64) != 36) {
+        return 9;
+    }
+    return 42;
+}

@@ -182,7 +182,7 @@ feature has executable tests plus a green `verify` fixed point.
 ### m1.7 variadic functions
 
 - [x] variadic extern calls with the `%al` protocol
-- [ ] `va_list` with register save areas and typed `va_arg`
+- [x] `va_list` with register save areas and typed `va_arg`
 
   No kernel consumer exists (all syscalls are fixed-arity); this milestone
   started by explicit decision to enable real C-library FFI.

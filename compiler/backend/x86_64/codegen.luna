@@ -1031,7 +1031,10 @@ fn bootstrap_x86_64_codegen_emit_integer_conversion(
     let source_width: usize = bootstrap_x86_64_codegen_bit_width(source);
     let target_width: usize = bootstrap_x86_64_codegen_bit_width(target);
     let signed_source: bool = bootstrap_x86_64_codegen_is_signed(context, source);
-    if (signed_source && target_width == 64 && source_width < 64) {
+    // A signed source widens by sign extension at any wider target width,
+    // not only 64-bit targets: value homes are zero-masked, so a plain movl
+    // would turn a negative i8/i16 into a large positive i32.
+    if (signed_source && source_width < 64 && target_width > source_width) {
         if (!bootstrap_x86_64_codegen_load_signed_rax(
                 context, instruction.left, source)) {
             return false;
@@ -1862,6 +1865,132 @@ fn bootstrap_x86_64_codegen_emit_parameter_register(
         bootstrap_x86_64_codegen_literal(context, "\n");
 }
 
+// Spills the incoming argument registers into the frame's 176-byte System V
+// register save area: gp registers always at +0..+40, then — only when the
+// caller set %al — xmm0-7 in 16-byte slots at +48..+175. Only the low 8
+// bytes of each SSE slot are ever read (f64/f32), so a plain movq suffices.
+fn bootstrap_x86_64_codegen_emit_register_save(context: *BootstrapX8664CodegenContext, function_id: usize) -> bool {
+    let storage: BootstrapX8664Storage =
+        bootstrap_x86_64_codegen_storage(context, BootstrapX8664StorageKind.register_save_area, function_id);
+    if (context->error != RuntimeError.none || !bootstrap_x86_64_codegen_literal(context, "    leaq ") ||
+        !bootstrap_x86_64_codegen_append_stack(context, storage) ||
+        !bootstrap_x86_64_codegen_literal(context, ", %r11\n")) {
+        return false;
+    }
+    var index: usize = 0;
+    while (index < (BootstrapX8664CodegenLimit.general_argument_registers as usize)) {
+        let source: *const u8 = bootstrap_x86_64_codegen_general_register_64(index);
+        if (source == null || !bootstrap_x86_64_codegen_literal(context, "    movq ") ||
+            !bootstrap_x86_64_codegen_literal(context, source) ||
+            !bootstrap_x86_64_codegen_literal(context, ", ") ||
+            !bootstrap_x86_64_codegen_usize(context, index * 8) ||
+            !bootstrap_x86_64_codegen_literal(context, "(%r11)\n")) {
+            return false;
+        }
+        index += 1;
+    }
+    if (!bootstrap_x86_64_codegen_literal(context, "    testb %al, %al\n    je ") ||
+        !bootstrap_x86_64_codegen_literal(context, ".Lbf") ||
+        !bootstrap_x86_64_codegen_usize(context, function_id) ||
+        !bootstrap_x86_64_codegen_literal(context, "_va_save\n")) {
+        return false;
+    }
+    index = 0;
+    while (index < (BootstrapX8664CodegenLimit.vector_argument_registers as usize)) {
+        let source: *const u8 = bootstrap_x86_64_codegen_vector_register(index);
+        if (source == null || !bootstrap_x86_64_codegen_literal(context, "    movq ") ||
+            !bootstrap_x86_64_codegen_literal(context, source) ||
+            !bootstrap_x86_64_codegen_literal(context, ", ") ||
+            !bootstrap_x86_64_codegen_usize(context, 48 + index * 16) ||
+            !bootstrap_x86_64_codegen_literal(context, "(%r11)\n")) {
+            return false;
+        }
+        index += 1;
+    }
+    return bootstrap_x86_64_codegen_literal(context, ".Lbf") &&
+        bootstrap_x86_64_codegen_usize(context, function_id) &&
+        bootstrap_x86_64_codegen_literal(context, "_va_save:\n");
+}
+
+fn bootstrap_x86_64_codegen_emit_va_start(
+    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction) -> bool {
+    let values: *const BootstrapIrValue = context->ir.values.data as *const BootstrapIrValue;
+    let abi_functions: *const BootstrapX8664AbiFunction = context->abi.functions.data as
+            *const BootstrapX8664AbiFunction;
+    let function_abi: BootstrapX8664AbiFunction = abi_functions[context->current_function];
+    let storage: BootstrapX8664Storage =
+        bootstrap_x86_64_codegen_storage(
+            context, BootstrapX8664StorageKind.register_save_area, context->current_function);
+    if (context->error != RuntimeError.none ||
+        !bootstrap_x86_64_codegen_load_rax(
+            context, instruction.left, bootstrap_x86_64_codegen_type(context, values[instruction.left].type_id))) {
+        return false;
+    }
+    // %rax holds the va_list address. gp_offset/fp_offset skip exactly the
+    // named register parameters (general_register_count already counts the
+    // hidden return pointer), the overflow area begins past the named stack
+    // arguments, and the save area is this frame's prologue spill slot.
+    return bootstrap_x86_64_codegen_literal(context, "    movl $") &&
+        bootstrap_x86_64_codegen_usize(context, function_abi.general_register_count * 8) &&
+        bootstrap_x86_64_codegen_literal(context, ", 0(%rax)\n    movl $") &&
+        bootstrap_x86_64_codegen_usize(context, 48 + function_abi.vector_register_count * 16) &&
+        bootstrap_x86_64_codegen_literal(context, ", 4(%rax)\n    leaq ") &&
+        bootstrap_x86_64_codegen_usize(context, 16 + function_abi.stack_argument_size_bytes) &&
+        bootstrap_x86_64_codegen_literal(context, "(%rbp), %r10\n    movq %r10, 8(%rax)\n    leaq ") &&
+        bootstrap_x86_64_codegen_append_stack(context, storage) &&
+        bootstrap_x86_64_codegen_literal(context, ", %r10\n    movq %r10, 16(%rax)\n");
+}
+
+fn bootstrap_x86_64_codegen_emit_va_arg(
+    context: *BootstrapX8664CodegenContext, instruction: BootstrapIrInstruction, instruction_id: usize) -> bool {
+    let record: *const BootstrapTypeRecord = bootstrap_x86_64_codegen_type(context, instruction.type_id);
+    if (record == null || !bootstrap_x86_64_codegen_literal(context, "    movq ") ||
+        !bootstrap_x86_64_codegen_append_value(context, instruction.left) ||
+        !bootstrap_x86_64_codegen_literal(context, ", %r11\n")) {
+        return false;
+    }
+    if (bootstrap_type_is_float(record->kind)) {
+        // SSE class: 16-byte save slots at fp_offset while it stays below
+        // 176 (f32 reads the slot's low 4 bytes, f64 the low 8), then 8-byte
+        // overflow slots.
+        if (!bootstrap_x86_64_codegen_literal(context, "    movl 4(%r11), %eax\n    cmpl $176, %eax\n    jae ") ||
+            !bootstrap_x86_64_codegen_instruction_label(context, instruction_id, "va_overflow") ||
+            !bootstrap_x86_64_codegen_literal(context, "\n    movq 16(%r11), %r10\n    ") ||
+            !bootstrap_x86_64_codegen_literal(context, bootstrap_x86_64_codegen_float_move(record)) ||
+            !bootstrap_x86_64_codegen_literal(context, " (%r10,%rax), %xmm0\n    addl $16, 4(%r11)\n    jmp ") ||
+            !bootstrap_x86_64_codegen_instruction_label(context, instruction_id, "va_done") ||
+            !bootstrap_x86_64_codegen_literal(context, "\n") ||
+            !bootstrap_x86_64_codegen_instruction_label(context, instruction_id, "va_overflow") ||
+            !bootstrap_x86_64_codegen_literal(context, ":\n    movq 8(%r11), %r10\n    ") ||
+            !bootstrap_x86_64_codegen_literal(context, bootstrap_x86_64_codegen_float_move(record)) ||
+            !bootstrap_x86_64_codegen_literal(context, " (%r10), %xmm0\n    addq $8, %r10\n    movq %r10, 8(%r11)\n") ||
+            !bootstrap_x86_64_codegen_instruction_label(context, instruction_id, "va_done") ||
+            !bootstrap_x86_64_codegen_literal(context, ":\n")) {
+            return false;
+        }
+        return bootstrap_x86_64_codegen_store_xmm(context, instruction.result, record, "%xmm0");
+    }
+    // INTEGER class: 8-byte gp save slots at gp_offset while it stays below
+    // 48, then the overflow area. Luna passes variadic extras at their
+    // declared width (no C default argument promotions) and va_arg reads the
+    // requested width back out of the slot — the divergence from C is
+    // deliberate.
+    if (!bootstrap_x86_64_codegen_literal(context, "    movl 0(%r11), %eax\n    cmpl $48, %eax\n    jae ") ||
+        !bootstrap_x86_64_codegen_instruction_label(context, instruction_id, "va_overflow") ||
+        !bootstrap_x86_64_codegen_literal(
+            context, "\n    movq 16(%r11), %r10\n    movq (%r10,%rax), %rax\n    addl $8, 0(%r11)\n    jmp ") ||
+        !bootstrap_x86_64_codegen_instruction_label(context, instruction_id, "va_done") ||
+        !bootstrap_x86_64_codegen_literal(context, "\n") ||
+        !bootstrap_x86_64_codegen_instruction_label(context, instruction_id, "va_overflow") ||
+        !bootstrap_x86_64_codegen_literal(
+            context, ":\n    movq 8(%r11), %r10\n    movq (%r10), %rax\n    addq $8, %r10\n    movq %r10, 8(%r11)\n") ||
+        !bootstrap_x86_64_codegen_instruction_label(context, instruction_id, "va_done") ||
+        !bootstrap_x86_64_codegen_literal(context, ":\n")) {
+        return false;
+    }
+    return bootstrap_x86_64_codegen_store_rax(context, instruction.result, record);
+}
+
 fn bootstrap_x86_64_codegen_emit_parameter_stack(
     context: *BootstrapX8664CodegenContext, parameter: BootstrapX8664AbiParameter, ir_parameter: BootstrapIrParameter
 ) -> bool {
@@ -2093,6 +2222,12 @@ fn bootstrap_x86_64_codegen_emit_instruction(
     if (instruction.opcode == BootstrapIrOpcode.call_indirect) {
         return bootstrap_x86_64_codegen_emit_call_indirect(context, instruction, instruction_id);
     }
+    if (instruction.opcode == BootstrapIrOpcode.va_list_start) {
+        return bootstrap_x86_64_codegen_emit_va_start(context, instruction);
+    }
+    if (instruction.opcode == BootstrapIrOpcode.va_list_arg) {
+        return bootstrap_x86_64_codegen_emit_va_arg(context, instruction, instruction_id);
+    }
     if (instruction.opcode == BootstrapIrOpcode.jump || instruction.opcode == BootstrapIrOpcode.branch ||
         instruction.opcode == BootstrapIrOpcode.return_value || instruction.opcode == BootstrapIrOpcode.return_void) {
         return bootstrap_x86_64_codegen_emit_control(context, instruction);
@@ -2225,6 +2360,12 @@ fn bootstrap_x86_64_codegen_emit_function(context: *BootstrapX8664CodegenContext
         !bootstrap_x86_64_codegen_usize(context, frames[function_id].frame_size_bytes) ||
         !bootstrap_x86_64_codegen_literal(
             context, ", %rsp\n"))) {
+        return false;
+    }
+    // A variadic prologue spills the argument registers before anything can
+    // clobber them (parameter homes below reuse %rax/%r10/%r11 and the SSE
+    // temporaries).
+    if (function.variadic && !bootstrap_x86_64_codegen_emit_register_save(context, function_id)) {
         return false;
     }
     if (!bootstrap_x86_64_codegen_emit_parameters(

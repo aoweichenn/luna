@@ -83,12 +83,48 @@ fn bootstrap_semantic_lower_variable(
         }
         type_id = initializer.type_id;
     } else {
-        type_id =
-            bootstrap_semantic_resolve_type_node(
+        let declared_type: BootstrapSyntaxNode =
+            bootstrap_semantic_node(
                 context,
                 context->current_unit,
                 node.first_child
             );
+        if (declared_type.kind ==
+                BootstrapSyntaxKind.type_builtin &&
+            bootstrap_semantic_token(
+                context,
+                context->current_unit,
+                declared_type.token_index
+            ).kind == BootstrapTokenKind.keyword_va_list) {
+            // A va_list mounts only as a local var inside a variadic
+            // function; every other position (parameters, fields, return
+            // types, aliases, pointers to it, ...) is rejected with
+            // invalid_va_list at type resolution.
+            if ((node.flags &
+                    (BootstrapSyntaxFlag.mutable_binding as usize)) == 0 ||
+                !bootstrap_semantic_current_function_is_variadic(
+                    context
+                )) {
+                bootstrap_semantic_add_diagnostic(
+                    context,
+                    BootstrapSemanticDiagnosticKind.invalid_va_list,
+                    context->current_unit,
+                    node.span,
+                    none,
+                    bootstrap_semantic_empty_span(),
+                    0
+                );
+                return false;
+            }
+            type_id = BootstrapBuiltinType.va_list_type as usize;
+        } else {
+            type_id =
+                bootstrap_semantic_resolve_type_node(
+                    context,
+                    context->current_unit,
+                    node.first_child
+                );
+        }
         if (type_id == none) {
             return false;
         }
@@ -1940,6 +1976,64 @@ fn bootstrap_semantic_clear_label_state(
     return context->error == RuntimeError.none;
 }
 
+fn bootstrap_semantic_lower_va_start(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode
+) -> bool {
+    let none: usize = bootstrap_semantic_no_id();
+    if (node.child_count != 1) {
+        context->error = RuntimeError.invalid_argument;
+        return false;
+    }
+    // va_start initializes a local va_list against the variadic function's
+    // register save area; outside a variadic function there is nothing to
+    // bind it to.
+    if (!bootstrap_semantic_current_function_is_variadic(context)) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.invalid_va_list,
+            context->current_unit,
+            node.span,
+            none,
+            bootstrap_semantic_empty_span(),
+            0
+        );
+        return false;
+    }
+    let list: BootstrapSemanticExpression =
+        bootstrap_semantic_lower_expression(
+            context,
+            node.first_child,
+            none
+        );
+    if (!list.valid) {
+        return false;
+    }
+    if (!list.lvalue || !list.mutable_lvalue ||
+        list.type_id != (BootstrapBuiltinType.va_list_type as usize)) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.invalid_va_list,
+            context->current_unit,
+            node.span,
+            none,
+            bootstrap_semantic_empty_span(),
+            0
+        );
+        return false;
+    }
+    var instruction: BootstrapIrInstruction =
+        bootstrap_semantic_instruction(
+            BootstrapIrOpcode.va_list_start,
+            node
+        );
+    instruction.left = list.address_id;
+    return bootstrap_semantic_emit_void(
+        context,
+        instruction
+    ) != none;
+}
+
 fn bootstrap_semantic_lower_statement(
     context: *BootstrapSemanticContext,
     node_id: usize
@@ -2082,6 +2176,12 @@ fn bootstrap_semantic_lower_statement(
             context,
             context->current_unit,
             node_id
+        );
+    }
+    if (node.kind == BootstrapSyntaxKind.va_start_statement) {
+        return bootstrap_semantic_lower_va_start(
+            context,
+            node
         );
     }
     bootstrap_semantic_add_diagnostic(

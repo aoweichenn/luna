@@ -218,6 +218,9 @@ fn bootstrap_semantic_builtin_type(
     if (kind == BootstrapTokenKind.keyword_f64) {
         return BootstrapBuiltinType.float_64 as usize;
     }
+    if (kind == BootstrapTokenKind.keyword_va_list) {
+        return BootstrapBuiltinType.va_list_type as usize;
+    }
     return bootstrap_semantic_no_id();
 }
 
@@ -233,12 +236,29 @@ fn bootstrap_semantic_resolve_type_node(
         node_index
     );
     if (node.kind == BootstrapSyntaxKind.type_builtin) {
-        let type_id: usize = bootstrap_semantic_builtin_type(
+        let token_kind: BootstrapTokenKind =
             bootstrap_semantic_token(
                 context,
                 unit_index,
                 node.token_index
-            ).kind
+            ).kind;
+        // va_list is not a general-purpose type: it mounts only as a local
+        // var inside a variadic function, a form the variable lowering
+        // resolves directly without passing through here.
+        if (token_kind == BootstrapTokenKind.keyword_va_list) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.invalid_va_list,
+                unit_index,
+                node.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                0
+            );
+            return none;
+        }
+        let type_id: usize = bootstrap_semantic_builtin_type(
+            token_kind
         );
         if (type_id != none) {
             return type_id;
@@ -275,6 +295,21 @@ fn bootstrap_semantic_resolve_type_node(
         }
     } else if (node.kind ==
         BootstrapSyntaxKind.type_function) {
+        // A `...` tail is legal only on function declarations; on a
+        // fn-pointer type it is rejected here.
+        if ((node.flags &
+                (BootstrapSyntaxFlag.variadic as usize)) != 0) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.invalid_variadic,
+                unit_index,
+                node.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                0
+            );
+            return none;
+        }
         let has_return: bool =
             (node.flags &
                 (BootstrapSyntaxFlag
