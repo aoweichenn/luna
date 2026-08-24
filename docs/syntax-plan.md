@@ -489,6 +489,25 @@ an array constant, the deliberate no-preprocessor answer to C23's
 `#embed`. Path resolution, determinism (the embedded bytes feed the fixed
 point) and rebuild-trigger rules are specified with the milestone.
 
+## Milestones m1.11/m1.12 — module qualification and selective imports
+
+```luna
+import luna.std.text;               // flat names + text:: qualifier
+import luna.std.path as fs;         // fs:: qualifier only, nothing flat
+import luna.std.io::{read_all};     // read_all flat + io:: qualifier
+
+let view: text::View = text::from_c_string(data, 64);
+let root: fs::Path = fs::from_text(view);
+```
+
+Imports gain use-site qualification. A plain import binds the module's last
+name segment as a qualifier alongside the legacy flat binding; `as t` binds
+only the qualifier and is the escape from flat binding and from colliding
+last segments; `::{x, y}` flat-binds only the listed, validated exports.
+Qualification resolves in expression, type and interface positions and
+composes with enum member access (`io::Error.none`). This is the namespace
+mechanism that lets m1.13 retire the manual `std_text_`-style prefixes.
+
 ## Explicitly out of scope
 
 Implicit conversions in any form; assignment/`++`/comma as expressions;

@@ -200,6 +200,24 @@ feature has executable tests plus a green `verify` fixed point.
 
 - [x] `@embed("path")` file-to-array-constant with determinism rules
 
+### m1.11 module qualification
+
+- [x] `qual::name` qualified access in expression, type and interface
+  positions, composing with enum member access
+- [x] `import a.b.c as t;` alias imports binding only the qualifier
+- [x] source extensions shortened: `foo.la` / `foo.lh`
+
+### m1.12 selective imports
+
+- [x] `import a.b.c::{x, y};` flat-binds only the listed exports, still
+  binding the `c::` qualifier
+
+### m1.13 de-prefixed exports (planned)
+
+- [ ] migrate every library/compiler module off manual name prefixes
+  (`std_text_view` → `text::view`), consumers switch to qualified or
+  selective imports, one module per gated slice
+
 ## Explicitly deferred
 
 Optimization beyond local x86-64 improvements, general metaprogramming,

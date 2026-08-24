@@ -29,8 +29,9 @@ import compiler.ast;
 
 A module has at most one interface and one implementation unit. Only
 declarations marked `export` in the interface are visible to importers. Module
-names organize visibility and dependencies but do not create a qualification
-syntax. Imported names are used directly.
+names organize visibility and dependencies, and the last segment of an
+imported module's name also serves as a qualification prefix at the use
+site.
 
 An interface contains complete structure, union and enum definitions plus
 function declarations without bodies. Its type definitions are directly
@@ -52,10 +53,20 @@ Imports are direct and non-transitive: importing one module does not expose
 that module's imports. An exported function or aggregate type cannot expose a
 module-private named type in its public signature or fields.
 
-Imported declarations are used by their unqualified names. Importing two
+Imported declarations may be used by their unqualified names. Importing two
 exported declarations with the same name is an error, and a local declaration
-cannot shadow an imported declaration. Luna 0 deliberately has no
-qualification or overload-resolution rule to hide such ambiguity.
+cannot shadow an imported declaration.
+
+A plain `import a.b.c;` additionally binds the last segment `c` as a module
+qualifier: `c::name` names any export of that module in expression and type
+positions (`mathx::triple(14)`, `p: mathx::Point`) and composes with enum
+member access (`mathx::Color.red`). An alias import `import a.b.c as t;`
+binds only the qualifier `t::` and no unqualified names; aliasing is the way
+to use two imported modules whose last segments coincide — a qualifier that
+matches more than one import is an error. A selective import
+`import a.b.c::{x, y};` flat-binds only the listed exports (each is checked
+against the target module) and still binds the `c::` qualifier. Combining
+`as` with `::{...}` is rejected.
 
 An executable compilation receives the root plus every transitive dependency,
 in any order. A dependency may be supplied as its interface/implementation
@@ -83,8 +94,8 @@ consistency check rather than an authenticity signature. Luna import/export
 symbols carry the interface fingerprint, so the final linker also rejects an
 object compiled from different metadata.
 
-There are no module partitions, header units, re-exports, aliases, selective
-imports, wildcard imports or cyclic dependencies in Luna 0.
+There are no module partitions, header units, re-exports, wildcard imports
+or cyclic dependencies in Luna 0.
 
 ## Declarations
 
