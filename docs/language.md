@@ -1008,6 +1008,21 @@ fn check(condition: bool, file: *const u8, line: usize, what: *const u8) {
 check(x == expected, @file(), @line(), "x should equal expected");
 ```
 
+`@embed("path")` reads a file at compilation time and yields its bytes as
+an array lvalue of type `[N]u8`, backed by a read-only global:
+
+```luna
+var firmware: [312]u8 = @embed("blobs/device.fw");
+let first: *const u8 = &@embed("blobs/device.fw")[0];
+let total: usize = sizeof(@embed("blobs/device.fw"));
+```
+
+The path resolves relative to the directory of the unit that references
+it (absolute paths are used as-is). The file must exist, be non-empty
+and no larger than 16 MiB. Bytes are read fresh on every compilation, so
+embedded files are part of the source tree like sources; the build is
+always from scratch, so there is no stale-embed hazard.
+
 ## Compile-time surface
 
 The compile-time surface in Luna 0 consists of typed constants, enum values

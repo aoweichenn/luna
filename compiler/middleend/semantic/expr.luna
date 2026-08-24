@@ -1451,10 +1451,14 @@ fn bootstrap_semantic_decode_string_token(
     return context->error == RuntimeError.none;
 }
 
-fn bootstrap_semantic_lower_string_literal(
+// Decodes a string literal node (its own token plus adjacent concatenated parts) into raw code units
+// of the literal's width, without any terminator. Shared by string literal lowering and @embed.
+fn bootstrap_semantic_decode_string_literal(
     context: *BootstrapSemanticContext,
-    node: BootstrapSyntaxNode
-) -> BootstrapSemanticExpression {
+    node: BootstrapSyntaxNode,
+    width: usize,
+    decoded: *StdByteBuffer
+) -> bool {
     let unit: *const BootstrapSemanticUnit =
         bootstrap_semantic_input_unit(
             context,
@@ -1465,15 +1469,12 @@ fn bootstrap_semantic_lower_string_literal(
         context->current_unit,
         node.token_index
     );
-    let width: usize =
-        bootstrap_semantic_string_token_width(token.kind);
-    var decoded: StdByteBuffer = std_byte_buffer_empty();
     var valid: bool = bootstrap_semantic_decode_string_token(
         context,
         unit,
         token,
         width,
-        &decoded
+        decoded
     );
     var child: usize = node.first_child;
     while (valid && child != bootstrap_semantic_no_id() &&
@@ -1498,10 +1499,31 @@ fn bootstrap_semantic_lower_string_literal(
             unit,
             part_token,
             width,
-            &decoded
+            decoded
         );
         child = part.next_sibling;
     }
+    return valid && context->error == RuntimeError.none;
+}
+
+fn bootstrap_semantic_lower_string_literal(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode
+) -> BootstrapSemanticExpression {
+    let token: BootstrapToken = bootstrap_semantic_token(
+        context,
+        context->current_unit,
+        node.token_index
+    );
+    let width: usize =
+        bootstrap_semantic_string_token_width(token.kind);
+    var decoded: StdByteBuffer = std_byte_buffer_empty();
+    let valid: bool = bootstrap_semantic_decode_string_literal(
+        context,
+        node,
+        width,
+        &decoded
+    );
     if (!valid) {
         let discard_error: RuntimeError =
             std_byte_buffer_release(decoded);
@@ -1584,6 +1606,139 @@ fn bootstrap_semantic_lower_string_literal(
         volatile_lvalue = false,
         valid = value_id != bootstrap_semantic_no_id(),
         bitfield_segment = bootstrap_semantic_no_id(),
+    };
+}
+
+enum BootstrapSemanticEmbedLimit: usize {
+    maximum_bytes = 16777216,
+}
+
+// @embed("path") reads the named file fresh on every compilation (the build is always from scratch,
+// so there is no incremental tracking and no stale-embed hazard; embedded files live in the source
+// tree like sources) and yields a read-only [N]u8 memory lvalue at a global holding the file's N
+// bytes. A relative path resolves against the directory of the referencing unit; a leading '/' is
+// used as-is. A non-u8-string argument, an undecodable path, a missing or unreadable file, an empty
+// file (arrays are positive-length) and a file over the cap all fail with invalid_embed.
+fn bootstrap_semantic_lower_embed(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode
+) -> BootstrapSemanticExpression {
+    let none: usize = bootstrap_semantic_no_id();
+    let argument: BootstrapSyntaxNode =
+        bootstrap_semantic_node(context, context->current_unit, node.first_child);
+    let token: BootstrapToken =
+        bootstrap_semantic_token(context, context->current_unit, argument.token_index);
+    var decoded: StdByteBuffer = std_byte_buffer_empty();
+    var path_bytes: StdByteBuffer = std_byte_buffer_empty();
+    var file: StdByteBuffer = std_byte_buffer_empty();
+    var path: StdPath = {
+        storage = std_byte_buffer_empty(), length = 0,
+    };
+    var has_path: bool = false;
+    var valid: bool = argument.kind == BootstrapSyntaxKind.string_expression &&
+        bootstrap_semantic_string_token_width(token.kind) == 1;
+    if (valid) {
+        valid = bootstrap_semantic_decode_string_literal(context, argument, 1, &decoded);
+    }
+    if (valid && context->error == RuntimeError.none) {
+        var step: StdByteBufferResult = {
+            buffer = path_bytes, error = RuntimeError.none,
+        };
+        if (decoded.length == 0 || decoded.data[0] != 47) {
+            let unit_path: StdTextView = bootstrap_semantic_unit_path(context, context->current_unit);
+            var directory: usize = unit_path.length;
+            while (directory != 0 && unit_path.data[directory - 1] != 47) {
+                directory -= 1;
+            }
+            if (directory != 0) {
+                step = std_byte_buffer_append(path_bytes, unit_path.data, directory);
+                path_bytes = step.buffer;
+            }
+        }
+        if (step.error == RuntimeError.none) {
+            step = std_byte_buffer_append(path_bytes, decoded.data as *const u8, decoded.length);
+            path_bytes = step.buffer;
+        }
+        context->error = step.error;
+    }
+    if (valid && context->error == RuntimeError.none) {
+        let text: StdTextViewResult = std_text_view(path_bytes.data as *const u8, path_bytes.length);
+        context->error = text.error;
+        if (text.error == RuntimeError.none) {
+            let resolved: StdPathResult = std_path_from_text(text.view);
+            if (resolved.error == RuntimeError.none) {
+                path = resolved.path;
+                has_path = true;
+            } else {
+                valid = false;
+            }
+        }
+    }
+    if (valid && context->error == RuntimeError.none) {
+        // The limited read also enforces the cap: a longer file is reported as a read error.
+        let read: StdByteBufferResult =
+            std_io_read_file_limited(path, BootstrapSemanticEmbedLimit.maximum_bytes as usize);
+        file = read.buffer;
+        valid = read.error == RuntimeError.none && read.buffer.length != 0;
+    }
+    var array_type: usize = none;
+    var global_id: usize = none;
+    if (valid && context->error == RuntimeError.none) {
+        let array: BootstrapTypeIdResult = bootstrap_type_table_array(
+            &context->types, BootstrapBuiltinType.unsigned_8 as usize, file.length);
+        context->error = array.error;
+        array_type = array.type_id;
+    }
+    if (valid && context->error == RuntimeError.none) {
+        global_id = bootstrap_ir_add_global(&context->ir, file.data as *const u8, file.length, 1, true);
+        if (global_id == none) {
+            context->error = context->ir.error;
+        }
+    }
+    var release_error: RuntimeError = std_byte_buffer_release(decoded);
+    let path_bytes_error: RuntimeError = std_byte_buffer_release(path_bytes);
+    if (release_error == RuntimeError.none) {
+        release_error = path_bytes_error;
+    }
+    let file_error: RuntimeError = std_byte_buffer_release(file);
+    if (release_error == RuntimeError.none) {
+        release_error = file_error;
+    }
+    if (has_path) {
+        let path_error: RuntimeError = std_path_release(path);
+        if (release_error == RuntimeError.none) {
+            release_error = path_error;
+        }
+    }
+    if (context->error == RuntimeError.none) {
+        context->error = release_error;
+    }
+    if (global_id == none || context->error != RuntimeError.none) {
+        if (!valid && context->error == RuntimeError.none) {
+            bootstrap_semantic_add_diagnostic(
+                context, BootstrapSemanticDiagnosticKind.invalid_embed, context->current_unit, node.span, none,
+                bootstrap_semantic_empty_span(), 0);
+        }
+        return bootstrap_semantic_invalid_expression();
+    }
+    let pointer: BootstrapTypeIdResult =
+        bootstrap_type_table_pointer(&context->types, array_type, true, false);
+    context->error = pointer.error;
+    var instruction: BootstrapIrInstruction =
+        bootstrap_semantic_instruction(BootstrapIrOpcode.global_address, node);
+    instruction.auxiliary = global_id;
+    let address_id: usize = bootstrap_semantic_emit_value(context, instruction, pointer.type_id);
+    return {
+        type_id = array_type,
+        value_id = none,
+        address_id = address_id,
+        constant_value = 0,
+        has_constant = false,
+        lvalue = true,
+        mutable_lvalue = false,
+        volatile_lvalue = false,
+        valid = address_id != none,
+        bitfield_segment = none,
     };
 }
 
@@ -5242,12 +5397,32 @@ fn bootstrap_semantic_lower_layout_query(
     if (node.child_count == 0) {
         return bootstrap_semantic_invalid_expression();
     }
-    let type_id: usize =
-        bootstrap_semantic_resolve_type_node(
+    var type_id: usize = bootstrap_semantic_no_id();
+    if (bootstrap_semantic_node(
             context,
             context->current_unit,
             node.first_child
-        );
+        ).kind ==
+        BootstrapSyntaxKind.intrinsic_expression) {
+        // Layout queries resolve type nodes; an intrinsic operand (e.g. sizeof(@embed("path"))) is
+        // lowered as an expression instead and the query reads the lowered type's layout.
+        let operand: BootstrapSemanticExpression =
+            bootstrap_semantic_lower_expression(
+                context,
+                node.first_child,
+                bootstrap_semantic_no_id()
+            );
+        if (operand.valid) {
+            type_id = operand.type_id;
+        }
+    } else {
+        type_id =
+            bootstrap_semantic_resolve_type_node(
+                context,
+                context->current_unit,
+                node.first_child
+            );
+    }
     if (type_id == bootstrap_semantic_no_id() ||
         !bootstrap_semantic_require_complete_type(
             context,
@@ -5480,6 +5655,12 @@ fn bootstrap_semantic_lower_expression(
             bootstrap_semantic_intrinsic_resolve(context, node);
         if (intrinsic == bootstrap_semantic_no_id()) {
             return bootstrap_semantic_invalid_expression();
+        }
+        if (bootstrap_semantic_intrinsic_entry(intrinsic).operand_class ==
+            BootstrapIntrinsicOperandClass.embedded_file) {
+            // @embed needs the argument's syntax node (string decoding lives here, and the import
+            // order forbids intrinsics.luna from reaching it), so it lowers before the operands.
+            return bootstrap_semantic_lower_embed(context, node);
         }
         var operand: BootstrapSemanticExpression =
             bootstrap_semantic_invalid_expression();

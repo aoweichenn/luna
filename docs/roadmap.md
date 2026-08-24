@@ -198,7 +198,7 @@ feature has executable tests plus a green `verify` fixed point.
 
 ### m1.10 embedded binary data
 
-- [ ] `@embed("path")` file-to-array-constant with determinism rules
+- [x] `@embed("path")` file-to-array-constant with determinism rules
 
 ## Explicitly deferred
 
