@@ -69,3 +69,16 @@ between the two stages, and `test` passed 122/122. The stage-fixed
 executables were copied here and `SHA256SUMS` refreshed. Compiler
 sources may now adopt m1.3 syntax: `@align`, `@packed`, anonymous
 members, `[?]T` header types and `@bits`.
+
+## 2026-08-24: promotion to the m1.6 self-built toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`203172434e8666936f00df5ab7077b778ac15a3b`
+(`feat(m1.6): labeled break/continue and validated goto`). Provenance
+chain: the previous m1.3 anchor (above) built `out/stage-next`, which
+rebuilt itself into `out/stage-fixed`; `verify` confirmed every artifact
+byte-identical between the two stages, and `test` passed 146/146. The
+stage-fixed executables were copied here and `SHA256SUMS` refreshed.
+Compiler sources may now adopt m1.4-m1.6 syntax: character/binary/hex
+literals, wide strings, array initializer lists, let/var inference,
+typed const, const fn, labels and goto.
