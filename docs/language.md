@@ -216,6 +216,21 @@ and in the layout of any containing record. An aggregate whose alignment
 exceeds 16 bytes is classified MEMORY at the System V boundary, so it is
 passed and returned on the stack.
 
+`@export_name("...")` mounts on function declarations with bodies and
+takes one string argument naming a C identifier:
+
+```luna
+@export_name("memcpy")
+fn shim_memcpy(dest: *void, src: *const void, count: usize) -> *void {
+```
+
+The function is emitted under the literal name instead of the
+module-fingerprint mangled form, making it visible to external objects at
+link time. The reserved names `_start` and `_L`-prefixed forms are
+rejected, as are duplicate export names. Luna code still calls the
+function by its declared name; the attribute changes only the emitted
+symbol.
+
 `@packed` mounts on structure declarations only and takes no arguments:
 
 ```luna

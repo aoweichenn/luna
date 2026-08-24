@@ -1488,7 +1488,117 @@ fn bootstrap_semantic_collect_functions(
         }
         function_id += 1;
     }
+    // Export names live outside the module-fingerprint scheme, so the usual
+    // per-module name uniqueness cannot catch collisions: two functions
+    // emitting the same verbatim symbol are a duplicate_function.
+    var outer: usize = 0;
+    while (outer < context->function_count &&
+        context->error == RuntimeError.none) {
+        let outer_function: BootstrapSemanticFunction = functions[outer];
+        let outer_token: usize =
+            bootstrap_semantic_function_export_name_token(
+                context, outer_function
+            );
+        if (outer_token != bootstrap_semantic_no_id()) {
+            let outer_span: BootstrapSourceSpan = bootstrap_semantic_token(
+                context, outer_function.implementation_unit, outer_token
+            ).span;
+            let outer_content: BootstrapSourceSpan = {
+                offset = outer_span.offset + 1,
+                length = outer_span.length - 2,
+                line = outer_span.line,
+                column = outer_span.column,
+            };
+            var inner: usize = outer + 1;
+            while (inner < context->function_count &&
+                context->error == RuntimeError.none) {
+                let inner_function: BootstrapSemanticFunction =
+                    functions[inner];
+                let inner_token: usize =
+                    bootstrap_semantic_function_export_name_token(
+                        context, inner_function
+                    );
+                if (inner_token != bootstrap_semantic_no_id()) {
+                    let inner_span: BootstrapSourceSpan =
+                        bootstrap_semantic_token(
+                            context,
+                            inner_function.implementation_unit,
+                            inner_token
+                        ).span;
+                    let inner_content: BootstrapSourceSpan = {
+                        offset = inner_span.offset + 1,
+                        length = inner_span.length - 2,
+                        line = inner_span.line,
+                        column = inner_span.column,
+                    };
+                    if (bootstrap_semantic_text_equal(
+                            context,
+                            outer_function.implementation_unit,
+                            outer_content,
+                            inner_function.implementation_unit,
+                            inner_content
+                        )) {
+                        bootstrap_semantic_add_diagnostic(
+                            context,
+                            BootstrapSemanticDiagnosticKind
+                                .duplicate_function,
+                            inner_function.implementation_unit,
+                            inner_span,
+                            outer_function.implementation_unit,
+                            outer_span,
+                            outer
+                        );
+                    }
+                }
+                inner += 1;
+            }
+        }
+        outer += 1;
+    }
     return context->error == RuntimeError.none;
+}
+
+// Token of a function's validated @export_name string literal in the
+// function's implementation unit, no-id when the function carries no (valid)
+// export name. Invalid arguments were already diagnosed by the attribute
+// pass; they fall back to the mangled symbol here.
+fn bootstrap_semantic_function_export_name_token(
+    context: *BootstrapSemanticContext,
+    function: BootstrapSemanticFunction
+) -> usize {
+    let none: usize = bootstrap_semantic_no_id();
+    if (function.implementation_unit == none ||
+        (function.flags &
+            (BootstrapSemanticSymbolFlag.external as usize)) != 0) {
+        return none;
+    }
+    let argument: usize =
+        bootstrap_semantic_declaration_attribute_argument(
+            context,
+            function.implementation_unit,
+            bootstrap_semantic_node(
+                context,
+                function.implementation_unit,
+                function.implementation_node
+            ),
+            BootstrapSemanticAttribute.export_name
+        );
+    if (argument == none) {
+        return none;
+    }
+    let argument_node: BootstrapSyntaxNode = bootstrap_semantic_node(
+        context, function.implementation_unit, argument
+    );
+    if (argument_node.kind != BootstrapSyntaxKind.string_expression ||
+        argument_node.child_count != 0 ||
+        !bootstrap_semantic_attribute_string_is_identifier(
+            context,
+            function.implementation_unit,
+            argument_node.token_index
+        )) {
+        return none;
+    }
+    return argument_node.token_index;
 }
 
 fn bootstrap_semantic_ir_function_record(
@@ -1525,6 +1635,8 @@ fn bootstrap_semantic_ir_function_record(
             (implementation.flags &
                 (BootstrapSyntaxFlag.bodyless as usize)) == 0;
     }
+    let export_name_token: usize =
+        bootstrap_semantic_function_export_name_token(context, function);
     return {
         declaration_unit = symbol.declaration_unit,
         declaration_node = symbol.declaration_node,
@@ -1546,6 +1658,9 @@ fn bootstrap_semantic_ir_function_record(
         has_body = has_body,
         variadic = (function.flags &
             (BootstrapSemanticSymbolFlag.variadic as usize)) != 0,
+        export_name_unit = export_name_token == none ?
+            none : function.implementation_unit,
+        export_name_token = export_name_token,
     };
 }
 
