@@ -647,6 +647,24 @@ fn bootstrap_semantic_tokens_equal(
     );
 }
 
+// Children of an import declaration beyond the dotted module name — the
+// `as` alias and the selective_import_names container — are not part of the
+// module name being matched.
+fn bootstrap_semantic_module_name_segment_count(node: BootstrapSyntaxNode) -> usize {
+    var count: usize = node.child_count;
+    if ((node.flags &
+            (BootstrapSyntaxFlag.aliased_import as usize)) != 0 &&
+        count != 0) {
+        count -= 1;
+    }
+    if ((node.flags &
+            (BootstrapSyntaxFlag.selective_import as usize)) != 0 &&
+        count != 0) {
+        count -= 1;
+    }
+    return count;
+}
+
 fn bootstrap_semantic_module_names_equal(
     context: *BootstrapSemanticContext,
     left_unit: usize,
@@ -658,18 +676,10 @@ fn bootstrap_semantic_module_names_equal(
         bootstrap_semantic_node(context, left_unit, left_node);
     let right: BootstrapSyntaxNode =
         bootstrap_semantic_node(context, right_unit, right_node);
-    // An aliased import declaration carries its alias as one extra trailing
-    // child; it is not part of the module name being matched.
     let left_count: usize =
-        (left.flags &
-                (BootstrapSyntaxFlag.aliased_import as usize)) != 0 &&
-            left.child_count != 0 ?
-            left.child_count - 1 : left.child_count;
+        bootstrap_semantic_module_name_segment_count(left);
     let right_count: usize =
-        (right.flags &
-                (BootstrapSyntaxFlag.aliased_import as usize)) != 0 &&
-            right.child_count != 0 ?
-            right.child_count - 1 : right.child_count;
+        bootstrap_semantic_module_name_segment_count(right);
     if (left_count != right_count || left_count == 0) {
         return false;
     }
@@ -938,6 +948,62 @@ fn bootstrap_semantic_unit_is_interface(
     return units[unit_index].interface_unit != 0;
 }
 
+// Flat visibility contributed by one import: an aliased import binds no
+// flat names, a selective import binds only the names listed in its
+// selective_import_names container, and a plain import binds every exported
+// name of its target module. Emits no diagnostics.
+fn bootstrap_semantic_import_binds_name(
+    context: *BootstrapSemanticContext,
+    import_record: BootstrapSemanticImport,
+    unit_index: usize,
+    name_token: usize
+) -> bool {
+    let none: usize = bootstrap_semantic_no_id();
+    if (import_record.alias_token != none) {
+        return false;
+    }
+    if (import_record.selective_node == none) {
+        return true;
+    }
+    var child: usize = bootstrap_semantic_node(
+        context,
+        import_record.source_unit,
+        import_record.selective_node
+    ).first_child;
+    while (child != none) {
+        let name_node: BootstrapSyntaxNode =
+            bootstrap_semantic_node(
+                context,
+                import_record.source_unit,
+                child
+            );
+        if (bootstrap_semantic_tokens_equal(
+                context,
+                unit_index,
+                name_token,
+                import_record.source_unit,
+                name_node.token_index
+            )) {
+            return true;
+        }
+        child = name_node.next_sibling;
+    }
+    return false;
+}
+
+fn bootstrap_semantic_import_binds_symbol(
+    context: *BootstrapSemanticContext,
+    import_record: BootstrapSemanticImport,
+    symbol: BootstrapSemanticSymbol
+) -> bool {
+    return bootstrap_semantic_import_binds_name(
+        context,
+        import_record,
+        symbol.declaration_unit,
+        symbol.name_token
+    );
+}
+
 fn bootstrap_semantic_find_imported_symbol(
     context: *BootstrapSemanticContext,
     unit_index: usize,
@@ -969,10 +1035,16 @@ fn bootstrap_semantic_find_imported_symbol(
         let import_record: BootstrapSemanticImport =
             imports[modules[module_id].first_import + import_index];
         // An aliased import binds only its `<alias>::` qualifier and
-        // contributes no flat names.
-        if (import_record.alias_token == none &&
-            (!interface_scope ||
-            import_record.interface_import)) {
+        // contributes no flat names; a selective import binds only its
+        // listed names flat.
+        if ((!interface_scope ||
+            import_record.interface_import) &&
+            bootstrap_semantic_import_binds_name(
+                context,
+                import_record,
+                unit_index,
+                name_token
+            )) {
             var symbol_index: usize = 0;
             while (symbol_index < context->symbol_count) {
                 let symbol: BootstrapSemanticSymbol =

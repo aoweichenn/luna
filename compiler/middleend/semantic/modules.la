@@ -193,10 +193,31 @@ fn bootstrap_semantic_collect_unit_imports(
                     target
                 );
             } else {
-                var alias_token: usize = none;
-                if ((declaration.flags &
+                let aliased: bool =
+                    (declaration.flags &
                         (BootstrapSyntaxFlag
-                            .aliased_import as usize)) != 0 &&
+                            .aliased_import as usize)) != 0;
+                let selective: bool =
+                    (declaration.flags &
+                        (BootstrapSyntaxFlag
+                            .selective_import as usize)) != 0;
+                if (aliased && selective) {
+                    // `import a.b.c as t::{x}` combines two binding modes;
+                    // out of scope, rejected outright.
+                    bootstrap_semantic_add_diagnostic(
+                        context,
+                        BootstrapSemanticDiagnosticKind
+                            .invalid_selective_import,
+                        unit_index,
+                        declaration.span,
+                        none,
+                        bootstrap_semantic_empty_span(),
+                        target
+                    );
+                } else {
+                var alias_token: usize = none;
+                var selective_node: usize = none;
+                if (aliased &&
                     declaration.last_child != none) {
                     // The parser carries the `as` alias as a trailing
                     // name_expression child after the module-name segments.
@@ -205,6 +226,12 @@ fn bootstrap_semantic_collect_unit_imports(
                         unit_index,
                         declaration.last_child
                     ).token_index;
+                }
+                if (selective &&
+                    declaration.last_child != none) {
+                    // The parser carries the listed names in a trailing
+                    // selective_import_names container child.
+                    selective_node = declaration.last_child;
                 }
                 let import_id: usize =
                     bootstrap_semantic_append_import(
@@ -216,6 +243,7 @@ fn bootstrap_semantic_collect_unit_imports(
                             target_module = target,
                             interface_import = interface_import,
                             alias_token = alias_token,
+                            selective_node = selective_node,
                         }
                     );
                 if (import_id == none) {
@@ -229,6 +257,7 @@ fn bootstrap_semantic_collect_unit_imports(
                         import_id;
                 }
                 result_modules[module_id].import_count += 1;
+                }
             }
         }
         child = declaration.next_sibling;
@@ -432,7 +461,12 @@ fn bootstrap_semantic_validate_imported_names(
                             left_import.target_module &&
                         (left_symbol.flags &
                             (BootstrapSemanticSymbolFlag
-                                .exported as usize)) != 0) {
+                                .exported as usize)) != 0 &&
+                        bootstrap_semantic_import_binds_symbol(
+                            context,
+                            left_import,
+                            left_symbol
+                        )) {
                         var right_symbol_id: usize = 0;
                         while (right_symbol_id <
                             context->symbol_count) {
@@ -444,6 +478,11 @@ fn bootstrap_semantic_validate_imported_names(
                                 (right_symbol.flags &
                                     (BootstrapSemanticSymbolFlag
                                         .exported as usize)) != 0 &&
+                                bootstrap_semantic_import_binds_symbol(
+                                    context,
+                                    right_import,
+                                    right_symbol
+                                ) &&
                                 bootstrap_semantic_symbols_have_same_name(
                                     context,
                                     left_symbol,
@@ -498,9 +537,7 @@ fn bootstrap_semantic_validate_imported_names(
                                 import_index
                         ];
                     var imported_symbol_id: usize = 0;
-                    while (import_record.alias_token ==
-                            bootstrap_semantic_no_id() &&
-                        imported_symbol_id <
+                    while (imported_symbol_id <
                         context->symbol_count) {
                         let imported_symbol:
                             BootstrapSemanticSymbol =
@@ -510,6 +547,11 @@ fn bootstrap_semantic_validate_imported_names(
                             (imported_symbol.flags &
                                 (BootstrapSemanticSymbolFlag
                                     .exported as usize)) != 0 &&
+                            bootstrap_semantic_import_binds_symbol(
+                                context,
+                                import_record,
+                                imported_symbol
+                            ) &&
                             bootstrap_semantic_symbols_have_same_name(
                                 context,
                                 local_symbol,
@@ -541,6 +583,94 @@ fn bootstrap_semantic_validate_imported_names(
                 }
             }
             local_symbol_id += 1;
+        }
+
+        // Every name listed by a selective import must be exported by the
+        // target module; an empty `::{}` list is diagnosed here too.
+        var selective_import_index: usize = 0;
+        while (selective_import_index <
+            module_record.import_count) {
+            let selective_import: BootstrapSemanticImport =
+                imports[
+                    module_record.first_import +
+                        selective_import_index
+                ];
+            if (selective_import.selective_node !=
+                bootstrap_semantic_no_id()) {
+                let container: BootstrapSyntaxNode =
+                    bootstrap_semantic_node(
+                        context,
+                        selective_import.source_unit,
+                        selective_import.selective_node
+                    );
+                if (container.child_count == 0) {
+                    bootstrap_semantic_add_diagnostic(
+                        context,
+                        BootstrapSemanticDiagnosticKind
+                            .unknown_selective_import,
+                        selective_import.source_unit,
+                        bootstrap_semantic_node(
+                            context,
+                            selective_import.source_unit,
+                            selective_import
+                                .declaration_node
+                        ).span,
+                        bootstrap_semantic_no_id(),
+                        bootstrap_semantic_empty_span(),
+                        0
+                    );
+                }
+                var name_child: usize = container.first_child;
+                while (name_child !=
+                    bootstrap_semantic_no_id()) {
+                    let name_node: BootstrapSyntaxNode =
+                        bootstrap_semantic_node(
+                            context,
+                            selective_import.source_unit,
+                            name_child
+                        );
+                    var exported_found: bool = false;
+                    var target_symbol_id: usize = 0;
+                    while (target_symbol_id <
+                        context->symbol_count) {
+                        let target_symbol:
+                            BootstrapSemanticSymbol =
+                            symbols[target_symbol_id];
+                        if (target_symbol.module_id ==
+                                selective_import
+                                    .target_module &&
+                            (target_symbol.flags &
+                                (BootstrapSemanticSymbolFlag
+                                    .exported as usize)) != 0 &&
+                            bootstrap_semantic_tokens_equal(
+                                context,
+                                selective_import.source_unit,
+                                name_node.token_index,
+                                target_symbol
+                                    .declaration_unit,
+                                target_symbol.name_token
+                            )) {
+                            exported_found = true;
+                            break;
+                        }
+                        target_symbol_id += 1;
+                    }
+                    if (!exported_found) {
+                        bootstrap_semantic_add_diagnostic(
+                            context,
+                            BootstrapSemanticDiagnosticKind
+                                .unknown_selective_import,
+                            selective_import.source_unit,
+                            name_node.span,
+                            bootstrap_semantic_no_id(),
+                            bootstrap_semantic_empty_span(),
+                            name_node.token_index
+                        );
+                    }
+                    name_child = name_node.next_sibling;
+                }
+            }
+            selective_import_index += 1;
         }
         module_id += 1;
     }

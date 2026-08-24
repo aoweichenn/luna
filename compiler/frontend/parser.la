@@ -72,7 +72,7 @@ fn bootstrap_syntax_tree_is_valid(tree: BootstrapSyntaxTree) -> bool {
     var node_index: usize = 0;
     while (node_index < tree.count) {
         let node: BootstrapSyntaxNode = nodes[node_index];
-        if ((node.kind as usize) > (BootstrapSyntaxKind.va_arg_expression as usize) || node.flags > 262143 ||
+        if ((node.kind as usize) > (BootstrapSyntaxKind.selective_import_names as usize) || node.flags > 524287 ||
             node.span.line == 0 || node.span.column == 0 || node.span.length >
                 (BootstrapParserLimit.maximum_size as usize) - node.span.offset || (node.token_index != none &&
                 node.token_index >= tree.token_count)) {
@@ -2593,6 +2593,44 @@ fn bootstrap_parser_parse_program(state: *BootstrapParserState) -> usize {
                     state, import_declaration,
                     bootstrap_parser_new_node(state, BootstrapSyntaxKind.name_expression, alias.span, alias_index));
             }
+        }
+        // `import a.b.c::{x, y};` binds only the listed names flat (the
+        // `c::` qualifier still binds). The names are carried as
+        // name_expression children of a trailing selective_import_names
+        // container node, marked by the selective_import flag; combining
+        // with `as` is rejected by sema.
+        let colons: BootstrapToken = state->current;
+        let colons_index: usize = state->current_index;
+        if (bootstrap_parser_match(
+                state, BootstrapTokenKind.colon_colon)) {
+            bootstrap_parser_add_node_flags(
+                state, import_declaration, BootstrapSyntaxFlag.selective_import as usize);
+            let selective_node: usize =
+                bootstrap_parser_new_node(
+                    state, BootstrapSyntaxKind.selective_import_names, colons.span, colons_index);
+            if (bootstrap_parser_expect(
+                    state, BootstrapTokenKind.left_brace)) {
+                while (state->error == RuntimeError.none &&
+                    state->current.kind == BootstrapTokenKind.identifier) {
+                    let selective_name: BootstrapToken = state->current;
+                    let selective_name_index: usize = state->current_index;
+                    bootstrap_parser_advance(state);
+                    bootstrap_parser_add_child(
+                        state, selective_node,
+                        bootstrap_parser_new_node(
+                            state, BootstrapSyntaxKind.name_expression, selective_name.span, selective_name_index));
+                    if (!bootstrap_parser_match(
+                            state, BootstrapTokenKind.comma)) {
+                        break;
+                    }
+                }
+                if (bootstrap_parser_expect(
+                        state, BootstrapTokenKind.right_brace)) {
+                    bootstrap_parser_set_node_span(
+                        state, selective_node, bootstrap_parser_join_spans(colons.span, state->previous.span));
+                }
+            }
+            bootstrap_parser_add_child(state, import_declaration, selective_node);
         }
         bootstrap_parser_expect(state, BootstrapTokenKind.semicolon);
         bootstrap_parser_set_node_span(

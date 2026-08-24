@@ -26,7 +26,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # toolchain binary invocation, for cross-architecture development hosts.
 TOOL_RUNNER = tuple(os.environ.get("LUNA_TOOL_RUNNER", "").split())
 IMPORT_PATTERN = re.compile(
-    r"^[ \t]*import[ \t]+([A-Za-z0-9_.]+)(?:[ \t]+as[ \t]+[A-Za-z0-9_]+)?[ \t]*;[ \t]*$",
+    r"^[ \t]*import[ \t]+([A-Za-z0-9_.]+)(?:[ \t]+as[ \t]+[A-Za-z0-9_]+)?"
+    r"(?:[ \t]*::[ \t]*\{[^}]*\})?[ \t]*;[ \t]*$",
     re.MULTILINE,
 )
 
