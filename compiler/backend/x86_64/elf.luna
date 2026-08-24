@@ -1,0 +1,844 @@
+module luna.bootstrap.backend.x86_64.elf;
+
+// Reads ELF64 relocatable objects (ET_REL, as produced by foreign compilers)
+// and converts them into the same in-memory object model the Luna assembler
+// emits, so the linker consumes both through one path. The accepted subset is
+// deliberate: little-endian x86-64 ET_REL with allocated PROGBITS/NOBITS
+// sections, one SHT_SYMTAB and explicit-addend SHT_RELA relocations. TLS,
+// COMDAT groups, writable-executable sections, implicit-addend REL entries
+// and unsupported relocation types are rejected; non-allocated metadata
+// (notes, comments, debug sections) is dropped. Every header field, range,
+// string, symbol reference and relocation reference is validated before its
+// data is used.
+
+enum BootstrapElfSectionType: usize {
+    none = 0, progbits = 1, symtab = 2, strtab = 3, rela = 4, note = 7, nobits = 8, rel = 9,
+}
+
+enum BootstrapElfSectionFlag: usize {
+    write = 1, alloc = 2, execute = 4, group = 512, tls = 1024,
+}
+
+enum BootstrapElfSectionIndex: usize {
+    undefined = 0, reserve_low = 65280, absolute = 65521, common = 65522,
+}
+
+enum BootstrapElfSymbolBind: usize {
+    local = 0, global = 1, weak = 2,
+}
+
+enum BootstrapElfSymbolType: usize {
+    notype = 0, object = 1, function = 2, section = 3, file = 4, common = 5, tls = 6,
+}
+
+enum BootstrapElfRelocationType: usize {
+    absolute64 = 1, pc32 = 2, plt32 = 4, absolute32 = 10, signed32 = 11,
+}
+
+enum BootstrapElfLimit: usize {
+    header_size = 64, section_size = 64, symbol_size = 24, relocation_size = 24, maximum_sections = 4096,
+    maximum_records = 65536, maximum_payload = 67108864, maximum_alignment = 4096, maximum_name = 4096,
+    no_symbol = 18446744073709551615,
+}
+
+struct BootstrapElfSection {
+    region: BootstrapObjectSection;
+    region_offset: usize;
+    symbol: usize;
+    kind: usize;
+    flags: usize;
+    offset: usize;
+    size: usize;
+    link: usize;
+    info: usize;
+    alignment: usize;
+    entry_size: usize;
+}
+
+struct BootstrapElfReader {
+    bytes: *const u8;
+    length: usize;
+    sections: StdByteBuffer;
+    symbol_map: StdByteBuffer;
+    symtab: usize;
+    has_symtab: bool;
+    object: BootstrapObject;
+    error: RuntimeError;
+}
+
+fn bootstrap_elf_fail(reader: *BootstrapElfReader, error: RuntimeError) -> bool {
+    if (reader != null && reader->error == RuntimeError.none) {
+        reader->error = error;
+    }
+    return false;
+}
+
+fn bootstrap_elf_power_of_two(value: usize) -> bool {
+    return value != 0 && (value & (value - 1)) == 0;
+}
+
+fn bootstrap_elf_align(value: usize, alignment: usize, result: *usize) -> bool {
+    if (result == null || !bootstrap_elf_power_of_two(alignment)) {
+        return false;
+    }
+    let mask: usize = alignment - 1;
+    if (value > 18446744073709551615 as usize - mask) {
+        return false;
+    }
+    *result = (value + mask) & ~mask;
+    return true;
+}
+
+fn bootstrap_elf_range_valid(offset: usize, size: usize, length: usize) -> bool {
+    return offset <= length && size <= length - offset;
+}
+
+fn bootstrap_elf_read_u16(bytes: *const u8, length: usize, offset: usize, value: *u16) -> bool {
+    if (bytes == null || value == null || !bootstrap_elf_range_valid(offset, 2, length)) {
+        return false;
+    }
+    *value = (bytes[offset] as u16) | ((bytes[offset + 1] as u16) << 8);
+    return true;
+}
+
+fn bootstrap_elf_read_u32(bytes: *const u8, length: usize, offset: usize, value: *u32) -> bool {
+    if (bytes == null || value == null || !bootstrap_elf_range_valid(offset, 4, length)) {
+        return false;
+    }
+    var result: u32 = 0;
+    var index: usize = 0;
+    while (index < 4) {
+        result |= (bytes[offset + index] as u32) << ((index * 8) as u32);
+        index += 1;
+    }
+    *value = result;
+    return true;
+}
+
+fn bootstrap_elf_read_u64(bytes: *const u8, length: usize, offset: usize, value: *u64) -> bool {
+    if (bytes == null || value == null || !bootstrap_elf_range_valid(offset, 8, length)) {
+        return false;
+    }
+    var result: u64 = 0;
+    var index: usize = 0;
+    while (index < 8) {
+        result |= (bytes[offset + index] as u64) << ((index * 8) as u64);
+        index += 1;
+    }
+    *value = result;
+    return true;
+}
+
+fn bootstrap_elf_section_count(reader: *BootstrapElfReader) -> usize {
+    if (reader == null || !std_byte_buffer_is_valid(reader->sections)) {
+        return 0;
+    }
+    return reader->sections.length / sizeof(BootstrapElfSection);
+}
+
+fn bootstrap_elf_section_at(reader: *BootstrapElfReader, index: usize) -> *BootstrapElfSection {
+    if (reader == null || index >= bootstrap_elf_section_count(reader)) {
+        return null;
+    }
+    let sections: *BootstrapElfSection = reader->sections.data as *BootstrapElfSection;
+    return &sections[index];
+}
+
+fn bootstrap_elf_section_copy(reader: *BootstrapElfReader, index: usize) -> BootstrapElfSection {
+    let section: *BootstrapElfSection = bootstrap_elf_section_at(reader, index);
+    if (section == null) {
+        return {
+            region = BootstrapObjectSection.undefined, region_offset = 0, symbol = BootstrapElfLimit.no_symbol as usize,
+            kind = 0, flags = 0, offset = 0, size = 0, link = 0, info = 0, alignment = 0, entry_size = 0,
+        };
+    }
+    return *section;
+}
+
+fn bootstrap_elf_region_buffer(object: *BootstrapObject, section: BootstrapObjectSection) -> *StdByteBuffer {
+    if (object == null) {
+        return null;
+    }
+    if (section == BootstrapObjectSection.text) {
+        return &object->text;
+    }
+    if (section == BootstrapObjectSection.rodata) {
+        return &object->rodata;
+    }
+    if (section == BootstrapObjectSection.data) {
+        return &object->data;
+    }
+    return null;
+}
+
+fn bootstrap_elf_pad_to(buffer: *StdByteBuffer, offset: usize) -> bool {
+    if (buffer == null || buffer->length > offset) {
+        return false;
+    }
+    while (buffer->length < offset) {
+        let appended: StdByteBufferResult = std_byte_buffer_push(*buffer, 0);
+        *buffer = appended.buffer;
+        if (appended.error != RuntimeError.none) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn bootstrap_elf_append_bytes(buffer: *StdByteBuffer, bytes: *const u8, offset: usize, size: usize) -> bool {
+    if (buffer == null || (size != 0 && bytes == null)) {
+        return false;
+    }
+    let appended: StdByteBufferResult = std_byte_buffer_append(
+        *buffer, size == 0 ? null as *const u8 : &bytes[offset], size);
+    *buffer = appended.buffer;
+    return appended.error == RuntimeError.none;
+}
+
+fn bootstrap_elf_parse_header(reader: *BootstrapElfReader) -> bool {
+    let bytes: *const u8 = reader->bytes;
+    let length: usize = reader->length;
+    if (bytes[0] != 127 || bytes[1] != 69 || bytes[2] != 76 || bytes[3] != 70 || bytes[4] != 2 || bytes[5] != 1 ||
+        bytes[6] != 1) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    var elf_type: u16 = 0;
+    var machine: u16 = 0;
+    var version: u32 = 0;
+    var section_offset: u64 = 0;
+    var program_count: u16 = 0;
+    var header_size: u16 = 0;
+    var section_header_size: u16 = 0;
+    var section_count_field: u16 = 0;
+    if (!bootstrap_elf_read_u16(bytes, length, 16, &elf_type) || !bootstrap_elf_read_u16(bytes, length, 18, &machine) ||
+        !bootstrap_elf_read_u32(bytes, length, 20, &version) ||
+        !bootstrap_elf_read_u64(bytes, length, 40, &section_offset) ||
+        !bootstrap_elf_read_u16(bytes, length, 52, &header_size) ||
+        !bootstrap_elf_read_u16(bytes, length, 56, &program_count) ||
+        !bootstrap_elf_read_u16(bytes, length, 58, &section_header_size) ||
+        !bootstrap_elf_read_u16(bytes, length, 60, &section_count_field)) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    if (elf_type != 1 || machine != 62 || version != 1 || program_count != 0 || header_size !=
+            (BootstrapElfLimit.header_size as usize) as u16 || section_header_size !=
+            (BootstrapElfLimit.section_size as usize) as u16 || section_offset == 0 || section_offset >
+            ((length as u64) - (BootstrapElfLimit.section_size as usize) as u64)) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    var section_count: usize = section_count_field as usize;
+    if (section_count == 0) {
+        // Extended section numbering: the real count lives in section 0's
+        // sh_size when e_shnum is zero.
+        var extended: u64 = 0;
+        if (!bootstrap_elf_read_u64(bytes, length, (section_offset as usize) + 32, &extended) || extended == 0 ||
+            extended > (BootstrapElfLimit.maximum_sections as usize) as u64) {
+            return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+        }
+        section_count = extended as usize;
+    }
+    let table_offset: usize = section_offset as usize;
+    if (section_count > BootstrapElfLimit.maximum_sections as usize || section_count >
+        (length - table_offset) / (BootstrapElfLimit.section_size as usize)) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    var index: usize = 0;
+    while (index < section_count) {
+        let base: usize = table_offset + index * (BootstrapElfLimit.section_size as usize);
+        var kind: u32 = 0;
+        var flags: u64 = 0;
+        var offset: u64 = 0;
+        var size: u64 = 0;
+        var link: u32 = 0;
+        var info: u32 = 0;
+        var alignment: u64 = 0;
+        var entry_size: u64 = 0;
+        if (!bootstrap_elf_read_u32(bytes, length, base + 4, &kind) ||
+            !bootstrap_elf_read_u64(bytes, length, base + 8, &flags) ||
+            !bootstrap_elf_read_u64(bytes, length, base + 24, &offset) ||
+            !bootstrap_elf_read_u64(bytes, length, base + 32, &size) ||
+            !bootstrap_elf_read_u32(bytes, length, base + 40, &link) ||
+            !bootstrap_elf_read_u32(bytes, length, base + 44, &info) ||
+            !bootstrap_elf_read_u64(bytes, length, base + 48, &alignment) ||
+            !bootstrap_elf_read_u64(bytes, length, base + 56, &entry_size)) {
+            return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+        }
+        let section: BootstrapElfSection = {
+            region = BootstrapObjectSection.undefined, region_offset = 0,
+            symbol = BootstrapElfLimit.no_symbol as usize, kind = kind as usize, flags = flags as usize,
+            offset = offset as usize, size = size as usize, link = link as usize, info = info as usize,
+            alignment = alignment as usize, entry_size = entry_size as usize,
+        };
+        let appended: StdByteBufferResult = std_byte_buffer_append(
+            reader->sections, (&section) as *const BootstrapElfSection as *const u8, sizeof(BootstrapElfSection));
+        reader->sections = appended.buffer;
+        if (appended.error != RuntimeError.none) {
+            return bootstrap_elf_fail(reader, appended.error);
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_elf_classify_sections(reader: *BootstrapElfReader) -> bool {
+    let count: usize = bootstrap_elf_section_count(reader);
+    var index: usize = 0;
+    while (index < count) {
+        let section: *BootstrapElfSection = bootstrap_elf_section_at(reader, index);
+        if (section == null || (index == 0 && section->kind != (BootstrapElfSectionType.none as usize))) {
+            return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+        }
+        if (section->alignment == 0) {
+            section->alignment = 1;
+        }
+        if (!bootstrap_elf_power_of_two(section->alignment) || section->alignment >
+                BootstrapElfLimit.maximum_alignment as usize) {
+            return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+        }
+        if ((section->flags & ((BootstrapElfSectionFlag.group as usize) | (BootstrapElfSectionFlag.tls as usize))) !=
+                0) {
+            return bootstrap_elf_fail(reader, RuntimeError.not_supported);
+        }
+        if ((section->flags & (BootstrapElfSectionFlag.write as usize)) != 0 &&
+            (section->flags & (BootstrapElfSectionFlag.execute as usize)) != 0) {
+            return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+        }
+        let alloc: bool = (section->flags & (BootstrapElfSectionFlag.alloc as usize)) != 0;
+        if (section->kind == (BootstrapElfSectionType.none as usize)) {
+            index += 1;
+            continue;
+        }
+        if (section->kind == (BootstrapElfSectionType.progbits as usize)) {
+            if (!alloc) {
+                index += 1;
+                continue;
+            }
+            if (section->size > BootstrapElfLimit.maximum_payload as usize ||
+                !bootstrap_elf_range_valid(section->offset, section->size, reader->length)) {
+                return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+            }
+            if ((section->flags & (BootstrapElfSectionFlag.execute as usize)) != 0) {
+                section->region = BootstrapObjectSection.text;
+            } else if ((section->flags & (BootstrapElfSectionFlag.write as usize)) != 0) {
+                section->region = BootstrapObjectSection.data;
+            } else {
+                section->region = BootstrapObjectSection.rodata;
+            }
+        } else if (section->kind == (BootstrapElfSectionType.nobits as usize)) {
+            if (!alloc) {
+                index += 1;
+                continue;
+            }
+            if ((section->flags & (BootstrapElfSectionFlag.write as usize)) == 0 || section->size >
+                    BootstrapElfLimit.maximum_payload as usize) {
+                return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+            }
+            section->region = BootstrapObjectSection.bss;
+        } else if (section->kind == (BootstrapElfSectionType.symtab as usize)) {
+            if (alloc || reader->has_symtab || section->entry_size != BootstrapElfLimit.symbol_size as usize ||
+                section->size % (BootstrapElfLimit.symbol_size as usize) != 0 || section->size /
+                    (BootstrapElfLimit.symbol_size as usize) > BootstrapElfLimit.maximum_records as usize ||
+                !bootstrap_elf_range_valid(section->offset, section->size, reader->length) || section->link >= count) {
+                return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+            }
+            reader->symtab = index;
+            reader->has_symtab = true;
+        } else if (section->kind == (BootstrapElfSectionType.strtab as usize)) {
+            if (alloc || !bootstrap_elf_range_valid(section->offset, section->size, reader->length)) {
+                return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+            }
+        } else if (section->kind == (BootstrapElfSectionType.rela as usize)) {
+            if (alloc || section->entry_size != BootstrapElfLimit.relocation_size as usize || section->size %
+                    (BootstrapElfLimit.relocation_size as usize) != 0 || section->size /
+                    (BootstrapElfLimit.relocation_size as usize) > BootstrapElfLimit.maximum_records as usize ||
+                !bootstrap_elf_range_valid(section->offset, section->size, reader->length) || section->link >= count ||
+                section->info >= count) {
+                return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+            }
+        } else if (section->kind == (BootstrapElfSectionType.note as usize)) {
+            // Loader metadata (including allocated .note.gnu.property); never
+            // consumed by a static link.
+            index += 1;
+            continue;
+        } else if (section->kind == (BootstrapElfSectionType.rel as usize)) {
+            return bootstrap_elf_fail(reader, RuntimeError.not_supported);
+        } else if (alloc) {
+            return bootstrap_elf_fail(reader, RuntimeError.not_supported);
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_elf_layout_sections(reader: *BootstrapElfReader) -> bool {
+    let count: usize = bootstrap_elf_section_count(reader);
+    var index: usize = 0;
+    while (index < count) {
+        let section: *BootstrapElfSection = bootstrap_elf_section_at(reader, index);
+        if (section == null) {
+            return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+        }
+        if (section->region == BootstrapObjectSection.undefined) {
+            index += 1;
+            continue;
+        }
+        if (!bootstrap_object_set_alignment(&reader->object, section->region, section->alignment)) {
+            return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+        }
+        if (section->region == BootstrapObjectSection.bss) {
+            var placed: usize = 0;
+            if (!bootstrap_elf_align(reader->object.bss_size, section->alignment, &placed) || section->size >
+                    (BootstrapElfLimit.maximum_payload as usize) - placed) {
+                return bootstrap_elf_fail(reader, RuntimeError.out_of_memory);
+            }
+            section->region_offset = placed;
+            reader->object.bss_size = placed + section->size;
+            index += 1;
+            continue;
+        }
+        let buffer: *StdByteBuffer = bootstrap_elf_region_buffer(&reader->object, section->region);
+        var placed: usize = 0;
+        if (buffer == null || !bootstrap_elf_align(buffer->length, section->alignment, &placed) || section->size >
+                (BootstrapElfLimit.maximum_payload as usize) - placed || !bootstrap_elf_pad_to(buffer, placed) ||
+            !bootstrap_elf_append_bytes(buffer, reader->bytes, section->offset, section->size)) {
+            return bootstrap_elf_fail(reader, RuntimeError.out_of_memory);
+        }
+        section->region_offset = placed;
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_elf_symbol_name(
+    reader: *BootstrapElfReader, strtab: BootstrapElfSection, name_offset: usize, name: *StdTextView) -> bool {
+    if (reader == null || name == null || name_offset == 0 || name_offset >= strtab.size) {
+        return false;
+    }
+    var length: usize = 0;
+    while (name_offset + length < strtab.size && reader->bytes[strtab.offset + name_offset + length] != 0) {
+        length += 1;
+    }
+    if (name_offset + length >= strtab.size || length > BootstrapElfLimit.maximum_name as usize) {
+        return false;
+    }
+    let view: StdTextViewResult = std_text_view(&reader->bytes[strtab.offset + name_offset], length);
+    if (view.error != RuntimeError.none) {
+        return false;
+    }
+    *name = view.view;
+    return true;
+}
+
+fn bootstrap_elf_synthetic_name(tag: *const u8, tag_length: usize, index: usize, output: *u8) -> usize {
+    // Synthetic names embed zero bytes, which strtab names by construction
+    // never contain, so they cannot collide with any input symbol name.
+    var length: usize = 0;
+    output[length] = 0;
+    length += 1;
+    var position: usize = 0;
+    while (position < tag_length) {
+        output[length] = tag[position];
+        length += 1;
+        position += 1;
+    }
+    output[length] = 0;
+    length += 1;
+    var digits: [5]u8 = {};
+    var digit_count: usize = 0;
+    var value: usize = index;
+    if (value == 0) {
+        digits[0] = 48;
+        digit_count = 1;
+    }
+    while (value != 0) {
+        digits[digit_count] = 48 + (value % 10) as u8;
+        value = value / 10;
+        digit_count += 1;
+    }
+    while (digit_count != 0) {
+        digit_count -= 1;
+        output[length] = digits[digit_count];
+        length += 1;
+    }
+    return length;
+}
+
+fn bootstrap_elf_synthetic_view(tag: *const u8, tag_length: usize, index: usize, name: *StdTextView) -> bool {
+    if (name == null) {
+        return false;
+    }
+    var storage: [24]u8 = {};
+    let length: usize = bootstrap_elf_synthetic_name(tag, tag_length, index, &storage[0]);
+    let view: StdTextViewResult = std_text_view(&storage[0] as *const u8, length);
+    if (view.error != RuntimeError.none) {
+        return false;
+    }
+    *name = view.view;
+    return true;
+}
+
+fn bootstrap_elf_load_section_symbol(
+    reader: *BootstrapElfReader, st_shndx: usize, st_value: u64, st_size: u64, mapped: *usize) -> bool {
+    if (st_shndx == 0 || st_shndx >= bootstrap_elf_section_count(reader) || st_value != 0 || st_size != 0) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    let target: *BootstrapElfSection = bootstrap_elf_section_at(reader, st_shndx);
+    if (target == null) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    if (target->region == BootstrapObjectSection.undefined) {
+        return true;
+    }
+    if (target->symbol == (BootstrapElfLimit.no_symbol as usize)) {
+        var name: StdTextView = {
+            data = null, length = 0,
+        };
+        if (!bootstrap_elf_synthetic_view("section", 7, st_shndx, &name)) {
+            return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+        }
+        let added: BootstrapObjectIndexResult = bootstrap_object_add_symbol(&reader->object, name);
+        let symbol: *BootstrapObjectSymbol = bootstrap_object_symbol_mut(&reader->object, added.index);
+        if (added.error != RuntimeError.none || added.found || symbol == null) {
+            return bootstrap_elf_fail(
+                reader, added.error == RuntimeError.none ? RuntimeError.invalid_argument : added.error);
+        }
+        symbol->defined = true;
+        symbol->section = target->region;
+        symbol->value = target->region_offset;
+        target->symbol = added.index;
+    }
+    *mapped = target->symbol;
+    return true;
+}
+
+fn bootstrap_elf_load_undefined_symbol(
+    reader: *BootstrapElfReader, strtab: BootstrapElfSection, st_name: usize, local: bool, st_value: u64,
+    st_size: u64, mapped: *usize) -> bool {
+    if (st_value != 0 || st_size != 0 || local) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    if (st_name == 0) {
+        return true;
+    }
+    var name: StdTextView = {
+        data = null, length = 0,
+    };
+    if (!bootstrap_elf_symbol_name(reader, strtab, st_name, &name)) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    let added: BootstrapObjectIndexResult = bootstrap_object_add_symbol(&reader->object, name);
+    if (added.error != RuntimeError.none) {
+        return bootstrap_elf_fail(reader, added.error);
+    }
+    let symbol: *BootstrapObjectSymbol = bootstrap_object_symbol_mut(&reader->object, added.index);
+    if (symbol == null) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    if (!symbol->defined) {
+        symbol->global = true;
+        symbol->external = true;
+    }
+    *mapped = added.index;
+    return true;
+}
+
+fn bootstrap_elf_load_common_symbol(
+    reader: *BootstrapElfReader, strtab: BootstrapElfSection, st_name: usize, local: bool, st_value: u64,
+    st_size: u64, mapped: *usize) -> bool {
+    // COMMON storage is allocated in bss: st_value carries the required
+    // alignment and st_size the byte count, so objects compiled without
+    // -fno-common stay linkable.
+    if (local || st_name == 0 || st_value > (BootstrapElfLimit.maximum_alignment as usize) as u64 || st_size >
+            (BootstrapElfLimit.maximum_payload as usize) as u64) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    var alignment: usize = st_value as usize;
+    if (alignment == 0) {
+        alignment = 1;
+    }
+    if (!bootstrap_elf_power_of_two(alignment)) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    var placed: usize = 0;
+    if (!bootstrap_elf_align(reader->object.bss_size, alignment, &placed) || (st_size as usize) >
+            (BootstrapElfLimit.maximum_payload as usize) - placed) {
+        return bootstrap_elf_fail(reader, RuntimeError.out_of_memory);
+    }
+    var name: StdTextView = {
+        data = null, length = 0,
+    };
+    if (!bootstrap_elf_symbol_name(reader, strtab, st_name, &name)) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    let added: BootstrapObjectIndexResult = bootstrap_object_add_symbol(&reader->object, name);
+    if (added.error != RuntimeError.none) {
+        return bootstrap_elf_fail(reader, added.error);
+    }
+    let symbol: *BootstrapObjectSymbol = bootstrap_object_symbol_mut(&reader->object, added.index);
+    if (symbol == null || symbol->defined) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    symbol->defined = true;
+    symbol->global = true;
+    symbol->external = false;
+    symbol->section = BootstrapObjectSection.bss;
+    symbol->value = placed;
+    symbol->size = st_size as usize;
+    symbol->kind = BootstrapObjectSymbolKind.object;
+    reader->object.bss_size = placed + (st_size as usize);
+    if (!bootstrap_object_set_alignment(&reader->object, BootstrapObjectSection.bss, alignment)) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    *mapped = added.index;
+    return true;
+}
+
+fn bootstrap_elf_load_defined_symbol(
+    reader: *BootstrapElfReader, strtab: BootstrapElfSection, index: usize, st_name: usize, local: bool,
+    st_shndx: usize, st_value: u64, st_size: u64, symbol_type: usize, mapped: *usize) -> bool {
+    let target: BootstrapElfSection = bootstrap_elf_section_copy(reader, st_shndx);
+    if (target.region == BootstrapObjectSection.undefined || st_value > (target.size as u64) || st_size >
+            (target.size as u64) - st_value) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    if (!local && st_name == 0) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    var name: StdTextView = {
+        data = null, length = 0,
+    };
+    if (st_name == 0) {
+        if (!bootstrap_elf_synthetic_view("symbol", 6, index, &name)) {
+            return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+        }
+    } else if (!bootstrap_elf_symbol_name(reader, strtab, st_name, &name)) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    var added: BootstrapObjectIndexResult = bootstrap_object_add_symbol(&reader->object, name);
+    if (added.error != RuntimeError.none) {
+        return bootstrap_elf_fail(reader, added.error);
+    }
+    if (local && added.found) {
+        // A local symbol sharing its name with another entry (for example an
+        // undefined global reference) is a distinct symbol; relabel it under
+        // a unique synthetic name.
+        if (!bootstrap_elf_synthetic_view("local", 5, index, &name)) {
+            return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+        }
+        added = bootstrap_object_add_symbol(&reader->object, name);
+        if (added.error != RuntimeError.none || added.found) {
+            return bootstrap_elf_fail(
+                reader, added.error == RuntimeError.none ? RuntimeError.invalid_argument : added.error);
+        }
+    }
+    let symbol: *BootstrapObjectSymbol = bootstrap_object_symbol_mut(&reader->object, added.index);
+    if (symbol == null || symbol->defined) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    symbol->defined = true;
+    symbol->external = false;
+    if (!local) {
+        symbol->global = true;
+    }
+    symbol->section = target.region;
+    symbol->value = target.region_offset + (st_value as usize);
+    symbol->size = st_size as usize;
+    symbol->kind = symbol_type == (BootstrapElfSymbolType.function as usize) ? BootstrapObjectSymbolKind.function :
+        (symbol_type == (BootstrapElfSymbolType.object as usize) || symbol_type ==
+            (BootstrapElfSymbolType.common as usize)) ? BootstrapObjectSymbolKind.object :
+        BootstrapObjectSymbolKind.none;
+    *mapped = added.index;
+    return true;
+}
+
+fn bootstrap_elf_load_symbol(
+    reader: *BootstrapElfReader, strtab: BootstrapElfSection, index: usize, st_name: usize, st_info: usize,
+    st_other: usize, st_shndx: usize, st_value: u64, st_size: u64, mapped: *usize) -> bool {
+    if (mapped == null) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    if (st_other != 0 || st_info >> 4 > (BootstrapElfSymbolBind.weak as usize)) {
+        return bootstrap_elf_fail(reader, RuntimeError.not_supported);
+    }
+    let local: bool = st_info >> 4 == (BootstrapElfSymbolBind.local as usize);
+    let symbol_type: usize = st_info & 15;
+    if (index == 0) {
+        if (st_name != 0 || st_info != 0 || st_shndx != 0 || st_value != 0 || st_size != 0) {
+            return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+        }
+        return true;
+    }
+    if (symbol_type == (BootstrapElfSymbolType.file as usize)) {
+        return true;
+    }
+    if (symbol_type >= (BootstrapElfSymbolType.tls as usize)) {
+        return bootstrap_elf_fail(reader, RuntimeError.not_supported);
+    }
+    if (symbol_type == (BootstrapElfSymbolType.section as usize)) {
+        return bootstrap_elf_load_section_symbol(reader, st_shndx, st_value, st_size, mapped);
+    }
+    if (st_shndx == (BootstrapElfSectionIndex.undefined as usize)) {
+        return bootstrap_elf_load_undefined_symbol(reader, strtab, st_name, local, st_value, st_size, mapped);
+    }
+    if (st_shndx == (BootstrapElfSectionIndex.common as usize)) {
+        return bootstrap_elf_load_common_symbol(reader, strtab, st_name, local, st_value, st_size, mapped);
+    }
+    if (st_shndx >= (BootstrapElfSectionIndex.reserve_low as usize)) {
+        return bootstrap_elf_fail(reader, RuntimeError.not_supported);
+    }
+    return bootstrap_elf_load_defined_symbol(
+        reader, strtab, index, st_name, local, st_shndx, st_value, st_size, symbol_type, mapped);
+}
+
+fn bootstrap_elf_map_symbol(reader: *BootstrapElfReader, mapped: usize) -> bool {
+    let entry: usize = mapped;
+    let appended: StdByteBufferResult = std_byte_buffer_append(
+        reader->symbol_map, (&entry) as *const usize as *const u8, sizeof(usize));
+    reader->symbol_map = appended.buffer;
+    if (appended.error != RuntimeError.none) {
+        return bootstrap_elf_fail(reader, appended.error);
+    }
+    return true;
+}
+
+fn bootstrap_elf_load_symbols(reader: *BootstrapElfReader) -> bool {
+    if (!reader->has_symtab) {
+        return true;
+    }
+    let symtab: BootstrapElfSection = bootstrap_elf_section_copy(reader, reader->symtab);
+    let strtab: BootstrapElfSection = bootstrap_elf_section_copy(reader, symtab.link);
+    if (strtab.kind != (BootstrapElfSectionType.strtab as usize)) {
+        return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+    }
+    let count: usize = symtab.size / (BootstrapElfLimit.symbol_size as usize);
+    var index: usize = 0;
+    while (index < count) {
+        let base: usize = symtab.offset + index * (BootstrapElfLimit.symbol_size as usize);
+        var st_name: u32 = 0;
+        var st_shndx: u16 = 0;
+        var st_value: u64 = 0;
+        var st_size: u64 = 0;
+        if (!bootstrap_elf_read_u32(reader->bytes, reader->length, base, &st_name) ||
+            !bootstrap_elf_read_u16(reader->bytes, reader->length, base + 6, &st_shndx) ||
+            !bootstrap_elf_read_u64(reader->bytes, reader->length, base + 8, &st_value) ||
+            !bootstrap_elf_read_u64(reader->bytes, reader->length, base + 16, &st_size)) {
+            return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+        }
+        var mapped: usize = BootstrapElfLimit.no_symbol as usize;
+        if (!bootstrap_elf_load_symbol(
+                reader, strtab, index, st_name as usize, reader->bytes[base + 4] as usize,
+                reader->bytes[base + 5] as usize, st_shndx as usize, st_value, st_size, &mapped) ||
+            !bootstrap_elf_map_symbol(reader, mapped)) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_elf_load_relocations(reader: *BootstrapElfReader) -> bool {
+    let section_count: usize = bootstrap_elf_section_count(reader);
+    let symbol_map: *const usize = reader->symbol_map.data as *const usize;
+    let symbol_count: usize = reader->symbol_map.length / sizeof(usize);
+    var index: usize = 0;
+    while (index < section_count) {
+        let section: BootstrapElfSection = bootstrap_elf_section_copy(reader, index);
+        if (section.kind != (BootstrapElfSectionType.rela as usize)) {
+            index += 1;
+            continue;
+        }
+        if (!reader->has_symtab || section.link != reader->symtab || section.info >= section_count) {
+            return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+        }
+        let target: BootstrapElfSection = bootstrap_elf_section_copy(reader, section.info);
+        if (target.region == BootstrapObjectSection.undefined) {
+            index += 1;
+            continue;
+        }
+        if (target.region == BootstrapObjectSection.bss) {
+            return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+        }
+        let count: usize = section.size / (BootstrapElfLimit.relocation_size as usize);
+        var relocation_index: usize = 0;
+        while (relocation_index < count) {
+            let base: usize = section.offset + relocation_index * (BootstrapElfLimit.relocation_size as usize);
+            var offset: u64 = 0;
+            var info: u64 = 0;
+            var addend: u64 = 0;
+            if (!bootstrap_elf_read_u64(reader->bytes, reader->length, base, &offset) ||
+                !bootstrap_elf_read_u64(reader->bytes, reader->length, base + 8, &info) ||
+                !bootstrap_elf_read_u64(reader->bytes, reader->length, base + 16, &addend)) {
+                return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+            }
+            let symbol_index: usize = (info >> 32) as usize;
+            let relocation_type: usize = (info & (4294967295 as u64)) as usize;
+            var kind: BootstrapObjectRelocationKind = BootstrapObjectRelocationKind.pc32;
+            var width: usize = 4;
+            if (relocation_type == (BootstrapElfRelocationType.absolute64 as usize)) {
+                kind = BootstrapObjectRelocationKind.absolute64;
+                width = 8;
+            } else if (relocation_type == (BootstrapElfRelocationType.pc32 as usize)) {
+                kind = BootstrapObjectRelocationKind.pc32;
+            } else if (relocation_type == (BootstrapElfRelocationType.plt32 as usize)) {
+                kind = BootstrapObjectRelocationKind.plt32;
+            } else if (relocation_type == (BootstrapElfRelocationType.absolute32 as usize)) {
+                kind = BootstrapObjectRelocationKind.absolute32;
+            } else if (relocation_type == (BootstrapElfRelocationType.signed32 as usize)) {
+                kind = BootstrapObjectRelocationKind.signed32;
+            } else {
+                return bootstrap_elf_fail(reader, RuntimeError.not_supported);
+            }
+            if (symbol_index >= symbol_count || symbol_map[symbol_index] == (BootstrapElfLimit.no_symbol as usize) ||
+                offset > (target.size as u64) || (width as u64) > (target.size as u64) - offset) {
+                return bootstrap_elf_fail(reader, RuntimeError.invalid_argument);
+            }
+            let relocation: BootstrapObjectRelocation = {
+                section = target.region, offset = target.region_offset + (offset as usize),
+                symbol_index = symbol_map[symbol_index], kind = kind, addend = addend as isize,
+            };
+            if (!bootstrap_object_add_relocation(&reader->object, relocation)) {
+                return bootstrap_elf_fail(
+                    reader, reader->object.error == RuntimeError.none ? RuntimeError.invalid_argument :
+                        reader->object.error);
+            }
+            relocation_index += 1;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn bootstrap_x86_64_elf_load(bytes: *const u8, length: usize) -> BootstrapObjectResult {
+    var reader: BootstrapElfReader = {
+        bytes = bytes, length = length, sections = std_byte_buffer_empty(), symbol_map = std_byte_buffer_empty(),
+        symtab = 0, has_symtab = false, object = bootstrap_object_empty(), error = RuntimeError.none,
+    };
+    if (bytes == null || length < BootstrapElfLimit.header_size as usize) {
+        return {
+            object = reader.object, error = RuntimeError.invalid_argument,
+        };
+    }
+    var loaded: bool = bootstrap_elf_parse_header(&reader) && bootstrap_elf_classify_sections(&reader) &&
+        bootstrap_elf_layout_sections(&reader) && bootstrap_elf_load_symbols(&reader) &&
+        bootstrap_elf_load_relocations(&reader);
+    if (loaded && !bootstrap_object_is_valid(reader.object)) {
+        loaded = bootstrap_elf_fail(&reader, RuntimeError.invalid_argument);
+    }
+    let map_error: RuntimeError = std_byte_buffer_release(reader.symbol_map);
+    let sections_error: RuntimeError = std_byte_buffer_release(reader.sections);
+    if (!loaded) {
+        bootstrap_object_release(reader.object);
+        return {
+            object = bootstrap_object_empty(), error = reader.error == RuntimeError.none ?
+                RuntimeError.invalid_argument : reader.error,
+        };
+    }
+    if (map_error != RuntimeError.none || sections_error != RuntimeError.none) {
+        bootstrap_object_release(reader.object);
+        return {
+            object = bootstrap_object_empty(), error = map_error == RuntimeError.none ? sections_error : map_error,
+        };
+    }
+    return {
+        object = reader.object, error = RuntimeError.none,
+    };
+}

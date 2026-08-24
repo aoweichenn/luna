@@ -61,10 +61,13 @@ python3 tools/selfhost.py test     # compile+run tests/cases against
   (`std/`): allocation, byte buffers, UTF-8 text, paths, file I/O.
 - `compiler/` — `frontend/` (lexer, parser), `middleend/` (type, ir,
   sema), `backend/x86_64/` (text, abi, frame, codegen, object,
-  assembler, linker). Correctness-first, no optimization.
+  assembler, linker, elf). Correctness-first, no optimization.
 - `drivers/` — freestanding argument-driven tool programs.
 - `tests/cases/` — executable behavior programs returning their verdict
   as the exit status.
+- `tests/ffi/` — hand-encoded ELF64 ET_REL fixtures
+  (`generate_fixtures.py` regenerates them) linked against Luna cases;
+  expectations accept `<exit-code>` or `link:<luna-link status>`.
 - `docs/` — authoritative per-subsystem design record (language,
   semantics, seed contract). Some docs describe the archived m0 seed;
   treat them as history where paths no longer exist.

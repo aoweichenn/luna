@@ -161,6 +161,11 @@ LIBRARIES = {
         "compiler/backend/x86_64/object",
         ("runtime", "bytes", "text"),
     ),
+    "x86_64_elf": (
+        "luna.bootstrap.backend.x86_64.elf",
+        "compiler/backend/x86_64/elf",
+        ("runtime", "bytes", "text", "x86_64_object"),
+    ),
     "x86_64_assembler": (
         "luna.bootstrap.backend.x86_64.assembler",
         "compiler/backend/x86_64/assembler",
@@ -200,6 +205,7 @@ LIBRARY_ORDER = (
     "x86_64_frame",
     "x86_64_codegen",
     "x86_64_object",
+    "x86_64_elf",
     "x86_64_assembler",
     "x86_64_linker",
 )
@@ -256,6 +262,7 @@ DRIVERS = {
             "io",
             "x86_64_text",
             "x86_64_object",
+            "x86_64_elf",
             "x86_64_linker",
         ),
     ),
@@ -421,6 +428,77 @@ def semantic_diagnostic_kinds() -> dict[str, int]:
     }
 
 
+def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, list[str]]:
+    """Link tests/ffi cases against the checked-in ELF64 fixture objects.
+
+    Each expectation line is `<case>.luna <fixture>.o <exit>`, or
+    `<case>.luna <fixture>.o link:<status>` when luna-link itself must fail
+    with the given exit status (malformed or unresolvable fixtures).
+    """
+    ffi = ROOT / "tests" / "ffi"
+    expectations = ffi / "expectations.txt"
+    if not expectations.is_file():
+        return 0, []
+    passed = 0
+    failed: list[str] = []
+    for line in expectations.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split()
+        name, fixture, expected = parts[0], parts[1], parts[2]
+        work = ROOT / "out" / "tests" / name.removesuffix(".luna")
+        reset(work)
+        assembly = work / f"{name}.s"
+        object_file = work / f"{name}.lo"
+        executable = work / name.removesuffix(".luna")
+        try:
+            run(
+                [
+                    *tool(stage_bin, "lunac"),
+                    "--executable",
+                    "-o",
+                    assembly,
+                    ffi / name,
+                ]
+            )
+            run([*tool(stage_bin, "luna-as"), "-o", object_file, assembly])
+            linked = subprocess.run(
+                [
+                    *tool(stage_bin, "luna-link"),
+                    "-o",
+                    executable,
+                    object_file,
+                    ffi / fixture,
+                ],
+                timeout=TIMEOUT_SECONDS,
+            )
+            if expected.startswith("link:"):
+                wanted = int(expected.removeprefix("link:"))
+                if linked.returncode != wanted:
+                    raise AssertionError(
+                        f"luna-link exit {linked.returncode}, expected {wanted}"
+                    )
+            else:
+                if linked.returncode != 0:
+                    raise AssertionError(
+                        f"luna-link exit {linked.returncode}, expected 0"
+                    )
+                completed = subprocess.run(
+                    [*runner, str(executable)],
+                    timeout=TIMEOUT_SECONDS,
+                )
+                if completed.returncode != int(expected):
+                    raise AssertionError(
+                        f"exit {completed.returncode}, expected {expected}"
+                    )
+            passed += 1
+            print(f"PASS {name} ({fixture}, {expected})")
+        except Exception as error:  # noqa: BLE001 - report and continue
+            failed.append(name)
+            print(f"FAIL {name}: {error}")
+    return passed, failed
+
+
 def execute_tests(stage_bin: pathlib.Path, runner: list[str]) -> int:
     expectations = ROOT / "tests" / "expectations.txt"
     cases = ROOT / "tests" / "cases"
@@ -491,6 +569,9 @@ def execute_tests(stage_bin: pathlib.Path, runner: list[str]) -> int:
         except Exception as error:  # noqa: BLE001 - report and continue
             failed.append(name)
             print(f"FAIL {name}: {error}")
+    ffi_passed, ffi_failed = execute_ffi_tests(stage_bin, runner)
+    passed += ffi_passed
+    failed.extend(ffi_failed)
     print(f"{passed} passed, {len(failed)} failed")
     return 1 if failed else 0
 
