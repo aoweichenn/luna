@@ -67,8 +67,8 @@ struct BootstrapAssemblerNumericLabel {
 struct BootstrapAssembler {
     object: BootstrapObject;
     section: BootstrapObjectSection;
-    fixups: StdByteBuffer;
-    numeric_labels: StdByteBuffer;
+    fixups: bytes::Buffer;
+    numeric_labels: bytes::Buffer;
     line: usize;
     error: runtime::Error;
 }
@@ -521,7 +521,7 @@ fn bootstrap_assembler_is_rm(operand: *const BootstrapAssemblerOperand, width: u
          bootstrap_assembler_is_gpr(operand, width));
 }
 
-fn bootstrap_assembler_section_buffer(assembler: *BootstrapAssembler) -> *StdByteBuffer {
+fn bootstrap_assembler_section_buffer(assembler: *BootstrapAssembler) -> *bytes::Buffer {
     if (assembler == null) {
         return null;
     }
@@ -615,7 +615,7 @@ fn bootstrap_assembler_add_fixup(
         numeric_label = 0, numeric_forward = false, is_numeric = false,
     };
     fixup.is_numeric = bootstrap_assembler_numeric_reference(target, &fixup.numeric_label, &fixup.numeric_forward);
-    let appended: StdByteBufferResult = std_byte_buffer_append(
+    let appended: bytes::BufferResult = bytes::append(
         assembler->fixups, (&fixup) as *const BootstrapAssemblerFixup as *const u8, sizeof(BootstrapAssemblerFixup));
     assembler->fixups = appended.buffer;
     if (appended.error != runtime::Error.none) {
@@ -674,7 +674,7 @@ fn bootstrap_assembler_emit_modrm(
         if (!bootstrap_assembler_append_u8(assembler, modrm)) {
             return false;
         }
-        let output: *StdByteBuffer = bootstrap_assembler_section_buffer(assembler);
+        let output: *bytes::Buffer = bootstrap_assembler_section_buffer(assembler);
         return output != null &&
             bootstrap_assembler_add_fixup(
                 assembler, rm->memory.symbol, output->length, BootstrapAssemblerFixupKind.rip_relative) &&
@@ -735,7 +735,7 @@ fn bootstrap_assembler_emit_relative(
             assembler, opcode_first, opcode_second, opcode_count)) {
         return false;
     }
-    let output: *StdByteBuffer = bootstrap_assembler_section_buffer(assembler);
+    let output: *bytes::Buffer = bootstrap_assembler_section_buffer(assembler);
     return output != null &&
         bootstrap_assembler_add_fixup(assembler, operands->values[0].label, output->length, kind) &&
         bootstrap_assembler_append_u32(assembler, 0);
@@ -1423,7 +1423,7 @@ fn bootstrap_assembler_get_symbol(assembler: *BootstrapAssembler, name: StdTextV
 }
 
 fn bootstrap_assembler_define_label(assembler: *BootstrapAssembler, name: StdTextView) -> bool {
-    let section: *StdByteBuffer = bootstrap_assembler_section_buffer(assembler);
+    let section: *bytes::Buffer = bootstrap_assembler_section_buffer(assembler);
     if (section == null || name.length == 0) {
         return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
@@ -1446,7 +1446,7 @@ fn bootstrap_assembler_define_label(assembler: *BootstrapAssembler, name: StdTex
         let label: BootstrapAssemblerNumericLabel = {
             section = assembler->section, offset = section->length, number = number,
         };
-        let appended: StdByteBufferResult = std_byte_buffer_append(
+        let appended: bytes::BufferResult = bytes::append(
             assembler->numeric_labels, (&label) as *const BootstrapAssemblerNumericLabel as *const u8,
             sizeof(BootstrapAssemblerNumericLabel));
         assembler->numeric_labels = appended.buffer;
@@ -1527,7 +1527,7 @@ fn bootstrap_assembler_symbol_size(assembler: *BootstrapAssembler, input: StdTex
         bootstrap_assembler_slice(input, comma + 1, input.length - comma - 1));
     let found: BootstrapObjectIndexResult = bootstrap_object_find_symbol(assembler->object, name);
     let symbol: *BootstrapObjectSymbol = bootstrap_object_symbol_mut(&assembler->object, found.index);
-    let section: *StdByteBuffer = bootstrap_assembler_section_buffer(assembler);
+    let section: *bytes::Buffer = bootstrap_assembler_section_buffer(assembler);
     if (!found.found || found.error != runtime::Error.none || symbol == null || !symbol->defined ||
         symbol->section != assembler->section || section == null || expression.length != name.length + 2 ||
         expression.data[0] != 46 || expression.data[1] != 45) {
@@ -1558,7 +1558,7 @@ fn bootstrap_assembler_alignment(assembler: *BootstrapAssembler, input: StdTextV
             &assembler->object, assembler->section, alignment)) {
         return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
-    let output: *StdByteBuffer = bootstrap_assembler_section_buffer(assembler);
+    let output: *bytes::Buffer = bootstrap_assembler_section_buffer(assembler);
     if (output == null) {
         return bootstrap_assembler_fail(assembler, runtime::Error.invalid_argument);
     }
@@ -1674,7 +1674,7 @@ fn bootstrap_assembler_line(assembler: *BootstrapAssembler, input: StdTextView) 
 }
 
 fn bootstrap_assembler_patch(assembler: *BootstrapAssembler, fixup: BootstrapAssemblerFixup, target: usize) -> bool {
-    let output: *StdByteBuffer = fixup.section == BootstrapObjectSection.text ? &assembler->object.text :
+    let output: *bytes::Buffer = fixup.section == BootstrapObjectSection.text ? &assembler->object.text :
         fixup.section == BootstrapObjectSection.rodata ? &assembler->object.rodata :
         fixup.section == BootstrapObjectSection.data ? &assembler->object.data : null;
     if (output == null || fixup.offset > output->length || (4 as usize) > output->length - fixup.offset ||
@@ -1798,8 +1798,8 @@ fn bootstrap_assembler_validate_symbols(assembler: *BootstrapAssembler) -> bool 
 
 fn bootstrap_x86_64_assemble(assembly: StdTextView) -> BootstrapAssemblerResult {
     var assembler: BootstrapAssembler = {
-        object = bootstrap_object_empty(), section = BootstrapObjectSection.undefined, fixups = std_byte_buffer_empty(),
-        numeric_labels = std_byte_buffer_empty(), line = 1, error = runtime::Error.none,
+        object = bootstrap_object_empty(), section = BootstrapObjectSection.undefined, fixups = bytes::empty(),
+        numeric_labels = bytes::empty(), line = 1, error = runtime::Error.none,
     };
     if (!std_text_is_valid_utf8(assembly) || assembly.length > BootstrapAssemblerLimit.maximum_source as usize) {
         assembler.error = runtime::Error.invalid_argument;
@@ -1831,8 +1831,8 @@ fn bootstrap_x86_64_assemble(assembly: StdTextView) -> BootstrapAssemblerResult 
             assembler.error = runtime::Error.invalid_argument;
         }
     }
-    let fixup_error: runtime::Error = std_byte_buffer_release(assembler.fixups);
-    let label_error: runtime::Error = std_byte_buffer_release(assembler.numeric_labels);
+    let fixup_error: runtime::Error = bytes::release(assembler.fixups);
+    let label_error: runtime::Error = bytes::release(assembler.numeric_labels);
     if (assembler.error == runtime::Error.none && fixup_error != runtime::Error.none) {
         assembler.error = fixup_error;
     }
