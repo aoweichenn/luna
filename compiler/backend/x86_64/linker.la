@@ -2,29 +2,29 @@ module luna.bootstrap.backend.x86_64.linker;
 
 import luna.std.text as text;
 
-enum BootstrapLinkerLimit: usize {
+enum Limit: usize {
     maximum_inputs = 64, maximum_output = 268435456, page_size = 4096, image_base = 4194304, text_offset = 4096,
 }
 
-enum BootstrapElf: usize {
+enum Elf: usize {
     header_size = 64, program_header_size = 56, machine_x86_64 = 62, executable_type = 2, load_segment = 1,
     flag_execute = 1, flag_write = 2, flag_read = 4,
 }
 
-struct BootstrapLinkPlacement {
+struct Placement {
     text: usize;
     rodata: usize;
     data: usize;
     bss: usize;
 }
 
-struct BootstrapLinkGlobal {
+struct Global {
     name: text::View;
     object_index: usize;
     symbol_index: usize;
 }
 
-struct BootstrapLinkImage {
+struct Image {
     text: bytes::Buffer;
     rodata: bytes::Buffer;
     data: bytes::Buffer;
@@ -43,7 +43,7 @@ struct BootstrapLinkImage {
     input_index: usize;
 }
 
-fn bootstrap_linker_image_empty() -> BootstrapLinkImage {
+fn image_empty() -> Image {
     return {
         text = bytes::empty(), rodata = bytes::empty(), data = bytes::empty(),
         globals = bytes::empty(), bss_size = 0, text_alignment = 1, rodata_alignment = 1, data_alignment = 1,
@@ -52,7 +52,7 @@ fn bootstrap_linker_image_empty() -> BootstrapLinkImage {
     };
 }
 
-fn bootstrap_linker_fail(image: *BootstrapLinkImage, error: runtime::Error, input_index: usize) -> bool {
+fn fail(image: *Image, error: runtime::Error, input_index: usize) -> bool {
     if (image != null && image->error == runtime::Error.none) {
         image->error = error;
         image->input_index = input_index;
@@ -60,12 +60,12 @@ fn bootstrap_linker_fail(image: *BootstrapLinkImage, error: runtime::Error, inpu
     return false;
 }
 
-fn bootstrap_linker_power_of_two(value: usize) -> bool {
+fn power_of_two(value: usize) -> bool {
     return value != 0 && (value & (value - 1)) == 0;
 }
 
-fn bootstrap_linker_align(value: usize, alignment: usize, result: *usize) -> bool {
-    if (result == null || !bootstrap_linker_power_of_two(alignment)) {
+fn align(value: usize, alignment: usize, result: *usize) -> bool {
+    if (result == null || !power_of_two(alignment)) {
         return false;
     }
     let mask: usize = alignment - 1;
@@ -76,7 +76,7 @@ fn bootstrap_linker_align(value: usize, alignment: usize, result: *usize) -> boo
     return true;
 }
 
-fn bootstrap_linker_append_u8(output: *bytes::Buffer, value: u8) -> bool {
+fn append_u8(output: *bytes::Buffer, value: u8) -> bool {
     if (output == null) {
         return false;
     }
@@ -85,10 +85,10 @@ fn bootstrap_linker_append_u8(output: *bytes::Buffer, value: u8) -> bool {
     return appended.error == runtime::Error.none;
 }
 
-fn bootstrap_linker_append_u16(output: *bytes::Buffer, value: u16) -> bool {
+fn append_u16(output: *bytes::Buffer, value: u16) -> bool {
     var index: usize = 0;
     while (index < 2) {
-        if (!bootstrap_linker_append_u8(
+        if (!append_u8(
                 output, ((value >> ((index * 8) as u16)) & 255) as u8)) {
             return false;
         }
@@ -97,10 +97,10 @@ fn bootstrap_linker_append_u16(output: *bytes::Buffer, value: u16) -> bool {
     return true;
 }
 
-fn bootstrap_linker_append_u32(output: *bytes::Buffer, value: u32) -> bool {
+fn append_u32(output: *bytes::Buffer, value: u32) -> bool {
     var index: usize = 0;
     while (index < 4) {
-        if (!bootstrap_linker_append_u8(
+        if (!append_u8(
                 output, ((value >> ((index * 8) as u32)) & 255) as u8)) {
             return false;
         }
@@ -109,10 +109,10 @@ fn bootstrap_linker_append_u32(output: *bytes::Buffer, value: u32) -> bool {
     return true;
 }
 
-fn bootstrap_linker_append_u64(output: *bytes::Buffer, value: u64) -> bool {
+fn append_u64(output: *bytes::Buffer, value: u64) -> bool {
     var index: usize = 0;
     while (index < 8) {
-        if (!bootstrap_linker_append_u8(
+        if (!append_u8(
                 output, ((value >> ((index * 8) as u64)) & 255) as u8)) {
             return false;
         }
@@ -121,7 +121,7 @@ fn bootstrap_linker_append_u64(output: *bytes::Buffer, value: u64) -> bool {
     return true;
 }
 
-fn bootstrap_linker_append_bytes(output: *bytes::Buffer, data: *const u8, length: usize) -> bool {
+fn append_bytes(output: *bytes::Buffer, data: *const u8, length: usize) -> bool {
     if (output == null) {
         return false;
     }
@@ -130,10 +130,10 @@ fn bootstrap_linker_append_bytes(output: *bytes::Buffer, data: *const u8, length
     return appended.error == runtime::Error.none;
 }
 
-fn bootstrap_linker_append_padding(output: *bytes::Buffer, count: usize, fill: u8) -> bool {
+fn append_padding(output: *bytes::Buffer, count: usize, fill: u8) -> bool {
     var index: usize = 0;
     while (index < count) {
-        if (!bootstrap_linker_append_u8(output, fill)) {
+        if (!append_u8(output, fill)) {
             return false;
         }
         index += 1;
@@ -141,38 +141,38 @@ fn bootstrap_linker_append_padding(output: *bytes::Buffer, count: usize, fill: u
     return true;
 }
 
-fn bootstrap_linker_pad_to(output: *bytes::Buffer, offset: usize) -> bool {
+fn pad_to(output: *bytes::Buffer, offset: usize) -> bool {
     return output != null && output->length <= offset &&
-        bootstrap_linker_append_padding(output, offset - output->length, 0);
+        append_padding(output, offset - output->length, 0);
 }
 
-fn bootstrap_linker_region_append(
-    image: *BootstrapLinkImage, destination: *bytes::Buffer, source: bytes::Buffer, alignment: usize, fill: u8,
+fn region_append(
+    image: *Image, destination: *bytes::Buffer, source: bytes::Buffer, alignment: usize, fill: u8,
     input_index: usize, placement: *usize) -> bool {
     var aligned: usize = 0;
-    if (destination == null || placement == null || !bootstrap_linker_align(destination->length, alignment, &aligned) ||
-        aligned > BootstrapLinkerLimit.maximum_output as usize || source.length >
-            (BootstrapLinkerLimit.maximum_output as usize) - aligned ||
-        !bootstrap_linker_append_padding(destination, aligned - destination->length, fill) ||
-        !bootstrap_linker_append_bytes(
+    if (destination == null || placement == null || !align(destination->length, alignment, &aligned) ||
+        aligned > Limit.maximum_output as usize || source.length >
+            (Limit.maximum_output as usize) - aligned ||
+        !append_padding(destination, aligned - destination->length, fill) ||
+        !append_bytes(
             destination, source.data as *const u8, source.length)) {
-        return bootstrap_linker_fail(image, runtime::Error.out_of_memory, input_index);
+        return fail(image, runtime::Error.out_of_memory, input_index);
     }
     *placement = aligned;
     return true;
 }
 
-fn bootstrap_linker_name_equal(left: text::View, right: text::View) -> bool {
+fn name_equal(left: text::View, right: text::View) -> bool {
     return text::equal(left, right);
 }
 
-fn bootstrap_linker_find_global(
-    image: *const BootstrapLinkImage, name: text::View, result: *BootstrapLinkGlobal) -> bool {
-    let globals: *const BootstrapLinkGlobal = image->globals.data as *const BootstrapLinkGlobal;
-    let count: usize = image->globals.length / sizeof(BootstrapLinkGlobal);
+fn find_global(
+    image: *const Image, name: text::View, result: *Global) -> bool {
+    let globals: *const Global = image->globals.data as *const Global;
+    let count: usize = image->globals.length / sizeof(Global);
     var index: usize = 0;
     while (index < count) {
-        if (bootstrap_linker_name_equal(globals[index].name, name)) {
+        if (name_equal(globals[index].name, name)) {
             if (result != null) {
                 *result = globals[index];
             }
@@ -183,37 +183,37 @@ fn bootstrap_linker_find_global(
     return false;
 }
 
-fn bootstrap_linker_collect_globals(
-    image: *BootstrapLinkImage, objects: *const BootstrapObject, object_count: usize) -> bool {
+fn collect_globals(
+    image: *Image, objects: *const object::Object, object_count: usize) -> bool {
     var object_index: usize = 0;
     while (object_index < object_count) {
         image->input_index = object_index;
-        let object: BootstrapObject = objects[object_index];
+        let object: object::Object = objects[object_index];
         var symbol_index: usize = 0;
-        while (symbol_index < bootstrap_object_symbol_count(object)) {
-            let result: BootstrapObjectSymbolResult = bootstrap_object_get_symbol(object, symbol_index);
+        while (symbol_index < object::symbol_count(object)) {
+            let result: object::SymbolResult = object::get_symbol(object, symbol_index);
             if (result.error != runtime::Error.none) {
-                return bootstrap_linker_fail(image, result.error, object_index);
+                return fail(image, result.error, object_index);
             }
-            let symbol: BootstrapObjectSymbol = result.symbol;
+            let symbol: object::Symbol = result.symbol;
             if (symbol.defined && symbol.global) {
-                let name: text::ViewResult = bootstrap_object_symbol_name(object, symbol);
-                var previous: BootstrapLinkGlobal = {};
+                let name: text::ViewResult = object::symbol_name(object, symbol);
+                var previous: Global = {};
                 if (name.error != runtime::Error.none ||
-                    bootstrap_linker_find_global(
-                        image as *const BootstrapLinkImage, name.view, &previous)) {
-                    return bootstrap_linker_fail(image, runtime::Error.exists, object_index);
+                    find_global(
+                        image as *const Image, name.view, &previous)) {
+                    return fail(image, runtime::Error.exists, object_index);
                 }
-                let global: BootstrapLinkGlobal = {
+                let global: Global = {
                     name = name.view, object_index = object_index, symbol_index = symbol_index,
                 };
                 let appended: bytes::BufferResult =
                     bytes::append(
-                        image->globals, (&global) as *const BootstrapLinkGlobal as *const u8,
-                        sizeof(BootstrapLinkGlobal));
+                        image->globals, (&global) as *const Global as *const u8,
+                        sizeof(Global));
                 image->globals = appended.buffer;
                 if (appended.error != runtime::Error.none) {
-                    return bootstrap_linker_fail(image, appended.error, object_index);
+                    return fail(image, appended.error, object_index);
                 }
             }
             symbol_index += 1;
@@ -223,30 +223,30 @@ fn bootstrap_linker_collect_globals(
     return true;
 }
 
-fn bootstrap_linker_layout_regions(
-    image: *BootstrapLinkImage, objects: *const BootstrapObject, object_count: usize,
-    placements: *BootstrapLinkPlacement) -> bool {
+fn layout_regions(
+    image: *Image, objects: *const object::Object, object_count: usize,
+    placements: *Placement) -> bool {
     var object_index: usize = 0;
     while (object_index < object_count) {
-        let object: BootstrapObject = objects[object_index];
-        if (!bootstrap_object_is_valid(object)) {
-            return bootstrap_linker_fail(image, runtime::Error.invalid_argument, object_index);
+        let object: object::Object = objects[object_index];
+        if (!object::is_valid(object)) {
+            return fail(image, runtime::Error.invalid_argument, object_index);
         }
-        if (!bootstrap_linker_region_append(
+        if (!region_append(
                 image, &image->text, object.text, object.text_alignment, 144, object_index,
                 &placements[object_index].text) ||
-            !bootstrap_linker_region_append(
+            !region_append(
                 image, &image->rodata, object.rodata, object.rodata_alignment, 0, object_index,
                 &placements[object_index].rodata) ||
-            !bootstrap_linker_region_append(
+            !region_append(
                 image, &image->data, object.data, object.data_alignment, 0, object_index, &placements[object_index].data
             )) {
             return false;
         }
         var bss_offset: usize = 0;
-        if (!bootstrap_linker_align(image->bss_size, object.bss_alignment, &bss_offset) ||
-            object.bss_size > (BootstrapLinkerLimit.maximum_output as usize) - bss_offset) {
-            return bootstrap_linker_fail(image, runtime::Error.out_of_memory, object_index);
+        if (!align(image->bss_size, object.bss_alignment, &bss_offset) ||
+            object.bss_size > (Limit.maximum_output as usize) - bss_offset) {
+            return fail(image, runtime::Error.out_of_memory, object_index);
         }
         placements[object_index].bss = bss_offset;
         image->bss_size = bss_offset + object.bss_size;
@@ -267,100 +267,100 @@ fn bootstrap_linker_layout_regions(
     return image->text.length != 0;
 }
 
-fn bootstrap_linker_layout_image(image: *BootstrapLinkImage) -> bool {
-    let page: usize = BootstrapLinkerLimit.page_size as usize;
-    let base: usize = BootstrapLinkerLimit.image_base as usize;
-    let text_offset: usize = BootstrapLinkerLimit.text_offset as usize;
+fn layout_image(image: *Image) -> bool {
+    let page: usize = Limit.page_size as usize;
+    let base: usize = Limit.image_base as usize;
+    let text_offset: usize = Limit.text_offset as usize;
     var rodata_offset: usize = 0;
     var data_offset: usize = 0;
-    if (!bootstrap_linker_align(text_offset + image->text.length, page, &rodata_offset) ||
-        !bootstrap_linker_align(rodata_offset + image->rodata.length, page, &data_offset) ||
+    if (!align(text_offset + image->text.length, page, &rodata_offset) ||
+        !align(rodata_offset + image->rodata.length, page, &data_offset) ||
         data_offset > 18446744073709551615 as usize - base) {
-        return bootstrap_linker_fail(image, runtime::Error.out_of_memory, image->input_index);
+        return fail(image, runtime::Error.out_of_memory, image->input_index);
     }
     image->text_address = base + text_offset;
     image->rodata_address = base + rodata_offset;
     image->data_address = base + data_offset;
-    if (!bootstrap_linker_align(
+    if (!align(
             image->data_address + image->data.length, image->bss_alignment, &image->bss_address)) {
-        return bootstrap_linker_fail(image, runtime::Error.out_of_memory, image->input_index);
+        return fail(image, runtime::Error.out_of_memory, image->input_index);
     }
     return true;
 }
 
-fn bootstrap_linker_section_address(
-    image: *const BootstrapLinkImage, placement: BootstrapLinkPlacement, section: BootstrapObjectSection, result: *usize
+fn section_address(
+    image: *const Image, placement: Placement, section: object::Section, result: *usize
 ) -> bool {
     if (result == null) {
         return false;
     }
-    if (section == BootstrapObjectSection.text) {
+    if (section == object::Section.text) {
         *result = image->text_address + placement.text;
         return true;
     }
-    if (section == BootstrapObjectSection.rodata) {
+    if (section == object::Section.rodata) {
         *result = image->rodata_address + placement.rodata;
         return true;
     }
-    if (section == BootstrapObjectSection.data) {
+    if (section == object::Section.data) {
         *result = image->data_address + placement.data;
         return true;
     }
-    if (section == BootstrapObjectSection.bss) {
+    if (section == object::Section.bss) {
         *result = image->bss_address + placement.bss;
         return true;
     }
     return false;
 }
 
-fn bootstrap_linker_symbol_address(
-    image: *const BootstrapLinkImage, objects: *const BootstrapObject, placements: *const BootstrapLinkPlacement,
+fn symbol_address(
+    image: *const Image, objects: *const object::Object, placements: *const Placement,
     object_index: usize, symbol_index: usize, result: *usize) -> bool {
-    let symbol_result: BootstrapObjectSymbolResult = bootstrap_object_get_symbol(objects[object_index], symbol_index);
+    let symbol_result: object::SymbolResult = object::get_symbol(objects[object_index], symbol_index);
     if (symbol_result.error != runtime::Error.none || !symbol_result.symbol.defined) {
         return false;
     }
-    var section_address: usize = 0;
-    if (!bootstrap_linker_section_address(
-            image, placements[object_index], symbol_result.symbol.section, &section_address) ||
-        symbol_result.symbol.value > 18446744073709551615 as usize - section_address) {
+    var base_address: usize = 0;
+    if (!section_address(
+            image, placements[object_index], symbol_result.symbol.section, &base_address) ||
+        symbol_result.symbol.value > 18446744073709551615 as usize - base_address) {
         return false;
     }
-    *result = section_address + symbol_result.symbol.value;
+    *result = base_address + symbol_result.symbol.value;
     return true;
 }
 
-fn bootstrap_linker_resolve_symbol(
-    image: *const BootstrapLinkImage, objects: *const BootstrapObject, placements: *const BootstrapLinkPlacement,
+fn resolve_symbol(
+    image: *const Image, objects: *const object::Object, placements: *const Placement,
     object_index: usize, symbol_index: usize, result: *usize) -> bool {
-    let object: BootstrapObject = objects[object_index];
-    let symbol_result: BootstrapObjectSymbolResult = bootstrap_object_get_symbol(object, symbol_index);
+    let object: object::Object = objects[object_index];
+    let symbol_result: object::SymbolResult = object::get_symbol(object, symbol_index);
     if (symbol_result.error != runtime::Error.none) {
         return false;
     }
     if (symbol_result.symbol.defined) {
-        return bootstrap_linker_symbol_address(image, objects, placements, object_index, symbol_index, result);
+        return symbol_address(image, objects, placements, object_index, symbol_index, result);
     }
-    let name: text::ViewResult = bootstrap_object_symbol_name(object, symbol_result.symbol);
-    var global: BootstrapLinkGlobal = {};
-    return name.error == runtime::Error.none && bootstrap_linker_find_global(image, name.view, &global) &&
-        bootstrap_linker_symbol_address(image, objects, placements, global.object_index, global.symbol_index, result);
+    let name: text::ViewResult = object::symbol_name(object, symbol_result.symbol);
+    var global: Global = {};
+    return name.error == runtime::Error.none && find_global(image, name.view, &global) &&
+        symbol_address(image, objects, placements, global.object_index, global.symbol_index, result);
 }
 
-fn bootstrap_linker_region(
-    image: *BootstrapLinkImage, placement: BootstrapLinkPlacement, section: BootstrapObjectSection,
+fn region(
+    image: *Image, placement: Placement, section: object::Section,
     output_offset: *usize, address: *usize) -> *bytes::Buffer {
-    if (section == BootstrapObjectSection.text) {
+    if (section == object::Section.text) {
         *output_offset = placement.text;
         *address = image->text_address;
         return &image->text;
     }
-    if (section == BootstrapObjectSection.rodata) {
+    if (section == object::Section.rodata) {
         *output_offset = placement.rodata;
         *address = image->rodata_address;
         return &image->rodata;
     }
-    if (section == BootstrapObjectSection.data) {
+    if (section == object::Section.data) {
         *output_offset = placement.data;
         *address = image->data_address;
         return &image->data;
@@ -368,7 +368,7 @@ fn bootstrap_linker_region(
     return null;
 }
 
-fn bootstrap_linker_store_u32(destination: *u8, value: u32) -> bool {
+fn store_u32(destination: *u8, value: u32) -> bool {
     if (destination == null) {
         return false;
     }
@@ -380,7 +380,7 @@ fn bootstrap_linker_store_u32(destination: *u8, value: u32) -> bool {
     return true;
 }
 
-fn bootstrap_linker_store_u64(destination: *u8, value: u64) -> bool {
+fn store_u64(destination: *u8, value: u64) -> bool {
     if (destination == null) {
         return false;
     }
@@ -392,82 +392,82 @@ fn bootstrap_linker_store_u64(destination: *u8, value: u64) -> bool {
     return true;
 }
 
-fn bootstrap_linker_apply_relocations(
-    image: *BootstrapLinkImage, objects: *const BootstrapObject, object_count: usize,
-    placements: *const BootstrapLinkPlacement) -> bool {
+fn apply_relocations(
+    image: *Image, objects: *const object::Object, object_count: usize,
+    placements: *const Placement) -> bool {
     var object_index: usize = 0;
     while (object_index < object_count) {
         image->input_index = object_index;
-        let object: BootstrapObject = objects[object_index];
+        let object: object::Object = objects[object_index];
         var relocation_index: usize = 0;
-        while (relocation_index < bootstrap_object_relocation_count(object)) {
-            let result: BootstrapObjectRelocationResult = bootstrap_object_get_relocation(object, relocation_index);
+        while (relocation_index < object::relocation_count(object)) {
+            let result: object::RelocationResult = object::get_relocation(object, relocation_index);
             if (result.error != runtime::Error.none) {
-                return bootstrap_linker_fail(image, result.error, object_index);
+                return fail(image, result.error, object_index);
             }
-            let relocation: BootstrapObjectRelocation = result.relocation;
+            let relocation: object::Relocation = result.relocation;
             var symbol_address: usize = 0;
-            if (!bootstrap_linker_resolve_symbol(
-                    image as *const BootstrapLinkImage, objects, placements, object_index, relocation.symbol_index,
+            if (!resolve_symbol(
+                    image as *const Image, objects, placements, object_index, relocation.symbol_index,
                     &symbol_address)) {
-                return bootstrap_linker_fail(image, runtime::Error.not_found, object_index);
+                return fail(image, runtime::Error.not_found, object_index);
             }
             var placement_offset: usize = 0;
             var region_address: usize = 0;
-            let region: *bytes::Buffer = bootstrap_linker_region(
+            let region: *bytes::Buffer = region(
                 image, placements[object_index], relocation.section, &placement_offset, &region_address);
-            let width: usize = relocation.kind == BootstrapObjectRelocationKind.absolute64 ? 8 : 4;
+            let width: usize = relocation.kind == object::RelocationKind.absolute64 ? 8 : 4;
             if (region == null || relocation.offset > region->length || placement_offset > region->length ||
                 relocation.offset > region->length - placement_offset || width > region->length -
                         placement_offset - relocation.offset) {
-                return bootstrap_linker_fail(image, runtime::Error.invalid_argument, object_index);
+                return fail(image, runtime::Error.invalid_argument, object_index);
             }
             let output_offset: usize = placement_offset + relocation.offset;
-            if (relocation.kind == BootstrapObjectRelocationKind.pc32 || relocation.kind ==
-                    BootstrapObjectRelocationKind.plt32) {
+            if (relocation.kind == object::RelocationKind.pc32 || relocation.kind ==
+                    object::RelocationKind.plt32) {
                 if (symbol_address > 9223372036854775807 as usize || region_address >
                         9223372036854775807 as usize - output_offset) {
-                    return bootstrap_linker_fail(image, runtime::Error.invalid_argument, object_index);
+                    return fail(image, runtime::Error.invalid_argument, object_index);
                 }
                 let place: isize = (region_address + output_offset) as isize;
                 let difference: isize = symbol_address as isize - place;
                 if ((relocation.addend > 0 && difference > 9223372036854775807 as isize - relocation.addend) ||
                     (relocation.addend < 0 && difference < -9223372036854775807 as isize - 1 - relocation.addend)) {
-                    return bootstrap_linker_fail(image, runtime::Error.invalid_argument, object_index);
+                    return fail(image, runtime::Error.invalid_argument, object_index);
                 }
                 let value: isize = difference + relocation.addend;
                 if (value < -2147483648 || value > 2147483647 ||
-                    !bootstrap_linker_store_u32(
+                    !store_u32(
                         &region->data[output_offset], value as u32)) {
-                    return bootstrap_linker_fail(image, runtime::Error.invalid_argument, object_index);
+                    return fail(image, runtime::Error.invalid_argument, object_index);
                 }
-            } else if (relocation.kind == BootstrapObjectRelocationKind.absolute64) {
+            } else if (relocation.kind == object::RelocationKind.absolute64) {
                 let signed_symbol: isize = symbol_address as isize;
                 if (symbol_address > 9223372036854775807 as usize || (relocation.addend > 0 && signed_symbol >
                         9223372036854775807 as isize - relocation.addend) || (relocation.addend < 0 && signed_symbol <
                         -9223372036854775807 as isize - 1 - relocation.addend) ||
-                    !bootstrap_linker_store_u64(
+                    !store_u64(
                         &region->data[output_offset], (signed_symbol + relocation.addend) as u64)) {
-                    return bootstrap_linker_fail(image, runtime::Error.invalid_argument, object_index);
+                    return fail(image, runtime::Error.invalid_argument, object_index);
                 }
-            } else if (relocation.kind == BootstrapObjectRelocationKind.absolute32 || relocation.kind ==
-                    BootstrapObjectRelocationKind.signed32) {
+            } else if (relocation.kind == object::RelocationKind.absolute32 || relocation.kind ==
+                    object::RelocationKind.signed32) {
                 let signed_symbol: isize = symbol_address as isize;
                 if (symbol_address > 9223372036854775807 as usize || (relocation.addend > 0 && signed_symbol >
                         9223372036854775807 as isize - relocation.addend) || (relocation.addend < 0 && signed_symbol <
                         -9223372036854775807 as isize - 1 - relocation.addend)) {
-                    return bootstrap_linker_fail(image, runtime::Error.invalid_argument, object_index);
+                    return fail(image, runtime::Error.invalid_argument, object_index);
                 }
                 let value: isize = signed_symbol + relocation.addend;
-                if ((relocation.kind == BootstrapObjectRelocationKind.absolute32 && (value < 0 || value >
-                        4294967295)) || (relocation.kind == BootstrapObjectRelocationKind.signed32 && (value <
+                if ((relocation.kind == object::RelocationKind.absolute32 && (value < 0 || value >
+                        4294967295)) || (relocation.kind == object::RelocationKind.signed32 && (value <
                         -2147483648 || value > 2147483647)) ||
-                    !bootstrap_linker_store_u32(
+                    !store_u32(
                         &region->data[output_offset], value as u32)) {
-                    return bootstrap_linker_fail(image, runtime::Error.invalid_argument, object_index);
+                    return fail(image, runtime::Error.invalid_argument, object_index);
                 }
             } else {
-                return bootstrap_linker_fail(image, runtime::Error.not_supported, object_index);
+                return fail(image, runtime::Error.not_supported, object_index);
             }
             relocation_index += 1;
         }
@@ -476,71 +476,71 @@ fn bootstrap_linker_apply_relocations(
     return true;
 }
 
-fn bootstrap_linker_resolve_entry(
-    image: *BootstrapLinkImage, objects: *const BootstrapObject, placements: *const BootstrapLinkPlacement) -> bool {
+fn resolve_entry(
+    image: *Image, objects: *const object::Object, placements: *const Placement) -> bool {
     let entry: text::ViewResult = text::view("_start", 6);
-    var global: BootstrapLinkGlobal = {};
+    var global: Global = {};
     if (entry.error != runtime::Error.none ||
-        !bootstrap_linker_find_global(image as *const BootstrapLinkImage, entry.view, &global) ||
-        !bootstrap_linker_symbol_address(
-            image as *const BootstrapLinkImage, objects, placements, global.object_index, global.symbol_index,
+        !find_global(image as *const Image, entry.view, &global) ||
+        !symbol_address(
+            image as *const Image, objects, placements, global.object_index, global.symbol_index,
             &image->entry_address)) {
-        return bootstrap_linker_fail(image, runtime::Error.not_found, image->input_index);
+        return fail(image, runtime::Error.not_found, image->input_index);
     }
-    let symbol: BootstrapObjectSymbolResult =
-        bootstrap_object_get_symbol(objects[global.object_index], global.symbol_index);
-    if (symbol.error != runtime::Error.none || symbol.symbol.section != BootstrapObjectSection.text ||
-        symbol.symbol.kind != BootstrapObjectSymbolKind.function) {
-        return bootstrap_linker_fail(image, runtime::Error.invalid_argument, global.object_index);
+    let symbol: object::SymbolResult =
+        object::get_symbol(objects[global.object_index], global.symbol_index);
+    if (symbol.error != runtime::Error.none || symbol.symbol.section != object::Section.text ||
+        symbol.symbol.kind != object::SymbolKind.function) {
+        return fail(image, runtime::Error.invalid_argument, global.object_index);
     }
     return true;
 }
 
-fn bootstrap_linker_write_header(
-    output: *bytes::Buffer, image: *const BootstrapLinkImage, program_count: usize) -> bool {
-    return bootstrap_linker_append_bytes(output, "\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00", 16) &&
-        bootstrap_linker_append_u16(output, (BootstrapElf.executable_type as usize) as u16) &&
-        bootstrap_linker_append_u16(output, (BootstrapElf.machine_x86_64 as usize) as u16) &&
-        bootstrap_linker_append_u32(output, 1) && bootstrap_linker_append_u64(output, image->entry_address as u64) &&
-        bootstrap_linker_append_u64(output, (BootstrapElf.header_size as usize) as u64) &&
-        bootstrap_linker_append_u64(output, 0) && bootstrap_linker_append_u32(output, 0) &&
-        bootstrap_linker_append_u16(output, (BootstrapElf.header_size as usize) as u16) &&
-        bootstrap_linker_append_u16(output, (BootstrapElf.program_header_size as usize) as u16) &&
-        bootstrap_linker_append_u16(output, program_count as u16) &&
-        bootstrap_linker_append_u16(output, 0) && bootstrap_linker_append_u16(output, 0) &&
-        bootstrap_linker_append_u16(output, 0);
+fn write_header(
+    output: *bytes::Buffer, image: *const Image, program_count: usize) -> bool {
+    return append_bytes(output, "\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00", 16) &&
+        append_u16(output, (Elf.executable_type as usize) as u16) &&
+        append_u16(output, (Elf.machine_x86_64 as usize) as u16) &&
+        append_u32(output, 1) && append_u64(output, image->entry_address as u64) &&
+        append_u64(output, (Elf.header_size as usize) as u64) &&
+        append_u64(output, 0) && append_u32(output, 0) &&
+        append_u16(output, (Elf.header_size as usize) as u16) &&
+        append_u16(output, (Elf.program_header_size as usize) as u16) &&
+        append_u16(output, program_count as u16) &&
+        append_u16(output, 0) && append_u16(output, 0) &&
+        append_u16(output, 0);
 }
 
-fn bootstrap_linker_write_program(
+fn write_program(
     output: *bytes::Buffer, flags: u32, offset: usize, address: usize, file_size: usize, memory_size: usize) -> bool {
-    return bootstrap_linker_append_u32(output, (BootstrapElf.load_segment as usize) as u32) &&
-        bootstrap_linker_append_u32(output, flags) && bootstrap_linker_append_u64(output, offset as u64) &&
-        bootstrap_linker_append_u64(output, address as u64) && bootstrap_linker_append_u64(output, address as u64) &&
-        bootstrap_linker_append_u64(output, file_size as u64) &&
-        bootstrap_linker_append_u64(output, memory_size as u64) &&
-        bootstrap_linker_append_u64(output, (BootstrapLinkerLimit.page_size as usize) as u64);
+    return append_u32(output, (Elf.load_segment as usize) as u32) &&
+        append_u32(output, flags) && append_u64(output, offset as u64) &&
+        append_u64(output, address as u64) && append_u64(output, address as u64) &&
+        append_u64(output, file_size as u64) &&
+        append_u64(output, memory_size as u64) &&
+        append_u64(output, (Limit.page_size as usize) as u64);
 }
 
-fn bootstrap_linker_serialize(image: *const BootstrapLinkImage) -> bytes::BufferResult {
+fn serialize(image: *const Image) -> bytes::BufferResult {
     var output: bytes::Buffer = bytes::empty();
     let has_rodata: bool = image->rodata.length != 0;
     let has_data: bool = image->data.length != 0 || image->bss_size != 0;
     let program_count: usize = 1 + (has_rodata ? 1 : 0) + (has_data ? 1 : 0);
-    if (!bootstrap_linker_write_header(&output, image, program_count) ||
-        !bootstrap_linker_write_program(
-            &output, ((BootstrapElf.flag_read as usize) | (BootstrapElf.flag_execute as usize)) as u32,
-            BootstrapLinkerLimit.text_offset as usize, image->text_address, image->text.length, image->text.length)) {
+    if (!write_header(&output, image, program_count) ||
+        !write_program(
+            &output, ((Elf.flag_read as usize) | (Elf.flag_execute as usize)) as u32,
+            Limit.text_offset as usize, image->text_address, image->text.length, image->text.length)) {
         bytes::release(output);
         return {
             buffer = bytes::empty(), error = runtime::Error.out_of_memory,
         };
     }
-    let base: usize = BootstrapLinkerLimit.image_base as usize;
+    let base: usize = Limit.image_base as usize;
     let rodata_offset: usize = image->rodata_address - base;
     let data_offset: usize = image->data_address - base;
     if (has_rodata &&
-        !bootstrap_linker_write_program(
-            &output, (BootstrapElf.flag_read as usize) as u32, rodata_offset, image->rodata_address,
+        !write_program(
+            &output, (Elf.flag_read as usize) as u32, rodata_offset, image->rodata_address,
             image->rodata.length, image->rodata.length)) {
         bytes::release(output);
         return {
@@ -550,8 +550,8 @@ fn bootstrap_linker_serialize(image: *const BootstrapLinkImage) -> bytes::Buffer
     if (has_data) {
         let memory_size: usize = image->bss_size == 0 ? image->data.length : image->bss_address + image->bss_size -
                     image->data_address;
-        if (!bootstrap_linker_write_program(
-                &output, ((BootstrapElf.flag_read as usize) | (BootstrapElf.flag_write as usize)) as u32, data_offset,
+        if (!write_program(
+                &output, ((Elf.flag_read as usize) | (Elf.flag_write as usize)) as u32, data_offset,
                 image->data_address, image->data.length, memory_size)) {
             bytes::release(output);
             return {
@@ -559,13 +559,13 @@ fn bootstrap_linker_serialize(image: *const BootstrapLinkImage) -> bytes::Buffer
             };
         }
     }
-    if (!bootstrap_linker_pad_to(&output, BootstrapLinkerLimit.text_offset as usize) ||
-        !bootstrap_linker_append_bytes(&output, image->text.data as *const u8, image->text.length) ||
-        (has_rodata && (!bootstrap_linker_pad_to(&output, rodata_offset) ||
-          !bootstrap_linker_append_bytes(
+    if (!pad_to(&output, Limit.text_offset as usize) ||
+        !append_bytes(&output, image->text.data as *const u8, image->text.length) ||
+        (has_rodata && (!pad_to(&output, rodata_offset) ||
+          !append_bytes(
             &output, image->rodata.data as *const u8, image->rodata.length))) || (has_data &&
-         (!bootstrap_linker_pad_to(&output, data_offset) ||
-          !bootstrap_linker_append_bytes(
+         (!pad_to(&output, data_offset) ||
+          !append_bytes(
             &output, image->data.data as *const u8, image->data.length)))) {
         bytes::release(output);
         return {
@@ -577,7 +577,7 @@ fn bootstrap_linker_serialize(image: *const BootstrapLinkImage) -> bytes::Buffer
     };
 }
 
-fn bootstrap_linker_image_release(image: BootstrapLinkImage) -> runtime::Error {
+fn image_release(image: Image) -> runtime::Error {
     var error: runtime::Error = bytes::release(image.globals);
     let data_error: runtime::Error = bytes::release(image.data);
     let rodata_error: runtime::Error = bytes::release(image.rodata);
@@ -594,30 +594,30 @@ fn bootstrap_linker_image_release(image: BootstrapLinkImage) -> runtime::Error {
     return error;
 }
 
-fn bootstrap_x86_64_link(objects: *const BootstrapObject, object_count: usize) -> BootstrapLinkerResult {
-    var image: BootstrapLinkImage = bootstrap_linker_image_empty();
-    if (objects == null || object_count == 0 || object_count > BootstrapLinkerLimit.maximum_inputs as usize) {
+fn link(objects: *const object::Object, object_count: usize) -> Result {
+    var image: Image = image_empty();
+    if (objects == null || object_count == 0 || object_count > Limit.maximum_inputs as usize) {
         return {
             executable = bytes::empty(), error = runtime::Error.invalid_argument, input_index = 0,
         };
     }
-    var placements: [65]BootstrapLinkPlacement = {};
+    var placements: [65]Placement = {};
     var executable: bytes::BufferResult = {
         buffer = bytes::empty(), error = runtime::Error.invalid_argument,
     };
-    if (bootstrap_linker_collect_globals(&image, objects, object_count) &&
-        bootstrap_linker_layout_regions(&image, objects, object_count, &placements[0]) &&
-        bootstrap_linker_layout_image(&image) &&
-        bootstrap_linker_apply_relocations(
-            &image, objects, object_count, &placements[0] as *const BootstrapLinkPlacement) &&
-        bootstrap_linker_resolve_entry(
-            &image, objects, &placements[0] as *const BootstrapLinkPlacement)) {
-        executable = bootstrap_linker_serialize(&image as *const BootstrapLinkImage);
+    if (collect_globals(&image, objects, object_count) &&
+        layout_regions(&image, objects, object_count, &placements[0]) &&
+        layout_image(&image) &&
+        apply_relocations(
+            &image, objects, object_count, &placements[0] as *const Placement) &&
+        resolve_entry(
+            &image, objects, &placements[0] as *const Placement)) {
+        executable = serialize(&image as *const Image);
         if (executable.error != runtime::Error.none) {
             image.error = executable.error;
         }
     }
-    let image_error: runtime::Error = bootstrap_linker_image_release(image);
+    let image_error: runtime::Error = image_release(image);
     if (image.error == runtime::Error.none && executable.error == runtime::Error.none &&
         image_error != runtime::Error.none) {
         bytes::release(executable.buffer);

@@ -1,9 +1,9 @@
 module luna.tools.bootstrap.stage_compiler;
 
-import luna.bootstrap.backend.x86_64.abi;
-import luna.bootstrap.backend.x86_64.codegen;
-import luna.bootstrap.backend.x86_64.frame;
-import luna.bootstrap.backend.x86_64.text;
+import luna.bootstrap.backend.x86_64.abi as abi;
+import luna.bootstrap.backend.x86_64.codegen as codegen;
+import luna.bootstrap.backend.x86_64.frame as frame;
+import luna.bootstrap.backend.x86_64.text as asm_text;
 import luna.bootstrap.frontend.lexer as lexer;
 import luna.bootstrap.frontend.parser as parser;
 import luna.bootstrap.middleend.ir as ir;
@@ -14,7 +14,7 @@ import luna.runtime;
 import luna.std.bytes;
 import luna.std.io;
 import luna.std.path as path;
-import luna.std.text as std_text;
+import luna.std.text as text;
 
 enum BootstrapStageLimit: usize {
     maximum_units = 64, maximum_path_bytes = 4096, maximum_source_bytes = 8388608,
@@ -36,21 +36,21 @@ fn bootstrap_stage_invalid_path_result(error: runtime::Error) -> path::PathResul
 }
 
 fn bootstrap_stage_unit_path(index: usize) -> path::PathResult {
-    var text: BootstrapX8664Text = bootstrap_x86_64_text_empty();
-    if (!bootstrap_x86_64_text_append_c_string(&text, "bootstrap-stage-unit-", 32) ||
-        !bootstrap_x86_64_text_append_usize(&text, index) ||
-        !bootstrap_x86_64_text_append_c_string(
+    var text: asm_text::Text = asm_text::empty();
+    if (!asm_text::append_c_string(&text, "bootstrap-stage-unit-", 32) ||
+        !asm_text::append_usize(&text, index) ||
+        !asm_text::append_c_string(
             &text, ".luna", 8)) {
         let error: runtime::Error = text.error == runtime::Error.none ? runtime::Error.invalid_argument : text.error;
-        bootstrap_x86_64_text_release(text);
+        asm_text::release(text);
         return bootstrap_stage_invalid_path_result(error);
     }
-    let bytes: bytes::BufferResult = bootstrap_x86_64_text_take(&text);
+    let bytes: bytes::BufferResult = asm_text::take(&text);
     if (bytes.error != runtime::Error.none) {
-        bootstrap_x86_64_text_release(text);
+        asm_text::release(text);
         return bootstrap_stage_invalid_path_result(bytes.error);
     }
-    let view: std_text::ViewResult = std_text::view(bytes.buffer.data as *const u8, bytes.buffer.length);
+    let view: text::ViewResult = text::view(bytes.buffer.data as *const u8, bytes.buffer.length);
     var result: path::PathResult = bootstrap_stage_invalid_path_result(view.error);
     if (view.error == runtime::Error.none) {
         result = path::from_text(view.view);
@@ -147,7 +147,7 @@ fn bootstrap_stage_source_load(
     if (source.error != runtime::Error.none) {
         return source.error;
     }
-    let view: std_text::ViewResult = std_text::view(source.buffer.data as *const u8, source.buffer.length);
+    let view: text::ViewResult = text::view(source.buffer.data as *const u8, source.buffer.length);
     if (view.error != runtime::Error.none) {
         bytes::release(source.buffer);
         return view.error;
@@ -215,16 +215,16 @@ fn bootstrap_stage_frontend_status(frontend: parser::FrontendResult) -> i32 {
     return BootstrapStageStatus.input_error as i32;
 }
 
-fn bootstrap_stage_print_text(text: *BootstrapX8664Text) -> runtime::Error {
+fn bootstrap_stage_print_text(text: *asm_text::Text) -> runtime::Error {
     if (text == null) {
         return runtime::Error.invalid_argument;
     }
-    let bytes: bytes::BufferResult = bootstrap_x86_64_text_take(text);
+    let bytes: bytes::BufferResult = asm_text::take(text);
     if (bytes.error != runtime::Error.none) {
-        bootstrap_x86_64_text_release(*text);
+        asm_text::release(*text);
         return bytes.error;
     }
-    let view: std_text::ViewResult = std_text::view(bytes.buffer.data as *const u8, bytes.buffer.length);
+    let view: text::ViewResult = text::view(bytes.buffer.data as *const u8, bytes.buffer.length);
     var error: runtime::Error = view.error;
     if (error == runtime::Error.none) {
         error = io::print_error(view.view);
@@ -242,16 +242,16 @@ fn bootstrap_stage_report_frontend(frontend: parser::FrontendResult) -> runtime:
     if (result.error != runtime::Error.none) {
         return result.error;
     }
-    var text: BootstrapX8664Text = bootstrap_x86_64_text_empty();
-    if (!bootstrap_x86_64_text_append_c_string(&text, lexical ? "frontend:lex:" : "frontend:parse:", 32) ||
-        !bootstrap_x86_64_text_append_usize(&text, result.diagnostic.kind as usize) ||
-        !bootstrap_x86_64_text_append_c_string(&text, ":", 2) ||
-        !bootstrap_x86_64_text_append_usize(&text, result.diagnostic.span.offset) ||
-        !bootstrap_x86_64_text_append_c_string(&text, ":", 2) ||
-        !bootstrap_x86_64_text_append_usize(&text, result.diagnostic.detail) ||
-        !bootstrap_x86_64_text_append_c_string(&text, "\n", 2)) {
+    var text: asm_text::Text = asm_text::empty();
+    if (!asm_text::append_c_string(&text, lexical ? "frontend:lex:" : "frontend:parse:", 32) ||
+        !asm_text::append_usize(&text, result.diagnostic.kind as usize) ||
+        !asm_text::append_c_string(&text, ":", 2) ||
+        !asm_text::append_usize(&text, result.diagnostic.span.offset) ||
+        !asm_text::append_c_string(&text, ":", 2) ||
+        !asm_text::append_usize(&text, result.diagnostic.detail) ||
+        !asm_text::append_c_string(&text, "\n", 2)) {
         let error: runtime::Error = text.error == runtime::Error.none ? runtime::Error.invalid_argument : text.error;
-        bootstrap_x86_64_text_release(text);
+        asm_text::release(text);
         return error;
     }
     return bootstrap_stage_print_text(&text);
@@ -259,15 +259,15 @@ fn bootstrap_stage_report_frontend(frontend: parser::FrontendResult) -> runtime:
 
 fn bootstrap_stage_report_resource(
     label: *const u8, label_maximum_length: usize, unit_index: usize, limit: usize) -> runtime::Error {
-    var text: BootstrapX8664Text = bootstrap_x86_64_text_empty();
-    if (!bootstrap_x86_64_text_append_c_string(&text, "resource:", 16) ||
-        !bootstrap_x86_64_text_append_c_string(&text, label, label_maximum_length) ||
-        !bootstrap_x86_64_text_append_c_string(&text, ":", 2) ||
-        !bootstrap_x86_64_text_append_usize(&text, unit_index) ||
-        !bootstrap_x86_64_text_append_c_string(&text, ":", 2) || !bootstrap_x86_64_text_append_usize(&text, limit) ||
-        !bootstrap_x86_64_text_append_c_string(&text, "\n", 2)) {
+    var text: asm_text::Text = asm_text::empty();
+    if (!asm_text::append_c_string(&text, "resource:", 16) ||
+        !asm_text::append_c_string(&text, label, label_maximum_length) ||
+        !asm_text::append_c_string(&text, ":", 2) ||
+        !asm_text::append_usize(&text, unit_index) ||
+        !asm_text::append_c_string(&text, ":", 2) || !asm_text::append_usize(&text, limit) ||
+        !asm_text::append_c_string(&text, "\n", 2)) {
         let error: runtime::Error = text.error == runtime::Error.none ? runtime::Error.invalid_argument : text.error;
-        bootstrap_x86_64_text_release(text);
+        asm_text::release(text);
         return error;
     }
     return bootstrap_stage_print_text(&text);
@@ -275,11 +275,11 @@ fn bootstrap_stage_report_resource(
 
 fn bootstrap_stage_input_add(
     input: *context::Input, source: bytes::Buffer, frontend: parser::FrontendResult,
-    path: std_text::View) -> bool {
+    path: text::View) -> bool {
     if (input == null) {
         return false;
     }
-    let view: std_text::ViewResult = std_text::view(source.data as *const u8, source.length);
+    let view: text::ViewResult = text::view(source.data as *const u8, source.length);
     return view.error == runtime::Error.none &&
         context::input_add(
             input, {
@@ -310,26 +310,26 @@ fn bootstrap_stage_report_semantic(semantic: context::Result) -> runtime::Error 
     if (diagnostic.error != runtime::Error.none) {
         return diagnostic.error;
     }
-    var text: BootstrapX8664Text = bootstrap_x86_64_text_empty();
-    if (!bootstrap_x86_64_text_append_c_string(&text, "semantic:", 16) ||
-        !bootstrap_x86_64_text_append_usize(&text, diagnostic.diagnostic.kind as usize) ||
-        !bootstrap_x86_64_text_append_c_string(&text, ":", 2) ||
-        !bootstrap_x86_64_text_append_usize(&text, diagnostic.diagnostic.unit_index) ||
-        !bootstrap_x86_64_text_append_c_string(&text, ":", 2) ||
-        !bootstrap_x86_64_text_append_usize(&text, diagnostic.diagnostic.span.offset) ||
-        !bootstrap_x86_64_text_append_c_string(&text, ":", 2) ||
-        !bootstrap_x86_64_text_append_usize(&text, diagnostic.diagnostic.detail) ||
-        !bootstrap_x86_64_text_append_c_string(&text, "\n", 2)) {
+    var text: asm_text::Text = asm_text::empty();
+    if (!asm_text::append_c_string(&text, "semantic:", 16) ||
+        !asm_text::append_usize(&text, diagnostic.diagnostic.kind as usize) ||
+        !asm_text::append_c_string(&text, ":", 2) ||
+        !asm_text::append_usize(&text, diagnostic.diagnostic.unit_index) ||
+        !asm_text::append_c_string(&text, ":", 2) ||
+        !asm_text::append_usize(&text, diagnostic.diagnostic.span.offset) ||
+        !asm_text::append_c_string(&text, ":", 2) ||
+        !asm_text::append_usize(&text, diagnostic.diagnostic.detail) ||
+        !asm_text::append_c_string(&text, "\n", 2)) {
         let error: runtime::Error = text.error == runtime::Error.none ? runtime::Error.invalid_argument : text.error;
-        bootstrap_x86_64_text_release(text);
+        asm_text::release(text);
         return error;
     }
-    let bytes: bytes::BufferResult = bootstrap_x86_64_text_take(&text);
+    let bytes: bytes::BufferResult = asm_text::take(&text);
     if (bytes.error != runtime::Error.none) {
-        bootstrap_x86_64_text_release(text);
+        asm_text::release(text);
         return bytes.error;
     }
-    let view: std_text::ViewResult = std_text::view(bytes.buffer.data as *const u8, bytes.buffer.length);
+    let view: text::ViewResult = text::view(bytes.buffer.data as *const u8, bytes.buffer.length);
     var error: runtime::Error = view.error;
     if (error == runtime::Error.none) {
         error = io::print_error(view.view);
@@ -447,13 +447,13 @@ fn bootstrap_stage_run(
             if (path.error != runtime::Error.none) {
                 added = false;
             } else {
-                let text: std_text::ViewResult = path::text(path.path);
+                let text: text::ViewResult = path::text(path.path);
                 added = text.error == runtime::Error.none &&
                     bootstrap_stage_input_add(&input, sources[index], frontends[index], text.view);
                 added = path::release(path.path) == runtime::Error.none && added;
             }
         } else {
-            let text: std_text::ViewResult = path::text(input_paths[index]);
+            let text: text::ViewResult = path::text(input_paths[index]);
             added = text.error == runtime::Error.none &&
                 bootstrap_stage_input_add(&input, sources[index], frontends[index], text.view);
         }
@@ -479,12 +479,12 @@ fn bootstrap_stage_run(
         bootstrap_stage_sources_release(&sources[0], &frontends[0], source_count);
         return status;
     }
-    let backend: BootstrapX8664BackendResult = bootstrap_x86_64_emit_assembly(input, semantic.ir, semantic.types);
-    if (!bootstrap_x86_64_backend_is_success(
+    let backend: codegen::BackendResult = codegen::emit_assembly(input, semantic.ir, semantic.types);
+    if (!codegen::backend_is_success(
             backend, input, semantic.ir, semantic.types)) {
         let backend_status: i32 = backend.error == runtime::Error.out_of_memory ?
                 BootstrapStageStatus.resource_limit as i32 : BootstrapStageStatus.backend_error as i32;
-        bootstrap_x86_64_backend_release(backend);
+        codegen::backend_release(backend);
         context::result_release(semantic);
         context::input_release(input);
         bootstrap_stage_sources_release(&sources[0], &frontends[0], source_count);
@@ -494,7 +494,7 @@ fn bootstrap_stage_run(
     let write_error: runtime::Error = io::write_file_atomic(
         output_path, backend.assembly.data as *const u8, backend.assembly.length);
 
-    let backend_error: runtime::Error = bootstrap_x86_64_backend_release(backend);
+    let backend_error: runtime::Error = codegen::backend_release(backend);
     let semantic_error: runtime::Error = context::result_release(semantic);
     let input_error: runtime::Error = context::input_release(input);
     let sources_error: runtime::Error = bootstrap_stage_sources_release(&sources[0], &frontends[0], source_count);
@@ -523,7 +523,7 @@ fn bootstrap_stage_argument_equals(argument: *const u8, expected: *const u8, len
 }
 
 fn bootstrap_stage_print_c_string(file: runtime::File, data: *const u8) -> runtime::Error {
-    let text: std_text::ViewResult = std_text::from_c_string(data, 1024);
+    let text: text::ViewResult = text::from_c_string(data, 1024);
     if (text.error != runtime::Error.none) {
         return text.error;
     }
@@ -629,12 +629,12 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
         valid = false;
     }
     if (valid) {
-        let output_text: std_text::ViewResult = path::text(output);
+        let output_text: text::ViewResult = path::text(output);
         index = 0;
         while (index < input_count && valid) {
-            let input_text: std_text::ViewResult = path::text(inputs[index]);
+            let input_text: text::ViewResult = path::text(inputs[index]);
             valid = output_text.error == runtime::Error.none && input_text.error == runtime::Error.none &&
-                !std_text::equal(output_text.view, input_text.view);
+                !text::equal(output_text.view, input_text.view);
             index += 1;
         }
     }

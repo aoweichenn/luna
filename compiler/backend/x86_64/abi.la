@@ -1,118 +1,118 @@
 module luna.bootstrap.backend.x86_64.abi;
 
-enum BootstrapX8664AbiLimit: usize {
+enum Limit: usize {
     maximum_size = 18446744073709551615, general_register_count = 6, vector_register_count = 8, eightbyte_size = 8,
     stack_alignment = 16, maximum_register_eightbytes = 2, maximum_type_depth = 128, maximum_stack_size = 2147483647,
 }
 
-fn bootstrap_x86_64_abi_no_id() -> usize {
-    return BootstrapX8664AbiLimit.maximum_size as usize;
+fn no_id() -> usize {
+    return Limit.maximum_size as usize;
 }
 
-fn bootstrap_x86_64_abi_empty() -> BootstrapX8664Abi {
+fn empty() -> Abi {
     return {
         functions = bytes::empty(), function_count = 0, parameters = bytes::empty(),
         parameter_count = 0, pieces = bytes::empty(), piece_count = 0, error = runtime::Error.none,
     };
 }
 
-fn bootstrap_x86_64_abi_buffer_matches(buffer: bytes::Buffer, count: usize, record_size: usize) -> bool {
+fn buffer_matches(buffer: bytes::Buffer, count: usize, record_size: usize) -> bool {
     return bytes::is_valid(buffer) && record_size != 0 && buffer.length % record_size == 0 &&
         count == buffer.length / record_size;
 }
 
-fn bootstrap_x86_64_abi_storage_is_valid(abi: BootstrapX8664Abi) -> bool {
-    return bootstrap_x86_64_abi_buffer_matches(abi.functions, abi.function_count, sizeof(BootstrapX8664AbiFunction)) &&
-        bootstrap_x86_64_abi_buffer_matches(abi.parameters, abi.parameter_count, sizeof(BootstrapX8664AbiParameter)) &&
-        bootstrap_x86_64_abi_buffer_matches(abi.pieces, abi.piece_count, sizeof(BootstrapX8664AbiPiece));
+fn storage_is_valid(abi: Abi) -> bool {
+    return buffer_matches(abi.functions, abi.function_count, sizeof(Function)) &&
+        buffer_matches(abi.parameters, abi.parameter_count, sizeof(Parameter)) &&
+        buffer_matches(abi.pieces, abi.piece_count, sizeof(Piece));
 }
 
-fn bootstrap_x86_64_abi_align_up(value: usize, alignment: usize) -> usize {
-    if (alignment == 0 || (alignment & (alignment - 1)) != 0 || value > (BootstrapX8664AbiLimit.maximum_size as usize) -
+fn align_up(value: usize, alignment: usize) -> usize {
+    if (alignment == 0 || (alignment & (alignment - 1)) != 0 || value > (Limit.maximum_size as usize) -
                 (alignment - 1)) {
-        return bootstrap_x86_64_abi_no_id();
+        return no_id();
     }
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
-fn bootstrap_x86_64_abi_class_merge(
-    left: BootstrapX8664AbiClass, right: BootstrapX8664AbiClass) -> BootstrapX8664AbiClass {
+fn class_merge(
+    left: Class, right: Class) -> Class {
     if (left == right) {
         return left;
     }
-    if (left == BootstrapX8664AbiClass.no_class) {
+    if (left == Class.no_class) {
         return right;
     }
-    if (right == BootstrapX8664AbiClass.no_class) {
+    if (right == Class.no_class) {
         return left;
     }
-    if (left == BootstrapX8664AbiClass.memory || right == BootstrapX8664AbiClass.memory) {
-        return BootstrapX8664AbiClass.memory;
+    if (left == Class.memory || right == Class.memory) {
+        return Class.memory;
     }
-    if (left == BootstrapX8664AbiClass.integer || right == BootstrapX8664AbiClass.integer) {
-        return BootstrapX8664AbiClass.integer;
+    if (left == Class.integer || right == Class.integer) {
+        return Class.integer;
     }
-    return BootstrapX8664AbiClass.sse;
+    return Class.sse;
 }
 
-fn bootstrap_x86_64_abi_set_memory(classification: *BootstrapX8664AbiClassification) -> bool {
+fn set_memory(classification: *Classification) -> bool {
     if (classification == null) {
         return false;
     }
     classification->eightbyte_count = 1;
-    classification->first = BootstrapX8664AbiClass.memory;
-    classification->second = BootstrapX8664AbiClass.no_class;
+    classification->first = Class.memory;
+    classification->second = Class.no_class;
     return false;
 }
 
-fn bootstrap_x86_64_abi_scalar_class(kind: type_info::Kind) -> BootstrapX8664AbiClass {
-    return type_info::is_float(kind) ? BootstrapX8664AbiClass.sse : BootstrapX8664AbiClass.integer;
+fn scalar_class(kind: type_info::Kind) -> Class {
+    return type_info::is_float(kind) ? Class.sse : Class.integer;
 }
 
-fn bootstrap_x86_64_abi_merge_leaf(
-    classification: *BootstrapX8664AbiClassification, offset_bytes: usize, size_bytes: usize, alignment_bytes: usize,
-    abi_class: BootstrapX8664AbiClass) -> bool {
+fn merge_leaf(
+    classification: *Classification, offset_bytes: usize, size_bytes: usize, alignment_bytes: usize,
+    abi_class: Class) -> bool {
     if (classification == null || size_bytes == 0 || size_bytes > 8 || alignment_bytes == 0 ||
         offset_bytes % alignment_bytes != 0 || offset_bytes > 15 || size_bytes > 16 - offset_bytes) {
-        return bootstrap_x86_64_abi_set_memory(classification);
+        return set_memory(classification);
     }
     let first: usize = offset_bytes / 8;
     let last: usize = (offset_bytes + size_bytes - 1) / 8;
     var index: usize = first;
     while (index <= last) {
         if (index == 0) {
-            classification->first = bootstrap_x86_64_abi_class_merge(classification->first, abi_class);
+            classification->first = class_merge(classification->first, abi_class);
         } else if (index == 1) {
-            classification->second = bootstrap_x86_64_abi_class_merge(classification->second, abi_class);
+            classification->second = class_merge(classification->second, abi_class);
         } else {
-            return bootstrap_x86_64_abi_set_memory(classification);
+            return set_memory(classification);
         }
         index += 1;
     }
     return true;
 }
 
-fn bootstrap_x86_64_abi_merge_type(
+fn merge_type(
     types: type_info::Table, type_id: usize, base_offset: usize, depth: usize,
-    classification: *BootstrapX8664AbiClassification) -> bool {
-    if (type_id >= types.type_count || depth > BootstrapX8664AbiLimit.maximum_type_depth as usize ||
-        classification == null || classification->first == BootstrapX8664AbiClass.memory) {
-        return bootstrap_x86_64_abi_set_memory(classification);
+    classification: *Classification) -> bool {
+    if (type_id >= types.type_count || depth > Limit.maximum_type_depth as usize ||
+        classification == null || classification->first == Class.memory) {
+        return set_memory(classification);
     }
     let records: *const type_info::Record = types.types.data as *const type_info::Record;
     let fields: *const type_info::Field = types.fields.data as *const type_info::Field;
     let record: type_info::Record = records[type_id];
     if (type_info::is_scalar(record.kind)) {
-        return bootstrap_x86_64_abi_merge_leaf(
+        return merge_leaf(
             classification, base_offset, record.size_bytes, record.alignment_bytes,
-            bootstrap_x86_64_abi_scalar_class(record.kind));
+            scalar_class(record.kind));
     }
     if (record.kind == type_info::Kind.array) {
         let element: type_info::Record = records[record.element_type];
         var index: usize = 0;
         while (index < record.element_count) {
-            if (index > (BootstrapX8664AbiLimit.maximum_size as usize) / element.size_bytes ||
-                !bootstrap_x86_64_abi_merge_type(
+            if (index > (Limit.maximum_size as usize) / element.size_bytes ||
+                !merge_type(
                     types, record.element_type, base_offset + index * element.size_bytes, depth + 1, classification)) {
                 return false;
             }
@@ -124,8 +124,8 @@ fn bootstrap_x86_64_abi_merge_type(
         var index: usize = 0;
         while (index < record.field_count) {
             let field: type_info::Field = fields[record.first_field + index];
-            if (field.offset_bytes > (BootstrapX8664AbiLimit.maximum_size as usize) - base_offset ||
-                !bootstrap_x86_64_abi_merge_type(
+            if (field.offset_bytes > (Limit.maximum_size as usize) - base_offset ||
+                !merge_type(
                     types, field.type_id, base_offset + field.offset_bytes, depth + 1, classification)) {
                 return false;
             }
@@ -133,12 +133,12 @@ fn bootstrap_x86_64_abi_merge_type(
         }
         return true;
     }
-    return bootstrap_x86_64_abi_set_memory(classification);
+    return set_memory(classification);
 }
 
-fn bootstrap_x86_64_abi_classify(types: type_info::Table, type_id: usize) -> BootstrapX8664AbiClassification {
-    var result: BootstrapX8664AbiClassification = {
-        eightbyte_count = 0, first = BootstrapX8664AbiClass.invalid, second = BootstrapX8664AbiClass.invalid,
+fn classify(types: type_info::Table, type_id: usize) -> Classification {
+    var result: Classification = {
+        eightbyte_count = 0, first = Class.invalid, second = Class.invalid,
     };
     if (!type_info::table_is_valid(types, true) || type_id >= types.type_count) {
         return result;
@@ -148,27 +148,27 @@ fn bootstrap_x86_64_abi_classify(types: type_info::Table, type_id: usize) -> Boo
     if (!type_info::is_memory(record.kind) || record.size_bytes == 0) {
         return result;
     }
-    result.first = BootstrapX8664AbiClass.no_class;
-    result.second = BootstrapX8664AbiClass.no_class;
+    result.first = Class.no_class;
+    result.second = Class.no_class;
     if (record.size_bytes > 16 || record.alignment_bytes > 16) {
-        bootstrap_x86_64_abi_set_memory(&result);
+        set_memory(&result);
         return result;
     }
     result.eightbyte_count = (record.size_bytes + 7) / 8;
-    if (!bootstrap_x86_64_abi_merge_type(
+    if (!merge_type(
             types, type_id, 0, 0, &result)) {
         return result;
     }
-    if (result.first == BootstrapX8664AbiClass.no_class) {
-        result.first = BootstrapX8664AbiClass.integer;
+    if (result.first == Class.no_class) {
+        result.first = Class.integer;
     }
-    if (result.eightbyte_count == 2 && result.second == BootstrapX8664AbiClass.no_class) {
-        result.second = BootstrapX8664AbiClass.integer;
+    if (result.eightbyte_count == 2 && result.second == Class.no_class) {
+        result.second = Class.integer;
     }
     return result;
 }
 
-fn bootstrap_x86_64_abi_append(buffer: bytes::Buffer, record: *const u8, record_size: usize) -> bytes::BufferResult {
+fn append(buffer: bytes::Buffer, record: *const u8, record_size: usize) -> bytes::BufferResult {
     if (record == null || record_size == 0) {
         return {
             buffer = buffer, error = runtime::Error.invalid_argument,
@@ -177,15 +177,15 @@ fn bootstrap_x86_64_abi_append(buffer: bytes::Buffer, record: *const u8, record_
     return bytes::append(buffer, record, record_size);
 }
 
-fn bootstrap_x86_64_abi_add_piece(abi: *BootstrapX8664Abi, piece: BootstrapX8664AbiPiece) -> usize {
-    let none: usize = bootstrap_x86_64_abi_no_id();
+fn add_piece(abi: *Abi, piece: Piece) -> usize {
+    let none: usize = no_id();
     if (abi == null || abi->error != runtime::Error.none) {
         return none;
     }
     let appended: bytes::BufferResult =
-        bootstrap_x86_64_abi_append(
-            abi->pieces, (&piece) as *const BootstrapX8664AbiPiece
-                as *const u8, sizeof(BootstrapX8664AbiPiece));
+        append(
+            abi->pieces, (&piece) as *const Piece
+                as *const u8, sizeof(Piece));
     abi->pieces = appended.buffer;
     abi->error = appended.error;
     if (appended.error != runtime::Error.none) {
@@ -196,15 +196,15 @@ fn bootstrap_x86_64_abi_add_piece(abi: *BootstrapX8664Abi, piece: BootstrapX8664
     return result;
 }
 
-fn bootstrap_x86_64_abi_add_parameter(abi: *BootstrapX8664Abi, parameter: BootstrapX8664AbiParameter) -> usize {
-    let none: usize = bootstrap_x86_64_abi_no_id();
+fn add_parameter(abi: *Abi, parameter: Parameter) -> usize {
+    let none: usize = no_id();
     if (abi == null || abi->error != runtime::Error.none) {
         return none;
     }
     let appended: bytes::BufferResult =
-        bootstrap_x86_64_abi_append(
-            abi->parameters, (&parameter) as *const BootstrapX8664AbiParameter
-                as *const u8, sizeof(BootstrapX8664AbiParameter));
+        append(
+            abi->parameters, (&parameter) as *const Parameter
+                as *const u8, sizeof(Parameter));
     abi->parameters = appended.buffer;
     abi->error = appended.error;
     if (appended.error != runtime::Error.none) {
@@ -215,15 +215,15 @@ fn bootstrap_x86_64_abi_add_parameter(abi: *BootstrapX8664Abi, parameter: Bootst
     return result;
 }
 
-fn bootstrap_x86_64_abi_add_function(abi: *BootstrapX8664Abi, function: BootstrapX8664AbiFunction) -> usize {
-    let none: usize = bootstrap_x86_64_abi_no_id();
+fn add_function(abi: *Abi, function: Function) -> usize {
+    let none: usize = no_id();
     if (abi == null || abi->error != runtime::Error.none) {
         return none;
     }
     let appended: bytes::BufferResult =
-        bootstrap_x86_64_abi_append(
-            abi->functions, (&function) as *const BootstrapX8664AbiFunction
-                as *const u8, sizeof(BootstrapX8664AbiFunction));
+        append(
+            abi->functions, (&function) as *const Function
+                as *const u8, sizeof(Function));
     abi->functions = appended.buffer;
     abi->error = appended.error;
     if (appended.error != runtime::Error.none) {
@@ -234,47 +234,47 @@ fn bootstrap_x86_64_abi_add_function(abi: *BootstrapX8664Abi, function: Bootstra
     return result;
 }
 
-fn bootstrap_x86_64_abi_piece_class(
-    classification: BootstrapX8664AbiClassification, index: usize) -> BootstrapX8664AbiClass {
+fn piece_class(
+    classification: Classification, index: usize) -> Class {
     return index == 0 ? classification.first : classification.second;
 }
 
-fn bootstrap_x86_64_abi_piece_size(size_bytes: usize, index: usize) -> usize {
+fn piece_size(size_bytes: usize, index: usize) -> usize {
     let offset: usize = index * 8;
     let remaining: usize = size_bytes - offset;
     return remaining < 8 ? remaining : 8;
 }
 
-fn bootstrap_x86_64_abi_add_stack_area(
+fn add_stack_area(
     current_size: usize, size_bytes: usize, alignment_bytes: usize, offset: *usize, area_size: *usize) -> usize {
     if (offset == null || area_size == null || size_bytes == 0 || alignment_bytes == 0) {
-        return bootstrap_x86_64_abi_no_id();
+        return no_id();
     }
     let stack_alignment: usize = alignment_bytes > 8 ? alignment_bytes : 8;
-    let aligned_offset: usize = bootstrap_x86_64_abi_align_up(current_size, stack_alignment);
-    let aligned_size: usize = bootstrap_x86_64_abi_align_up(size_bytes, 8);
-    if (aligned_offset == bootstrap_x86_64_abi_no_id() || aligned_size == bootstrap_x86_64_abi_no_id() ||
-        aligned_offset > (BootstrapX8664AbiLimit.maximum_size as usize) - aligned_size) {
-        return bootstrap_x86_64_abi_no_id();
+    let aligned_offset: usize = align_up(current_size, stack_alignment);
+    let aligned_size: usize = align_up(size_bytes, 8);
+    if (aligned_offset == no_id() || aligned_size == no_id() ||
+        aligned_offset > (Limit.maximum_size as usize) - aligned_size) {
+        return no_id();
     }
     *offset = aligned_offset;
     *area_size = aligned_size;
     return aligned_offset + aligned_size;
 }
 
-fn bootstrap_x86_64_abi_build_return(
-    abi: *BootstrapX8664Abi, function: *BootstrapX8664AbiFunction, types: type_info::Table) -> bool {
+fn build_return(
+    abi: *Abi, function: *Function, types: type_info::Table) -> bool {
     let records: *const type_info::Record = types.types.data as *const type_info::Record;
     let record: type_info::Record = records[function->return_type];
     function->return_size_bytes = record.size_bytes;
     function->return_alignment_bytes = record.alignment_bytes;
     function->return_aggregate = type_info::is_memory(record.kind);
-    function->first_return_piece = bootstrap_x86_64_abi_no_id();
+    function->first_return_piece = no_id();
     if (!function->return_aggregate) {
         return true;
     }
-    let classification: BootstrapX8664AbiClassification = bootstrap_x86_64_abi_classify(types, function->return_type);
-    if (classification.first == BootstrapX8664AbiClass.memory) {
+    let classification: Classification = classify(types, function->return_type);
+    if (classification.first == Class.memory) {
         function->hidden_return_pointer = true;
         function->general_register_count = 1;
         return true;
@@ -284,20 +284,20 @@ fn bootstrap_x86_64_abi_build_return(
     var vector_index: usize = 0;
     var index: usize = 0;
     while (index < classification.eightbyte_count) {
-        let abi_class: BootstrapX8664AbiClass = bootstrap_x86_64_abi_piece_class(classification, index);
-        let register_index: usize = abi_class == BootstrapX8664AbiClass.integer ? general_index : vector_index;
-        if (abi_class == BootstrapX8664AbiClass.integer) {
+        let abi_class: Class = piece_class(classification, index);
+        let register_index: usize = abi_class == Class.integer ? general_index : vector_index;
+        if (abi_class == Class.integer) {
             general_index += 1;
         } else {
             vector_index += 1;
         }
-        if (bootstrap_x86_64_abi_add_piece(
+        if (add_piece(
                 abi, {
-                    abi_class = abi_class, location = abi_class == BootstrapX8664AbiClass.integer ?
-                            BootstrapX8664AbiLocationKind.general_register : BootstrapX8664AbiLocationKind
+                    abi_class = abi_class, location = abi_class == Class.integer ?
+                            LocationKind.general_register : LocationKind
                                 .vector_register, register_index = register_index, value_offset_bytes = index * 8,
-                    size_bytes = bootstrap_x86_64_abi_piece_size(record.size_bytes, index),
-                }) == bootstrap_x86_64_abi_no_id()) {
+                    size_bytes = piece_size(record.size_bytes, index),
+                }) == no_id()) {
             return false;
         }
         function->return_piece_count += 1;
@@ -306,69 +306,69 @@ fn bootstrap_x86_64_abi_build_return(
     return true;
 }
 
-fn bootstrap_x86_64_abi_build_scalar_parameter(
-    function: *BootstrapX8664AbiFunction, parameter: *BootstrapX8664AbiParameter, record: type_info::Record) -> bool {
-    let abi_class: BootstrapX8664AbiClass = bootstrap_x86_64_abi_scalar_class(record.kind);
+fn build_scalar_parameter(
+    function: *Function, parameter: *Parameter, record: type_info::Record) -> bool {
+    let abi_class: Class = scalar_class(record.kind);
     parameter->abi_class = abi_class;
-    if (abi_class == BootstrapX8664AbiClass.integer && function->general_register_count <
-            BootstrapX8664AbiLimit.general_register_count as usize) {
-        parameter->location = BootstrapX8664AbiLocationKind.general_register;
+    if (abi_class == Class.integer && function->general_register_count <
+            Limit.general_register_count as usize) {
+        parameter->location = LocationKind.general_register;
         parameter->register_index = function->general_register_count;
         function->general_register_count += 1;
         return true;
     }
-    if (abi_class == BootstrapX8664AbiClass.sse && function->vector_register_count <
-            BootstrapX8664AbiLimit.vector_register_count as usize) {
-        parameter->location = BootstrapX8664AbiLocationKind.vector_register;
+    if (abi_class == Class.sse && function->vector_register_count <
+            Limit.vector_register_count as usize) {
+        parameter->location = LocationKind.vector_register;
         parameter->register_index = function->vector_register_count;
         function->vector_register_count += 1;
         return true;
     }
     var offset: usize = 0;
     var area_size: usize = 0;
-    let total: usize = bootstrap_x86_64_abi_add_stack_area(
+    let total: usize = add_stack_area(
         function->stack_argument_size_bytes, 8, 8, &offset, &area_size);
-    if (total == bootstrap_x86_64_abi_no_id()) {
+    if (total == no_id()) {
         return false;
     }
     function->stack_argument_size_bytes = total;
-    parameter->location = BootstrapX8664AbiLocationKind.stack;
+    parameter->location = LocationKind.stack;
     parameter->stack_offset_bytes = offset;
     parameter->stack_size_bytes = area_size;
     return true;
 }
 
-fn bootstrap_x86_64_abi_build_aggregate_parameter(
-    abi: *BootstrapX8664Abi, function: *BootstrapX8664AbiFunction, parameter: *BootstrapX8664AbiParameter,
+fn build_aggregate_parameter(
+    abi: *Abi, function: *Function, parameter: *Parameter,
     types: type_info::Table, record: type_info::Record) -> bool {
-    let classification: BootstrapX8664AbiClassification = bootstrap_x86_64_abi_classify(types, parameter->type_id);
+    let classification: Classification = classify(types, parameter->type_id);
     var required_general: usize = 0;
     var required_vector: usize = 0;
     var index: usize = 0;
-    while (index < classification.eightbyte_count && classification.first != BootstrapX8664AbiClass.memory) {
-        if (bootstrap_x86_64_abi_piece_class(
-                classification, index) == BootstrapX8664AbiClass.integer) {
+    while (index < classification.eightbyte_count && classification.first != Class.memory) {
+        if (piece_class(
+                classification, index) == Class.integer) {
             required_general += 1;
         } else {
             required_vector += 1;
         }
         index += 1;
     }
-    let registers_fit: bool = classification.first != BootstrapX8664AbiClass.memory && required_general <=
-            (BootstrapX8664AbiLimit.general_register_count as usize) - function->general_register_count &&
-        required_vector <= (BootstrapX8664AbiLimit.vector_register_count as usize) - function->vector_register_count;
+    let registers_fit: bool = classification.first != Class.memory && required_general <=
+            (Limit.general_register_count as usize) - function->general_register_count &&
+        required_vector <= (Limit.vector_register_count as usize) - function->vector_register_count;
     if (!registers_fit) {
         var offset: usize = 0;
         var area_size: usize = 0;
         let total: usize =
-            bootstrap_x86_64_abi_add_stack_area(
+            add_stack_area(
                 function->stack_argument_size_bytes, record.size_bytes, record.alignment_bytes, &offset, &area_size);
-        if (total == bootstrap_x86_64_abi_no_id()) {
+        if (total == no_id()) {
             return false;
         }
         function->stack_argument_size_bytes = total;
-        parameter->abi_class = BootstrapX8664AbiClass.memory;
-        parameter->location = BootstrapX8664AbiLocationKind.stack;
+        parameter->abi_class = Class.memory;
+        parameter->location = LocationKind.stack;
         parameter->stack_offset_bytes = offset;
         parameter->stack_size_bytes = area_size;
         return true;
@@ -376,26 +376,26 @@ fn bootstrap_x86_64_abi_build_aggregate_parameter(
 
     parameter->first_piece = abi->piece_count;
     parameter->piece_count = classification.eightbyte_count;
-    parameter->abi_class = classification.eightbyte_count == 1 ? classification.first : BootstrapX8664AbiClass.no_class;
-    parameter->location = BootstrapX8664AbiLocationKind.invalid;
+    parameter->abi_class = classification.eightbyte_count == 1 ? classification.first : Class.no_class;
+    parameter->location = LocationKind.invalid;
     index = 0;
     while (index < classification.eightbyte_count) {
-        let abi_class: BootstrapX8664AbiClass = bootstrap_x86_64_abi_piece_class(classification, index);
-        let is_integer: bool = abi_class == BootstrapX8664AbiClass.integer;
+        let abi_class: Class = piece_class(classification, index);
+        let is_integer: bool = abi_class == Class.integer;
         let register_index: usize = is_integer ? function->general_register_count : function->vector_register_count;
         if (is_integer) {
             function->general_register_count += 1;
         } else {
             function->vector_register_count += 1;
         }
-        let location: BootstrapX8664AbiLocationKind = is_integer ? BootstrapX8664AbiLocationKind.general_register :
-                BootstrapX8664AbiLocationKind.vector_register;
-        if (bootstrap_x86_64_abi_add_piece(
+        let location: LocationKind = is_integer ? LocationKind.general_register :
+                LocationKind.vector_register;
+        if (add_piece(
                 abi, {
                     abi_class = abi_class, location = location, register_index = register_index,
                     value_offset_bytes = index * 8, size_bytes =
-                        bootstrap_x86_64_abi_piece_size(record.size_bytes, index),
-                }) == bootstrap_x86_64_abi_no_id()) {
+                        piece_size(record.size_bytes, index),
+                }) == no_id()) {
             return false;
         }
         index += 1;
@@ -403,27 +403,27 @@ fn bootstrap_x86_64_abi_build_aggregate_parameter(
     return true;
 }
 
-fn bootstrap_x86_64_abi_build_parameter(
-    abi: *BootstrapX8664Abi, function: *BootstrapX8664AbiFunction, ir_parameter: ir::Parameter,
+fn build_parameter(
+    abi: *Abi, function: *Function, ir_parameter: ir::Parameter,
     parameter_index: usize, types: type_info::Table) -> bool {
     let records: *const type_info::Record = types.types.data as *const type_info::Record;
     let record: type_info::Record = records[ir_parameter.type_id];
-    let none: usize = bootstrap_x86_64_abi_no_id();
-    var parameter: BootstrapX8664AbiParameter = {
+    let none: usize = no_id();
+    var parameter: Parameter = {
         function_id = function->function_id, parameter_index = parameter_index,
-        abi_class = BootstrapX8664AbiClass.invalid, location = BootstrapX8664AbiLocationKind.invalid,
+        abi_class = Class.invalid, location = LocationKind.invalid,
         register_index = none, stack_offset_bytes = none, stack_size_bytes = 0, type_id = ir_parameter.type_id,
         size_bytes = record.size_bytes, alignment_bytes = record.alignment_bytes, first_piece = none, piece_count = 0,
         aggregate = type_info::is_memory(record.kind),
     };
     let built: bool = parameter.aggregate ?
-        bootstrap_x86_64_abi_build_aggregate_parameter(abi, function, &parameter, types, record) :
-        bootstrap_x86_64_abi_build_scalar_parameter(function, &parameter, record);
-    return built && bootstrap_x86_64_abi_add_parameter(abi, parameter) != none;
+        build_aggregate_parameter(abi, function, &parameter, types, record) :
+        build_scalar_parameter(function, &parameter, record);
+    return built && add_parameter(abi, parameter) != none;
 }
 
-fn bootstrap_x86_64_abi_analyze(ir: ir::Store, types: type_info::Table) -> BootstrapX8664AbiResult {
-    var abi: BootstrapX8664Abi = bootstrap_x86_64_abi_empty();
+fn analyze(ir: ir::Store, types: type_info::Table) -> Result {
+    var abi: Abi = empty();
     if (!ir::is_valid(ir, types)) {
         return {
             abi = abi, error = runtime::Error.invalid_argument,
@@ -431,25 +431,25 @@ fn bootstrap_x86_64_abi_analyze(ir: ir::Store, types: type_info::Table) -> Boots
     }
     let functions: *const ir::Function = ir.functions.data as *const ir::Function;
     let parameters: *const ir::Parameter = ir.parameters.data as *const ir::Parameter;
-    let none: usize = bootstrap_x86_64_abi_no_id();
+    let none: usize = no_id();
     var function_id: usize = 0;
     while (function_id < ir.function_count && abi.error == runtime::Error.none) {
         let source: ir::Function = functions[function_id];
-        var function: BootstrapX8664AbiFunction = {
+        var function: Function = {
             function_id = function_id, first_parameter = source.parameter_count == 0 ? none : abi.parameter_count,
             parameter_count = 0, first_return_piece = none, return_piece_count = 0, return_type = source.return_type,
             return_size_bytes = 0, return_alignment_bytes = 0, return_aggregate = false, hidden_return_pointer = false,
             general_register_count = 0, vector_register_count = 0, stack_argument_size_bytes = 0,
             call_frame_size_bytes = 0,
         };
-        if (!bootstrap_x86_64_abi_build_return(
+        if (!build_return(
                 &abi, &function, types)) {
             abi.error = runtime::Error.invalid_argument;
             break;
         }
         var index: usize = 0;
         while (index < source.parameter_count && abi.error == runtime::Error.none) {
-            if (!bootstrap_x86_64_abi_build_parameter(
+            if (!build_parameter(
                     &abi, &function, parameters[source.first_parameter + index], index, types)) {
                 if (abi.error == runtime::Error.none) {
                     abi.error = runtime::Error.invalid_argument;
@@ -460,11 +460,11 @@ fn bootstrap_x86_64_abi_analyze(ir: ir::Store, types: type_info::Table) -> Boots
             index += 1;
         }
         function.call_frame_size_bytes =
-            bootstrap_x86_64_abi_align_up(
-                function.stack_argument_size_bytes, BootstrapX8664AbiLimit.stack_alignment as usize);
-        if (function.call_frame_size_bytes == bootstrap_x86_64_abi_no_id() || function.call_frame_size_bytes >
-                BootstrapX8664AbiLimit.maximum_stack_size as usize ||
-            bootstrap_x86_64_abi_add_function(
+            align_up(
+                function.stack_argument_size_bytes, Limit.stack_alignment as usize);
+        if (function.call_frame_size_bytes == no_id() || function.call_frame_size_bytes >
+                Limit.maximum_stack_size as usize ||
+            add_function(
                 &abi, function) == none) {
             if (abi.error == runtime::Error.none) {
                 abi.error = runtime::Error.invalid_argument;
@@ -482,14 +482,14 @@ fn bootstrap_x86_64_abi_analyze(ir: ir::Store, types: type_info::Table) -> Boots
             signature_type += 1;
             continue;
         }
-        var synthesized: BootstrapX8664AbiFunction = {
+        var synthesized: Function = {
             function_id = none, first_parameter = record.field_count == 0 ? none : abi.parameter_count,
             parameter_count = 0, first_return_piece = none, return_piece_count = 0, return_type = record.element_type,
             return_size_bytes = 0, return_alignment_bytes = 0, return_aggregate = false, hidden_return_pointer = false,
             general_register_count = 0, vector_register_count = 0, stack_argument_size_bytes = 0,
             call_frame_size_bytes = 0,
         };
-        if (!bootstrap_x86_64_abi_build_return(
+        if (!build_return(
                 &abi, &synthesized, types)) {
             abi.error = runtime::Error.invalid_argument;
             break;
@@ -500,7 +500,7 @@ fn bootstrap_x86_64_abi_analyze(ir: ir::Store, types: type_info::Table) -> Boots
                 function_id = none, type_id = type_fields[ record.first_field + parameter_index].type_id,
                 slot_id = none, name_token = none,
             };
-            if (!bootstrap_x86_64_abi_build_parameter(
+            if (!build_parameter(
                     &abi, &synthesized, ir_parameter, parameter_index, types)) {
                 if (abi.error == runtime::Error.none) {
                     abi.error = runtime::Error.invalid_argument;
@@ -511,12 +511,12 @@ fn bootstrap_x86_64_abi_analyze(ir: ir::Store, types: type_info::Table) -> Boots
             parameter_index += 1;
         }
         synthesized.call_frame_size_bytes =
-            bootstrap_x86_64_abi_align_up(
-                synthesized.stack_argument_size_bytes, BootstrapX8664AbiLimit.stack_alignment as usize);
-        if (abi.error == runtime::Error.none && (synthesized.call_frame_size_bytes == bootstrap_x86_64_abi_no_id() ||
-                synthesized.call_frame_size_bytes > BootstrapX8664AbiLimit.maximum_stack_size
+            align_up(
+                synthesized.stack_argument_size_bytes, Limit.stack_alignment as usize);
+        if (abi.error == runtime::Error.none && (synthesized.call_frame_size_bytes == no_id() ||
+                synthesized.call_frame_size_bytes > Limit.maximum_stack_size
                         as usize ||
-                bootstrap_x86_64_abi_add_function(
+                add_function(
                     &abi, synthesized) == none)) {
             if (abi.error == runtime::Error.none) {
                 abi.error = runtime::Error.invalid_argument;
@@ -526,9 +526,9 @@ fn bootstrap_x86_64_abi_analyze(ir: ir::Store, types: type_info::Table) -> Boots
     }
     if (abi.error != runtime::Error.none) {
         let error: runtime::Error = abi.error;
-        bootstrap_x86_64_abi_release(abi);
+        release(abi);
         return {
-            abi = bootstrap_x86_64_abi_empty(), error = error,
+            abi = empty(), error = error,
         };
     }
     return {
@@ -536,7 +536,7 @@ fn bootstrap_x86_64_abi_analyze(ir: ir::Store, types: type_info::Table) -> Boots
     };
 }
 
-fn bootstrap_x86_64_abi_equal(left: BootstrapX8664Abi, right: BootstrapX8664Abi) -> bool {
+fn equal(left: Abi, right: Abi) -> bool {
     return left.error == right.error && left.function_count == right.function_count &&
         left.parameter_count == right.parameter_count && left.piece_count == right.piece_count &&
         bytes::equal(left.functions, right.functions.data as *const u8, right.functions.length) &&
@@ -544,19 +544,19 @@ fn bootstrap_x86_64_abi_equal(left: BootstrapX8664Abi, right: BootstrapX8664Abi)
         bytes::equal(left.pieces, right.pieces.data as *const u8, right.pieces.length);
 }
 
-fn bootstrap_x86_64_abi_is_valid(abi: BootstrapX8664Abi, ir: ir::Store, types: type_info::Table) -> bool {
-    if (abi.error != runtime::Error.none || !bootstrap_x86_64_abi_storage_is_valid(abi)) {
+fn is_valid(abi: Abi, ir: ir::Store, types: type_info::Table) -> bool {
+    if (abi.error != runtime::Error.none || !storage_is_valid(abi)) {
         return false;
     }
-    let expected: BootstrapX8664AbiResult = bootstrap_x86_64_abi_analyze(ir, types);
-    let valid: bool = expected.error == runtime::Error.none && bootstrap_x86_64_abi_equal(abi, expected.abi);
-    bootstrap_x86_64_abi_release(expected.abi);
+    let expected: Result = analyze(ir, types);
+    let valid: bool = expected.error == runtime::Error.none && equal(abi, expected.abi);
+    release(expected.abi);
     return valid;
 }
 
-fn bootstrap_x86_64_abi_invalid_function()
-    -> BootstrapX8664AbiFunction {
-    let none: usize = bootstrap_x86_64_abi_no_id();
+fn invalid_function()
+    -> Function {
+    let none: usize = no_id();
     return {
         function_id = none, first_parameter = none, parameter_count = 0, first_return_piece = none,
         return_piece_count = 0, return_type = none, return_size_bytes = 0, return_alignment_bytes = 0,
@@ -565,61 +565,61 @@ fn bootstrap_x86_64_abi_invalid_function()
     };
 }
 
-fn bootstrap_x86_64_abi_invalid_parameter()
-    -> BootstrapX8664AbiParameter {
-    let none: usize = bootstrap_x86_64_abi_no_id();
+fn invalid_parameter()
+    -> Parameter {
+    let none: usize = no_id();
     return {
-        function_id = none, parameter_index = none, abi_class = BootstrapX8664AbiClass.invalid,
-        location = BootstrapX8664AbiLocationKind.invalid, register_index = none, stack_offset_bytes = none,
+        function_id = none, parameter_index = none, abi_class = Class.invalid,
+        location = LocationKind.invalid, register_index = none, stack_offset_bytes = none,
         stack_size_bytes = 0, type_id = none, size_bytes = 0, alignment_bytes = 0, first_piece = none, piece_count = 0,
         aggregate = false,
     };
 }
 
-fn bootstrap_x86_64_abi_invalid_piece()
-    -> BootstrapX8664AbiPiece {
+fn invalid_piece()
+    -> Piece {
     return {
-        abi_class = BootstrapX8664AbiClass.invalid, location = BootstrapX8664AbiLocationKind.invalid,
-        register_index = bootstrap_x86_64_abi_no_id(), value_offset_bytes = 0, size_bytes = 0,
+        abi_class = Class.invalid, location = LocationKind.invalid,
+        register_index = no_id(), value_offset_bytes = 0, size_bytes = 0,
     };
 }
 
-fn bootstrap_x86_64_abi_get_function(abi: BootstrapX8664Abi, function_id: usize) -> BootstrapX8664AbiFunctionResult {
-    if (!bootstrap_x86_64_abi_storage_is_valid(abi) || function_id >= abi.function_count) {
+fn get_function(abi: Abi, function_id: usize) -> FunctionResult {
+    if (!storage_is_valid(abi) || function_id >= abi.function_count) {
         return {
-            function = bootstrap_x86_64_abi_invalid_function(), error = runtime::Error.invalid_argument,
+            function = invalid_function(), error = runtime::Error.invalid_argument,
         };
     }
     return {
-        function = (abi.functions.data as *const BootstrapX8664AbiFunction)[function_id], error = runtime::Error.none,
+        function = (abi.functions.data as *const Function)[function_id], error = runtime::Error.none,
     };
 }
 
-fn bootstrap_x86_64_abi_get_parameter(abi: BootstrapX8664Abi, parameter_id: usize) -> BootstrapX8664AbiParameterResult {
-    if (!bootstrap_x86_64_abi_storage_is_valid(abi) || parameter_id >= abi.parameter_count) {
+fn get_parameter(abi: Abi, parameter_id: usize) -> ParameterResult {
+    if (!storage_is_valid(abi) || parameter_id >= abi.parameter_count) {
         return {
-            parameter = bootstrap_x86_64_abi_invalid_parameter(), error = runtime::Error.invalid_argument,
+            parameter = invalid_parameter(), error = runtime::Error.invalid_argument,
         };
     }
     return {
-        parameter = (abi.parameters.data as *const BootstrapX8664AbiParameter)[parameter_id],
+        parameter = (abi.parameters.data as *const Parameter)[parameter_id],
         error = runtime::Error.none,
     };
 }
 
-fn bootstrap_x86_64_abi_get_piece(abi: BootstrapX8664Abi, piece_id: usize) -> BootstrapX8664AbiPieceResult {
-    if (!bootstrap_x86_64_abi_storage_is_valid(abi) || piece_id >= abi.piece_count) {
+fn get_piece(abi: Abi, piece_id: usize) -> PieceResult {
+    if (!storage_is_valid(abi) || piece_id >= abi.piece_count) {
         return {
-            piece = bootstrap_x86_64_abi_invalid_piece(), error = runtime::Error.invalid_argument,
+            piece = invalid_piece(), error = runtime::Error.invalid_argument,
         };
     }
     return {
-        piece = (abi.pieces.data as *const BootstrapX8664AbiPiece)[piece_id], error = runtime::Error.none,
+        piece = (abi.pieces.data as *const Piece)[piece_id], error = runtime::Error.none,
     };
 }
 
-fn bootstrap_x86_64_abi_release(abi: BootstrapX8664Abi) -> runtime::Error {
-    if (!bootstrap_x86_64_abi_storage_is_valid(abi)) {
+fn release(abi: Abi) -> runtime::Error {
+    if (!storage_is_valid(abi)) {
         return runtime::Error.invalid_argument;
     }
     var error: runtime::Error = bytes::release(abi.functions);

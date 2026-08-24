@@ -1,23 +1,23 @@
 module luna.tools.bootstrap.stage_assembler;
 
-import luna.bootstrap.backend.x86_64.assembler;
-import luna.bootstrap.backend.x86_64.object;
+import luna.bootstrap.backend.x86_64.assembler as assembler;
+import luna.bootstrap.backend.x86_64.object as object;
 import luna.runtime;
 import luna.std.bytes;
 import luna.std.io;
 import luna.std.path as path;
 import luna.std.text as text;
 
-enum BootstrapAssemblerDriverLimit: usize {
+enum BootstrapStageLimit: usize {
     maximum_path_bytes = 4096, maximum_input = 67108864,
 }
 
-enum BootstrapAssemblerDriverStatus: i32 {
+enum BootstrapStageStatus: i32 {
     input_error = 1, assembly_error = 2, serialization_error = 3, output_error = 4, release_error = 5, success = 42,
     cli_usage_error = 125,
 }
 
-fn bootstrap_assembler_driver_report(line: usize) -> runtime::Error {
+fn bootstrap_stage_driver_report(line: usize) -> runtime::Error {
     var digits: [20]u8 = {};
     var cursor: usize = 20;
     var value: usize = line;
@@ -40,48 +40,48 @@ fn bootstrap_assembler_driver_report(line: usize) -> runtime::Error {
     return error;
 }
 
-fn bootstrap_assembler_driver_run(input_path: path::Path, output_path: path::Path) -> i32 {
+fn bootstrap_stage_driver_run(input_path: path::Path, output_path: path::Path) -> i32 {
     if (!path::is_valid(input_path) || !path::is_valid(output_path)) {
-        return BootstrapAssemblerDriverStatus.input_error as i32;
+        return BootstrapStageStatus.input_error as i32;
     }
     let input: bytes::BufferResult = io::read_file_limited(
-        input_path, BootstrapAssemblerDriverLimit.maximum_input as usize);
+        input_path, BootstrapStageLimit.maximum_input as usize);
     if (input.error != runtime::Error.none) {
-        return BootstrapAssemblerDriverStatus.input_error as i32;
+        return BootstrapStageStatus.input_error as i32;
     }
     let view: text::ViewResult = text::view(input.buffer.data as *const u8, input.buffer.length);
     if (view.error != runtime::Error.none) {
         bytes::release(input.buffer);
-        return BootstrapAssemblerDriverStatus.input_error as i32;
+        return BootstrapStageStatus.input_error as i32;
     }
-    let assembled: BootstrapAssemblerResult = bootstrap_x86_64_assemble(view.view);
+    let assembled: assembler::Result = assembler::assemble(view.view);
     if (assembled.error != runtime::Error.none) {
-        bootstrap_assembler_driver_report(assembled.line);
+        bootstrap_stage_driver_report(assembled.line);
         bytes::release(input.buffer);
-        return BootstrapAssemblerDriverStatus.assembly_error as i32;
+        return BootstrapStageStatus.assembly_error as i32;
     }
-    let serialized: bytes::BufferResult = bootstrap_object_serialize(assembled.object);
+    let serialized: bytes::BufferResult = object::serialize(assembled.object);
     if (serialized.error != runtime::Error.none) {
-        bootstrap_object_release(assembled.object);
+        object::release(assembled.object);
         bytes::release(input.buffer);
-        return BootstrapAssemblerDriverStatus.serialization_error as i32;
+        return BootstrapStageStatus.serialization_error as i32;
     }
     let write_error: runtime::Error = io::write_file_atomic(
         output_path, serialized.buffer.data as *const u8, serialized.buffer.length);
     let serialized_error: runtime::Error = bytes::release(serialized.buffer);
-    let object_error: runtime::Error = bootstrap_object_release(assembled.object);
+    let object_error: runtime::Error = object::release(assembled.object);
     let input_error: runtime::Error = bytes::release(input.buffer);
     if (write_error != runtime::Error.none) {
-        return BootstrapAssemblerDriverStatus.output_error as i32;
+        return BootstrapStageStatus.output_error as i32;
     }
     if (serialized_error != runtime::Error.none || object_error != runtime::Error.none ||
         input_error != runtime::Error.none) {
-        return BootstrapAssemblerDriverStatus.release_error as i32;
+        return BootstrapStageStatus.release_error as i32;
     }
-    return BootstrapAssemblerDriverStatus.success as i32;
+    return BootstrapStageStatus.success as i32;
 }
 
-fn bootstrap_assembler_argument_equals(argument: *const u8, expected: *const u8, length: usize) -> bool {
+fn bootstrap_stage_argument_equals(argument: *const u8, expected: *const u8, length: usize) -> bool {
     if (argument == null || expected == null) {
         return false;
     }
@@ -95,7 +95,7 @@ fn bootstrap_assembler_argument_equals(argument: *const u8, expected: *const u8,
     return argument[length] == 0;
 }
 
-fn bootstrap_assembler_print(file: runtime::File, data: *const u8) -> runtime::Error {
+fn bootstrap_stage_print(file: runtime::File, data: *const u8) -> runtime::Error {
     let text: text::ViewResult = text::from_c_string(data, 512);
     if (text.error != runtime::Error.none) {
         return text.error;
@@ -103,25 +103,25 @@ fn bootstrap_assembler_print(file: runtime::File, data: *const u8) -> runtime::E
     return io::write_all(file, text.view.data, text.view.length);
 }
 
-fn bootstrap_assembler_usage() -> i32 {
-    bootstrap_assembler_print(runtime::standard_error(), "usage: luna-as -o <output.lo> <input.s>\n");
-    return BootstrapAssemblerDriverStatus.cli_usage_error as i32;
+fn bootstrap_stage_usage() -> i32 {
+    bootstrap_stage_print(runtime::standard_error(), "usage: luna-as -o <output.lo> <input.s>\n");
+    return BootstrapStageStatus.cli_usage_error as i32;
 }
 
-fn bootstrap_assembler_cli_main(argc: usize, argv: **const u8) -> i32 {
+fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
     if (argv == null || argc < 2) {
-        return bootstrap_assembler_usage();
+        return bootstrap_stage_usage();
     }
     if (argc == 2 &&
-        bootstrap_assembler_argument_equals(
+        bootstrap_stage_argument_equals(
             argv[1], "--help", 6)) {
-        bootstrap_assembler_print(runtime::standard_output(), "usage: luna-as -o <output.lo> <input.s>\n");
+        bootstrap_stage_print(runtime::standard_output(), "usage: luna-as -o <output.lo> <input.s>\n");
         return 0;
     }
     if (argc == 2 &&
-        bootstrap_assembler_argument_equals(
+        bootstrap_stage_argument_equals(
             argv[1], "--version", 9)) {
-        bootstrap_assembler_print(runtime::standard_output(), "luna-as (self-hosted Luna 1) 0.1.0\n");
+        bootstrap_stage_print(runtime::standard_output(), "luna-as (self-hosted Luna 1) 0.1.0\n");
         return 0;
     }
 
@@ -135,18 +135,18 @@ fn bootstrap_assembler_cli_main(argc: usize, argv: **const u8) -> i32 {
     while (index < argc && valid) {
         let argument: *const u8 = argv[index];
         if (!options_finished &&
-            bootstrap_assembler_argument_equals(
+            bootstrap_stage_argument_equals(
                 argument, "--", 2)) {
             options_finished = true;
         } else if (!options_finished &&
-            bootstrap_assembler_argument_equals(
+            bootstrap_stage_argument_equals(
                 argument, "-o", 2)) {
             if (has_output || index + 1 >= argc) {
                 valid = false;
             } else {
                 index += 1;
                 let path: path::PathResult =
-                    path::from_c_string(argv[index], BootstrapAssemblerDriverLimit.maximum_path_bytes as usize);
+                    path::from_c_string(argv[index], BootstrapStageLimit.maximum_path_bytes as usize);
                 if (path.error != runtime::Error.none) {
                     valid = false;
                 } else {
@@ -160,7 +160,7 @@ fn bootstrap_assembler_cli_main(argc: usize, argv: **const u8) -> i32 {
             valid = false;
         } else {
             let path: path::PathResult =
-                path::from_c_string(argument, BootstrapAssemblerDriverLimit.maximum_path_bytes as usize);
+                path::from_c_string(argument, BootstrapStageLimit.maximum_path_bytes as usize);
             if (path.error != runtime::Error.none) {
                 valid = false;
             } else {
@@ -180,14 +180,14 @@ fn bootstrap_assembler_cli_main(argc: usize, argv: **const u8) -> i32 {
             !text::equal(input_text.view, output_text.view);
     }
 
-    var status: i32 = BootstrapAssemblerDriverStatus.cli_usage_error as i32;
+    var status: i32 = BootstrapStageStatus.cli_usage_error as i32;
     if (valid) {
-        status = bootstrap_assembler_driver_run(input, output);
-        if (status == BootstrapAssemblerDriverStatus.success as i32) {
+        status = bootstrap_stage_driver_run(input, output);
+        if (status == BootstrapStageStatus.success as i32) {
             status = 0;
         }
     } else {
-        bootstrap_assembler_usage();
+        bootstrap_stage_usage();
     }
     var release_error: runtime::Error = runtime::Error.none;
     if (has_input) {
@@ -200,30 +200,30 @@ fn bootstrap_assembler_cli_main(argc: usize, argv: **const u8) -> i32 {
         }
     }
     if (status == 0 && release_error != runtime::Error.none) {
-        return BootstrapAssemblerDriverStatus.release_error as i32;
+        return BootstrapStageStatus.release_error as i32;
     }
     return status;
 }
 
 fn main(argc: usize, argv: **const u8) -> i32 {
     if (argc != 1) {
-        return bootstrap_assembler_cli_main(argc, argv);
+        return bootstrap_stage_cli_main(argc, argv);
     }
     let input: path::PathResult = path::from_c_string("bootstrap-assembly-input.s", 27);
     if (input.error != runtime::Error.none) {
-        return BootstrapAssemblerDriverStatus.input_error as i32;
+        return BootstrapStageStatus.input_error as i32;
     }
     let output: path::PathResult = path::from_c_string("bootstrap-object-output.lo", 27);
     if (output.error != runtime::Error.none) {
         path::release(input.path);
-        return BootstrapAssemblerDriverStatus.output_error as i32;
+        return BootstrapStageStatus.output_error as i32;
     }
-    let status: i32 = bootstrap_assembler_driver_run(input.path, output.path);
+    let status: i32 = bootstrap_stage_driver_run(input.path, output.path);
     let input_error: runtime::Error = path::release(input.path);
     let output_error: runtime::Error = path::release(output.path);
-    if (status == BootstrapAssemblerDriverStatus.success as i32 && (input_error != runtime::Error.none ||
+    if (status == BootstrapStageStatus.success as i32 && (input_error != runtime::Error.none ||
             output_error != runtime::Error.none)) {
-        return BootstrapAssemblerDriverStatus.release_error as i32;
+        return BootstrapStageStatus.release_error as i32;
     }
     return status;
 }

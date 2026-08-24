@@ -1,25 +1,25 @@
 module luna.tools.bootstrap.stage_linker;
 
-import luna.bootstrap.backend.x86_64.elf;
-import luna.bootstrap.backend.x86_64.linker;
-import luna.bootstrap.backend.x86_64.object;
-import luna.bootstrap.backend.x86_64.text;
+import luna.bootstrap.backend.x86_64.elf as elf;
+import luna.bootstrap.backend.x86_64.linker as linker;
+import luna.bootstrap.backend.x86_64.object as object;
+import luna.bootstrap.backend.x86_64.text as asm_text;
 import luna.runtime;
 import luna.std.bytes;
 import luna.std.io;
 import luna.std.path as path;
-import luna.std.text as std_text;
+import luna.std.text as text;
 
-enum BootstrapLinkerDriverLimit: usize {
+enum BootstrapStageLimit: usize {
     maximum_inputs = 64, maximum_path_bytes = 4096, maximum_object = 268435456,
 }
 
-enum BootstrapLinkerDriverStatus: i32 {
+enum BootstrapStageStatus: i32 {
     input_error = 1, object_error = 2, link_error = 3, output_error = 4, release_error = 5, success = 42,
     cli_usage_error = 125,
 }
 
-fn bootstrap_linker_driver_invalid_path(error: runtime::Error) -> path::PathResult {
+fn bootstrap_stage_driver_invalid_path(error: runtime::Error) -> path::PathResult {
     return {
         path = {
             storage = bytes::empty(), length = 0,
@@ -27,47 +27,47 @@ fn bootstrap_linker_driver_invalid_path(error: runtime::Error) -> path::PathResu
     };
 }
 
-fn bootstrap_linker_driver_input_path(index: usize) -> path::PathResult {
-    var text: BootstrapX8664Text = bootstrap_x86_64_text_empty();
-    if (!bootstrap_x86_64_text_append_c_string(&text, "bootstrap-link-input-", 32) ||
-        !bootstrap_x86_64_text_append_usize(&text, index) ||
-        !bootstrap_x86_64_text_append_c_string(
+fn bootstrap_stage_driver_input_path(index: usize) -> path::PathResult {
+    var text: asm_text::Text = asm_text::empty();
+    if (!asm_text::append_c_string(&text, "bootstrap-link-input-", 32) ||
+        !asm_text::append_usize(&text, index) ||
+        !asm_text::append_c_string(
             &text, ".lo", 8)) {
         let error: runtime::Error = text.error == runtime::Error.none ? runtime::Error.invalid_argument : text.error;
-        bootstrap_x86_64_text_release(text);
-        return bootstrap_linker_driver_invalid_path(error);
+        asm_text::release(text);
+        return bootstrap_stage_driver_invalid_path(error);
     }
-    let bytes: bytes::BufferResult = bootstrap_x86_64_text_take(&text);
+    let bytes: bytes::BufferResult = asm_text::take(&text);
     if (bytes.error != runtime::Error.none) {
-        bootstrap_x86_64_text_release(text);
-        return bootstrap_linker_driver_invalid_path(bytes.error);
+        asm_text::release(text);
+        return bootstrap_stage_driver_invalid_path(bytes.error);
     }
-    let view: std_text::ViewResult = std_text::view(bytes.buffer.data as *const u8, bytes.buffer.length);
-    var result: path::PathResult = bootstrap_linker_driver_invalid_path(view.error);
+    let view: text::ViewResult = text::view(bytes.buffer.data as *const u8, bytes.buffer.length);
+    var result: path::PathResult = bootstrap_stage_driver_invalid_path(view.error);
     if (view.error == runtime::Error.none) {
         result = path::from_text(view.view);
     }
     let release_error: runtime::Error = bytes::release(bytes.buffer);
     if (result.error == runtime::Error.none && release_error != runtime::Error.none) {
         path::release(result.path);
-        return bootstrap_linker_driver_invalid_path(release_error);
+        return bootstrap_stage_driver_invalid_path(release_error);
     }
     return result;
 }
 
-fn bootstrap_linker_driver_parse(data: *const u8, length: usize) -> BootstrapObjectResult {
+fn bootstrap_stage_driver_parse(data: *const u8, length: usize) -> object::Result {
     if (length >= 4 && data[0] == 127 && data[1] == 69 && data[2] == 76 && data[3] == 70) {
-        return bootstrap_x86_64_elf_load(data, length);
+        return elf::load(data, length);
     }
-    return bootstrap_object_deserialize(data, length);
+    return object::deserialize(data, length);
 }
 
-fn bootstrap_linker_driver_release_objects(objects: *BootstrapObject, count: usize) -> runtime::Error {
+fn bootstrap_stage_driver_release_objects(objects: *object::Object, count: usize) -> runtime::Error {
     var error: runtime::Error = runtime::Error.none;
     var index: usize = count;
     while (index != 0) {
         index -= 1;
-        let release_error: runtime::Error = bootstrap_object_release(objects[index]);
+        let release_error: runtime::Error = object::release(objects[index]);
         if (error == runtime::Error.none) {
             error = release_error;
         }
@@ -75,35 +75,35 @@ fn bootstrap_linker_driver_release_objects(objects: *BootstrapObject, count: usi
     return error;
 }
 
-fn bootstrap_linker_driver_run(
+fn bootstrap_stage_driver_run(
     fixed_protocol: bool, input_paths: *const path::Path, input_count: usize, output_path: path::Path) -> i32 {
-    if ((!fixed_protocol && (input_paths == null || input_count == 0 || input_count > BootstrapLinkerDriverLimit
+    if ((!fixed_protocol && (input_paths == null || input_count == 0 || input_count > BootstrapStageLimit
                         .maximum_inputs as usize)) || !path::is_valid(output_path)) {
-        return BootstrapLinkerDriverStatus.input_error as i32;
+        return BootstrapStageStatus.input_error as i32;
     }
-    var objects: [64]BootstrapObject = {};
+    var objects: [64]object::Object = {};
     var count: usize = 0;
-    let expected_count: usize = fixed_protocol ? BootstrapLinkerDriverLimit.maximum_inputs as usize : input_count;
+    let expected_count: usize = fixed_protocol ? BootstrapStageLimit.maximum_inputs as usize : input_count;
     while (count < expected_count) {
-        var path: path::PathResult = bootstrap_linker_driver_invalid_path(runtime::Error.none);
+        var path: path::PathResult = bootstrap_stage_driver_invalid_path(runtime::Error.none);
         if (fixed_protocol) {
-            path = bootstrap_linker_driver_input_path(count);
+            path = bootstrap_stage_driver_input_path(count);
             if (path.error != runtime::Error.none) {
-                bootstrap_linker_driver_release_objects(&objects[0], count);
-                return BootstrapLinkerDriverStatus.input_error as i32;
+                bootstrap_stage_driver_release_objects(&objects[0], count);
+                return BootstrapStageStatus.input_error as i32;
             }
         }
         let input_path: path::Path = fixed_protocol ? path.path : input_paths[count];
         let bytes: bytes::BufferResult =
-            io::read_file_limited(input_path, BootstrapLinkerDriverLimit.maximum_object as usize);
+            io::read_file_limited(input_path, BootstrapStageLimit.maximum_object as usize);
         var path_error: runtime::Error = runtime::Error.none;
         if (fixed_protocol) {
             path_error = path::release(path.path);
         }
         if (fixed_protocol && bytes.error == runtime::Error.not_found) {
             if (path_error != runtime::Error.none) {
-                bootstrap_linker_driver_release_objects(&objects[0], count);
-                return BootstrapLinkerDriverStatus.release_error as i32;
+                bootstrap_stage_driver_release_objects(&objects[0], count);
+                return BootstrapStageStatus.release_error as i32;
             }
             break;
         }
@@ -111,27 +111,27 @@ fn bootstrap_linker_driver_run(
             if (bytes.error == runtime::Error.none) {
                 bytes::release(bytes.buffer);
             }
-            bootstrap_linker_driver_release_objects(&objects[0], count);
-            return BootstrapLinkerDriverStatus.input_error as i32;
+            bootstrap_stage_driver_release_objects(&objects[0], count);
+            return BootstrapStageStatus.input_error as i32;
         }
-        let parsed: BootstrapObjectResult =
-            bootstrap_linker_driver_parse(bytes.buffer.data as *const u8, bytes.buffer.length);
+        let parsed: object::Result =
+            bootstrap_stage_driver_parse(bytes.buffer.data as *const u8, bytes.buffer.length);
         let bytes_error: runtime::Error = bytes::release(bytes.buffer);
         if (parsed.error != runtime::Error.none || bytes_error != runtime::Error.none) {
             if (parsed.error == runtime::Error.none) {
-                bootstrap_object_release(parsed.object);
+                object::release(parsed.object);
             }
-            bootstrap_linker_driver_release_objects(&objects[0], count);
-            return BootstrapLinkerDriverStatus.object_error as i32;
+            bootstrap_stage_driver_release_objects(&objects[0], count);
+            return BootstrapStageStatus.object_error as i32;
         }
         objects[count] = parsed.object;
         count += 1;
     }
-    if (fixed_protocol && count == BootstrapLinkerDriverLimit.maximum_inputs as usize) {
-        let excess_path: path::PathResult = bootstrap_linker_driver_input_path(count);
+    if (fixed_protocol && count == BootstrapStageLimit.maximum_inputs as usize) {
+        let excess_path: path::PathResult = bootstrap_stage_driver_input_path(count);
         if (excess_path.error != runtime::Error.none) {
-            bootstrap_linker_driver_release_objects(&objects[0], count);
-            return BootstrapLinkerDriverStatus.input_error as i32;
+            bootstrap_stage_driver_release_objects(&objects[0], count);
+            return BootstrapStageStatus.input_error as i32;
         }
         let excess: bytes::BufferResult = io::read_file_limited(excess_path.path, 0);
         let excess_path_error: runtime::Error = path::release(excess_path.path);
@@ -139,32 +139,32 @@ fn bootstrap_linker_driver_run(
             bytes::release(excess.buffer);
         }
         if (excess.error != runtime::Error.not_found || excess_path_error != runtime::Error.none) {
-            bootstrap_linker_driver_release_objects(&objects[0], count);
-            return BootstrapLinkerDriverStatus.input_error as i32;
+            bootstrap_stage_driver_release_objects(&objects[0], count);
+            return BootstrapStageStatus.input_error as i32;
         }
     }
     if (count == 0) {
-        return BootstrapLinkerDriverStatus.input_error as i32;
+        return BootstrapStageStatus.input_error as i32;
     }
-    let linked: BootstrapLinkerResult = bootstrap_x86_64_link(&objects[0] as *const BootstrapObject, count);
+    let linked: linker::Result = linker::link(&objects[0] as *const object::Object, count);
     if (linked.error != runtime::Error.none) {
-        bootstrap_linker_driver_release_objects(&objects[0], count);
-        return BootstrapLinkerDriverStatus.link_error as i32;
+        bootstrap_stage_driver_release_objects(&objects[0], count);
+        return BootstrapStageStatus.link_error as i32;
     }
     let write_error: runtime::Error =
         io::write_executable_file_atomic(output_path, linked.executable.data as *const u8, linked.executable.length);
     let executable_error: runtime::Error = bytes::release(linked.executable);
-    let objects_error: runtime::Error = bootstrap_linker_driver_release_objects(&objects[0], count);
+    let objects_error: runtime::Error = bootstrap_stage_driver_release_objects(&objects[0], count);
     if (write_error != runtime::Error.none) {
-        return BootstrapLinkerDriverStatus.output_error as i32;
+        return BootstrapStageStatus.output_error as i32;
     }
     if (executable_error != runtime::Error.none || objects_error != runtime::Error.none) {
-        return BootstrapLinkerDriverStatus.release_error as i32;
+        return BootstrapStageStatus.release_error as i32;
     }
-    return BootstrapLinkerDriverStatus.success as i32;
+    return BootstrapStageStatus.success as i32;
 }
 
-fn bootstrap_linker_argument_equals(argument: *const u8, expected: *const u8, length: usize) -> bool {
+fn bootstrap_stage_argument_equals(argument: *const u8, expected: *const u8, length: usize) -> bool {
     if (argument == null || expected == null) {
         return false;
     }
@@ -178,21 +178,21 @@ fn bootstrap_linker_argument_equals(argument: *const u8, expected: *const u8, le
     return argument[length] == 0;
 }
 
-fn bootstrap_linker_print(file: runtime::File, data: *const u8) -> runtime::Error {
-    let text: std_text::ViewResult = std_text::from_c_string(data, 512);
+fn bootstrap_stage_print(file: runtime::File, data: *const u8) -> runtime::Error {
+    let text: text::ViewResult = text::from_c_string(data, 512);
     if (text.error != runtime::Error.none) {
         return text.error;
     }
     return io::write_all(file, text.view.data, text.view.length);
 }
 
-fn bootstrap_linker_usage() -> i32 {
-    bootstrap_linker_print(runtime::standard_error(), "usage: luna-link -o <executable> <input.lo>...\n");
-    return BootstrapLinkerDriverStatus.cli_usage_error as i32;
+fn bootstrap_stage_usage() -> i32 {
+    bootstrap_stage_print(runtime::standard_error(), "usage: luna-link -o <executable> <input.lo>...\n");
+    return BootstrapStageStatus.cli_usage_error as i32;
 }
 
-fn bootstrap_linker_release_paths(paths: *path::Path, count: usize) -> runtime::Error {
-    if (paths == null || count > BootstrapLinkerDriverLimit.maximum_inputs as usize) {
+fn bootstrap_stage_release_paths(paths: *path::Path, count: usize) -> runtime::Error {
+    if (paths == null || count > BootstrapStageLimit.maximum_inputs as usize) {
         return runtime::Error.invalid_argument;
     }
     var error: runtime::Error = runtime::Error.none;
@@ -207,20 +207,20 @@ fn bootstrap_linker_release_paths(paths: *path::Path, count: usize) -> runtime::
     return error;
 }
 
-fn bootstrap_linker_cli_main(argc: usize, argv: **const u8) -> i32 {
+fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
     if (argv == null || argc < 2) {
-        return bootstrap_linker_usage();
+        return bootstrap_stage_usage();
     }
     if (argc == 2 &&
-        bootstrap_linker_argument_equals(
+        bootstrap_stage_argument_equals(
             argv[1], "--help", 6)) {
-        bootstrap_linker_print(runtime::standard_output(), "usage: luna-link -o <executable> <input.lo>...\n");
+        bootstrap_stage_print(runtime::standard_output(), "usage: luna-link -o <executable> <input.lo>...\n");
         return 0;
     }
     if (argc == 2 &&
-        bootstrap_linker_argument_equals(
+        bootstrap_stage_argument_equals(
             argv[1], "--version", 9)) {
-        bootstrap_linker_print(runtime::standard_output(), "luna-link (self-hosted Luna 1) 0.1.0\n");
+        bootstrap_stage_print(runtime::standard_output(), "luna-link (self-hosted Luna 1) 0.1.0\n");
         return 0;
     }
 
@@ -234,18 +234,18 @@ fn bootstrap_linker_cli_main(argc: usize, argv: **const u8) -> i32 {
     while (index < argc && valid) {
         let argument: *const u8 = argv[index];
         if (!options_finished &&
-            bootstrap_linker_argument_equals(
+            bootstrap_stage_argument_equals(
                 argument, "--", 2)) {
             options_finished = true;
         } else if (!options_finished &&
-            bootstrap_linker_argument_equals(
+            bootstrap_stage_argument_equals(
                 argument, "-o", 2)) {
             if (has_output || index + 1 >= argc) {
                 valid = false;
             } else {
                 index += 1;
                 let path: path::PathResult =
-                    path::from_c_string(argv[index], BootstrapLinkerDriverLimit.maximum_path_bytes as usize);
+                    path::from_c_string(argv[index], BootstrapStageLimit.maximum_path_bytes as usize);
                 if (path.error != runtime::Error.none) {
                     valid = false;
                 } else {
@@ -255,11 +255,11 @@ fn bootstrap_linker_cli_main(argc: usize, argv: **const u8) -> i32 {
             }
         } else if (!options_finished && argument != null && argument[0] == 45) {
             valid = false;
-        } else if (input_count == BootstrapLinkerDriverLimit.maximum_inputs as usize) {
+        } else if (input_count == BootstrapStageLimit.maximum_inputs as usize) {
             valid = false;
         } else {
             let path: path::PathResult =
-                path::from_c_string(argument, BootstrapLinkerDriverLimit.maximum_path_bytes as usize);
+                path::from_c_string(argument, BootstrapStageLimit.maximum_path_bytes as usize);
             if (path.error != runtime::Error.none) {
                 valid = false;
             } else {
@@ -273,48 +273,48 @@ fn bootstrap_linker_cli_main(argc: usize, argv: **const u8) -> i32 {
         valid = false;
     }
     if (valid) {
-        let output_text: std_text::ViewResult = path::text(output);
+        let output_text: text::ViewResult = path::text(output);
         index = 0;
         while (index < input_count && valid) {
-            let input_text: std_text::ViewResult = path::text(inputs[index]);
+            let input_text: text::ViewResult = path::text(inputs[index]);
             valid = output_text.error == runtime::Error.none && input_text.error == runtime::Error.none &&
-                !std_text::equal(output_text.view, input_text.view);
+                !text::equal(output_text.view, input_text.view);
             index += 1;
         }
     }
 
-    var status: i32 = BootstrapLinkerDriverStatus.cli_usage_error as i32;
+    var status: i32 = BootstrapStageStatus.cli_usage_error as i32;
     if (valid) {
-        status = bootstrap_linker_driver_run(false, &inputs[0] as *const path::Path, input_count, output);
-        if (status == BootstrapLinkerDriverStatus.success as i32) {
+        status = bootstrap_stage_driver_run(false, &inputs[0] as *const path::Path, input_count, output);
+        if (status == BootstrapStageStatus.success as i32) {
             status = 0;
         }
     } else {
-        bootstrap_linker_usage();
+        bootstrap_stage_usage();
     }
-    let input_error: runtime::Error = bootstrap_linker_release_paths(&inputs[0], input_count);
+    let input_error: runtime::Error = bootstrap_stage_release_paths(&inputs[0], input_count);
     var output_error: runtime::Error = runtime::Error.none;
     if (has_output) {
         output_error = path::release(output);
     }
     if (status == 0 && (input_error != runtime::Error.none || output_error != runtime::Error.none)) {
-        return BootstrapLinkerDriverStatus.release_error as i32;
+        return BootstrapStageStatus.release_error as i32;
     }
     return status;
 }
 
 fn main(argc: usize, argv: **const u8) -> i32 {
     if (argc != 1) {
-        return bootstrap_linker_cli_main(argc, argv);
+        return bootstrap_stage_cli_main(argc, argv);
     }
     let output: path::PathResult = path::from_c_string("bootstrap-link-output", 22);
     if (output.error != runtime::Error.none) {
-        return BootstrapLinkerDriverStatus.output_error as i32;
+        return BootstrapStageStatus.output_error as i32;
     }
-    let status: i32 = bootstrap_linker_driver_run(true, null, 0, output.path);
+    let status: i32 = bootstrap_stage_driver_run(true, null, 0, output.path);
     let release_error: runtime::Error = path::release(output.path);
-    if (status == BootstrapLinkerDriverStatus.success as i32 && release_error != runtime::Error.none) {
-        return BootstrapLinkerDriverStatus.release_error as i32;
+    if (status == BootstrapStageStatus.success as i32 && release_error != runtime::Error.none) {
+        return BootstrapStageStatus.release_error as i32;
     }
     return status;
 }
