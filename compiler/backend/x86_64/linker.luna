@@ -1,6 +1,5 @@
 module luna.bootstrap.backend.x86_64.linker;
 
-import luna.bootstrap.backend.x86_64.assembler;
 import luna.std.text;
 
 enum BootstrapLinkerLimit: usize {
@@ -578,21 +577,6 @@ fn bootstrap_linker_serialize(image: *const BootstrapLinkImage) -> StdByteBuffer
     };
 }
 
-fn bootstrap_linker_syscall_object() -> BootstrapObjectResult {
-    let assembly: StdTextViewResult = std_text_from_c_string(
-        "    .text\n    .balign 16\n    .globl luna_linux_syscall0\n    .type luna_linux_syscall0, @function\nluna_linux_syscall0:\n    movq %rdi, %rax\n    syscall\n    ret\n    .size luna_linux_syscall0, .-luna_linux_syscall0\n    .globl luna_linux_syscall1\n    .type luna_linux_syscall1, @function\nluna_linux_syscall1:\n    movq %rdi, %rax\n    movq %rsi, %rdi\n    syscall\n    ret\n    .size luna_linux_syscall1, .-luna_linux_syscall1\n    .globl luna_linux_syscall2\n    .type luna_linux_syscall2, @function\nluna_linux_syscall2:\n    movq %rdi, %rax\n    movq %rsi, %rdi\n    movq %rdx, %rsi\n    syscall\n    ret\n    .size luna_linux_syscall2, .-luna_linux_syscall2\n    .globl luna_linux_syscall3\n    .type luna_linux_syscall3, @function\nluna_linux_syscall3:\n    movq %rdi, %rax\n    movq %rsi, %rdi\n    movq %rdx, %rsi\n    movq %rcx, %rdx\n    syscall\n    ret\n    .size luna_linux_syscall3, .-luna_linux_syscall3\n    .globl luna_linux_syscall4\n    .type luna_linux_syscall4, @function\nluna_linux_syscall4:\n    movq %rdi, %rax\n    movq %rsi, %rdi\n    movq %rdx, %rsi\n    movq %rcx, %rdx\n    movq %r8, %r10\n    syscall\n    ret\n    .size luna_linux_syscall4, .-luna_linux_syscall4\n    .globl luna_linux_syscall5\n    .type luna_linux_syscall5, @function\nluna_linux_syscall5:\n    movq %rdi, %rax\n    movq %rsi, %rdi\n    movq %rdx, %rsi\n    movq %rcx, %rdx\n    movq %r8, %r10\n    movq %r9, %r8\n    syscall\n    ret\n    .size luna_linux_syscall5, .-luna_linux_syscall5\n    .globl luna_linux_syscall6\n    .type luna_linux_syscall6, @function\nluna_linux_syscall6:\n    movq %rdi, %rax\n    movq %rsi, %rdi\n    movq %rdx, %rsi\n    movq %rcx, %rdx\n    movq %r8, %r10\n    movq %r9, %r8\n    movq 8(%rsp), %r9\n    syscall\n    ret\n    .size luna_linux_syscall6, .-luna_linux_syscall6\n",
-        4096);
-    if (assembly.error != RuntimeError.none) {
-        return {
-            object = bootstrap_object_empty(), error = assembly.error,
-        };
-    }
-    let assembled: BootstrapAssemblerResult = bootstrap_x86_64_assemble(assembly.view);
-    return {
-        object = assembled.object, error = assembled.error,
-    };
-}
-
 fn bootstrap_linker_image_release(image: BootstrapLinkImage) -> RuntimeError {
     var error: RuntimeError = std_byte_buffer_release(image.globals);
     let data_error: RuntimeError = std_byte_buffer_release(image.data);
@@ -610,30 +594,6 @@ fn bootstrap_linker_image_release(image: BootstrapLinkImage) -> RuntimeError {
     return error;
 }
 
-fn bootstrap_linker_has_syscall_definitions(objects: *const BootstrapObject, object_count: usize) -> bool {
-    let wanted: StdTextViewResult = std_text_view("luna_linux_syscall0", 19);
-    if (wanted.error != RuntimeError.none) {
-        return false;
-    }
-    var object_index: usize = 0;
-    while (object_index < object_count) {
-        let symbols: *const BootstrapObjectSymbol = objects[object_index].symbols.data as *const BootstrapObjectSymbol;
-        var symbol_index: usize = 0;
-        while (symbol_index < bootstrap_object_symbol_count(objects[object_index])) {
-            let symbol: BootstrapObjectSymbol = symbols[symbol_index];
-            if (symbol.defined && symbol.global && !symbol.external) {
-                let name: StdTextViewResult = bootstrap_object_symbol_name(objects[object_index], symbol);
-                if (name.error == RuntimeError.none && bootstrap_linker_name_equal(name.view, wanted.view)) {
-                    return true;
-                }
-            }
-            symbol_index += 1;
-        }
-        object_index += 1;
-    }
-    return false;
-}
-
 fn bootstrap_x86_64_link(objects: *const BootstrapObject, object_count: usize) -> BootstrapLinkerResult {
     var image: BootstrapLinkImage = bootstrap_linker_image_empty();
     if (objects == null || object_count == 0 || object_count > BootstrapLinkerLimit.maximum_inputs as usize) {
@@ -641,59 +601,23 @@ fn bootstrap_x86_64_link(objects: *const BootstrapObject, object_count: usize) -
             executable = std_byte_buffer_empty(), error = RuntimeError.invalid_argument, input_index = 0,
         };
     }
-    // The syscall stubs are injected only when no input object provides them:
-    // library/linux/syscall.luna defines them as asm fn source, and duplicating
-    // those definitions is a link error, not an override.
-    let inject_syscalls: bool = !bootstrap_linker_has_syscall_definitions(objects, object_count);
-    var syscall: BootstrapObjectResult = {
-        object = bootstrap_object_empty(), error = RuntimeError.none,
-    };
-    if (inject_syscalls) {
-        syscall = bootstrap_linker_syscall_object();
-        if (syscall.error != RuntimeError.none) {
-            return {
-                executable = std_byte_buffer_empty(), error = syscall.error, input_index = object_count,
-            };
-        }
-    }
-    var all_objects: [65]BootstrapObject = {};
     var placements: [65]BootstrapLinkPlacement = {};
-    var index: usize = 0;
-    while (index < object_count) {
-        all_objects[index] = objects[index];
-        index += 1;
-    }
-    var total_count: usize = object_count;
-    if (inject_syscalls) {
-        all_objects[object_count] = syscall.object;
-        total_count += 1;
-    }
     var executable: StdByteBufferResult = {
         buffer = std_byte_buffer_empty(), error = RuntimeError.invalid_argument,
     };
-    if (bootstrap_linker_collect_globals(&image, &all_objects[0] as *const BootstrapObject, total_count) &&
-        bootstrap_linker_layout_regions(
-            &image, &all_objects[0] as *const BootstrapObject, total_count, &placements[0]) &&
+    if (bootstrap_linker_collect_globals(&image, objects, object_count) &&
+        bootstrap_linker_layout_regions(&image, objects, object_count, &placements[0]) &&
         bootstrap_linker_layout_image(&image) &&
         bootstrap_linker_apply_relocations(
-            &image, &all_objects[0] as *const BootstrapObject, total_count,
-            &placements[0] as *const BootstrapLinkPlacement) &&
+            &image, objects, object_count, &placements[0] as *const BootstrapLinkPlacement) &&
         bootstrap_linker_resolve_entry(
-            &image, &all_objects[0] as *const BootstrapObject, &placements[0] as *const BootstrapLinkPlacement)) {
+            &image, objects, &placements[0] as *const BootstrapLinkPlacement)) {
         executable = bootstrap_linker_serialize(&image as *const BootstrapLinkImage);
         if (executable.error != RuntimeError.none) {
             image.error = executable.error;
         }
     }
-    let syscall_error: RuntimeError = bootstrap_object_release(syscall.object);
     let image_error: RuntimeError = bootstrap_linker_image_release(image);
-    if (image.error == RuntimeError.none && executable.error == RuntimeError.none &&
-        syscall_error != RuntimeError.none) {
-        std_byte_buffer_release(executable.buffer);
-        return {
-            executable = std_byte_buffer_empty(), error = syscall_error, input_index = object_count,
-        };
-    }
     if (image.error == RuntimeError.none && executable.error == RuntimeError.none && image_error != RuntimeError.none) {
         std_byte_buffer_release(executable.buffer);
         return {

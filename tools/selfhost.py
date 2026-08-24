@@ -174,7 +174,7 @@ LIBRARIES = {
     "x86_64_linker": (
         "luna.bootstrap.backend.x86_64.linker",
         "compiler/backend/x86_64/linker",
-        ("runtime", "bytes", "text", "x86_64_object", "x86_64_assembler"),
+        ("runtime", "bytes", "text", "x86_64_object"),
     ),
 }
 
@@ -475,6 +475,15 @@ def ffi_units(ffi: pathlib.Path, name: str) -> list[pathlib.Path]:
     return units
 
 
+def syscall_object(stage_bin: pathlib.Path) -> pathlib.Path:
+    """The luna.linux.syscall object from the build step, home of the
+    luna_linux_syscallN asm fn stubs (test cases and FFI shims declare them
+    extern; the linker no longer injects their definitions). It defines no
+    _start, so linking it into every test executable is inert for cases
+    that never touch syscalls."""
+    return stage_bin.parent / "objects" / "syscall.lo"
+
+
 def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, list[str]]:
     """Link tests/ffi cases against the checked-in ELF64 fixture objects.
 
@@ -525,6 +534,7 @@ def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, 
                     executable,
                     object_file,
                     fixture_path,
+                    syscall_object(stage_bin),
                 ],
                 timeout=TIMEOUT_SECONDS,
             )
@@ -611,7 +621,15 @@ def execute_tests(stage_bin: pathlib.Path, runner: list[str]) -> int:
                 ]
             )
             run([*tool(stage_bin, "luna-as"), "-o", object_file, assembly])
-            run([*tool(stage_bin, "luna-link"), "-o", executable, object_file])
+            run(
+                [
+                    *tool(stage_bin, "luna-link"),
+                    "-o",
+                    executable,
+                    object_file,
+                    syscall_object(stage_bin),
+                ]
+            )
             completed = subprocess.run(
                 [*runner, str(executable)],
                 timeout=TIMEOUT_SECONDS,
