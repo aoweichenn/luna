@@ -140,3 +140,16 @@ itself into `out/stage-fixed`; `verify` confirmed every artifact
 byte-identical between the two stages, and `test` passed 170/170. The
 stage-fixed executables were copied here and `SHA256SUMS` refreshed.
 The m1 milestone series (m1.1-m1.10) is complete with this toolchain.
+
+## 2026-08-24: promotion to the m1.12 toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`435103b` (`feat(m1.12): selective imports import a.b.c::{x, y}`),
+which includes m1.11 (`::` module qualification, `as` alias imports)
+and the `.luna`/`.interface.luna` → `.la`/`.lh` extension rename.
+Provenance chain: the previous anchor (above) built `out/stage-next`,
+which rebuilt itself into `out/stage-fixed`; `verify` confirmed every
+artifact byte-identical between the two stages, and `test` passed
+181/181. The stage-fixed executables were copied here and `SHA256SUMS`
+refreshed. Compiler sources may now adopt qualified names and alias or
+selective imports per the iteration discipline.
