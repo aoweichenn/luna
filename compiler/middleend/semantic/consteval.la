@@ -58,12 +58,14 @@ fn bootstrap_const_eval_enum_member(
             BootstrapSyntaxKind.name_expression) {
         return bootstrap_const_not_constant();
     }
-    let type_symbol: usize = bootstrap_semantic_lookup_symbol(
-        context,
-        unit_index,
-        owner_node.token_index,
-        BootstrapSemanticSymbolKind.named_type
-    );
+    let type_symbol: usize =
+        bootstrap_semantic_lookup_qualified_symbol(
+            context,
+            unit_index,
+            owner_node,
+            BootstrapSemanticSymbolKind.named_type,
+            false
+        );
     if (type_symbol == bootstrap_semantic_no_id()) {
         return bootstrap_const_not_constant();
     }
@@ -133,43 +135,47 @@ fn bootstrap_const_eval_name(
     node: BootstrapSyntaxNode
 ) -> BootstrapConstValue {
     let none: usize = bootstrap_semantic_no_id();
-    if (context->const_call_depth > 0) {
-        let slot: usize = bootstrap_const_env_find(
+    if (node.child_count == 0) {
+        if (context->const_call_depth > 0) {
+            let slot: usize = bootstrap_const_env_find(
+                context, unit_index, node.token_index
+            );
+            if (slot != none) {
+                let bindings: *const BootstrapSemanticConstLocal =
+                    context->const_locals.data as
+                        *const BootstrapSemanticConstLocal;
+                let binding: BootstrapSemanticConstLocal = bindings[slot];
+                if (binding.is_boolean) {
+                    return bootstrap_const_boolean(binding.value != 0);
+                }
+                return bootstrap_const_integer(binding.value);
+            }
+        }
+        let local_id: usize = bootstrap_semantic_find_local(
             context, unit_index, node.token_index
         );
-        if (slot != none) {
-            let bindings: *const BootstrapSemanticConstLocal =
-                context->const_locals.data as
-                    *const BootstrapSemanticConstLocal;
-            let binding: BootstrapSemanticConstLocal = bindings[slot];
-            if (binding.is_boolean) {
-                return bootstrap_const_boolean(binding.value != 0);
+        if (local_id != none) {
+            let locals: *const BootstrapSemanticLocal =
+                context->locals.data as *const BootstrapSemanticLocal;
+            let local: BootstrapSemanticLocal = locals[local_id];
+            if (!local.constant_binding) {
+                return bootstrap_const_not_constant();
             }
-            return bootstrap_const_integer(binding.value);
+            if (local.type_id ==
+                (BootstrapBuiltinType.boolean as usize)) {
+                return bootstrap_const_boolean(local.integer_value != 0);
+            }
+            return bootstrap_const_integer(local.integer_value);
         }
     }
-    let local_id: usize = bootstrap_semantic_find_local(
-        context, unit_index, node.token_index
-    );
-    if (local_id != none) {
-        let locals: *const BootstrapSemanticLocal =
-            context->locals.data as *const BootstrapSemanticLocal;
-        let local: BootstrapSemanticLocal = locals[local_id];
-        if (!local.constant_binding) {
-            return bootstrap_const_not_constant();
-        }
-        if (local.type_id ==
-            (BootstrapBuiltinType.boolean as usize)) {
-            return bootstrap_const_boolean(local.integer_value != 0);
-        }
-        return bootstrap_const_integer(local.integer_value);
-    }
-    let symbol_id: usize = bootstrap_semantic_lookup_symbol(
-        context,
-        unit_index,
-        node.token_index,
-        BootstrapSemanticSymbolKind.constant
-    );
+    let symbol_id: usize =
+        bootstrap_semantic_lookup_qualified_symbol(
+            context,
+            unit_index,
+            node,
+            BootstrapSemanticSymbolKind.constant,
+            false
+        );
     if (symbol_id == none) {
         return bootstrap_const_not_constant();
     }
@@ -939,18 +945,28 @@ fn bootstrap_const_eval_call(
     let callee: BootstrapSyntaxNode = bootstrap_semantic_node(
         context, unit_index, node.first_child
     );
-    if (callee.kind != BootstrapSyntaxKind.name_expression ||
-        bootstrap_const_env_find(
-            context, unit_index, callee.token_index
-        ) != none) {
+    if (callee.kind != BootstrapSyntaxKind.name_expression) {
         return bootstrap_const_not_constant();
     }
-    let symbol_id: usize = bootstrap_semantic_lookup_symbol(
-        context,
-        unit_index,
-        callee.token_index,
-        BootstrapSemanticSymbolKind.const_function
-    );
+    var symbol_id: usize = bootstrap_semantic_no_id();
+    if (callee.child_count != 0) {
+        symbol_id = bootstrap_semantic_lookup_qualified_symbol(
+            context,
+            unit_index,
+            callee,
+            BootstrapSemanticSymbolKind.const_function,
+            false
+        );
+    } else if (bootstrap_const_env_find(
+            context, unit_index, callee.token_index
+        ) == none) {
+        symbol_id = bootstrap_semantic_lookup_symbol(
+            context,
+            unit_index,
+            callee.token_index,
+            BootstrapSemanticSymbolKind.const_function
+        );
+    }
     if (symbol_id == none ||
         context->const_call_depth >=
             BootstrapSemanticLimit.maximum_const_call_depth as

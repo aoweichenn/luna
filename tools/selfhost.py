@@ -26,7 +26,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # toolchain binary invocation, for cross-architecture development hosts.
 TOOL_RUNNER = tuple(os.environ.get("LUNA_TOOL_RUNNER", "").split())
 IMPORT_PATTERN = re.compile(
-    r"^[ \t]*import[ \t]+([A-Za-z0-9_.]+)[ \t]*;[ \t]*$",
+    r"^[ \t]*import[ \t]+([A-Za-z0-9_.]+)(?:[ \t]+as[ \t]+[A-Za-z0-9_]+)?[ \t]*;[ \t]*$",
     re.MULTILINE,
 )
 
@@ -476,6 +476,23 @@ def ffi_units(ffi: pathlib.Path, name: str) -> list[pathlib.Path]:
     return units
 
 
+def case_units(cases: pathlib.Path, name: str) -> list[pathlib.Path]:
+    """Source units for a tests/cases entry: the case itself plus every
+    tests.modules.* module it imports, supplied as interface/implementation
+    source pairs; dots after the prefix become directory separators under
+    tests/modules/ (tests.modules.a.b -> tests/modules/a/b.{la,lh})."""
+    units = [cases / name]
+    source = (cases / name).read_text(encoding="utf-8")
+    modules_root = ROOT / "tests" / "modules"
+    for module in IMPORT_PATTERN.findall(source):
+        if module.startswith("tests.modules."):
+            stem = modules_root / module.removeprefix("tests.modules.").replace(".", "/")
+            units.extend(
+                (stem.with_suffix(".la"), stem.with_suffix(".lh"))
+            )
+    return units
+
+
 def syscall_object(stage_bin: pathlib.Path) -> pathlib.Path:
     """The luna.linux.syscall object from the build step, home of the
     luna_linux_syscallN asm fn stubs (test cases and FFI shims declare them
@@ -591,7 +608,7 @@ def execute_tests(stage_bin: pathlib.Path, runner: list[str]) -> int:
                         "--executable",
                         "-o",
                         assembly,
-                        cases / name,
+                        *case_units(cases, name),
                     ],
                     timeout=TIMEOUT_SECONDS,
                     capture_output=True,
@@ -618,7 +635,7 @@ def execute_tests(stage_bin: pathlib.Path, runner: list[str]) -> int:
                     "--executable",
                     "-o",
                     assembly,
-                    cases / name,
+                    *case_units(cases, name),
                 ]
             )
             run([*tool(stage_bin, "luna-as"), "-o", object_file, assembly])

@@ -2510,11 +2510,59 @@ fn bootstrap_semantic_function_value(
     };
 }
 
+// Emits the resolved value of a module-level constant symbol (flat or
+// qualified lookup), mirroring the literal lowering of a local constant.
+fn bootstrap_semantic_emit_symbol_constant(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode,
+    symbol_id: usize
+) -> BootstrapSemanticExpression {
+    let symbols: *const BootstrapSemanticSymbol =
+        context->symbols.data as *const BootstrapSemanticSymbol;
+    let type_id: usize = symbols[symbol_id].type_id;
+    let value: u64 = symbols[symbol_id].integer_value;
+    if (type_id == (BootstrapBuiltinType.boolean as usize)) {
+        return bootstrap_semantic_emit_boolean_constant(
+            context, node, value != 0
+        );
+    }
+    let kind: BootstrapTypeKind =
+        bootstrap_semantic_type_record(context, type_id).kind;
+    return bootstrap_semantic_emit_integer_constant(
+        context,
+        node,
+        type_id,
+        bootstrap_semantic_mask_integer(
+            value, bootstrap_type_bit_width(kind)
+        )
+    );
+}
+
 fn bootstrap_semantic_lower_const_name(
     context: *BootstrapSemanticContext,
     node: BootstrapSyntaxNode
 ) -> BootstrapSemanticExpression {
     let none: usize = bootstrap_semantic_no_id();
+    if (node.child_count != 0) {
+        // Qualified `qual::name`: only a module-level constant of the named
+        // module applies; the lookup diagnoses failures itself.
+        let qualified_symbol: usize =
+            bootstrap_semantic_lookup_qualified_symbol(
+                context,
+                context->current_unit,
+                node,
+                BootstrapSemanticSymbolKind.constant,
+                true
+            );
+        if (qualified_symbol == none) {
+            return bootstrap_semantic_invalid_expression();
+        }
+        return bootstrap_semantic_emit_symbol_constant(
+            context,
+            node,
+            qualified_symbol
+        );
+    }
     var type_id: usize = none;
     var value: u64 = 0;
     let local_id: usize = bootstrap_semantic_find_local(
@@ -2563,10 +2611,61 @@ fn bootstrap_semantic_lower_const_name(
     );
 }
 
+// Lowers a qualified `qual::name` expression: constant first, then function,
+// probing quietly so a name found under either kind yields exactly one
+// result; only a total miss re-runs the diagnosing lookup to report the
+// qualifier or name failure once.
+fn bootstrap_semantic_lower_qualified_name(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode
+) -> BootstrapSemanticExpression {
+    let none: usize = bootstrap_semantic_no_id();
+    var symbol_id: usize =
+        bootstrap_semantic_lookup_qualified_symbol(
+            context,
+            context->current_unit,
+            node,
+            BootstrapSemanticSymbolKind.constant,
+            false
+        );
+    if (symbol_id != none) {
+        return bootstrap_semantic_emit_symbol_constant(
+            context,
+            node,
+            symbol_id
+        );
+    }
+    symbol_id = bootstrap_semantic_lookup_qualified_symbol(
+        context,
+        context->current_unit,
+        node,
+        BootstrapSemanticSymbolKind.function,
+        false
+    );
+    if (symbol_id != none) {
+        return bootstrap_semantic_function_value(
+            context,
+            node,
+            symbol_id
+        );
+    }
+    bootstrap_semantic_lookup_qualified_symbol(
+        context,
+        context->current_unit,
+        node,
+        BootstrapSemanticSymbolKind.constant,
+        true
+    );
+    return bootstrap_semantic_invalid_expression();
+}
+
 fn bootstrap_semantic_lower_name(
     context: *BootstrapSemanticContext,
     node: BootstrapSyntaxNode
 ) -> BootstrapSemanticExpression {
+    if (node.child_count != 0) {
+        return bootstrap_semantic_lower_qualified_name(context, node);
+    }
     let const_name: BootstrapSemanticExpression =
         bootstrap_semantic_lower_const_name(context, node);
     if (const_name.valid) {
@@ -2660,11 +2759,12 @@ fn bootstrap_semantic_lower_enum_member(
         return bootstrap_semantic_invalid_expression();
     }
     let type_symbol: usize =
-        bootstrap_semantic_lookup_symbol(
+        bootstrap_semantic_lookup_qualified_symbol(
             context,
             context->current_unit,
-            owner_node.token_index,
-            BootstrapSemanticSymbolKind.named_type
+            owner_node,
+            BootstrapSemanticSymbolKind.named_type,
+            false
         );
     if (type_symbol == bootstrap_semantic_no_id()) {
         return bootstrap_semantic_invalid_expression();
@@ -3455,6 +3555,22 @@ fn bootstrap_semantic_lower_call(
     var callee_value: usize = none;
     if (callee_node.kind ==
         BootstrapSyntaxKind.name_expression &&
+        callee_node.child_count != 0) {
+        // A qualified callee names a function of the qualifier's module;
+        // the lookup diagnoses unknown qualifiers and names itself.
+        direct_symbol =
+            bootstrap_semantic_lookup_qualified_symbol(
+                context,
+                context->current_unit,
+                callee_node,
+                BootstrapSemanticSymbolKind.function,
+                true
+            );
+        if (direct_symbol == none) {
+            return bootstrap_semantic_invalid_expression();
+        }
+    } else if (callee_node.kind ==
+        BootstrapSyntaxKind.name_expression &&
         bootstrap_semantic_find_local(
             context,
             context->current_unit,
@@ -3995,24 +4111,34 @@ fn bootstrap_semantic_lower_unary(
     }
     if (operation == BootstrapTokenKind.ampersand &&
         operand_node.kind ==
-            BootstrapSyntaxKind.name_expression &&
-        bootstrap_semantic_find_local(
-            context,
-            context->current_unit,
-            operand_node.token_index
-        ) == bootstrap_semantic_no_id()) {
-        let function_symbol: usize =
-            bootstrap_semantic_lookup_symbol(
+            BootstrapSyntaxKind.name_expression) {
+        var address_symbol: usize = bootstrap_semantic_no_id();
+        if (operand_node.child_count != 0) {
+            address_symbol =
+                bootstrap_semantic_lookup_qualified_symbol(
+                    context,
+                    context->current_unit,
+                    operand_node,
+                    BootstrapSemanticSymbolKind.function,
+                    false
+                );
+        } else if (bootstrap_semantic_find_local(
+                context,
+                context->current_unit,
+                operand_node.token_index
+            ) == bootstrap_semantic_no_id()) {
+            address_symbol = bootstrap_semantic_lookup_symbol(
                 context,
                 context->current_unit,
                 operand_node.token_index,
                 BootstrapSemanticSymbolKind.function
             );
-        if (function_symbol != bootstrap_semantic_no_id()) {
+        }
+        if (address_symbol != bootstrap_semantic_no_id()) {
             return bootstrap_semantic_function_value(
                 context,
                 node,
-                function_symbol
+                address_symbol
             );
         }
     }

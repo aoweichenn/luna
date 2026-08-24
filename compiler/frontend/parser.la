@@ -72,7 +72,7 @@ fn bootstrap_syntax_tree_is_valid(tree: BootstrapSyntaxTree) -> bool {
     var node_index: usize = 0;
     while (node_index < tree.count) {
         let node: BootstrapSyntaxNode = nodes[node_index];
-        if ((node.kind as usize) > (BootstrapSyntaxKind.va_arg_expression as usize) || node.flags > 131071 ||
+        if ((node.kind as usize) > (BootstrapSyntaxKind.va_arg_expression as usize) || node.flags > 262143 ||
             node.span.line == 0 || node.span.column == 0 || node.span.length >
                 (BootstrapParserLimit.maximum_size as usize) - node.span.offset || (node.token_index != none &&
                 node.token_index >= tree.token_count)) {
@@ -195,7 +195,7 @@ fn bootstrap_parser_input_is_valid(source: StdTextView, tokens: BootstrapTokenBu
             return false;
         }
         let token: BootstrapToken = token_result.token;
-        if ((token.kind as usize) > (BootstrapTokenKind.keyword_asm as usize) ||
+        if ((token.kind as usize) > (BootstrapTokenKind.colon_colon as usize) ||
             !bootstrap_parser_span_is_valid(source, token.span) || token.span.offset < previous_end) {
             return false;
         }
@@ -637,6 +637,39 @@ fn bootstrap_parser_validate_float(state: *BootstrapParserState, token: Bootstra
     return true;
 }
 
+// Parses the `:: segment` tail of a qualified path after the first
+// identifier. The node's token_index names the last segment; every preceding
+// segment becomes a name_expression child in source order, so qualified
+// names need no new node kinds. Sema accepts exactly one qualifier segment
+// and diagnoses longer chains itself (parse errors are not diagnosable).
+fn bootstrap_parser_parse_qualified_name(
+    state: *BootstrapParserState, first: BootstrapToken, first_index: usize, kind: BootstrapSyntaxKind) -> usize {
+    let node: usize = bootstrap_parser_new_node(state, kind, first.span, first_index);
+    var segment: BootstrapToken = first;
+    var segment_index: usize = first_index;
+    while (state->error == RuntimeError.none && state->current.kind == BootstrapTokenKind.colon_colon) {
+        bootstrap_parser_advance(state);
+        let name: BootstrapToken = state->current;
+        let name_index: usize = state->current_index;
+        if (!bootstrap_parser_expect(
+                state, BootstrapTokenKind.identifier)) {
+            break;
+        }
+        bootstrap_parser_add_child(
+            state, node,
+            bootstrap_parser_new_node(state, BootstrapSyntaxKind.name_expression, segment.span, segment_index));
+        segment = name;
+        segment_index = name_index;
+        let pointer: *BootstrapSyntaxNode = bootstrap_parser_node_pointer(state, node);
+        if (pointer == null) {
+            return bootstrap_syntax_no_index();
+        }
+        pointer->token_index = name_index;
+        bootstrap_parser_set_node_span(state, node, bootstrap_parser_join_spans(first.span, name.span));
+    }
+    return node;
+}
+
 fn bootstrap_parser_parse_type(state: *BootstrapParserState) -> usize {
     let none: usize = bootstrap_syntax_no_index();
     let start: BootstrapToken = state->current;
@@ -769,6 +802,15 @@ fn bootstrap_parser_parse_type(state: *BootstrapParserState) -> usize {
         }
         bootstrap_parser_leave_nesting(state);
         return bootstrap_parser_new_node(state, BootstrapSyntaxKind.invalid, start.span, start_index);
+    }
+
+    if (kind == BootstrapSyntaxKind.type_named) {
+        let named: BootstrapToken = state->current;
+        let named_index: usize = state->current_index;
+        bootstrap_parser_advance(state);
+        let named_node: usize = bootstrap_parser_parse_qualified_name(state, named, named_index, kind);
+        bootstrap_parser_leave_nesting(state);
+        return named_node;
     }
 
     let node: usize = bootstrap_parser_new_node(state, kind, state->current.span, state->current_index);
@@ -1079,7 +1121,7 @@ fn bootstrap_parser_parse_primary_expression(state: *BootstrapParserState) -> us
     }
     if (token.kind == BootstrapTokenKind.identifier) {
         bootstrap_parser_advance(state);
-        return bootstrap_parser_new_node(state, BootstrapSyntaxKind.name_expression, token.span, token_index);
+        return bootstrap_parser_parse_qualified_name(state, token, token_index, BootstrapSyntaxKind.name_expression);
     }
     if (token.kind == BootstrapTokenKind.left_parenthesis) {
         bootstrap_parser_advance(state);
@@ -2536,6 +2578,22 @@ fn bootstrap_parser_parse_program(state: *BootstrapParserState) -> usize {
         let import_declaration: usize =
             bootstrap_parser_new_node(state, BootstrapSyntaxKind.import_declaration, import_keyword.span, import_index);
         bootstrap_parser_parse_module_name(state, import_declaration);
+        // `import a.b.c as t;` binds only the qualifier `t::`; the alias is
+        // carried as a trailing name_expression child after the module-name
+        // segments, marked by the aliased_import flag.
+        if (bootstrap_parser_match(
+                state, BootstrapTokenKind.keyword_as)) {
+            let alias: BootstrapToken = state->current;
+            let alias_index: usize = state->current_index;
+            if (bootstrap_parser_expect(
+                    state, BootstrapTokenKind.identifier)) {
+                bootstrap_parser_add_node_flags(
+                    state, import_declaration, BootstrapSyntaxFlag.aliased_import as usize);
+                bootstrap_parser_add_child(
+                    state, import_declaration,
+                    bootstrap_parser_new_node(state, BootstrapSyntaxKind.name_expression, alias.span, alias_index));
+            }
+        }
         bootstrap_parser_expect(state, BootstrapTokenKind.semicolon);
         bootstrap_parser_set_node_span(
             state, import_declaration, bootstrap_parser_join_spans(import_keyword.span, state->previous.span));

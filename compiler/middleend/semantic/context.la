@@ -658,14 +658,25 @@ fn bootstrap_semantic_module_names_equal(
         bootstrap_semantic_node(context, left_unit, left_node);
     let right: BootstrapSyntaxNode =
         bootstrap_semantic_node(context, right_unit, right_node);
-    if (left.child_count != right.child_count ||
-        left.child_count == 0) {
+    // An aliased import declaration carries its alias as one extra trailing
+    // child; it is not part of the module name being matched.
+    let left_count: usize =
+        (left.flags &
+                (BootstrapSyntaxFlag.aliased_import as usize)) != 0 &&
+            left.child_count != 0 ?
+            left.child_count - 1 : left.child_count;
+    let right_count: usize =
+        (right.flags &
+                (BootstrapSyntaxFlag.aliased_import as usize)) != 0 &&
+            right.child_count != 0 ?
+            right.child_count - 1 : right.child_count;
+    if (left_count != right_count || left_count == 0) {
         return false;
     }
     var left_child: usize = left.first_child;
     var right_child: usize = right.first_child;
     var index: usize = 0;
-    while (index < left.child_count) {
+    while (index < left_count) {
         let left_name: BootstrapSyntaxNode =
             bootstrap_semantic_node(
                 context,
@@ -957,8 +968,11 @@ fn bootstrap_semantic_find_imported_symbol(
     while (import_index < modules[module_id].import_count) {
         let import_record: BootstrapSemanticImport =
             imports[modules[module_id].first_import + import_index];
-        if (!interface_scope ||
-            import_record.interface_import) {
+        // An aliased import binds only its `<alias>::` qualifier and
+        // contributes no flat names.
+        if (import_record.alias_token == none &&
+            (!interface_scope ||
+            import_record.interface_import)) {
             var symbol_index: usize = 0;
             while (symbol_index < context->symbol_count) {
                 let symbol: BootstrapSemanticSymbol =
@@ -1037,6 +1051,258 @@ fn bootstrap_semantic_lookup_symbol(
         name_token,
         kind
     );
+}
+
+// Resolves a `qual::` qualifier against the unit's direct imports, using the
+// same visibility rule as flat imports (an interface unit sees only imports
+// written in the interface). A qualifier matches an import's alias, or — for
+// a plain import — the last segment of the target module's name. Returns the
+// target module, or no-id when nothing matches or when two or more distinct
+// modules match (then *ambiguous is set). Emits no diagnostics.
+fn bootstrap_semantic_find_qualifier_target(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    qualifier_token: usize,
+    ambiguous: *bool
+) -> usize {
+    let none: usize = bootstrap_semantic_no_id();
+    if (ambiguous == null) {
+        context->error = RuntimeError.invalid_argument;
+        return none;
+    }
+    *ambiguous = false;
+    let module_id: usize = bootstrap_semantic_unit_module(
+        context,
+        unit_index
+    );
+    let interface_scope: bool =
+        bootstrap_semantic_unit_is_interface(
+            context,
+            unit_index
+        );
+    let modules: *const BootstrapSemanticModule =
+        context->modules.data as
+            *const BootstrapSemanticModule;
+    let imports: *const BootstrapSemanticImport =
+        context->imports.data as
+            *const BootstrapSemanticImport;
+    var found: usize = none;
+    var import_index: usize = 0;
+    while (import_index < modules[module_id].import_count) {
+        let import_record: BootstrapSemanticImport =
+            imports[modules[module_id].first_import + import_index];
+        if (!interface_scope ||
+            import_record.interface_import) {
+            var matches: bool = false;
+            if (import_record.alias_token != none) {
+                matches = bootstrap_semantic_tokens_equal(
+                    context,
+                    unit_index,
+                    qualifier_token,
+                    import_record.source_unit,
+                    import_record.alias_token
+                );
+            } else {
+                let name_node: BootstrapSyntaxNode =
+                    bootstrap_semantic_node(
+                        context,
+                        modules[import_record.target_module].name_unit,
+                        modules[import_record.target_module].name_node
+                    );
+                if (name_node.child_count != 0) {
+                    let last_segment: BootstrapSyntaxNode =
+                        bootstrap_semantic_node(
+                            context,
+                            modules[import_record.target_module]
+                                .name_unit,
+                            name_node.last_child
+                        );
+                    matches = bootstrap_semantic_tokens_equal(
+                        context,
+                        unit_index,
+                        qualifier_token,
+                        modules[import_record.target_module].name_unit,
+                        last_segment.token_index
+                    );
+                }
+            }
+            if (matches) {
+                if (found != none &&
+                    found != import_record.target_module) {
+                    *ambiguous = true;
+                    return none;
+                }
+                found = import_record.target_module;
+            }
+        }
+        import_index += 1;
+    }
+    return found;
+}
+
+// Diagnosing wrapper around bootstrap_semantic_find_qualifier_target:
+// reports unknown_module_qualifier or ambiguous_module_qualifier.
+fn bootstrap_semantic_resolve_module_qualifier(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    qualifier_token: usize,
+    qualifier_span: BootstrapSourceSpan
+) -> usize {
+    var ambiguous: bool = false;
+    let target: usize = bootstrap_semantic_find_qualifier_target(
+        context,
+        unit_index,
+        qualifier_token,
+        &ambiguous
+    );
+    if (target == bootstrap_semantic_no_id()) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            ambiguous ?
+                BootstrapSemanticDiagnosticKind
+                    .ambiguous_module_qualifier :
+                BootstrapSemanticDiagnosticKind
+                    .unknown_module_qualifier,
+            unit_index,
+            qualifier_span,
+            bootstrap_semantic_no_id(),
+            bootstrap_semantic_empty_span(),
+            qualifier_token
+        );
+    }
+    return target;
+}
+
+// Finds the exported symbol of `kind` named `name_token` inside `module_id`,
+// without considering any imports. Emits no diagnostics.
+fn bootstrap_semantic_find_module_symbol(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    module_id: usize,
+    name_token: usize,
+    kind: BootstrapSemanticSymbolKind
+) -> usize {
+    let symbols: *const BootstrapSemanticSymbol =
+        context->symbols.data as
+            *const BootstrapSemanticSymbol;
+    var index: usize = 0;
+    while (index < context->symbol_count) {
+        let symbol: BootstrapSemanticSymbol = symbols[index];
+        if (symbol.module_id == module_id &&
+            symbol.kind == kind &&
+            (symbol.flags &
+                (BootstrapSemanticSymbolFlag
+                    .exported as usize)) != 0 &&
+            bootstrap_semantic_tokens_equal(
+                context,
+                unit_index,
+                name_token,
+                symbol.declaration_unit,
+                symbol.name_token
+            )) {
+            return index;
+        }
+        index += 1;
+    }
+    return bootstrap_semantic_no_id();
+}
+
+// Node-aware lookup: an unqualified name_expression delegates to
+// bootstrap_semantic_lookup_symbol; a qualified `qual::name` node (qualifier
+// segments carried as children) resolves the qualifier against the unit's
+// direct imports and searches only that module's exports. Exactly one
+// qualifier segment is supported; longer chains are rejected with
+// invalid_qualified_path. Diagnostics (unknown/ambiguous qualifier, unknown
+// qualified name, invalid path) are emitted only when `diagnose` is set, so
+// speculative callers can probe quietly and report once.
+fn bootstrap_semantic_lookup_qualified_symbol(
+    context: *BootstrapSemanticContext,
+    unit_index: usize,
+    node: BootstrapSyntaxNode,
+    kind: BootstrapSemanticSymbolKind,
+    diagnose: bool
+) -> usize {
+    let none: usize = bootstrap_semantic_no_id();
+    if (node.child_count == 0) {
+        return bootstrap_semantic_lookup_symbol(
+            context,
+            unit_index,
+            node.token_index,
+            kind
+        );
+    }
+    if (node.child_count > 1) {
+        if (diagnose) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind
+                    .invalid_qualified_path,
+                unit_index,
+                node.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                node.token_index
+            );
+        }
+        return none;
+    }
+    let qualifier: BootstrapSyntaxNode = bootstrap_semantic_node(
+        context,
+        unit_index,
+        node.first_child
+    );
+    var ambiguous: bool = false;
+    let target: usize = bootstrap_semantic_find_qualifier_target(
+        context,
+        unit_index,
+        qualifier.token_index,
+        &ambiguous
+    );
+    if (target == none) {
+        if (diagnose) {
+            bootstrap_semantic_add_diagnostic(
+                context,
+                ambiguous ?
+                    BootstrapSemanticDiagnosticKind
+                        .ambiguous_module_qualifier :
+                    BootstrapSemanticDiagnosticKind
+                        .unknown_module_qualifier,
+                unit_index,
+                qualifier.span,
+                none,
+                bootstrap_semantic_empty_span(),
+                qualifier.token_index
+            );
+        }
+        return none;
+    }
+    let symbol_id: usize = bootstrap_semantic_find_module_symbol(
+        context,
+        unit_index,
+        target,
+        node.token_index,
+        kind
+    );
+    if (symbol_id == none && diagnose) {
+        let modules: *const BootstrapSemanticModule =
+            context->modules.data as
+                *const BootstrapSemanticModule;
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind
+                .unknown_qualified_name,
+            unit_index,
+            node.span,
+            modules[target].name_unit,
+            bootstrap_semantic_node(
+                context,
+                modules[target].name_unit,
+                modules[target].name_node
+            ).span,
+            node.token_index
+        );
+    }
+    return symbol_id;
 }
 
 fn bootstrap_semantic_first_declaration(
