@@ -610,6 +610,30 @@ fn bootstrap_linker_image_release(image: BootstrapLinkImage) -> RuntimeError {
     return error;
 }
 
+fn bootstrap_linker_has_syscall_definitions(objects: *const BootstrapObject, object_count: usize) -> bool {
+    let wanted: StdTextViewResult = std_text_view("luna_linux_syscall0", 20);
+    if (wanted.error != RuntimeError.none) {
+        return false;
+    }
+    var object_index: usize = 0;
+    while (object_index < object_count) {
+        let symbols: *const BootstrapObjectSymbol = objects[object_index].symbols.data as *const BootstrapObjectSymbol;
+        var symbol_index: usize = 0;
+        while (symbol_index < bootstrap_object_symbol_count(objects[object_index])) {
+            let symbol: BootstrapObjectSymbol = symbols[symbol_index];
+            if (symbol.defined && symbol.global && !symbol.external) {
+                let name: StdTextViewResult = bootstrap_object_symbol_name(objects[object_index], symbol);
+                if (name.error == RuntimeError.none && bootstrap_linker_name_equal(name.view, wanted.view)) {
+                    return true;
+                }
+            }
+            symbol_index += 1;
+        }
+        object_index += 1;
+    }
+    return false;
+}
+
 fn bootstrap_x86_64_link(objects: *const BootstrapObject, object_count: usize) -> BootstrapLinkerResult {
     var image: BootstrapLinkImage = bootstrap_linker_image_empty();
     if (objects == null || object_count == 0 || object_count > BootstrapLinkerLimit.maximum_inputs as usize) {
@@ -617,11 +641,20 @@ fn bootstrap_x86_64_link(objects: *const BootstrapObject, object_count: usize) -
             executable = std_byte_buffer_empty(), error = RuntimeError.invalid_argument, input_index = 0,
         };
     }
-    let syscall: BootstrapObjectResult = bootstrap_linker_syscall_object();
-    if (syscall.error != RuntimeError.none) {
-        return {
-            executable = std_byte_buffer_empty(), error = syscall.error, input_index = object_count,
-        };
+    // The syscall stubs are injected only when no input object provides them:
+    // library/linux/syscall.luna defines them as asm fn source, and duplicating
+    // those definitions is a link error, not an override.
+    let inject_syscalls: bool = !bootstrap_linker_has_syscall_definitions(objects, object_count);
+    var syscall: BootstrapObjectResult = {
+        object = bootstrap_object_empty(), error = RuntimeError.none,
+    };
+    if (inject_syscalls) {
+        syscall = bootstrap_linker_syscall_object();
+        if (syscall.error != RuntimeError.none) {
+            return {
+                executable = std_byte_buffer_empty(), error = syscall.error, input_index = object_count,
+            };
+        }
     }
     var all_objects: [65]BootstrapObject = {};
     var placements: [65]BootstrapLinkPlacement = {};
@@ -630,8 +663,11 @@ fn bootstrap_x86_64_link(objects: *const BootstrapObject, object_count: usize) -
         all_objects[index] = objects[index];
         index += 1;
     }
-    all_objects[object_count] = syscall.object;
-    let total_count: usize = object_count + 1;
+    var total_count: usize = object_count;
+    if (inject_syscalls) {
+        all_objects[object_count] = syscall.object;
+        total_count += 1;
+    }
     var executable: StdByteBufferResult = {
         buffer = std_byte_buffer_empty(), error = RuntimeError.invalid_argument,
     };
