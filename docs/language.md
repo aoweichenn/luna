@@ -97,7 +97,19 @@ const BUFFER_SIZE: usize = 4096;
 ```
 
 All declarations have an explicit type and initializer. `let` bindings cannot
-be reassigned; `var` bindings can. The type may be omitted when the
+be reassigned; `var` bindings can. A `const` declaration binds a name to a
+compile-time constant of integer or boolean type, at module scope
+(exportable from interfaces) or in a function body:
+
+```luna
+const BUFFER_SIZE: usize = 4096;
+const TOO_MANY: bool = BUFFER_SIZE > 8192;
+```
+
+The initializer is evaluated by the constant evaluator; referencing the
+name yields the constant itself, so it flows anywhere a literal constant
+is expected — expressions, `switch` case labels, indexed array
+initializers and `assert` — and it is not an lvalue. The type may be omitted when the
 initializer has a standalone type, which the binding then takes:
 
 ```luna

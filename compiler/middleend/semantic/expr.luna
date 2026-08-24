@@ -2355,10 +2355,68 @@ fn bootstrap_semantic_function_value(
     };
 }
 
+fn bootstrap_semantic_lower_const_name(
+    context: *BootstrapSemanticContext,
+    node: BootstrapSyntaxNode
+) -> BootstrapSemanticExpression {
+    let none: usize = bootstrap_semantic_no_id();
+    var type_id: usize = none;
+    var value: u64 = 0;
+    let local_id: usize = bootstrap_semantic_find_local(
+        context,
+        context->current_unit,
+        node.token_index
+    );
+    if (local_id != none) {
+        let locals: *const BootstrapSemanticLocal =
+            context->locals.data as *const BootstrapSemanticLocal;
+        let local: BootstrapSemanticLocal = locals[local_id];
+        if (!local.constant_binding) {
+            return bootstrap_semantic_invalid_expression();
+        }
+        type_id = local.type_id;
+        value = local.integer_value;
+    } else {
+        let symbol_id: usize = bootstrap_semantic_lookup_symbol(
+            context,
+            context->current_unit,
+            node.token_index,
+            BootstrapSemanticSymbolKind.constant
+        );
+        if (symbol_id == none) {
+            return bootstrap_semantic_invalid_expression();
+        }
+        let symbols: *const BootstrapSemanticSymbol =
+            context->symbols.data as *const BootstrapSemanticSymbol;
+        type_id = symbols[symbol_id].type_id;
+        value = symbols[symbol_id].integer_value;
+    }
+    if (type_id == (BootstrapBuiltinType.boolean as usize)) {
+        return bootstrap_semantic_emit_boolean_constant(
+            context, node, value != 0
+        );
+    }
+    let kind: BootstrapTypeKind =
+        bootstrap_semantic_type_record(context, type_id).kind;
+    return bootstrap_semantic_emit_integer_constant(
+        context,
+        node,
+        type_id,
+        bootstrap_semantic_mask_integer(
+            value, bootstrap_type_bit_width(kind)
+        )
+    );
+}
+
 fn bootstrap_semantic_lower_name(
     context: *BootstrapSemanticContext,
     node: BootstrapSyntaxNode
 ) -> BootstrapSemanticExpression {
+    let const_name: BootstrapSemanticExpression =
+        bootstrap_semantic_lower_const_name(context, node);
+    if (const_name.valid) {
+        return const_name;
+    }
     let local_id: usize = bootstrap_semantic_find_local(
         context,
         context->current_unit,

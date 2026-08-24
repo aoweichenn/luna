@@ -223,6 +223,133 @@ fn bootstrap_semantic_lower_variable(
             scope_depth = context->scope_depth,
             mutable_binding = mutable_binding,
             volatile_binding = volatile_binding,
+            constant_binding = false,
+            integer_value = 0,
+        }
+    ) != none;
+}
+
+fn bootstrap_semantic_lower_constant(
+    context: *BootstrapSemanticContext,
+    node_id: usize,
+    node: BootstrapSyntaxNode
+) -> bool {
+    let none: usize = bootstrap_semantic_no_id();
+    if (node.child_count !=
+        2 + bootstrap_semantic_count_attribute_children(
+            context,
+            context->current_unit,
+            node
+        )) {
+        context->error = RuntimeError.invalid_argument;
+        return false;
+    }
+    let duplicate: usize =
+        bootstrap_semantic_local_in_current_scope(
+            context,
+            context->current_unit,
+            node.token_index
+        );
+    if (duplicate != none) {
+        let locals: *const BootstrapSemanticLocal =
+            context->locals.data as *const BootstrapSemanticLocal;
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.duplicate_local,
+            context->current_unit,
+            node.span,
+            locals[duplicate].unit_index,
+            bootstrap_semantic_node(
+                context,
+                locals[duplicate].unit_index,
+                locals[duplicate].declaration_node
+            ).span,
+            duplicate
+        );
+        return false;
+    }
+    let type_id: usize = bootstrap_semantic_resolve_type_node(
+        context,
+        context->current_unit,
+        node.first_child
+    );
+    if (type_id == none) {
+        return false;
+    }
+    let type_record: BootstrapTypeRecord =
+        bootstrap_semantic_type_record(context, type_id);
+    if (!bootstrap_type_is_integer(type_record.kind) &&
+        type_record.kind != BootstrapTypeKind.boolean) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind.type_mismatch,
+            context->current_unit,
+            bootstrap_semantic_node(
+                context,
+                context->current_unit,
+                node.first_child
+            ).span,
+            none,
+            bootstrap_semantic_empty_span(),
+            type_id
+        );
+        return false;
+    }
+    let initializer_id: usize = bootstrap_semantic_node(
+        context,
+        context->current_unit,
+        node.first_child
+    ).next_sibling;
+    let value: BootstrapConstValue =
+        bootstrap_consteval_expression(
+            context,
+            context->current_unit,
+            initializer_id
+        );
+    if (!value.is_constant || value.error) {
+        bootstrap_semantic_add_diagnostic(
+            context,
+            BootstrapSemanticDiagnosticKind
+                .non_constant_expression,
+            context->current_unit,
+            bootstrap_semantic_node(
+                context,
+                context->current_unit,
+                initializer_id
+            ).span,
+            none,
+            bootstrap_semantic_empty_span(),
+            node_id
+        );
+        return false;
+    }
+    if (!bootstrap_semantic_const_value_conforms(
+            context,
+            context->current_unit,
+            bootstrap_semantic_node(
+                context,
+                context->current_unit,
+                initializer_id
+            ).span,
+            type_id,
+            value
+        )) {
+        return false;
+    }
+    return bootstrap_semantic_append_local(
+        context,
+        {
+            function_id = context->current_function,
+            type_id = type_id,
+            slot_id = none,
+            unit_index = context->current_unit,
+            declaration_node = node_id,
+            name_token = node.token_index,
+            scope_depth = context->scope_depth,
+            mutable_binding = false,
+            volatile_binding = false,
+            constant_binding = true,
+            integer_value = value.value,
         }
     ) != none;
 }
@@ -936,6 +1063,9 @@ fn bootstrap_semantic_switch_label(
             control_type
         );
     }
+    if (node.kind == BootstrapSyntaxKind.name_expression) {
+        return bootstrap_semantic_lower_const_name(context, node);
+    }
     if (node.kind ==
         BootstrapSyntaxKind.unary_expression) {
         return bootstrap_semantic_lower_unary(
@@ -1306,6 +1436,13 @@ fn bootstrap_semantic_lower_statement(
             node
         );
     }
+    if (node.kind == BootstrapSyntaxKind.const_declaration) {
+        return bootstrap_semantic_lower_constant(
+            context,
+            node_id,
+            node
+        );
+    }
     if (node.kind ==
         BootstrapSyntaxKind.assignment_statement) {
         return bootstrap_semantic_lower_assignment(
@@ -1534,6 +1671,8 @@ fn bootstrap_semantic_add_parameter_locals(
                 scope_depth = 0,
                 mutable_binding = false,
                 volatile_binding = false,
+                constant_binding = false,
+                integer_value = 0,
             }
         );
         child = parameter_node.next_sibling;
