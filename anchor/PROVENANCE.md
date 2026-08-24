@@ -93,3 +93,15 @@ itself into `out/stage-fixed`; `verify` confirmed every artifact
 byte-identical between the two stages, and `test` passed 165/165. The
 stage-fixed executables were copied here and `SHA256SUMS` refreshed.
 The new anchor can parse `asm fn`, unlocking the syscall stub migration.
+
+## 2026-08-24: promotion to the conditional-injection toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`0f5f316aa560cf842a08c47965a9762e7a990586`
+(`feat(linker): inject syscall stubs only when undefined`). Provenance
+chain: the previous anchor (above) built `out/stage-next`, which rebuilt
+itself into `out/stage-fixed`; `verify` confirmed every artifact
+byte-identical between the two stages, and `test` passed 165/165. The
+stage-fixed executables were copied here and `SHA256SUMS` refreshed.
+This linker's injection is conditional, allowing the syscall stubs to
+move to asm fn source without duplicate definitions.
