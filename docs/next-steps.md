@@ -54,10 +54,10 @@ tables included).
 ### 0.3 Expected-failure cases — done
 
 `tools/selfhost.py` accepts a second expectation form,
-`<case>.luna FAIL <diagnostic-kind>`, asserting that compilation fails
+`<case>.la FAIL <diagnostic-kind>`, asserting that compilation fails
 with exactly that leading `BootstrapSemanticDiagnosticKind` (exit status
 `64 + kind`, compile-only, no linking). Kind ordinals are parsed from
-`compiler/middleend/semantic/context.interface.luna`.
+`compiler/middleend/semantic/context.lh`.
 
 ## Step 1 — m1.2 qualifiers, attributes and static assertions — done
 
@@ -107,7 +107,7 @@ is parked in m1.7 until a real C-library consumer appears.
 
 ## Deferred (explicitly)
 
-- Further splitting of parser.luna/codegen.luna: both are under the
+- Further splitting of parser.la/codegen.la: both are under the
   soft ceiling after R0; revisit only if they regrow.
 - Global variables initialized with function addresses: needs a data
   symbol relocation path (`.quad`-style); not required by any accepted

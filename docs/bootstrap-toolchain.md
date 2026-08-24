@@ -44,8 +44,8 @@ fixed protocol; they do not wrap the C23 seed:
 cmake --build --preset debug --target luna_selfhost_toolchain
 
 TOOLS=build/debug/selfhost-bootstrap/stage-three/bin
-"$TOOLS/lunac" --executable -o app.s app.luna dependency.interface.luna \
-  dependency.luna
+"$TOOLS/lunac" --executable -o app.s app.la dependency.lh \
+  dependency.la
 "$TOOLS/luna-as" -o app.lo app.s
 "$TOOLS/luna-link" -o app app.lo
 ```

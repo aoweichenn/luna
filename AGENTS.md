@@ -25,9 +25,9 @@ python3 tools/selfhost.py test     # compile+run tests/cases against
 - `verify` is the core correctness gate for any change under `library/`,
   `compiler/` or `drivers/`. It takes a few minutes.
 - Test expectations live in `tests/expectations.txt`
-  (`<case>.luna <exit-code>`); negative codes are fatal signals, e.g. `-8`
+  (`<case>.la <exit-code>`); negative codes are fatal signals, e.g. `-8`
   for a division trap. Expected-failure cases use
-  `<case>.luna FAIL <diagnostic-kind>`: compilation must fail with that
+  `<case>.la FAIL <diagnostic-kind>`: compilation must fail with that
   leading `BootstrapSemanticDiagnosticKind`, compile-only, no linking.
 
 ## Iteration discipline
@@ -51,7 +51,7 @@ python3 tools/selfhost.py test     # compile+run tests/cases against
 - Semantic lowering lives under `compiler/middleend/semantic/`
   (`context`, `attributes`, `modules`, `types`, `consteval`,
   `intrinsics`, `functions`, `expr`, `stmt`) with the pipeline entry remaining in
-  `sema.luna`; imports flow strictly downward in that order.
+  `sema.la`; imports flow strictly downward in that order.
 
 ## Layout
 
@@ -82,6 +82,6 @@ From `docs/architecture.md` — do not violate:
   `library/` and link no libc.
 - Only target is `x86_64-unknown-linux-gnu`; `isize`/`usize` are target-sized.
 - Luna modules are matched interface/implementation pairs
-  (`foo.interface.luna` declares exports; `foo.luna` defines).
+  (`foo.lh` declares exports; `foo.la` defines).
 - New modules must be registered in `tools/selfhost.py` (`LIBRARIES`,
   `LIBRARY_ORDER`, driver interface lists) so the fixed point covers them.

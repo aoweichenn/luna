@@ -188,9 +188,11 @@ def sort_imports(lines):
 def main():
     root = pathlib.Path(__file__).resolve().parent.parent
     targets = [
-        *sorted((root / "compiler").rglob("*.luna")),
-        *sorted((root / "library").rglob("*.luna")),
-        *sorted((root / "drivers").rglob("*.luna")),
+        *sorted((root / "compiler").rglob("*.la")),
+        *sorted((root / "compiler").rglob("*.lh")),
+        *sorted((root / "library").rglob("*.la")),
+        *sorted((root / "library").rglob("*.lh")),
+        *sorted((root / "drivers").rglob("*.la")),
     ]
     reformatted = 0
     skipped = 0

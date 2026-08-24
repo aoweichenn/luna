@@ -4,7 +4,7 @@
 executable without invoking LLD, GNU ld, an assembler or a host compiler:
 
 ```sh
-lunac --emit obj -o app.o app.luna
+lunac --emit obj -o app.o app.la
 lunalink -o app app.o
 ```
 

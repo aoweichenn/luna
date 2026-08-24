@@ -13,7 +13,7 @@ allocation, buffering and higher-level policy remain separate.
 
 ## Luna contract
 
-The source interface is `runtime/luna/linux/syscall.interface.luna`. The
+The source interface is `runtime/luna/linux/syscall.lh`. The
 explicit sysroot target generates target-specific metadata at:
 
 ```text
@@ -45,7 +45,7 @@ fn main() -> i32 {
 
 ```sh
 build/debug/lunac --emit obj -o write.o \
-  write.luna build/debug/sysroot/luna/linux/syscall.lmi
+  write.la build/debug/sysroot/luna/linux/syscall.lmi
 build/debug/lunalink -o write write.o
 ```
 

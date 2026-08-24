@@ -10,7 +10,7 @@ contract and the planned way back off C dependencies.
 `extern fn` declarations name C symbols with System V ABI classification
 (scalars, aggregates, variadic calls with the `%al` protocol). The linker
 consumes both the project's own LUNAOBJ1 objects and standard ELF64
-relocatable objects (`compiler/backend/x86_64/elf.luna`), mapping
+relocatable objects (`compiler/backend/x86_64/elf.la`), mapping
 sections onto the four-region model and applying `PC32`, `PLT32`, `64`,
 `32` and `32S` relocations. TLS, COMDAT, REL relocations and other
 unsupported content are rejected; notes and debug sections are dropped.

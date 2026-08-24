@@ -42,7 +42,7 @@ freshly built tools and checks each program's exit status against
 Compile and run a program directly:
 
 ```sh
-out/stage-next/bin/lunac --executable -o hello.s examples/hello.luna
+out/stage-next/bin/lunac --executable -o hello.s examples/hello.la
 out/stage-next/bin/luna-as -o hello.lo hello.s
 out/stage-next/bin/luna-link -o hello hello.lo
 ./hello

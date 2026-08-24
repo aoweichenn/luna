@@ -30,7 +30,7 @@ object under `build/debug/sysroot/luna/std/`, for example `bytes.lmi` and
 metadata graph:
 
 ```sh
-build/debug/lunac --emit obj -o app.o app.luna \
+build/debug/lunac --emit obj -o app.o app.la \
   build/debug/sysroot/luna/runtime.lmi \
   build/debug/sysroot/luna/std/bytes.lmi \
   build/debug/sysroot/luna/std/text.lmi \

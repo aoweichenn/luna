@@ -13,8 +13,8 @@ deferred.
 
 ## Sysroot artifacts
 
-The public interface is `runtime/luna/runtime.interface.luna`; its
-implementation is `runtime/luna/runtime.luna`. Build both compiled artifacts
+The public interface is `runtime/luna/runtime.lh`; its
+implementation is `runtime/luna/runtime.la`. Build both compiled artifacts
 with:
 
 ```sh
@@ -34,7 +34,7 @@ object privately depends on the raw system-call module:
 
 ```sh
 build/debug/lunac --emit obj -o app.o \
-  app.luna build/debug/sysroot/luna/runtime.lmi
+  app.la build/debug/sysroot/luna/runtime.lmi
 build/debug/lunalink -o app \
   app.o build/debug/sysroot/luna/runtime.o
 ```

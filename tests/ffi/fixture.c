@@ -7,7 +7,7 @@
  *
  * and luna-link consumes the resulting ELF64 ET_REL object through the Luna
  * ELF reader. Every libc symbol referenced here is defined by the Luna shim
- * module tests/ffi/shims.luna; nothing else external may be referenced.
+ * module tests/ffi/shims.la; nothing else external may be referenced.
  *
  * Typical gcc output under these flags (what the reader must absorb):
  *   .text / .rodata / .data / .bss, .rodata.str1.1 merge sections for the

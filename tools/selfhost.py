@@ -214,7 +214,7 @@ LIBRARY_ORDER = (
 # tool name -> (driver source, interface keys)
 DRIVERS = {
     "lunac": (
-        "drivers/stage_compiler.luna",
+        "drivers/stage_compiler.la",
         (
             "runtime",
             "bytes",
@@ -242,7 +242,7 @@ DRIVERS = {
         ),
     ),
     "luna-as": (
-        "drivers/stage_assembler.luna",
+        "drivers/stage_assembler.la",
         (
             "runtime",
             "bytes",
@@ -254,7 +254,7 @@ DRIVERS = {
         ),
     ),
     "luna-link": (
-        "drivers/stage_linker.luna",
+        "drivers/stage_linker.la",
         (
             "runtime",
             "bytes",
@@ -303,11 +303,11 @@ def import_closure(key: str) -> list[str]:
     while pending:
         current = pending.pop()
         stem = ROOT / LIBRARIES[current][1]
-        text = stem.with_suffix(".interface.luna").read_text(encoding="utf-8")
+        text = stem.with_suffix(".lh").read_text(encoding="utf-8")
         for name in IMPORT_PATTERN.findall(text):
             dependency = names_to_keys.get(name)
             if dependency is None:
-                fail(f"{stem}.interface.luna imports unknown module {name}")
+                fail(f"{stem}.lh imports unknown module {name}")
             if dependency not in required:
                 required.add(dependency)
                 pending.append(dependency)
@@ -317,9 +317,9 @@ def import_closure(key: str) -> list[str]:
 def library_units(key: str) -> list[pathlib.Path]:
     module = LIBRARIES[key]
     stem = ROOT / module[1]
-    units = [stem.with_suffix(".luna"), stem.with_suffix(".interface.luna")]
+    units = [stem.with_suffix(".la"), stem.with_suffix(".lh")]
     units.extend(
-        (ROOT / LIBRARIES[dependency][1]).with_suffix(".interface.luna")
+        (ROOT / LIBRARIES[dependency][1]).with_suffix(".lh")
         for dependency in import_closure(key)
     )
     return units
@@ -366,7 +366,7 @@ def build_stage(
         assembly = assembly_root / f"{name}.s"
         units = [ROOT / source]
         units.extend(
-            (ROOT / LIBRARIES[key][1]).with_suffix(".interface.luna")
+            (ROOT / LIBRARIES[key][1]).with_suffix(".lh")
             for key in interface_keys
         )
         run([*compiler, "--executable", "-o", assembly, *units])
@@ -413,7 +413,7 @@ def semantic_diagnostic_kinds() -> dict[str, int]:
         / "compiler"
         / "middleend"
         / "semantic"
-        / "context.interface.luna"
+        / "context.lh"
     )
     text = interface.read_text(encoding="utf-8")
     match = re.search(
@@ -471,7 +471,7 @@ def ffi_units(ffi: pathlib.Path, name: str) -> list[pathlib.Path]:
         if module.startswith("tests.ffi."):
             stem = ffi / module.removeprefix("tests.ffi.")
             units.extend(
-                (stem.with_suffix(".luna"), stem.with_suffix(".interface.luna"))
+                (stem.with_suffix(".la"), stem.with_suffix(".lh"))
             )
     return units
 
@@ -488,8 +488,8 @@ def syscall_object(stage_bin: pathlib.Path) -> pathlib.Path:
 def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, list[str]]:
     """Link tests/ffi cases against the checked-in ELF64 fixture objects.
 
-    Each expectation line is `<case>.luna <fixture>.o <exit>`, or
-    `<case>.luna <fixture>.o link:<status>` when luna-link itself must fail
+    Each expectation line is `<case>.la <fixture>.o <exit>`, or
+    `<case>.la <fixture>.o link:<status>` when luna-link itself must fail
     with the given exit status (malformed or unresolvable fixtures). Fixtures
     not checked in (fixture.o) are built from C sources with the host gcc;
     without a gcc their cases are skipped, not failed.
@@ -512,11 +512,11 @@ def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, 
                 print(f"SKIP {name}: gcc-built fixture {fixture} unavailable")
                 continue
             fixture_path = gcc_fixtures / fixture
-        work = ROOT / "out" / "tests" / name.removesuffix(".luna")
+        work = ROOT / "out" / "tests" / name.removesuffix(".la")
         reset(work)
         assembly = work / f"{name}.s"
         object_file = work / f"{name}.lo"
-        executable = work / name.removesuffix(".luna")
+        executable = work / name.removesuffix(".la")
         try:
             run(
                 [
@@ -577,7 +577,7 @@ def execute_tests(stage_bin: pathlib.Path, runner: list[str]) -> int:
             continue
         parts = line.split()
         name = parts[0]
-        work = ROOT / "out" / "tests" / name.removesuffix(".luna")
+        work = ROOT / "out" / "tests" / name.removesuffix(".la")
         reset(work)
         assembly = work / f"{name}.s"
         try:
@@ -611,7 +611,7 @@ def execute_tests(stage_bin: pathlib.Path, runner: list[str]) -> int:
                 continue
             expected = int(parts[1])
             object_file = work / f"{name}.lo"
-            executable = work / name.removesuffix(".luna")
+            executable = work / name.removesuffix(".la")
             run(
                 [
                     *tool(stage_bin, "lunac"),

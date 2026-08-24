@@ -4,7 +4,7 @@ Luna emits x86-64 Linux relocatable objects without invoking LLVM, GNU
 binutils or a host C compiler. The command-line boundary is:
 
 ```sh
-lunac --emit obj -o program.o program.luna
+lunac --emit obj -o program.o program.la
 ```
 
 The result is an ELF64 little-endian `ET_REL` object for `EM_X86_64`. It can be
