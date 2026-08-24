@@ -498,6 +498,85 @@ fn bootstrap_semantic_resolve_type_node(
                     count_node.next_sibling
                 );
             var element_count: u64 = 0;
+            // General constant expressions are evaluated by the consteval
+            // prescan (types cannot import consteval); plain literals fall
+            // back to the direct token parse when no cached value exists.
+            var count_valid: bool = false;
+            let cached_id: usize =
+                bootstrap_semantic_find_array_length(
+                    context,
+                    unit_index,
+                    node_index
+                );
+            if (cached_id != none) {
+                let lengths: *const BootstrapSemanticArrayLength =
+                    context->array_lengths.data as
+                        *const BootstrapSemanticArrayLength;
+                let cached: BootstrapSemanticArrayLength =
+                    lengths[cached_id];
+                if (!cached.valid) {
+                    bootstrap_semantic_add_diagnostic(
+                        context,
+                        BootstrapSemanticDiagnosticKind
+                            .non_constant_expression,
+                        unit_index,
+                        count_node.span,
+                        none,
+                        bootstrap_semantic_empty_span(),
+                        node_index
+                    );
+                    return none;
+                }
+                element_count = cached.value;
+                count_valid = true;
+            } else if (count_node.kind ==
+                BootstrapSyntaxKind.integer_expression) {
+                count_valid = bootstrap_semantic_parse_unsigned(
+                    context,
+                    unit_index,
+                    count_node.token_index,
+                    &element_count
+                );
+            }
+            if (!count_valid) {
+                if (count_node.kind ==
+                    BootstrapSyntaxKind.integer_expression) {
+                    bootstrap_semantic_add_diagnostic(
+                        context,
+                        BootstrapSemanticDiagnosticKind.unknown_type,
+                        unit_index,
+                        node.span,
+                        none,
+                        bootstrap_semantic_empty_span(),
+                        node_index
+                    );
+                    return none;
+                }
+                bootstrap_semantic_add_diagnostic(
+                    context,
+                    BootstrapSemanticDiagnosticKind
+                        .non_constant_expression,
+                    unit_index,
+                    count_node.span,
+                    none,
+                    bootstrap_semantic_empty_span(),
+                    node_index
+                );
+                return none;
+            }
+            if (element_count == 0) {
+                bootstrap_semantic_add_diagnostic(
+                    context,
+                    BootstrapSemanticDiagnosticKind
+                        .invalid_array_length,
+                    unit_index,
+                    count_node.span,
+                    none,
+                    bootstrap_semantic_empty_span(),
+                    node_index
+                );
+                return none;
+            }
             let element_type: usize =
                 bootstrap_semantic_resolve_type_node(
                     context,
@@ -511,13 +590,6 @@ fn bootstrap_semantic_resolve_type_node(
                     context,
                     element_type
                 ) &&
-                bootstrap_semantic_parse_unsigned(
-                    context,
-                    unit_index,
-                    count_node.token_index,
-                    &element_count
-                ) &&
-                element_count != 0 &&
                 element_count <=
                     BootstrapSemanticLimit.maximum_size
                         as usize as u64) {
@@ -1115,8 +1187,10 @@ fn bootstrap_semantic_enum_value(
     member: BootstrapSyntaxNode,
     underlying_kind: BootstrapTypeKind,
     implicit_value: u64,
-    value: *u64
+    value: *u64,
+    pending: *bool
 ) -> bool {
+    *pending = false;
     if (member.child_count == 0) {
         *value = implicit_value;
         return true;
@@ -1149,10 +1223,14 @@ fn bootstrap_semantic_enum_value(
             initializer.first_child
         );
     }
+    if (literal.kind != BootstrapSyntaxKind.integer_expression) {
+        // A general constant expression (typed const, const fn call, cast,
+        // arithmetic): consteval folds it once enum layout is complete.
+        *pending = true;
+        return true;
+    }
     var magnitude: u64 = 0;
-    if (literal.kind !=
-            BootstrapSyntaxKind.integer_expression ||
-        !bootstrap_semantic_parse_unsigned(
+    if (!bootstrap_semantic_parse_unsigned(
             context,
             unit_index,
             literal.token_index,
@@ -1251,6 +1329,7 @@ fn bootstrap_semantic_resolve_enum_layout(
     ).next_sibling;
     var next_value: u64 = 0;
     var next_value_valid: bool = true;
+    var chain_pending: bool = false;
     while (member_id != bootstrap_semantic_no_id()) {
         let member: BootstrapSyntaxNode =
             bootstrap_semantic_node(
@@ -1282,9 +1361,10 @@ fn bootstrap_semantic_resolve_enum_layout(
             );
         } else {
             var value: u64 = next_value;
+            var pending: bool = false;
             let implicit_overflow: bool =
                 member.child_count == 0 &&
-                !next_value_valid;
+                !next_value_valid && !chain_pending;
             if (implicit_overflow ||
                 !bootstrap_semantic_enum_value(
                     context,
@@ -1292,7 +1372,8 @@ fn bootstrap_semantic_resolve_enum_layout(
                     member,
                     underlying.record.kind,
                     next_value,
-                    &value
+                    &value,
+                    &pending
                 )) {
                 bootstrap_semantic_add_diagnostic(
                     context,
@@ -1308,6 +1389,14 @@ fn bootstrap_semantic_resolve_enum_layout(
                     type_id
                 );
             } else {
+                var flags: usize =
+                    BootstrapSemanticSymbolFlag.none as usize;
+                if (pending || chain_pending) {
+                    // The value is folded by consteval once layout is done
+                    // (see bootstrap_semantic_resolve_enum_constant_values).
+                    flags |= BootstrapSemanticSymbolFlag
+                        .enum_value_pending as usize;
+                }
                 bootstrap_semantic_append_symbol(
                     context,
                     {
@@ -1324,21 +1413,25 @@ fn bootstrap_semantic_resolve_enum_layout(
                         type_id = type_id,
                         function_id = bootstrap_semantic_no_id(),
                         integer_value = value,
-                        flags = BootstrapSemanticSymbolFlag
-                            .none as usize,
+                        flags = flags,
                     }
                 );
-                next_value = bootstrap_semantic_mask_integer(
-                    value + 1,
-                    bootstrap_type_bit_width(
-                        underlying.record.kind
-                    )
-                );
-                next_value_valid =
-                    bootstrap_semantic_enum_can_increment(
-                        underlying.record.kind,
-                        value
+                if (pending || chain_pending) {
+                    chain_pending = true;
+                    next_value_valid = false;
+                } else {
+                    next_value = bootstrap_semantic_mask_integer(
+                        value + 1,
+                        bootstrap_type_bit_width(
+                            underlying.record.kind
+                        )
                     );
+                    next_value_valid =
+                        bootstrap_semantic_enum_can_increment(
+                            underlying.record.kind,
+                            value
+                        );
+                }
             }
         }
         member_id = member.next_sibling;

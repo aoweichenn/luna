@@ -77,6 +77,8 @@ export enum BootstrapSemanticDiagnosticKind: usize {
     invalid_character,
     invalid_string,
     non_constant_expression,
+    invalid_const_function,
+    invalid_array_length,
 }
 
 export struct BootstrapSemanticUnit {
@@ -130,6 +132,8 @@ export enum BootstrapSemanticLimit: usize {
     maximum_floating_digits = 1200,
     maximum_floating_limbs = 128,
     floating_exponent_margin = 2048,
+    maximum_const_steps = 65536,
+    maximum_const_call_depth = 128,
 }
 
 export enum BootstrapSemanticSymbolKind: usize {
@@ -137,6 +141,7 @@ export enum BootstrapSemanticSymbolKind: usize {
     function,
     enum_member,
     constant,
+    const_function,
 }
 
 export enum BootstrapSemanticSymbolFlag: usize {
@@ -147,6 +152,9 @@ export enum BootstrapSemanticSymbolFlag: usize {
     no_return = 8,
     inline_hint = 16,
     constant_resolved = 32,
+    constant_resolving = 64,
+    enum_value_pending = 128,
+    enum_values_resolving = 256,
 }
 
 export enum BootstrapSemanticLiteralFamily: usize {
@@ -277,6 +285,37 @@ export struct BootstrapSemanticAlignmentOverride {
     alignment: usize;
 }
 
+// A `const fn` declaration: evaluator-only, never lowered to IR. Parameters
+// reuse the shared parameter buffer (with function_id set to no-id so regular
+// duplicate detection never matches them); the symbol's function_id indexes
+// this table.
+export struct BootstrapSemanticConstFunction {
+    symbol_id: usize;
+    return_type: usize;
+    first_parameter: usize;
+    parameter_count: usize;
+}
+
+// One live binding of the const-function interpreter. The stack is shared by
+// every active call frame; frames truncate it on exit.
+export struct BootstrapSemanticConstLocal {
+    unit_index: usize;
+    name_token: usize;
+    type_id: usize;
+    value: u64;
+    is_boolean: bool;
+    mutable_binding: bool;
+}
+
+// Cached constant value of an array length expression, filled by the consteval
+// prescan so type resolution (which cannot import consteval) can read it.
+export struct BootstrapSemanticArrayLength {
+    unit_index: usize;
+    node_index: usize;
+    value: u64;
+    valid: bool;
+}
+
 export struct BootstrapSemanticContext {
     input: BootstrapSemanticInput;
     units: StdByteBuffer;
@@ -297,6 +336,14 @@ export struct BootstrapSemanticContext {
     alignment_override_count: usize;
     bitfield_segments: StdByteBuffer;
     bitfield_segment_count: usize;
+    const_functions: StdByteBuffer;
+    const_function_count: usize;
+    const_locals: StdByteBuffer;
+    const_local_count: usize;
+    array_lengths: StdByteBuffer;
+    array_length_count: usize;
+    const_call_depth: usize;
+    const_steps: usize;
     types: BootstrapTypeTable;
     ir: BootstrapTypedIr;
     diagnostics: BootstrapSemanticDiagnosticBuffer;
@@ -421,6 +468,8 @@ export fn bootstrap_semantic_append_alignment_override( context: *BootstrapSeman
 export fn bootstrap_semantic_alignment_override( context: *BootstrapSemanticContext, declaration_unit: usize, declaration_node: usize ) -> usize;
 
 export fn bootstrap_semantic_append_bitfield_segment( context: *BootstrapSemanticContext, segment: BootstrapSemanticBitfieldSegment ) -> bool;
+
+export fn bootstrap_semantic_find_array_length( context: *BootstrapSemanticContext, unit_index: usize, node_index: usize ) -> usize;
 
 export fn bootstrap_semantic_bitfield_segment( context: *BootstrapSemanticContext, segment_id: usize ) -> BootstrapSemanticBitfieldSegment;
 

@@ -171,7 +171,7 @@ feature has executable tests plus a green `verify` fixed point.
 
 ### m1.5 constant functions
 
-- [ ] `const fn` scalar interpreter feeding array lengths, enum
+- [x] `const fn` scalar interpreter feeding array lengths, enum
       discriminants, assertions and typed constants
 
 ### m1.6 labels and goto

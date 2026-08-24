@@ -920,3 +920,24 @@ conditional operator, integer `as` casts and the three layout queries.
 Arithmetic works on 64-bit two's-complement values; division or remainder
 by zero is an evaluation error. Everything else — variables, calls,
 indexing, floating-point, strings — is not constant.
+
+Typed `const` declarations and `const fn` definitions extend the constant
+domain. A `const fn` is a module-scope function evaluated entirely at
+compile time:
+
+```luna
+const fn align_up(value: usize, alignment: usize) -> usize {
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
+var scratch: [align_up(4096, 64)]u8 = {};
+```
+
+Parameters and the result must be integer scalars or `bool`. The body is a
+pure subset: scalar `let`/`var`/`const` bindings, assignments, `if`/`else`,
+`return` and calls to other const functions — no loops, no memory access,
+no pointers, no runtime calls. A const fn produces no runtime code and its
+name resolves only in constant contexts. Results feed array lengths, enum
+discriminants, typed constants, assertions, indexed initializers and
+attribute arguments; evaluation runs under a fixed step budget and call
+depth cap, and exceeding either makes the expression non-constant.
