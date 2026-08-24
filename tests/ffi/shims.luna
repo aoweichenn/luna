@@ -1,0 +1,160 @@
+module tests.ffi.shims;
+
+// The FFI test executables link no Luna runtime library: allocation and exit
+// go through the linker's built-in luna_linux_syscallN stubs directly.
+
+extern fn luna_linux_syscall1(number: usize, argument0: usize) -> isize;
+extern fn luna_linux_syscall2(number: usize, argument0: usize, argument1: usize) -> isize;
+extern fn luna_linux_syscall6(
+    number: usize, argument0: usize, argument1: usize, argument2: usize, argument3: usize, argument4: usize,
+    argument5: usize) -> isize;
+
+enum ShimSystemCall: usize {
+    map_memory = 9, unmap_memory = 11, exit_group = 231,
+}
+
+enum ShimMemoryProtection: usize {
+    read_write = 3,
+}
+
+enum ShimMemoryFlags: usize {
+    private_anonymous = 34,
+}
+
+@export_name("memcpy")
+fn shim_memcpy(destination: *void, source: *const void, count: usize) -> *void {
+    let target: *u8 = destination as *u8;
+    let origin: *const u8 = source as *const u8;
+    var index: usize = 0;
+    while (index < count) {
+        target[index] = origin[index];
+        index += 1;
+    }
+    return destination;
+}
+
+@export_name("memmove")
+fn shim_memmove(destination: *void, source: *const void, count: usize) -> *void {
+    let target: *u8 = destination as *u8;
+    let origin: *const u8 = source as *const u8;
+    if (target as usize < origin as usize) {
+        var index: usize = 0;
+        while (index < count) {
+            target[index] = origin[index];
+            index += 1;
+        }
+        return destination;
+    }
+    var remaining: usize = count;
+    while (remaining != 0) {
+        remaining -= 1;
+        target[remaining] = origin[remaining];
+    }
+    return destination;
+}
+
+@export_name("memset")
+fn shim_memset(destination: *void, value: i32, count: usize) -> *void {
+    let target: *u8 = destination as *u8;
+    let byte: u8 = value as u8;
+    var index: usize = 0;
+    while (index < count) {
+        target[index] = byte;
+        index += 1;
+    }
+    return destination;
+}
+
+@export_name("memcmp")
+fn shim_memcmp(left: *const void, right: *const void, count: usize) -> i32 {
+    let left_bytes: *const u8 = left as *const u8;
+    let right_bytes: *const u8 = right as *const u8;
+    var index: usize = 0;
+    while (index < count) {
+        if (left_bytes[index] != right_bytes[index]) {
+            return (left_bytes[index] as i32) - (right_bytes[index] as i32);
+        }
+        index += 1;
+    }
+    return 0;
+}
+
+@export_name("strlen")
+fn shim_strlen(text: *const u8) -> usize {
+    var length: usize = 0;
+    while (text[length] != 0) {
+        length += 1;
+    }
+    return length;
+}
+
+@export_name("strcmp")
+fn shim_strcmp(left: *const u8, right: *const u8) -> i32 {
+    var index: usize = 0;
+    while (left[index] != 0 && left[index] == right[index]) {
+        index += 1;
+    }
+    return (left[index] as i32) - (right[index] as i32);
+}
+
+@export_name("strncmp")
+fn shim_strncmp(left: *const u8, right: *const u8, count: usize) -> i32 {
+    var index: usize = 0;
+    while (index < count && left[index] != 0 && left[index] == right[index]) {
+        index += 1;
+    }
+    if (index == count) {
+        return 0;
+    }
+    return (left[index] as i32) - (right[index] as i32);
+}
+
+@export_name("malloc")
+fn shim_malloc(size: usize) -> *void {
+    if (size == 0) {
+        return null;
+    }
+    // One mmap per allocation: the 16-byte header holds the complete mapping
+    // length for free, and returning header + 16 keeps 16-byte alignment.
+    let total: usize = size + 16;
+    let result: isize = luna_linux_syscall6(
+        ShimSystemCall.map_memory as usize, 0, total, ShimMemoryProtection.read_write as usize,
+        ShimMemoryFlags.private_anonymous as usize, -1 as isize as usize, 0);
+    if (result < 0) {
+        return null;
+    }
+    let header: *usize = result as usize as *usize;
+    header[0] = total;
+    return ((result as usize) + 16) as *void;
+}
+
+@export_name("free")
+fn shim_free(memory: *void) -> void {
+    if (memory == null) {
+        return;
+    }
+    let header: *usize = ((memory as usize) - 16) as *usize;
+    luna_linux_syscall2(ShimSystemCall.unmap_memory as usize, header as usize, header[0]);
+}
+
+@export_name("calloc")
+fn shim_calloc(count: usize, size: usize) -> *void {
+    if (size != 0 && count > (18446744073709551615 as usize) / size) {
+        return null;
+    }
+    let total: usize = count * size;
+    let memory: *void = shim_malloc(total);
+    if (memory == null) {
+        return null;
+    }
+    shim_memset(memory, 0, total);
+    return memory;
+}
+
+@export_name("abort")
+fn shim_abort() -> void {
+    // 134 = 128 + SIGABRT(6): the status a shell reports for a real abort.
+    luna_linux_syscall1(ShimSystemCall.exit_group as usize, 134);
+    while (true) {
+    }
+}

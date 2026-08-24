@@ -1,0 +1,97 @@
+module tests.ffi.call_gcc;
+
+// End-to-end gcc FFI: links tests/ffi/fixture.o, a real gcc -O1 freestanding
+// object compiled by tools/selfhost.py, with every libc symbol it references
+// provided by the tests.ffi.shims module compiled alongside this case.
+
+import tests.ffi.shims;
+
+struct FixturePair {
+    left: i32;
+    right: i32;
+}
+
+extern fn fixture_string_check(text: *const u8) -> i32;
+extern fn fixture_malloc_check() -> i32;
+extern fn fixture_calloc_check() -> i32;
+extern fn fixture_pair_make(left: i32, right: i32) -> FixturePair;
+extern fn fixture_pair_sum(pair: FixturePair) -> i32;
+extern fn fixture_name(index: u32) -> *const u8;
+extern fn fixture_counter_next() -> i32;
+extern fn fixture_data_check() -> i32;
+extern fn fixture_data_string() -> *const u8;
+extern fn fixture_sum(count: i32, ...) -> i32;
+extern fn fixture_sumf(count: i32, ...) -> f64;
+extern fn fixture_require(condition: i32) -> void;
+
+fn main() -> i32 {
+    // The shim layer itself, called from Luna.
+    if (shim_strlen("luna-ffi-fixture") != 16) {
+        return 1;
+    }
+    if (shim_strcmp("luna", "luna") != 0 || shim_strcmp("luna", "lunb") >= 0 ||
+        shim_strcmp("lunb", "luna") <= 0) {
+        return 2;
+    }
+    if (shim_strncmp("luna-ffi", "luna-gcc", 4) != 0 || shim_strncmp("luna-ffi", "luna-gcc", 6) >= 0) {
+        return 3;
+    }
+    if (shim_memcmp("abc" as *const void, "abd" as *const void, 3) >= 0 ||
+        shim_memcmp("abd" as *const void, "abc" as *const void, 3) <= 0 ||
+        shim_memcmp("abc" as *const void, "abc" as *const void, 3) != 0) {
+        return 4;
+    }
+
+    // String calls inside the gcc object: strlen/memcpy/strcmp/strncmp/
+    // memmove/memcmp/memset all resolve to the shims at link time.
+    if (fixture_string_check("luna-ffi-fixture") != 16) {
+        return 5;
+    }
+
+    // mmap-backed malloc/free and calloc through the shims.
+    if (fixture_malloc_check() != 448) {
+        return 6;
+    }
+    if (fixture_calloc_check() != 42) {
+        return 7;
+    }
+
+    // SysV aggregate return and aggregate parameter across the boundary.
+    let pair: FixturePair = fixture_pair_make(20, 22);
+    if (pair.left != 20 || pair.right != 22) {
+        return 8;
+    }
+    if (fixture_pair_sum(pair) != 42) {
+        return 9;
+    }
+
+    // Absolute-addressed globals: the .rodata pointer table, .bss and .data.
+    if (shim_strcmp(fixture_name(1), "beta") != 0 || fixture_name(3) != null) {
+        return 10;
+    }
+    if (fixture_counter_next() != 1 || fixture_counter_next() != 2) {
+        return 11;
+    }
+    if (fixture_data_check() != 42 || shim_strcmp(fixture_data_string(), "fixture-data") != 0) {
+        return 12;
+    }
+
+    // True C variadic callees: integer extras (%al = 0) and f64 extras
+    // (%al = vector register count), including bank overflow to the stack.
+    if (fixture_sum(0) != 0) {
+        return 13;
+    }
+    if (fixture_sum(8, 1, 2, 3, 4, 5, 6, 7, 8) != 36) {
+        return 14;
+    }
+    if (fixture_sumf(3, 1.5, 2.5, 38.0) != 42.0) {
+        return 15;
+    }
+    if (fixture_sumf(9, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0) != 45.0) {
+        return 16;
+    }
+
+    // References the abort shim without firing it.
+    fixture_require(1);
+    return 42;
+}

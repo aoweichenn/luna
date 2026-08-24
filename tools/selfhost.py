@@ -428,17 +428,67 @@ def semantic_diagnostic_kinds() -> dict[str, int]:
     }
 
 
+# Flags for the gcc-compiled C fixture: freestanding, no PIC, small model and
+# no unwind tables keep the object inside the ELF subset the Luna linker
+# reader accepts; -Wall -Werror proves the fixture is warning-clean.
+GCC_FIXTURE_FLAGS = (
+    "-ffreestanding",
+    "-fno-stack-protector",
+    "-fno-pic",
+    "-fno-common",
+    "-fno-asynchronous-unwind-tables",
+    "-mcmodel=small",
+    "-O1",
+    "-Wall",
+    "-Werror",
+    "-c",
+)
+
+
+def build_gcc_fixtures(ffi: pathlib.Path) -> pathlib.Path | None:
+    """Compile tests/ffi/fixture.c with the host gcc, when one is available.
+
+    Returns the directory holding the fresh objects, or None when no gcc is
+    present; expectations naming a gcc-built fixture are skipped then.
+    """
+    compiler = shutil.which("gcc")
+    if compiler is None:
+        print("SKIP gcc fixtures: no gcc found on this host")
+        return None
+    work = ROOT / "out" / "tests" / "ffi-gcc"
+    reset(work)
+    run([compiler, *GCC_FIXTURE_FLAGS, "-o", work / "fixture.o", ffi / "fixture.c"])
+    return work
+
+
+def ffi_units(ffi: pathlib.Path, name: str) -> list[pathlib.Path]:
+    """Source units for an FFI case: the case itself plus every tests.ffi.*
+    module it imports, supplied as interface/implementation source pairs."""
+    units = [ffi / name]
+    source = (ffi / name).read_text(encoding="utf-8")
+    for module in IMPORT_PATTERN.findall(source):
+        if module.startswith("tests.ffi."):
+            stem = ffi / module.removeprefix("tests.ffi.")
+            units.extend(
+                (stem.with_suffix(".luna"), stem.with_suffix(".interface.luna"))
+            )
+    return units
+
+
 def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, list[str]]:
     """Link tests/ffi cases against the checked-in ELF64 fixture objects.
 
     Each expectation line is `<case>.luna <fixture>.o <exit>`, or
     `<case>.luna <fixture>.o link:<status>` when luna-link itself must fail
-    with the given exit status (malformed or unresolvable fixtures).
+    with the given exit status (malformed or unresolvable fixtures). Fixtures
+    not checked in (fixture.o) are built from C sources with the host gcc;
+    without a gcc their cases are skipped, not failed.
     """
     ffi = ROOT / "tests" / "ffi"
     expectations = ffi / "expectations.txt"
     if not expectations.is_file():
         return 0, []
+    gcc_fixtures = build_gcc_fixtures(ffi)
     passed = 0
     failed: list[str] = []
     for line in expectations.read_text(encoding="utf-8").splitlines():
@@ -446,6 +496,12 @@ def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, 
             continue
         parts = line.split()
         name, fixture, expected = parts[0], parts[1], parts[2]
+        fixture_path = ffi / fixture
+        if not fixture_path.is_file():
+            if gcc_fixtures is None:
+                print(f"SKIP {name}: gcc-built fixture {fixture} unavailable")
+                continue
+            fixture_path = gcc_fixtures / fixture
         work = ROOT / "out" / "tests" / name.removesuffix(".luna")
         reset(work)
         assembly = work / f"{name}.s"
@@ -458,7 +514,7 @@ def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, 
                     "--executable",
                     "-o",
                     assembly,
-                    ffi / name,
+                    *ffi_units(ffi, name),
                 ]
             )
             run([*tool(stage_bin, "luna-as"), "-o", object_file, assembly])
@@ -468,7 +524,7 @@ def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, 
                     "-o",
                     executable,
                     object_file,
-                    ffi / fixture,
+                    fixture_path,
                 ],
                 timeout=TIMEOUT_SECONDS,
             )
