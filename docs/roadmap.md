@@ -189,8 +189,8 @@ feature has executable tests plus a green `verify` fixed point.
 
 ### m1.8 naked assembly functions
 
-- [ ] `asm fn` with string-literal bodies, no prologue/epilogue
-- [ ] `luna.linux.syscall` migrated from linker injection to `asm fn`
+- [x] `asm fn` with string-literal bodies, no prologue/epilogue
+- [x] `luna.linux.syscall` migrated from linker injection to `asm fn`
 
 ### m1.9 source position intrinsics
 

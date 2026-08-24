@@ -551,7 +551,6 @@ declared-width calling convention above. Re-initializing with a second
 contain `...`.
 
 For `x86_64-unknown-linux-gnu`, the interoperable C23 spellings are:
-
 | Luna | C23 |
 | --- | --- |
 | `bool` | `_Bool` |
@@ -567,11 +566,31 @@ The names `_start` and every name beginning with `_L` are reserved at this
 boundary for the bootstrap runtime and Luna's internal symbol encoding.
 
 The target sysroot provides the `luna.linux.syscall` module. Its seven
-external declarations accept a system-call number plus zero to six `usize`
-argument bit patterns and return the raw `isize` Linux result. `lunalink`
-provides their project-owned direct-`syscall` definitions; caller objects may
-not override those symbols. This is a target ABI boundary rather than a
-general language intrinsic or high-level I/O interface.
+declarations accept a system-call number plus zero to six `usize`
+argument bit patterns and return the raw `isize` Linux result. Their
+project-owned direct-`syscall` definitions are written in Luna as `asm
+fn` bodies in the module's implementation. This is a target ABI boundary
+rather than a general language intrinsic or high-level I/O interface.
+
+An `asm fn` declares an ordinary function signature whose entire body is
+raw assembly:
+
+```luna
+asm fn std_atomic_xchg_u64(target: *u64, value: u64) -> u64 {
+    "xchg %rsi, (%rdi)\n"
+    "mov %rsi, %rax\n"
+    "ret\n"
+}
+```
+
+The signature is checked and called under the System V ABI like any
+other function. The body is one or more adjacent string literals and
+nothing else; the compiler emits no prologue, epilogue or `ret`, so
+register use, stack discipline and the return sequence belong to the
+author. The body text is spliced into the emitted assembly after the
+function label and is validated and encoded by the assembler like any
+other instruction text. `asm fn` appears only in implementation units
+and composes with `@export_name`.
 
 ## Statements
 
