@@ -1214,6 +1214,243 @@ fn bootstrap_semantic_decode_hex(byte: u8) -> usize {
     return bootstrap_semantic_no_id();
 }
 
+fn bootstrap_semantic_string_token_width(
+    kind: BootstrapTokenKind
+) -> usize {
+    if (kind == BootstrapTokenKind.string_u16) {
+        return 2;
+    }
+    if (kind == BootstrapTokenKind.string_u32) {
+        return 4;
+    }
+    return 1;
+}
+
+fn bootstrap_semantic_push_code_unit(
+    context: *BootstrapSemanticContext,
+    decoded: *StdByteBuffer,
+    value: usize,
+    width: usize
+) -> bool {
+    var shift: usize = 0;
+    while (shift < width * 8 &&
+        context->error == RuntimeError.none) {
+        let pushed: StdByteBufferResult =
+            std_byte_buffer_push(
+                *decoded,
+                ((value >> shift) & 255) as u8
+            );
+        *decoded = pushed.buffer;
+        context->error = pushed.error;
+        shift += 8;
+    }
+    return context->error == RuntimeError.none;
+}
+
+// Appends one code point to a decoded string buffer, encoded as UTF-8,
+// UTF-16 (surrogate pairs above 0xFFFF) or UTF-32 per the unit width.
+fn bootstrap_semantic_push_code_point(
+    context: *BootstrapSemanticContext,
+    decoded: *StdByteBuffer,
+    code_point: usize,
+    width: usize
+) -> bool {
+    if (width == 4) {
+        return bootstrap_semantic_push_code_unit(
+            context, decoded, code_point, 4);
+    }
+    if (width == 2) {
+        if (code_point < 65536) {
+            return bootstrap_semantic_push_code_unit(
+                context, decoded, code_point, 2);
+        }
+        let reduced: usize = code_point - 65536;
+        return bootstrap_semantic_push_code_unit(
+                context, decoded, 55296 + (reduced >> 10), 2) &&
+            bootstrap_semantic_push_code_unit(
+                context, decoded, 56320 + (reduced & 1023), 2);
+    }
+    if (code_point < 128) {
+        return bootstrap_semantic_push_code_unit(
+            context, decoded, code_point, 1);
+    }
+    if (code_point < 2048) {
+        return bootstrap_semantic_push_code_unit(
+                context, decoded, 192 + (code_point >> 6), 1) &&
+            bootstrap_semantic_push_code_unit(
+                context, decoded, 128 + (code_point & 63), 1);
+    }
+    if (code_point < 65536) {
+        return bootstrap_semantic_push_code_unit(
+                context, decoded, 224 + (code_point >> 12), 1) &&
+            bootstrap_semantic_push_code_unit(
+                context, decoded, 128 + ((code_point >> 6) & 63), 1) &&
+            bootstrap_semantic_push_code_unit(
+                context, decoded, 128 + (code_point & 63), 1);
+    }
+    return bootstrap_semantic_push_code_unit(
+            context, decoded, 240 + (code_point >> 18), 1) &&
+        bootstrap_semantic_push_code_unit(
+            context, decoded, 128 + ((code_point >> 12) & 63), 1) &&
+        bootstrap_semantic_push_code_unit(
+            context, decoded, 128 + ((code_point >> 6) & 63), 1) &&
+        bootstrap_semantic_push_code_unit(
+            context, decoded, 128 + (code_point & 63), 1);
+}
+
+// Parses the braced hexadecimal code point of a \u{...} escape.
+// escape_index points at the 'u' inside the token span; on success value
+// receives the code point and last the index of the closing brace.
+fn bootstrap_semantic_decode_unicode_escape(
+    unit: *const BootstrapSemanticUnit,
+    token: BootstrapToken,
+    escape_index: usize,
+    value: *usize,
+    last: *usize
+) -> bool {
+    if (value == null || last == null ||
+        escape_index + 2 >= token.span.length ||
+        unit->source.data[
+            token.span.offset + escape_index + 1
+        ] != 123) {
+        return false;
+    }
+    var code_point: usize = 0;
+    var digits: usize = 0;
+    var index: usize = escape_index + 2;
+    while (index + 1 < token.span.length) {
+        let digit: usize = bootstrap_semantic_decode_hex(
+            unit->source.data[token.span.offset + index]
+        );
+        if (digit == bootstrap_semantic_no_id() || digits >= 6) {
+            break;
+        }
+        code_point = code_point * 16 + digit;
+        digits += 1;
+        index += 1;
+    }
+    if (digits == 0 ||
+        unit->source.data[token.span.offset + index] != 125) {
+        return false;
+    }
+    if (code_point > 1114111 ||
+        (code_point >= 55296 && code_point <= 57343)) {
+        return false;
+    }
+    *value = code_point;
+    *last = index;
+    return true;
+}
+
+// Decodes one string literal token (width prefix and quotes included in
+// the span) into code units of the literal's width. Raw non-ASCII source
+// bytes pass through in u8 literals; u16/u32 literals UTF-8-decode them
+// and re-encode (the lexer already validated the source as UTF-8).
+fn bootstrap_semantic_decode_string_token(
+    context: *BootstrapSemanticContext,
+    unit: *const BootstrapSemanticUnit,
+    token: BootstrapToken,
+    width: usize,
+    decoded: *StdByteBuffer
+) -> bool {
+    var index: usize = width == 1 ? 1 : 4;
+    while (index + 1 < token.span.length &&
+        context->error == RuntimeError.none) {
+        var byte: u8 =
+            unit->source.data[token.span.offset + index];
+        if (byte != 92 && byte < 128) {
+            if (!bootstrap_semantic_push_code_unit(
+                    context, decoded, byte as usize, width)) {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+        if (byte >= 128) {
+            if (width == 1) {
+                if (!bootstrap_semantic_push_code_unit(
+                        context, decoded, byte as usize, 1)) {
+                    return false;
+                }
+                index += 1;
+                continue;
+            }
+            var code_point: usize = (byte & 31) as usize;
+            var continuation: usize = 1;
+            if (byte >= 240) {
+                code_point = (byte & 7) as usize;
+                continuation = 3;
+            } else if (byte >= 224) {
+                code_point = (byte & 15) as usize;
+                continuation = 2;
+            }
+            var count: usize = 0;
+            while (count < continuation &&
+                index + 2 < token.span.length) {
+                index += 1;
+                code_point = (code_point << 6) +
+                    (unit->source.data[
+                        token.span.offset + index
+                    ] & 63) as usize;
+                count += 1;
+            }
+            if (!bootstrap_semantic_push_code_point(
+                    context, decoded, code_point, width)) {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+        index += 1;
+        byte = unit->source.data[token.span.offset + index];
+        if (byte == 120) {
+            let high: usize = bootstrap_semantic_decode_hex(
+                unit->source.data[
+                    token.span.offset + index + 1
+                ]
+            );
+            let low: usize = bootstrap_semantic_decode_hex(
+                unit->source.data[
+                    token.span.offset + index + 2
+                ]
+            );
+            if (!bootstrap_semantic_push_code_unit(
+                    context, decoded, high * 16 + low, width)) {
+                return false;
+            }
+            index += 3;
+            continue;
+        }
+        if (byte == 117) {
+            var escape_point: usize = 0;
+            var last: usize = 0;
+            if (!bootstrap_semantic_decode_unicode_escape(
+                    unit, token, index, &escape_point, &last) ||
+                !bootstrap_semantic_push_code_point(
+                    context, decoded, escape_point, width)) {
+                return false;
+            }
+            index = last + 1;
+            continue;
+        }
+        if (byte == 110) {
+            byte = 10;
+        } else if (byte == 114) {
+            byte = 13;
+        } else if (byte == 116) {
+            byte = 9;
+        } else if (byte == 48) {
+            byte = 0;
+        }
+        if (!bootstrap_semantic_push_code_unit(
+                context, decoded, byte as usize, width)) {
+            return false;
+        }
+        index += 1;
+    }
+    return context->error == RuntimeError.none;
+}
+
 fn bootstrap_semantic_lower_string_literal(
     context: *BootstrapSemanticContext,
     node: BootstrapSyntaxNode
@@ -1228,56 +1465,74 @@ fn bootstrap_semantic_lower_string_literal(
         context->current_unit,
         node.token_index
     );
+    let width: usize =
+        bootstrap_semantic_string_token_width(token.kind);
     var decoded: StdByteBuffer = std_byte_buffer_empty();
-    var index: usize = 1;
-    while (index + 1 < token.span.length &&
+    var valid: bool = bootstrap_semantic_decode_string_token(
+        context,
+        unit,
+        token,
+        width,
+        &decoded
+    );
+    var child: usize = node.first_child;
+    while (valid && child != bootstrap_semantic_no_id() &&
         context->error == RuntimeError.none) {
-        var byte: u8 =
-            unit->source.data[token.span.offset + index];
-        if (byte == 92) {
-            index += 1;
-            byte = unit->source.data[token.span.offset + index];
-            if (byte == 110) {
-                byte = 10;
-            } else if (byte == 114) {
-                byte = 13;
-            } else if (byte == 116) {
-                byte = 9;
-            } else if (byte == 48) {
-                byte = 0;
-            } else if (byte == 120) {
-                let high: usize = bootstrap_semantic_decode_hex(
-                    unit->source.data[
-                        token.span.offset + index + 1
-                    ]
-                );
-                let low: usize = bootstrap_semantic_decode_hex(
-                    unit->source.data[
-                        token.span.offset + index + 2
-                    ]
-                );
-                byte = (high * 16 + low) as u8;
-                index += 2;
-            }
+        let part: BootstrapSyntaxNode = bootstrap_semantic_node(
+            context,
+            context->current_unit,
+            child
+        );
+        let part_token: BootstrapToken = bootstrap_semantic_token(
+            context,
+            context->current_unit,
+            part.token_index
+        );
+        if (part.kind != BootstrapSyntaxKind.string_expression ||
+            part_token.kind != token.kind) {
+            valid = false;
+            break;
         }
-        let pushed: StdByteBufferResult =
-            std_byte_buffer_push(decoded, byte);
-        decoded = pushed.buffer;
-        context->error = pushed.error;
-        index += 1;
+        valid = bootstrap_semantic_decode_string_token(
+            context,
+            unit,
+            part_token,
+            width,
+            &decoded
+        );
+        child = part.next_sibling;
+    }
+    if (!valid) {
+        let discard_error: RuntimeError =
+            std_byte_buffer_release(decoded);
+        if (context->error == RuntimeError.none) {
+            context->error = discard_error;
+            bootstrap_semantic_add_diagnostic(
+                context,
+                BootstrapSemanticDiagnosticKind.invalid_string,
+                context->current_unit,
+                node.span,
+                bootstrap_semantic_no_id(),
+                bootstrap_semantic_empty_span(),
+                0
+            );
+        }
+        return bootstrap_semantic_invalid_expression();
     }
     if (context->error == RuntimeError.none) {
-        let terminated: StdByteBufferResult =
-            std_byte_buffer_push(decoded, 0);
-        decoded = terminated.buffer;
-        context->error = terminated.error;
+        bootstrap_semantic_push_code_unit(
+            context,
+            &decoded,
+            0,
+            width
+        );
     }
     let global_id: usize = context->error == RuntimeError.none ?
         bootstrap_ir_add_global(
             &context->ir,
             decoded.data as *const u8,
             decoded.length,
-            1,
+            width,
             true
         ) : bootstrap_semantic_no_id();
     let release_error: RuntimeError =
@@ -1291,10 +1546,18 @@ fn bootstrap_semantic_lower_string_literal(
         }
         return bootstrap_semantic_invalid_expression();
     }
+    var element_type: usize =
+        BootstrapBuiltinType.unsigned_8 as usize;
+    if (width == 2) {
+        element_type = BootstrapBuiltinType.unsigned_16 as usize;
+    }
+    if (width == 4) {
+        element_type = BootstrapBuiltinType.unsigned_32 as usize;
+    }
     let pointer: BootstrapTypeIdResult =
         bootstrap_type_table_pointer(
             &context->types,
-            BootstrapBuiltinType.unsigned_8 as usize,
+            element_type,
             true,
             false
         );

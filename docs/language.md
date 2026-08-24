@@ -629,9 +629,26 @@ raw pointer implies no bounds knowledge.
 
 A string literal has type `*const u8` and points at immutable static bytes
 followed by one terminating zero byte. The supported escapes are `\\`, `\"`,
-`\n`, `\r`, `\t`, `\0` and `\xHH` with exactly two hexadecimal digits.
-Source text is otherwise preserved as UTF-8 bytes. String literals are never
-writable and adjacent literal concatenation is not implicit.
+`\n`, `\r`, `\t`, `\0`, `\xHH` with exactly two hexadecimal digits, and
+`\u{...}` with one to six hexadecimal digits naming a Unicode code point
+(out-of-range and surrogate code points are rejected). Source text is
+otherwise preserved as UTF-8 bytes. String literals are never writable.
+
+A width prefix selects wider code units: `u16"..."` has type `*const u16`
+and is UTF-16 (astral code points become surrogate pairs), `u32"..."` has
+type `*const u32` and is UTF-32. Each ends with one zero code unit. A
+`\u{...}` escape encodes as UTF-8, UTF-16 or UTF-32 respectively, and
+`\xHH` names code unit value 0x00HH in the wider forms.
+
+Two or more adjacent string literals of the same width concatenate at
+translation time:
+
+```luna
+let greeting: *const u8 = "Hel" "lo";    // "Hello"
+let wide: *const u16 = u16"a" u16"b";    // u16"ab"
+```
+
+Mixing widths in one concatenation is a compile-time error.
 
 An unsuffixed integer literal takes the integer type required by its
 declaration, return, argument or enclosing integer expression. It defaults to
