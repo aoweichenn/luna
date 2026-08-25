@@ -53,20 +53,20 @@ Imports are direct and non-transitive: importing one module does not expose
 that module's imports. An exported function or aggregate type cannot expose a
 module-private named type in its public signature or fields.
 
-Imported declarations may be used by their unqualified names. Importing two
-exported declarations with the same name is an error, and a local declaration
-cannot shadow an imported declaration.
+Every import binds a module qualifier: a plain `import a.b.c;` binds the last
+segment `c`, and an alias import `import a.b.c as t;` binds `t`. `c::name`
+names any export of that module in expression and type positions
+(`mathx::triple(14)`, `p: mathx::Point`) and composes with enum member access
+(`mathx::Color.red`). Aliasing is the way to use two imported modules whose
+last segments coincide — a qualifier that matches more than one import is an
+error.
 
-A plain `import a.b.c;` additionally binds the last segment `c` as a module
-qualifier: `c::name` names any export of that module in expression and type
-positions (`mathx::triple(14)`, `p: mathx::Point`) and composes with enum
-member access (`mathx::Color.red`). An alias import `import a.b.c as t;`
-binds only the qualifier `t::` and no unqualified names; aliasing is the way
-to use two imported modules whose last segments coincide — a qualifier that
-matches more than one import is an error. A selective import
-`import a.b.c::{x, y};` flat-binds only the listed exports (each is checked
-against the target module) and still binds the `c::` qualifier. Combining
-`as` with `::{...}` is rejected.
+Imports never flat-bind on their own. A selective import
+`import a.b.c::{x, y};` additionally brings the listed exports into scope
+under their unqualified names (each is checked against the target module),
+while still binding the `c::` qualifier. Importing two declarations with the
+same unqualified name is an error, and a local declaration cannot shadow an
+imported one. Combining `as` with `::{...}` is rejected.
 
 An executable compilation receives the root plus every transitive dependency,
 in any order. A dependency may be supplied as its interface/implementation

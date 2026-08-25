@@ -220,6 +220,11 @@ feature has executable tests plus a green `verify` fixed point.
   `asm_text::append_c_string`); consumers use qualified or alias imports,
   landed one module family per gated slice
 
+### m1.14 qualifier-only imports
+
+- [x] plain `import a.b.c;` binds only the `c::` qualifier; flat binding
+  requires an explicit selective import `::{x, y}`
+
 ## Explicitly deferred
 
 Optimization beyond local x86-64 improvements, general metaprogramming,

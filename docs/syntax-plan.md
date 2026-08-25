@@ -500,10 +500,10 @@ let view: text::View = text::from_c_string(data, 64);
 let root: fs::Path = fs::from_text(view);
 ```
 
-Imports gain use-site qualification. A plain import binds the module's last
-name segment as a qualifier alongside the legacy flat binding; `as t` binds
-only the qualifier and is the escape from flat binding and from colliding
-last segments; `::{x, y}` flat-binds only the listed, validated exports.
+Imports gain use-site qualification. Every import binds a module qualifier —
+plain imports the last name segment, `as t` the alias — and nothing else:
+flat binding requires an explicit selective import `::{x, y}` whose names are
+validated against the target module (this final rule landed in m1.14).
 Qualification resolves in expression, type and interface positions and
 composes with enum member access (`io::Error.none`). This is the namespace
 mechanism that let m1.13 retire the manual `std_text_`-style prefixes.
