@@ -160,10 +160,10 @@ feature has executable tests plus a green `verify` fixed point.
 - [x] `@packed` structures (no padding; field addresses rejected)
 - [x] flexible trailing array member (`[?]T` header types)
 
-### m1.4 characters, strings, literals and inference
+### m1.4 character literals, strings, numeric literals and inference
 
-- [x] `char` spelling, string width prefixes (`u16"`, `u32"`),
-      adjacent literal concatenation, `\u{...}` escapes
+- [x] character literals, string width prefixes (`u16"`, `u32"`), adjacent
+      literal concatenation and `\u{...}` escapes; no built-in `char` type
 - [x] binary (`0b`) and hexadecimal floating literals
 - [x] positional and indexed array initializer lists
 - [x] nested `offsetof` designators

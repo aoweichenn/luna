@@ -47,8 +47,7 @@ The allocation-aware emitter keeps `%rsp` 16-byte aligned immediately before
 After the return address and old frame pointer are stored, the callee reads
 `stack[0]` at `16(%rbp)`, `stack[8]` at `24(%rbp)`, and so on. It then copies
 all incoming parameters into their exact local parameter slots. This path is
-shared by internal calls, compiled-module calls and non-variadic external C
-calls.
+shared by internal calls, compiled-module calls and external C calls.
 
 Scalar results keep the existing System V locations: general-purpose results
 use `%rax`, and `f32`/`f64` results use `%xmm0`. Narrow signed arguments at an
@@ -108,7 +107,14 @@ Internal Luna signatures support structures, unions and fixed arrays by
 value. External C structures and unions use the same classifier and are
 tested against real strict C23 objects. Fixed arrays are rejected specifically
 at an external C boundary because a C function type has no by-value array
-parameter or result form. Variadic calls remain unsupported.
+parameter or result form.
+
+Variadic extern calls classify additional scalar arguments through the same
+register and stack machinery and report the used SSE-register count in `%al`.
+Arguments keep their declared Luna widths rather than receiving C's default
+promotions. Variadic definitions reserve the System V register save area and
+serve typed `va_arg` reads from the built-in `va_list`; aggregates and
+variadic function-pointer types remain outside the accepted surface.
 
 ## Ownership and verification
 

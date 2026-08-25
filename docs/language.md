@@ -487,8 +487,9 @@ extern fn allocate(size: usize) -> *void;
 ```
 
 Parameters are passed by value and their bindings are immutable. Pointer
-parameters express mutation explicitly. There is no overloading, default
-argument or variadic Luna function.
+parameters express mutation explicitly. There is no overloading or default
+argument; variadic declarations and definitions use the explicit-width
+contract described below.
 
 An executable entry point has one of exactly two signatures:
 

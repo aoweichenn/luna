@@ -26,15 +26,13 @@ there is no preprocessor.
    before implementation. `defer` is shelved: `goto cleanup` covers the
    error-cleanup idiom for now, and the question may be reopened with
    concrete usage experience.
-3. **Variadic functions wait for a real consumer.** The kernel is not one:
-   every Linux syscall Luna makes is fixed-arity (`syscall0`..`syscall6`
-   already exist), and glibc's variadic `ioctl(fd, request, ...)` spelling
-   is user-space sugar over a fixed three-argument syscall. The only honest
-   consumers of variadic calls and `va_list` are actual C libraries, and
-   linking any libc is a separate explicit boundary decision (decision 8).
-   Both sides — extern calls with the `%al` protocol and definitions with
-   register save areas — are therefore parked together in m1.7, which
-   starts when the first real C-library consumer appears.
+3. **Variadic functions entered through an explicit FFI decision.** The
+   kernel is not a consumer: every Linux syscall Luna makes is fixed-arity,
+   and glibc's variadic `ioctl(fd, request, ...)` spelling is user-space sugar
+   over a fixed three-argument syscall. m1.7 nevertheless landed both sides
+   together for real C-library interop — extern calls with the `%al` protocol
+   and definitions with register save areas. Variadic arguments retain
+   Luna's declared widths instead of receiving C's default promotions.
 4. **Milestone order** below is fixed by the self-hosting discipline: each
    group lands green (`tools/selfhost.py verify` + `test`) before compiler
    sources adopt any of it, one group at a time.
@@ -78,7 +76,7 @@ is deliberate.
 | C23 feature | Disposition | Landing point or rationale |
 | --- | --- | --- |
 | `_Bool`, `true`, `false` | adopted | `bool`, already in the language |
-| `char` family (three distinct types) | modernized | single `char` spelling as an alias, m1.4 |
+| `char` family (three distinct types) | modernized | explicit `i8`/`u8`; projects may add a transparent `char` alias |
 | `short`/`int`/`long` width soup | modernized | `i8`..`i64`, `isize`/`usize`, done |
 | `long double` (f80/x87) | rejected | x87 legacy, 16-byte ABI friction |
 | `_Decimal32/64/128` | rejected | no hardware support on the sole target |
@@ -143,8 +141,8 @@ is deliberate.
 | C23 feature | Disposition | Landing point or rationale |
 | --- | --- | --- |
 | K&R declarations, `f()` vagueness | rejected | exact prototypes only, done |
-| variadic calls | shelved | m1.7; starts with the first C-library consumer |
-| variadic definitions, `va_list` | shelved | m1.7, same trigger |
+| variadic calls | adopted with explicit widths | m1.7; `%al` vector-count protocol |
+| variadic definitions, `va_list` | adopted with explicit widths | m1.7; register save areas and typed `va_arg` |
 | `noreturn` | modernized | `@noreturn`, m1.2 |
 | `inline` | adopted | `@inline` metadata, m1.2 |
 | default arguments, overloading | rejected | one exact signature per name |
@@ -360,7 +358,7 @@ behind pointers, with storage sized by the caller
 ## Milestone m1.4 — characters, strings, literals and inference
 
 ```luna
-type char = i8;                         // SysV x86-64 spelling of char
+type char = i8;                         // ordinary project alias, not a built-in type
 let wide: *const u16 = u16"...";
 let greeting: *const u8 = "Hel" "lo";   // adjacent literal concatenation
 let cursor = list_head(list);           // let/var inference from initializer
@@ -420,17 +418,16 @@ the cleanup idiom rests on `goto` alone until real usage argues otherwise.
 
 ## Milestone m1.7 — variadic functions
 
-Both sides of variadic support, parked together per decision 3: extern
-call sites with the `%al` vector-count protocol, then definitions
-`fn format(out: *mut File, fmt: *const u8, ...) { ... }` with `va_list`
-exposure equivalent to `<stdarg.h>` — register save areas in the prologue,
-typed `va_arg` expansion by argument class. The default-promotion question
-is resolved toward explicitness: Luna passes each argument at its declared
-width and documents the divergence from C's promotions at this boundary.
+Both sides of variadic support landed together per decision 3: extern call
+sites use the `%al` vector-count protocol, and definitions such as
+`fn format(out: *File, fmt: *const u8, ...) { ... }` expose `va_list` with
+register save areas in the prologue and typed `va_arg` expansion by argument
+class. Luna passes each argument at its declared width and documents the
+divergence from C's default promotions at this boundary.
 
-This milestone has no kernel consumer — every Linux syscall is
-fixed-arity — and starts when the first real C-library consumer appears
-(decision 8 governs what linking one means).
+This milestone has no kernel consumer — every Linux syscall is fixed-arity.
+It landed by explicit decision to enable C-library FFI; decision 8 continues
+to govern what linking such a consumer means.
 
 ## Milestone m1.8 — naked assembly functions
 

@@ -261,8 +261,8 @@ use its remaining registers.
 
 The caller reserves a 16-byte-aligned argument area before the call and
 restores it afterward. Internal Luna calls, compiled-module calls and
-non-variadic external C calls share this placement. Integer-like scalar
-results use `%rax`, and floating results use `%xmm0`.
+external C calls share this placement. Integer-like scalar results use
+`%rax`, and floating results use `%xmm0`.
 
 An aggregate of at most 16 bytes is classified into one or two `INTEGER` or
 `SSE` eightbytes. It uses general-purpose and SSE argument registers only if
@@ -275,7 +275,17 @@ Internal Luna calls support structures, unions and fixed arrays by value.
 External C calls support structures and unions by value and are checked
 against the same System V classifier. Fixed-array parameters and results are
 rejected at the external boundary because C function types do not pass arrays
-by value. Variadic calls are not part of the bootstrap language.
+by value.
+
+Variadic extern calls accept extra scalar arguments at their declared widths,
+classify them through the same register banks and stack area, and place the
+number of used vector registers in `%al`. Luna deliberately does not apply
+C's default argument promotions. A variadic Luna definition spills its
+incoming argument registers into a System V register save area; `va_start`
+initializes the built-in 24-byte `va_list`, and typed `va_arg` advances through
+the general-purpose, vector or overflow areas according to the requested
+scalar type. Aggregate variadic arguments and variadic function-pointer types
+are rejected.
 
 ## Module contracts
 

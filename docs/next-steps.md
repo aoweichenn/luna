@@ -102,8 +102,8 @@ Purely additive intrinsics; low risk.
 Anonymous struct/union members, psABI-conformant bitfields via
 `@bits(...)`, `@align(N)` alignment control, `@packed` structures and the
 `[?]T` flexible trailing array member (header types). Heaviest single item
-is the bitfield layout engine; deferred until after X. Variadic support
-is parked in m1.7 until a real C-library consumer appears.
+is the bitfield layout engine; deferred until after X. Variadic support later
+landed as m1.7 by explicit FFI decision, with declared-width arguments.
 
 ## Deferred (explicitly)
 
