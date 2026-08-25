@@ -225,6 +225,14 @@ feature has executable tests plus a green `verify` fixed point.
 - [x] plain `import a.b.c;` binds only the `c::` qualifier; flat binding
   requires an explicit selective import `::{x, y}`
 
+### m1.15 C calls Luna
+
+- [x] `elf::save` ELF64 `ET_REL` writer (one section per region,
+  locals-first symtab, RELA addends, `.note.GNU-stack`)
+- [x] `luna-as --emit elf`; round-trip through the project's own
+  reader/linker plus an end-to-end gcc host link of a C main against
+  Luna `@export_name` definitions
+
 ## Explicitly deferred
 
 Optimization beyond local x86-64 improvements, general metaprogramming,

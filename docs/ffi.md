@@ -34,6 +34,35 @@ TLS setup, archives, crt startup and environ/auxv handling make it an
 order of magnitude more work than the boundary above, for capabilities
 the runtime already owns.
 
+## C calling Luna
+
+`luna-as --emit elf` turns Luna assembly into a standard ELF64 `ET_REL`
+object that any host linker accepts. `elf::save`
+(`compiler/backend/x86_64/elf.la`) serializes the shared object model
+with one section per region (`.text`/`.rodata`/`.data`/`.bss`), a
+locals-first symbol table, `RELA` relocations with explicit addends and
+an empty `.note.GNU-stack`; the default `lunaobj` output is unchanged.
+
+A Luna function becomes visible to C by carrying
+`@export_name("symbol")`, which emits the verbatim unmangled global.
+Definitions use the same System V ABI as the `extern fn` call side, so
+scalar and narrow-integer arguments, `i64` values and pointers round-trip
+without shims:
+
+```sh
+lunac --library -o answer.s answer.la
+luna-as --emit elf -o answer.o answer.s
+gcc -no-pie -o app cmain.c answer.o
+```
+
+Objects destined for a host link come from `lunac --library` (no
+`_start`); Luna objects are small-model and non-PIC by construction, so
+`-no-pie` (or `-fno-pic` on the C side) is the matching host mode. The
+writer's output is validated two ways in the test suite: round-trips
+through the project's own ELF reader and linker (`elf-link` expectation
+shape) and an end-to-end gcc link of a C `main` against Luna
+`@export_name` definitions (`host-link` shape, `tests/ffi/c_calls_luna`).
+
 ## The exit strategy
 
 The shim layer is also the replacement surface. Every C-ABI symbol
