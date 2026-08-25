@@ -705,6 +705,33 @@ def case_units(cases: pathlib.Path, name: str) -> list[pathlib.Path]:
     return units
 
 
+def expectation_units(
+    cases: pathlib.Path,
+    name: str,
+    specification: list[str],
+) -> list[pathlib.Path]:
+    """Resolve an optional ordered source set from an expectation line.
+
+    The default preserves the import-derived test convention. `UNITS` makes
+    every source explicit so module diagnostics can exercise input order,
+    duplicate units and unreachable modules without teaching the harness Luna
+    module semantics.
+    """
+    if not specification:
+        return case_units(cases, name)
+    if specification[0] != "UNITS" or len(specification) == 1:
+        raise AssertionError(f"invalid unit specification for {name}")
+    units: list[pathlib.Path] = []
+    for source_name in specification[1:]:
+        source = (ROOT / source_name).resolve()
+        if not source.is_relative_to(ROOT):
+            raise AssertionError(f"unit outside repository for {name}: {source_name}")
+        if source.suffix not in (".la", ".lh") or not source.is_file():
+            raise AssertionError(f"invalid unit for {name}: {source_name}")
+        units.append(source)
+    return units
+
+
 def syscall_object(stage_bin: pathlib.Path) -> pathlib.Path:
     """The luna.linux.syscall object from the build step, home of the
     luna_linux_syscallN asm fn stubs (test cases and FFI shims declare them
@@ -895,7 +922,7 @@ def execute_tests(stage_bin: pathlib.Path, runner: tuple[str, ...]) -> int:
         reset(work)
         assembly = work / f"{name}.s"
         try:
-            if len(parts) == 3 and parts[1] == "FAIL":
+            if len(parts) >= 3 and parts[1] == "FAIL":
                 kind = parts[2]
                 if kind not in kinds:
                     raise AssertionError(f"unknown diagnostic kind {kind}")
@@ -905,7 +932,7 @@ def execute_tests(stage_bin: pathlib.Path, runner: tuple[str, ...]) -> int:
                         "--executable",
                         "-o",
                         assembly,
-                        *case_units(cases, name),
+                        *expectation_units(cases, name, parts[3:]),
                     ],
                     timeout=timeout,
                     capture_output=True,
@@ -932,7 +959,7 @@ def execute_tests(stage_bin: pathlib.Path, runner: tuple[str, ...]) -> int:
                     "--executable",
                     "-o",
                     assembly,
-                    *case_units(cases, name),
+                    *expectation_units(cases, name, parts[2:]),
                 ],
                 timeout=timeout,
             )

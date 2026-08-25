@@ -306,18 +306,26 @@ independent of command-line order because it follows the unique `main`;
 library mode deliberately selects the first input unit's module as its root.
 
 An interface import is visible while checking both the interface and its
-implementation. An implementation-only import is visible only in that
-implementation. Only declarations explicitly exported by the imported
-interface enter scope, and imports are not transitively visible or re-exported.
-Conflicting unqualified imported names and local shadowing of imported names
-are rejected.
+implementation, including its alias or selective flat bindings. An
+implementation-only import is visible only in that implementation. One target
+module may be imported at most once across the interface and implementation
+together. Only declarations explicitly exported by the imported interface
+enter scope, and imports are not transitively visible or re-exported.
+Conflicting qualifiers are rejected at their import declarations even when
+unused; conflicting unqualified imported names and local shadowing of imported
+names are also rejected.
 
-The executable module is the unique implementation containing `main`. Every
-supplied module must be reachable from it through direct imports. Every
-imported module is supplied at least as a source interface; an implementation
-may also be present when compiling several reachable source modules together.
-The dependency graph must be acyclic. Compatible declarations of one external
-C symbol share that symbol globally; incompatible signatures are rejected.
+The compiler does not load modules or derive paths from module names. Its
+caller supplies the complete source-interface closure, and module declarations
+establish identity. The executable module is the unique implementation
+containing `main`; library mode instead selects the first input unit's module
+as root. Every supplied module must be reachable from the selected root through
+direct imports, and the dependency graph must be acyclic. An imported module
+is supplied at least as a source interface; an implementation may also be
+present when compiling several reachable source modules together. Every
+supplied implementation must satisfy its matching interface. Compatible
+declarations of one external C symbol share that symbol globally;
+incompatible signatures are rejected.
 
 This contract is compile-time only and adds no run-time initialization or
 dispatch. A dependency interface contributes canonical public types and

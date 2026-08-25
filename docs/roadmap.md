@@ -211,6 +211,8 @@ feature has executable tests plus a green `verify` fixed point.
 
 - [x] `import a.b.c::{x, y};` flat-binds only the listed exports, still
   binding the `c::` qualifier
+- [x] nonempty unique-name lists, optional trailing comma and precise empty,
+  duplicate-name and alias/selective diagnostics
 
 ### m1.13 de-prefixed exports
 
@@ -224,6 +226,8 @@ feature has executable tests plus a green `verify` fixed point.
 
 - [x] plain `import a.b.c;` binds only the `c::` qualifier; flat binding
   requires an explicit selective import `::{x, y}`
+- [x] conflicting plain or aliased qualifiers are rejected at the import site,
+  even when the qualifier is never used
 
 ### m1.15 C calls Luna
 

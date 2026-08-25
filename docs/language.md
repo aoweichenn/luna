@@ -27,31 +27,53 @@ import core.text;
 import compiler.ast;
 ```
 
+The source-unit prefix grammar is:
+
+```text
+ModuleUnit        ::= [ "export" ] "module" ModuleName ";"
+                      ImportDeclaration* TopLevelDeclaration*
+ModuleName        ::= Identifier ( "." Identifier )*
+ImportDeclaration ::= "import" ModuleName [ ImportBinding ] ";"
+ImportBinding     ::= "as" Identifier
+                    | "::" "{" Identifier ( "," Identifier )* [ "," ] "}"
+```
+
+Every source unit begins with exactly one module declaration. Imports form one
+contiguous prefix immediately after it; an import cannot appear after an
+ordinary top-level declaration. A selective list is nonempty, contains no
+duplicate name and may end in one trailing comma. Alias and selective bindings
+are mutually exclusive.
+
 A module has at most one interface and one implementation unit. Only
 declarations marked `export` in the interface are visible to importers. Module
 names organize visibility and dependencies, and the last segment of an
 imported module's name also serves as a qualification prefix at the use
 site.
 
-An interface contains complete structure, union and enum definitions plus
-function declarations without bodies. Its type definitions are directly
-available in the matching implementation and are not repeated there. Every
-non-`extern` interface function must have exactly one definition in the
-implementation. The function name, parameter count and order, every parameter
-type and pointer qualifier, and the return type must match exactly. Parameter
-names do not form part of the contract. An `extern fn` in the interface names
-an external C symbol and therefore has no Luna definition.
+An interface contains type, constant and function declarations. Its aggregate
+definitions, aliases and constants are canonical definitions directly
+available in the matching implementation and cannot be repeated there. Every
+non-`extern` interface function must have exactly one definition when that
+module's implementation is supplied. Matching compares the function name,
+parameter count and order, every parameter type and pointer qualifier, the
+variadic state and the return type. Parameter names and the choice between an
+ordinary function body and an `asm fn` body are not part of the signature. An
+`extern fn` in the interface names an external C symbol and therefore has no
+Luna definition.
 
 An implementation unit cannot contain `export`. Functions omitted from the
 interface are module-private and need no prior declaration. Interface types
 and function signatures must resolve using the interface itself; they cannot
 depend on a type declared only in the implementation.
 
-An import written in an interface is visible to both units of that module. An
-implementation may add imports that remain private to the implementation.
-Imports are direct and non-transitive: importing one module does not expose
-that module's imports. An exported function or aggregate type cannot expose a
-module-private named type in its public signature or fields.
+An import written in an interface is visible to both units of that module,
+including its alias or selective flat bindings. An implementation may add
+imports that remain private to the implementation. The same target module may
+be imported at most once across the interface and implementation together, so
+an implementation cannot re-import an interface dependency under another
+binding. Imports are direct and non-transitive: importing one module does not
+expose that module's imports. An exported function or aggregate type cannot
+expose a module-private named type in its public signature or fields.
 
 Every import binds a module qualifier: a plain `import a.b.c;` binds the last
 segment `c`, and an alias import `import a.b.c as t;` binds `t`. `c::name`
@@ -68,12 +90,20 @@ while still binding the `c::` qualifier. Importing two declarations with the
 same unqualified name is an error, and a local declaration cannot shadow an
 imported one. Combining `as` with `::{...}` is rejected.
 
-The self-hosted compiler consumes source units directly. An executable
-compilation contains exactly one implementation defining `main`; that module
-is the root. A library compilation takes the first input unit's module as its
-root and emits no `_start`. Every supplied module must be reachable from the
-root, and the import graph must be acyclic. Unknown, self, repeated and cyclic
-imports are rejected before type checking.
+The self-hosted compiler consumes only the source units supplied by its caller;
+it never maps a module name to a path or loads an imported module from the file
+system. Module identity comes from the source `module` declaration, while an
+external build driver owns path mapping and dependency discovery.
+
+An executable compilation contains exactly one implementation defining
+`main`; that module is the root. A library compilation takes the first input
+unit's module as its root and emits no `_start`. Every supplied module must be
+reachable from the root, every direct import must resolve within the supplied
+set, and the whole supplied module graph must be acyclic. Unknown, self,
+repeated and cyclic imports are rejected before type checking. Every supplied
+implementation must define all non-`extern` functions promised by its matching
+interface; interface-only dependencies leave those definitions to separately
+compiled objects.
 
 An imported dependency must be supplied at least as its source interface. Its
 implementation may be omitted from the compilation; a separately compiled
@@ -1075,4 +1105,6 @@ no pointers, no runtime calls. A const fn produces no runtime code and its
 name resolves only in constant contexts. Results feed array lengths, enum
 discriminants, typed constants, assertions, indexed initializers and
 attribute arguments; evaluation runs under a fixed step budget and call
-depth cap, and exceeding either makes the expression non-constant.
+depth cap, and exceeding either makes the expression non-constant. A const fn
+is implementation-private: it is invalid in an interface and cannot be
+exported.

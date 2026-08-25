@@ -5,8 +5,7 @@
 本文审查当前 `main` 上的纯 Luna 自举实现，而不是 `m0` 分支中的 C23
 重建种子。
 
-审查基线为 `9de5a3e`（`refactor: separate module interfaces and
-implementations`）。后续实现变化应同步更新本文中的源码数量和优先级判断。
+本文随当前实现维护；后续实现变化应同步更新其中的源码数量和优先级判断。
 
 当前分支不生成或消费 `.lmi`：`tools/selfhost.py` 为每次编译传入根模块源码和
 依赖接口源码，`lunac` 只提供 `--library` 与 `--executable` 两种编译模式。
@@ -28,19 +27,18 @@ implementations`）。后续实现变化应同步更新本文中的源码数量�
 - selective import 才显式引入未限定名字；
 - import 是直接、非传递的；
 - module graph 必须可达且无环；
-- 接口声明与实现定义必须精确匹配；
+- 接口函数与实现函数的类型签名必须匹配；
 - `::` 只负责模块限定，`.` 负责字段和枚举成员访问。
 
-当前真正需要处理的是：
+当前仍需处理的主要是后续扩展问题：
 
-1. qualifier 冲突只在使用限定名时才报告；
-2. 名字查找和 import 验证反复扫描全局 symbol 表；
+1. Python 构建脚本维护了一份正则版 module scanner；
+2. 名字查找仍反复扫描全局 symbol 表；
 3. `Import` 同时承担依赖边和名字绑定；
 4. module graph 仍依赖 AST node/token 身份；
-5. Python 构建脚本维护了一份正则版 module scanner；
-6. 一个模块只能有一个实现文件；
-7. 缺少 opaque/incomplete aggregate；
-8. 驱动的 64 source-unit 上限比语义层的 1024 module 上限更早生效。
+5. 一个模块只能有一个实现文件；
+6. 缺少 opaque/incomplete aggregate；
+7. 驱动的 64 source-unit 上限比语义层的 1024 module 上限更早生效。
 
 `.lmi` 指纹拆分不是当前第一优先级。只有重新引入二进制模块接口、增量缓存或
 已编译包分发时，才应重新设计 public API identity、内部接口 identity 和单符号
@@ -50,8 +48,9 @@ ABI identity。
 
 ### 构建边界
 
-`tools/selfhost.py` 的 `LIBRARIES` 是模块名与接口/实现路径的唯一注册表。依赖和
-链接闭包来自源码 import：
+`tools/selfhost.py` 的 `LIBRARIES` 是生产 library/compiler module graph 的模块名与
+接口/实现路径注册表。drivers 由 `DRIVERS` 注册；测试和 FFI module 使用各自的测试
+路径约定。生产依赖和链接闭包来自源码 import：
 
 ```text
 LIBRARIES registry
@@ -65,8 +64,39 @@ lunac
 assembly -> luna-as -> object -> luna-link
 ```
 
-每个 library 单独编译。依赖模块只提供 `.lh`，其定义由另外生成的模块对象在
-链接时提供。当前没有已编译接口文件或 metadata-only dependency。
+每个生产 library 单独编译。依赖模块只提供 `.lh`，其定义由另外生成的模块对象在
+链接时提供；测试编译可以在一次调用中显式提供多个被测模块的 `.lh/.la`。当前没有
+已编译接口文件或 metadata-only dependency。
+
+### Compilation-set contract
+
+`lunac` 不根据 module name 搜索路径或加载文件。调用方必须提供根模块和完整的依赖
+接口闭包；module declaration 决定模块身份，构建驱动负责文件路径映射。
+
+- executable compilation 的 root 是唯一包含 `main` 的 implementation module；
+- library compilation 的 root 是输入单元 0 所属模块；
+- 每个 direct import 必须在所提供的 source units 中解析成功；
+- 所有提供的模块必须从 root 可达，并且整个所提供模块图无环；
+- 提供了 implementation 的每个模块都必须满足自己的 matching interface；
+- interface-only dependency 的函数定义由另外编译和链接的模块对象提供。
+
+source unit 的 module/import 前缀语法是：
+
+```text
+ModuleUnit        ::= [ "export" ] "module" ModuleName ";"
+                      ImportDeclaration* TopLevelDeclaration*
+ModuleName        ::= Identifier ( "." Identifier )*
+ImportDeclaration ::= "import" ModuleName [ ImportBinding ] ";"
+ImportBinding     ::= "as" Identifier
+                    | "::" "{" Identifier ( "," Identifier )* [ "," ] "}"
+```
+
+import 必须紧跟 module declaration 并形成连续前缀。selective list 非空、名字不重复，
+允许一个 trailing comma；alias 和 selective binding 互斥。
+
+interface import 及其 alias/selective binding 会被 implementation 继承；implementation
+import 对 interface 不可见。同一 target module 在一个模块的 `.lh + .la` 中合计最多
+import 一次，implementation 不能为 interface 已导入的 target 另建 binding。
 
 ### 语义模型
 
@@ -105,9 +135,9 @@ _L + hex(canonical module name) + _ + hex(function name)
 足以保证同一构建内的唯一性；但链接器不会发现调用方与实现方来自不兼容的旧接口。
 当前 self-host 流程通过从同一源码图全量重建所有对象来避免这种混用。
 
-## 二、立即存在的正确性问题
+## 二、已冻结的即时规则
 
-### qualifier 冲突诊断过晚
+### qualifier 冲突在 import 阶段诊断
 
 下面两个 import 都绑定 `text::`：
 
@@ -116,24 +146,20 @@ import foo.text;
 import bar.text;
 ```
 
-当前实现只在解析 `text::name` 时扫描 imports 并发现歧义。如果程序没有使用
-`text::`，冲突不会被报告。
-
-import 声明本身已经建立名字绑定，因此应在 import 收集完成后立即检查 qualifier。
-诊断可以继续使用现有 `ambiguous_module_qualifier`，同时把前一个 import 作为
-related span。应增加一个“冲突 qualifier 从未使用”的负例。
+import 声明本身已经建立名字绑定。当前实现会在 import 收集完成后立即比较同模块
+qualifier；即使程序没有使用 `text::`，也会在后一个 import 处报告
+`ambiguous_module_qualifier`，并把前一个 import 作为 related span。
 
 ### selective import 边角
 
-当前还有三个小问题：
+当前规则是：
 
-- `import foo::{read, read};` 没有检测同一列表内的重复名字；
-- `import foo::{};` 最终报告 `unknown_selective_import`，错误分类不准确；
-- parser 接受 `import foo as f::{x};` 的组合，再由 semantic 报
-  `invalid_selective_import`。
+- `import foo::{read, write,};` 合法，trailing comma 是正式语法；
+- `import foo::{read, read};` 报 `duplicate_selective_import_name`；
+- `import foo::{};` 报 `empty_selective_import`；
+- `import foo as f::{x};` 由 semantic 报 `invalid_selective_import`。
 
-第三项不是正确性错误：semantic 诊断比 parser 的通用 expected-token 诊断更明确。
-如果保留这种分层，只需把语法文档写清楚。前两项应补精确验证和负例。
+最后一项保留 semantic 诊断，因为它比 parser 的通用 expected-token 诊断更明确。
 
 ## 三、名字查找和 import 验证
 
@@ -150,7 +176,8 @@ find_imported_symbol      O(I * S)
 其中 `M` 是 module 数，`I` 是当前模块 import 数，`S` 是 compilation 中的全局
 symbol 数。每次字符串比较还要重新访问两个 unit 的 source bytes。
 
-`validate_imported_names()` 更重：
+`validate_imported_names()` 只处理建立 flat binding 的 selective imports；设其数量为
+`J`，验证路径仍然较重：
 
 ```text
 每对 import
@@ -162,18 +189,14 @@ symbol 数。每次字符串比较还要重新访问两个 unit 的 source bytes
     x 全部 symbols
 ```
 
-`import_binds_name()` 还会扫描 selective name 列表，因此严格最坏情况在原有
-`O(I^2 * S^2 + I * S^2)` 外还包含 selective-list 长度因子。
+`import_binds_name()` 还会扫描 selective name 列表，因此严格最坏情况近似为
+`O(J^2 * S^2 * L + J * S^2 * L)`，其中 `L` 是 selective-list 长度。
 
-### 先做低风险快速跳过
+### 已有低风险快速跳过
 
 当前 `library/`、`compiler/` 和 `drivers/` 中共有 413 条 import，其中 371 条是
-alias import，没有一条 selective import。普通和 alias import 都不建立 flat
-binding，却仍会进入大量最终不可能命中的 symbol 循环。
-
-在完整索引重构前，应先让 `validate_imported_names()` 只处理
-`selective_node != no_id` 的 import。这个改动不改变语言行为，却能消除当前生产
-源码中的绝大部分 import-name 验证成本。
+alias import，没有一条 selective import。实现已经按 `selective_node != no_id`
+跳过普通和 alias imports，因此当前生产源码不会进入 flat-name 的二次全表验证。
 
 ### 后续索引模型
 
@@ -359,9 +382,10 @@ semantic context 的 `maximum_modules` 是 1024，但当前 `lunac` driver 最�
 | per-symbol ABI identity | 防止旧调用方对象与不兼容实现静默链接 |
 
 public API 的规范化编码必须覆盖当前 Luna 1 的完整接口，而不只是旧格式支持的
-struct/union/enum/function：还要考虑 constants、type aliases、const fn、function
-pointers、variadic、layout attributes、flexible members、anonymous members、bitfields
-和所有会改变调用方语义的属性。
+struct/union/enum/function：还要考虑 constants、type aliases、function pointers、
+variadic、layout attributes、flexible members、anonymous members、bitfields 和所有会
+改变调用方语义的属性。当前 `const fn` 是 implementation-private；如果将来允许跨
+模块导出，二进制接口还必须携带其函数体或等价的编译期表示。
 
 顶层声明顺序和参数名不属于契约；结构字段顺序、enum member 顺序和值、参数类型
 顺序以及布局属性属于契约。没有隐式 re-export 时，依赖身份也不应无条件污染一个
@@ -369,27 +393,29 @@ pointers、variadic、layout attributes、flexible members、anonymous members�
 
 ## 十一、建议实施顺序
 
-### 第一阶段：当前正确性和低风险性能
+### 已完成：当前合同、正确性和测试
 
-1. 在 import 收集完成时诊断 qualifier 冲突；
-2. `validate_imported_names()` 跳过全部 non-selective imports；
-3. 修复重复和空 selective list，并增加负例；
-4. 明确 64 source units 与 1024 modules 的限制关系；
-5. 用现有 self-host 构建测量名字查找和 import 验证耗时。
+1. 明确 compiler 不加载模块、root 选择和完整 compilation-set 合同；
+2. 明确 `.lh/.la` import 合并规则及完整 module/import grammar；
+3. 在 import 收集完成时诊断 qualifier 冲突；
+4. 修复重复和空 selective list，冻结 trailing comma；
+5. `validate_imported_names()` 跳过全部 non-selective imports；
+6. missing-definition 检查所有提供了 implementation 的模块；
+7. 测试 harness 支持显式有序 source set，并覆盖模块错误矩阵。
 
-### 第二阶段：规范化模块层
+### 近期：保持简单
 
-1. 引入 NameId/ModuleNameId；
-2. 建立 ModuleSymbolIndex 和 UnitImportScope；
-3. 拆分 DependencyEdge 与 ImportBinding；
-4. 让 module graph 不再保存 AST child/token identity；
-5. 分两次提升完成 compiler scanner 与构建脚本切换。
+1. 明确 64 source units 与 1024 modules 的限制关系；
+2. 分两次提升完成 compiler scanner 与构建脚本切换；
+3. 测量现有查找耗时，在没有证据前不增加索引结构。
 
-### 第三阶段：语言扩展
+### 暂缓：内部重构和语言扩展
 
-1. 决定是否支持一个接口、多个实现单元；
-2. 设计 opaque/incomplete aggregate；
-3. 单独决定 selective import 是保留、修改还是删除。
+1. NameId、ModuleSymbolIndex 和 UnitImportScope；
+2. DependencyEdge/ImportBinding 分离及 AST 规范化；
+3. 一个接口、多个实现单元；
+4. opaque/incomplete aggregate；
+5. selective import 的表面修改。
 
 ### 将来存在二进制分发需求时
 
@@ -404,6 +430,6 @@ pointers、variadic、layout attributes、flexible members、anonymous members�
 > 声明查找，AST 只提供声明语义和诊断来源。
 
 保持 `::` 为模块限定符、保持 `.` 为字段和成员访问是正确方向。当前语言明确禁止
-函数重载，因此也不应为了假设中的 C++ 式方法重载提前复杂化 Binding。先解决真实
-的 qualifier 诊断、无效扫描、双重 scanner 和 source-unit 上限，再扩展多实现单元
-或二进制模块接口，风险最低。
+函数重载，因此也不应为了假设中的 C++ 式方法重载提前复杂化 Binding。当前阶段先
+保持一接口、一实现和源码依赖闭包模型，等测试或测量证明需要时再扩展内部结构，
+风险最低。

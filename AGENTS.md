@@ -39,7 +39,9 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
   (`<case>.la <exit-code>`); negative codes are fatal signals, e.g. `-8`
   for a division trap. Expected-failure cases use
   `<case>.la FAIL <diagnostic-kind>`: compilation must fail with that
-  leading `BootstrapSemanticDiagnosticKind`, compile-only, no linking.
+  leading `BootstrapSemanticDiagnosticKind`, compile-only, no linking. Either
+  form may append `UNITS <ordered-source>...` to replace import-derived test
+  discovery with an explicit source set for module-order and graph cases.
 
 ## Iteration discipline
 

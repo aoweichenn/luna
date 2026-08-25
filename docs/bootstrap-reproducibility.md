@@ -67,12 +67,13 @@ Each library invocation receives:
 2. the root module interface;
 3. the interfaces in its reachable import closure.
 
-An imported interface may omit its implementation. Only the root module must
-provide the definitions that its interface promises. Supplying an
-implementation that is not reachable from the root is rejected. The compiler
-driver is compiled in executable mode from its implementation followed by its
-dependency interfaces, while separately generated module objects provide the
-linked definitions.
+An imported interface may omit its implementation. Every implementation that
+is supplied must provide the definitions promised by its matching interface;
+the production library invocation supplies only the root implementation.
+Supplying an implementation that is not reachable from the root is rejected.
+The compiler driver is compiled in executable mode from its implementation
+followed by its dependency interfaces, while separately generated module
+objects provide the linked definitions.
 
 This boundary replaces stage-0 `.lmi` consumption inside the self-hosted
 compiler. Stage 0 metadata is used only to create stage 1; stage 1 and later

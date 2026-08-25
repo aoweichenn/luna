@@ -178,6 +178,12 @@ imports enter both interface and implementation scope; implementation-only
 imports never enter interface scope. Only exported declarations enter an
 importer's scope, and visibility is never transitive.
 
+The compiler never discovers or loads a module from its name. Its caller
+supplies the complete source-interface closure; module declarations establish
+identity and the build driver owns path mapping. Every supplied implementation
+must satisfy its matching interface, while an interface-only dependency is
+resolved by a separately linked module object.
+
 The self-hosted middle end orders IR functions by complete module name and
 function name with an iterative heap sort. Function, parameter, slot, block
 and global construction therefore remains deterministic when source units are

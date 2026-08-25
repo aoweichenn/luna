@@ -50,8 +50,19 @@ TOOLS=build/debug/selfhost-bootstrap/stage-three/bin
 "$TOOLS/luna-link" -o app app.lo
 ```
 
-`lunac` accepts one to 64 Luna source units, defaults to `--executable`, uses
-`--library` to suppress `_start`, and emits only the owned assembly dialect.
+`lunac` accepts one to 64 `.la` or `.lh` Luna source units, defaults to
+`--executable`, uses `--library` to suppress `_start`, and emits only the owned
+assembly dialect. It does not search for modules or map module names to paths:
+the caller must provide a complete source-interface dependency closure. Module
+identity comes from each source unit's declaration, not its path.
+
+In executable mode, the unique implementation containing `main` is the root.
+In library mode, the first source unit's module is the root. Every supplied
+module must be reachable from that root, every import must resolve within the
+supplied set, and the supplied graph must be acyclic. An interface-only
+dependency may leave its definitions to a separately linked module object;
+every supplied implementation must satisfy its own matching interface.
+
 `luna-as` accepts exactly one assembly input and emits `LUNAOBJ1`.
 `luna-link` accepts one to 64 `LUNAOBJ1` inputs and emits one static x86-64
 Linux ELF64 executable. Every command requires `-o`, accepts `--` before
