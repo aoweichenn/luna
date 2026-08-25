@@ -1,6 +1,7 @@
 module luna.tools.bootstrap.stage_assembler;
 
 import luna.bootstrap.backend.x86_64.assembler as assembler;
+import luna.bootstrap.backend.x86_64.elf as elf;
 import luna.bootstrap.backend.x86_64.object as object;
 import luna.runtime;
 import luna.std.bytes;
@@ -40,7 +41,7 @@ fn bootstrap_stage_driver_report(line: usize) -> runtime::Error {
     return error;
 }
 
-fn bootstrap_stage_driver_run(input_path: path::Path, output_path: path::Path) -> i32 {
+fn bootstrap_stage_driver_run(input_path: path::Path, output_path: path::Path, emit_elf: bool) -> i32 {
     if (!path::is_valid(input_path) || !path::is_valid(output_path)) {
         return BootstrapStageStatus.input_error as i32;
     }
@@ -60,7 +61,8 @@ fn bootstrap_stage_driver_run(input_path: path::Path, output_path: path::Path) -
         bytes::release(input.buffer);
         return BootstrapStageStatus.assembly_error as i32;
     }
-    let serialized: bytes::BufferResult = object::serialize(assembled.object);
+    let serialized: bytes::BufferResult = emit_elf ? elf::save(assembled.object) :
+        object::serialize(assembled.object);
     if (serialized.error != runtime::Error.none) {
         object::release(assembled.object);
         bytes::release(input.buffer);
@@ -104,7 +106,7 @@ fn bootstrap_stage_print(file: runtime::File, data: *const u8) -> runtime::Error
 }
 
 fn bootstrap_stage_usage() -> i32 {
-    bootstrap_stage_print(runtime::standard_error(), "usage: luna-as -o <output.lo> <input.s>\n");
+    bootstrap_stage_print(runtime::standard_error(), "usage: luna-as [--emit elf|lunaobj] -o <output> <input.s>\n");
     return BootstrapStageStatus.cli_usage_error as i32;
 }
 
@@ -115,7 +117,8 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
     if (argc == 2 &&
         bootstrap_stage_argument_equals(
             argv[1], "--help", 6)) {
-        bootstrap_stage_print(runtime::standard_output(), "usage: luna-as -o <output.lo> <input.s>\n");
+        bootstrap_stage_print(
+            runtime::standard_output(), "usage: luna-as [--emit elf|lunaobj] -o <output> <input.s>\n");
         return 0;
     }
     if (argc == 2 &&
@@ -129,6 +132,8 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
     var output: path::Path = {};
     var has_input: bool = false;
     var has_output: bool = false;
+    var has_emit: bool = false;
+    var emit_elf: bool = false;
     var options_finished: bool = false;
     var valid: bool = true;
     var index: usize = 1;
@@ -138,6 +143,22 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
             bootstrap_stage_argument_equals(
                 argument, "--", 2)) {
             options_finished = true;
+        } else if (!options_finished &&
+            bootstrap_stage_argument_equals(
+                argument, "--emit", 6)) {
+            if (has_emit || index + 1 >= argc) {
+                valid = false;
+            } else {
+                index += 1;
+                if (bootstrap_stage_argument_equals(argv[index], "elf", 3)) {
+                    emit_elf = true;
+                    has_emit = true;
+                } else if (bootstrap_stage_argument_equals(argv[index], "lunaobj", 7)) {
+                    has_emit = true;
+                } else {
+                    valid = false;
+                }
+            }
         } else if (!options_finished &&
             bootstrap_stage_argument_equals(
                 argument, "-o", 2)) {
@@ -182,7 +203,7 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
 
     var status: i32 = BootstrapStageStatus.cli_usage_error as i32;
     if (valid) {
-        status = bootstrap_stage_driver_run(input, output);
+        status = bootstrap_stage_driver_run(input, output, emit_elf);
         if (status == BootstrapStageStatus.success as i32) {
             status = 0;
         }
@@ -218,7 +239,7 @@ fn main(argc: usize, argv: **const u8) -> i32 {
         path::release(input.path);
         return BootstrapStageStatus.output_error as i32;
     }
-    let status: i32 = bootstrap_stage_driver_run(input.path, output.path);
+    let status: i32 = bootstrap_stage_driver_run(input.path, output.path, false);
     let input_error: runtime::Error = path::release(input.path);
     let output_error: runtime::Error = path::release(output.path);
     if (status == BootstrapStageStatus.success as i32 && (input_error != runtime::Error.none ||

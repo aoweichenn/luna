@@ -251,6 +251,7 @@ DRIVERS = {
             "path",
             "io",
             "x86_64_object",
+            "x86_64_elf",
             "x86_64_assembler",
         ),
     ),
@@ -511,6 +512,15 @@ def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, 
     with the given exit status (malformed or unresolvable fixtures). Fixtures
     not checked in (fixture.o) are built from C sources with the host gcc;
     without a gcc their cases are skipped, not failed.
+
+    Two more shapes exercise the luna-as --emit elf writer:
+    `<case>.la elf-link <fixture>.o <exit>` (or link:<status>) assembles the
+    case to a standard ELF64 ET_REL instead of LUNAOBJ1, then links with
+    luna-link exactly as above — a writer -> reader -> linker round-trip;
+    `<case>.la host-link <cmain>.c <exit>` compiles the case with
+    `lunac --library`, assembles it with --emit elf and links the object
+    against a C main with the host gcc, running the resulting hosted
+    executable (skipped when no gcc is present).
     """
     ffi = ROOT / "tests" / "ffi"
     expectations = ffi / "expectations.txt"
@@ -523,19 +533,78 @@ def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, 
         if not line.strip() or line.startswith("#"):
             continue
         parts = line.split()
-        name, fixture, expected = parts[0], parts[1], parts[2]
-        fixture_path = ffi / fixture
-        if not fixture_path.is_file():
-            if gcc_fixtures is None:
-                print(f"SKIP {name}: gcc-built fixture {fixture} unavailable")
-                continue
-            fixture_path = gcc_fixtures / fixture
+        name = parts[0]
+        if len(parts) == 4 and parts[1] in ("elf-link", "host-link"):
+            mode, fixture, expected = parts[1], parts[2], parts[3]
+        else:
+            mode, fixture, expected = "luna-link", parts[1], parts[2]
         work = ROOT / "out" / "tests" / name.removesuffix(".la")
         reset(work)
         assembly = work / f"{name}.s"
-        object_file = work / f"{name}.lo"
         executable = work / name.removesuffix(".la")
         try:
+            if mode == "host-link":
+                cmain = ffi / fixture
+                if not cmain.is_file():
+                    raise AssertionError(f"missing C main {cmain}")
+                compiler = shutil.which("gcc")
+                if compiler is None:
+                    print(f"SKIP {name}: no gcc found on this host")
+                    continue
+                object_file = work / f"{name}.o"
+                run(
+                    [
+                        *tool(stage_bin, "lunac"),
+                        "--library",
+                        "-o",
+                        assembly,
+                        *ffi_units(ffi, name),
+                    ]
+                )
+                run(
+                    [
+                        *tool(stage_bin, "luna-as"),
+                        "--emit",
+                        "elf",
+                        "-o",
+                        object_file,
+                        assembly,
+                    ]
+                )
+                # Link flags mirror GCC_FIXTURE_FLAGS where they apply to a
+                # hosted link: Luna objects use small-model non-PIC addressing
+                # like the -fno-pic fixtures, so -no-pie counters the distro
+                # PIE default; -Wall -Werror keeps the C main warning-clean.
+                run(
+                    [
+                        compiler,
+                        "-Wall",
+                        "-Werror",
+                        "-no-pie",
+                        "-o",
+                        executable,
+                        object_file,
+                        cmain,
+                    ]
+                )
+                completed = subprocess.run(
+                    [*runner, str(executable)],
+                    timeout=TIMEOUT_SECONDS,
+                )
+                if completed.returncode != int(expected):
+                    raise AssertionError(
+                        f"exit {completed.returncode}, expected {expected}"
+                    )
+                passed += 1
+                print(f"PASS {name} (host-link {fixture}, {expected})")
+                continue
+            fixture_path = ffi / fixture
+            if not fixture_path.is_file():
+                if gcc_fixtures is None:
+                    print(f"SKIP {name}: gcc-built fixture {fixture} unavailable")
+                    continue
+                fixture_path = gcc_fixtures / fixture
+            object_file = work / f"{name}.lo" if mode == "luna-link" else work / f"{name}.o"
             run(
                 [
                     *tool(stage_bin, "lunac"),
@@ -545,7 +614,10 @@ def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, 
                     *ffi_units(ffi, name),
                 ]
             )
-            run([*tool(stage_bin, "luna-as"), "-o", object_file, assembly])
+            assemble_command = [*tool(stage_bin, "luna-as")]
+            if mode == "elf-link":
+                assemble_command += ["--emit", "elf"]
+            run([*assemble_command, "-o", object_file, assembly])
             linked = subprocess.run(
                 [
                     *tool(stage_bin, "luna-link"),
@@ -577,7 +649,7 @@ def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, 
                         f"exit {completed.returncode}, expected {expected}"
                     )
             passed += 1
-            print(f"PASS {name} ({fixture}, {expected})")
+            print(f"PASS {name} ({mode} {fixture}, {expected})")
         except Exception as error:  # noqa: BLE001 - report and continue
             failed.append(name)
             print(f"FAIL {name}: {error}")
