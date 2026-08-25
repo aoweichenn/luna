@@ -309,8 +309,9 @@ module luna.std.fs;
 `Module` 只记录 `implementation_count`；当前最多 64 个 source units，语义 pass 在
 需要时扫描 unit records 取得第 N 个实现单元。这避免为了早期规模引入额外索引或
 partition graph。`LIBRARIES` 可显式登记一个有序 implementation path tuple，依赖图
-取所有实现文件 imports 的并集。按照自举迭代纪律，生产模块要等支持该能力的工具链
-提升为 anchor 后才能实际拆分；本阶段由 stage-next 模块案例覆盖该能力。
+取所有实现文件 imports 的并集。支持该能力的工具链提升为 anchor 后，生产编译器已
+用它拆分 `semantic.functions` 的 const-fn 阶段、`semantic.types` 的布局阶段和
+`consteval.engine` 的解释执行阶段；这些文件不增加新的 module name 或 import edge。
 
 这个模型借用了 C++ named modules 的多 implementation unit 能力，但没有引入 global
 module fragment、header unit、partition、隐式 re-export 或 BMI 选择规则。

@@ -75,7 +75,9 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
   `consteval` (+ `consteval/{model,engine}`), `intrinsics`,
   `functions` (+ `functions/ir`), `expr` (+ `expr/{base,numeric,
   strings,api,initializer,access,operators}`), `stmt` (+
-  `stmt/{api,labels}`).
+  `stmt/{api,labels}`). The same-module files `types/layout.la`,
+  `consteval/engine/execute.la` and `functions/const.la` are implementation
+  splits, not additional dependency-graph modules.
 
 ## Layout
 

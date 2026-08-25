@@ -1,0 +1,330 @@
+module luna.bootstrap.middleend.semantic.consteval.engine;
+
+fn exec_invalid() -> Exec {
+    return {
+        valid = false, returned = false, is_boolean = false, value = 0,
+    };
+}
+
+fn exec_continue() -> Exec {
+    return {
+        valid = true, returned = false, is_boolean = false, value = 0,
+    };
+}
+
+fn exec_return(value: model::Value) -> Exec {
+    return {
+        valid = true, returned = true, is_boolean = value.is_boolean, value = value.value,
+    };
+}
+
+fn step(context: *context::Context) -> bool {
+    if (context->const_steps == 0) {
+        return false;
+    }
+    context->const_steps -= 1;
+    return true;
+}
+
+fn env_find(context: *context::Context, unit_index: usize, name_token: usize) -> usize {
+    let bindings: *const context::ConstLocal = context->const_locals.data as
+            *const context::ConstLocal;
+    var index: usize = context->const_local_count;
+    while (index > 0) {
+        index -= 1;
+        if (context::tokens_equal(
+                context, unit_index, name_token, bindings[index].unit_index, bindings[index].name_token)) {
+            return index;
+        }
+    }
+    return context::no_id();
+}
+
+fn env_push(context: *context::Context, binding: context::ConstLocal) -> bool {
+    if (!names::append_record(
+            context, &context->const_locals, (&binding) as
+                *const context::ConstLocal as *const u8, sizeof(context::ConstLocal))) {
+        return false;
+    }
+    context->const_local_count += 1;
+    return true;
+}
+
+// Frame/block teardown: the buffer must shrink with the watermark so the
+// context storage invariant (count == length / sizeof) keeps holding.
+fn env_truncate(context: *context::Context, base: usize) -> bool {
+    let truncated: bytes::BufferResult = bytes::truncate(context->const_locals, base * sizeof(context::ConstLocal));
+    context->const_locals = truncated.buffer;
+    if (truncated.error != runtime::Error.none) {
+        context->error = truncated.error;
+        return false;
+    }
+    context->const_local_count = base;
+    return true;
+}
+
+// Unwraps aliases; the result is type_info::Kind.invalid unless the type
+// resolves to an integer scalar or bool.
+fn scalar_kind(context: *context::Context, type_id: usize) -> type_info::Kind {
+    var record: type_info::Record = context::type_record(context, type_id);
+    if (record.kind == type_info::Kind.alias && types::require_complete_type(context, type_id)) {
+        record = context::type_record(context, record.element_type);
+    }
+    if (!type_info::is_integer(record.kind) && record.kind != type_info::Kind.boolean) {
+        return type_info::Kind.invalid;
+    }
+    return record.kind;
+}
+
+fn narrow_value(kind: type_info::Kind, value: u64) -> u64 {
+    let width: usize = type_info::bit_width(kind);
+    var narrowed: u64 = builder::mask_integer(value, width);
+    if (width < 64 && type_info::is_signed_integer(kind) && (narrowed & ((1 as u64) << ((width - 1) as u64))) != 0) {
+        narrowed = narrowed | ~(((1 as u64) << (width as u64)) - 1);
+    }
+    return narrowed;
+}
+
+fn exec_block(context: *context::Context, unit_index: usize, block_index: usize) -> Exec {
+    let scope_base: usize = context->const_local_count;
+    var result: Exec = exec_continue();
+    var child: usize = context::node(context, unit_index, block_index).first_child;
+    while (child != context::no_id() && result.valid && !result.returned && context->error == runtime::Error.none) {
+        result = exec_statement(context, unit_index, child);
+        child = context::node(context, unit_index, child).next_sibling;
+    }
+    if (!env_truncate(context, scope_base)) {
+        return exec_invalid();
+    }
+    return result;
+}
+
+fn exec_statement(context: *context::Context, unit_index: usize, node_index: usize) -> Exec {
+    if (!step(context)) {
+        return exec_invalid();
+    }
+    let node: syntax::SyntaxNode = context::node(context, unit_index, node_index);
+    if (node.kind == syntax::SyntaxKind.block_statement) {
+        return exec_block(context, unit_index, node_index);
+    }
+    if (node.kind == syntax::SyntaxKind.variable_declaration || node.kind == syntax::SyntaxKind.const_declaration) {
+        if (node.child_count != 2) {
+            return exec_invalid();
+        }
+        let type_id: usize = types::resolve_type_node(context, unit_index, node.first_child);
+        if (type_id == context::no_id()) {
+            return exec_invalid();
+        }
+        let kind: type_info::Kind = scalar_kind(context, type_id);
+        if (kind == type_info::Kind.invalid) {
+            return exec_invalid();
+        }
+        let initializer_id: usize = context::node(context, unit_index, node.first_child).next_sibling;
+        let value: model::Value = expression(context, unit_index, initializer_id);
+        if (!value.is_constant || value.error) {
+            return exec_invalid();
+        }
+        let is_boolean: bool = kind == type_info::Kind.boolean;
+        if (value.is_boolean != is_boolean || (!is_boolean &&
+                !const_integer_fits(
+                    kind, value.value))) {
+            return exec_invalid();
+        }
+        var stored: u64 = 0;
+        if (value.value != 0) {
+            stored = 1;
+        }
+        if (!is_boolean) {
+            stored = narrow_value(kind, value.value);
+        }
+        if (!env_push(
+                context, {
+                    unit_index = unit_index, name_token = node.token_index, type_id = type_id, value = stored,
+                    is_boolean = is_boolean, mutable_binding = (node.flags & (syntax::SyntaxFlag.mutable_binding as
+                            usize)) != 0,
+                })) {
+            return exec_invalid();
+        }
+        return exec_continue();
+    }
+    if (node.kind == syntax::SyntaxKind.assignment_statement) {
+        if (node.child_count != 2 ||
+            context::token(
+                context, unit_index, node.token_index).kind != lexer::TokenKind.equal) {
+            return exec_invalid();
+        }
+        let target: syntax::SyntaxNode = context::node(context, unit_index, node.first_child);
+        if (target.kind != syntax::SyntaxKind.name_expression) {
+            return exec_invalid();
+        }
+        let slot: usize = env_find(context, unit_index, target.token_index);
+        if (slot == context::no_id()) {
+            return exec_invalid();
+        }
+        let value_id: usize = target.next_sibling;
+        let value: model::Value = expression(context, unit_index, value_id);
+        if (!value.is_constant || value.error) {
+            return exec_invalid();
+        }
+        // Nested calls may have grown the binding stack; take a fresh
+        // pointer before mutating.
+        let bindings: *context::ConstLocal = context->const_locals.data as
+                *context::ConstLocal;
+        let kind: type_info::Kind = scalar_kind(context, bindings[slot].type_id);
+        if (kind == type_info::Kind.invalid || !bindings[slot].mutable_binding ||
+            bindings[slot].is_boolean != value.is_boolean || (!value.is_boolean &&
+                !const_integer_fits(
+                    kind, value.value))) {
+            return exec_invalid();
+        }
+        var stored: u64 = 0;
+        if (value.value != 0) {
+            stored = 1;
+        }
+        if (!value.is_boolean) {
+            stored = narrow_value(kind, value.value);
+        }
+        bindings[slot].value = stored;
+        return exec_continue();
+    }
+    if (node.kind == syntax::SyntaxKind.expression_statement) {
+        if (node.child_count != 1) {
+            return exec_invalid();
+        }
+        let value: model::Value = expression(context, unit_index, node.first_child);
+        if (!value.is_constant || value.error) {
+            return exec_invalid();
+        }
+        return exec_continue();
+    }
+    if (node.kind == syntax::SyntaxKind.if_statement) {
+        if (node.child_count < 2 || node.child_count > 3) {
+            return exec_invalid();
+        }
+        let condition: model::Value = expression(context, unit_index, node.first_child);
+        if (!condition.is_constant || condition.error || !condition.is_boolean) {
+            return exec_invalid();
+        }
+        let then_id: usize = context::node(context, unit_index, node.first_child).next_sibling;
+        if (condition.value != 0) {
+            return exec_statement(context, unit_index, then_id);
+        }
+        if (node.child_count == 3) {
+            return exec_statement(context, unit_index, context::node(context, unit_index, then_id).next_sibling);
+        }
+        return exec_continue();
+    }
+    if (node.kind == syntax::SyntaxKind.return_statement) {
+        if (node.child_count != 1) {
+            return exec_invalid();
+        }
+        let value: model::Value = expression(context, unit_index, node.first_child);
+        if (!value.is_constant || value.error) {
+            return exec_invalid();
+        }
+        return exec_return(value);
+    }
+    return exec_invalid();
+}
+
+fn eval_call(context: *context::Context, unit_index: usize, node: syntax::SyntaxNode) -> model::Value {
+    let none: usize = context::no_id();
+    if (node.child_count == 0) {
+        return not_constant();
+    }
+    let callee: syntax::SyntaxNode = context::node(context, unit_index, node.first_child);
+    if (callee.kind != syntax::SyntaxKind.name_expression) {
+        return not_constant();
+    }
+    var symbol_id: usize = context::no_id();
+    if (callee.child_count != 0) {
+        symbol_id = names::lookup_qualified_symbol(
+            context, unit_index, callee, context::SymbolKind.const_function, false);
+    } else if (env_find(
+            context, unit_index, callee.token_index) == none) {
+        symbol_id = names::lookup_symbol(context, unit_index, callee.token_index, context::SymbolKind.const_function);
+    }
+    if (symbol_id == none || context->const_call_depth >= context::Limit.maximum_const_call_depth as usize) {
+        return not_constant();
+    }
+    if (context->const_call_depth == 0) {
+        context->const_steps = context::Limit.maximum_const_steps as usize;
+    }
+    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let symbol: context::Symbol = symbols[symbol_id];
+    let const_functions: *const context::ConstFunction = context->const_functions.data as
+            *const context::ConstFunction;
+    let record: context::ConstFunction = const_functions[symbol.function_id];
+    if (node.child_count - 1 != record.parameter_count) {
+        return not_constant();
+    }
+    let body_unit: usize = symbol.declaration_unit;
+    var body_id: usize = none;
+    var child: usize = context::node(context, body_unit, symbol.declaration_node).first_child;
+    while (child != none) {
+        let part: syntax::SyntaxNode = context::node(context, body_unit, child);
+        if (part.kind == syntax::SyntaxKind.block_statement) {
+            body_id = child;
+        }
+        child = part.next_sibling;
+    }
+    if (body_id == none) {
+        return not_constant();
+    }
+    let parameters: *const context::Parameter = context->parameters.data as
+            *const context::Parameter;
+    let frame_base: usize = context->const_local_count;
+    var argument_id: usize = callee.next_sibling;
+    var index: usize = 0;
+    var arguments_ok: bool = true;
+    while (index < record.parameter_count && arguments_ok) {
+        let parameter: context::Parameter = parameters[record.first_parameter + index];
+        let kind: type_info::Kind = scalar_kind(context, parameter.type_id);
+        let value: model::Value = expression(context, unit_index, argument_id);
+        let is_boolean: bool = kind == type_info::Kind.boolean;
+        if (kind == type_info::Kind.invalid || !value.is_constant || value.error || value.is_boolean != is_boolean ||
+            (!is_boolean &&
+                !const_integer_fits(
+                    kind, value.value))) {
+            arguments_ok = false;
+            break;
+        }
+        var stored: u64 = 0;
+        if (value.value != 0) {
+            stored = 1;
+        }
+        if (!is_boolean) {
+            stored = narrow_value(kind, value.value);
+        }
+        arguments_ok = env_push(
+            context, {
+                unit_index = body_unit, name_token = parameter.name_token, type_id = parameter.type_id, value = stored,
+                is_boolean = is_boolean, mutable_binding = false,
+            });
+        argument_id = context::node(context, unit_index, argument_id).next_sibling;
+        index += 1;
+    }
+    var result: Exec = exec_invalid();
+    if (arguments_ok) {
+        context->const_call_depth += 1;
+        result = exec_block(context, body_unit, body_id);
+        context->const_call_depth -= 1;
+    }
+    if (!env_truncate(context, frame_base)) {
+        return not_constant();
+    }
+    if (!result.valid || !result.returned) {
+        return not_constant();
+    }
+    let return_kind: type_info::Kind = scalar_kind(context, record.return_type);
+    let return_boolean: bool = return_kind == type_info::Kind.boolean;
+    if (return_kind == type_info::Kind.invalid || result.is_boolean != return_boolean || (!return_boolean &&
+            !const_integer_fits(
+                return_kind, result.value))) {
+        return not_constant();
+    }
+    if (return_boolean) {
+        return boolean(result.value != 0);
+    }
+    return integer(result.value);
+}

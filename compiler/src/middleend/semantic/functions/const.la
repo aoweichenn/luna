@@ -1,0 +1,344 @@
+module luna.bootstrap.middleend.semantic.functions;
+
+fn append_const_function(context: *context::Context, record: context::ConstFunction) -> usize {
+    let result: usize = context->const_function_count;
+    if (!names::append_record(
+            context, &context->const_functions, (&record) as
+                *const context::ConstFunction as *const u8, sizeof(context::ConstFunction))) {
+        return context::no_id();
+    }
+    context->const_function_count += 1;
+    return result;
+}
+
+fn report_invalid_const_function(context: *context::Context, unit_index: usize, span: lexer::SourceSpan) -> bool {
+    return context::add_diagnostic(
+        context, context::DiagnosticKind.invalid_const_function, unit_index, span, context::no_id(),
+        context::empty_span(), 0);
+}
+
+fn const_scalar_type(context: *context::Context, type_id: usize) -> bool {
+    var record: type_info::Record = context::type_record(context, type_id);
+    if (record.kind == type_info::Kind.alias && types::require_complete_type(context, type_id)) {
+        record = context::type_record(context, record.element_type);
+    }
+    return type_info::is_integer(record.kind) || record.kind == type_info::Kind.boolean;
+}
+
+fn validate_const_call(context: *context::Context, unit_index: usize, node: syntax::SyntaxNode) -> bool {
+    let none: usize = context::no_id();
+    if (node.child_count == 0) {
+        return false;
+    }
+    let callee: syntax::SyntaxNode = context::node(context, unit_index, node.first_child);
+    if (callee.kind != syntax::SyntaxKind.name_expression) {
+        return false;
+    }
+    let symbol_id: usize =
+        names::lookup_qualified_symbol(context, unit_index, callee, context::SymbolKind.const_function, false);
+    if (symbol_id == none) {
+        return false;
+    }
+    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let records: *const context::ConstFunction = context->const_functions.data as
+            *const context::ConstFunction;
+    if (node.child_count - 1 != records[symbols[symbol_id].function_id].parameter_count) {
+        return false;
+    }
+    var valid: bool = true;
+    var argument: usize = callee.next_sibling;
+    while (argument != none && valid) {
+        valid = validate_const_expression(context, unit_index, argument);
+        argument = context::node(context, unit_index, argument).next_sibling;
+    }
+    return valid;
+}
+
+fn validate_const_expression(context: *context::Context, unit_index: usize, node_index: usize) -> bool {
+    let none: usize = context::no_id();
+    let node: syntax::SyntaxNode = context::node(context, unit_index, node_index);
+    var valid: bool = false;
+    if (node.kind == syntax::SyntaxKind.integer_expression || node.kind == syntax::SyntaxKind.character_expression ||
+        node.kind == syntax::SyntaxKind.boolean_expression || node.kind == syntax::SyntaxKind.name_expression) {
+        valid = true;
+    } else if (node.kind == syntax::SyntaxKind.parenthesized_expression) {
+        valid = node.child_count == 1 && validate_const_expression(context, unit_index, node.first_child);
+    } else if (node.kind == syntax::SyntaxKind.member_expression) {
+        valid = node.child_count == 2 &&
+            context::node(context, unit_index, node.first_child).kind == syntax::SyntaxKind.name_expression &&
+            context::node(
+                context, unit_index, context::node(context, unit_index, node.first_child).next_sibling
+            ).kind == syntax::SyntaxKind.name_expression;
+    } else if (node.kind == syntax::SyntaxKind.unary_expression) {
+        let operation: lexer::TokenKind = context::token(context, unit_index, node.token_index).kind;
+        valid = node.child_count == 1 && (operation == lexer::TokenKind.minus || operation == lexer::TokenKind.tilde ||
+                operation == lexer::TokenKind.bang) && validate_const_expression(context, unit_index, node.first_child);
+    } else if (node.kind == syntax::SyntaxKind.binary_expression ||
+        node.kind == syntax::SyntaxKind.conditional_expression) {
+        var operands: bool = true;
+        var operand: usize = node.first_child;
+        while (operand != none && operands) {
+            operands = validate_const_expression(context, unit_index, operand);
+            operand = context::node(context, unit_index, operand).next_sibling;
+        }
+        valid = operands && node.child_count == (node.kind == syntax::SyntaxKind.binary_expression ? 2 : 3);
+    } else if (node.kind == syntax::SyntaxKind.sizeof_expression ||
+        node.kind == syntax::SyntaxKind.alignof_expression) {
+        valid = node.child_count == 1;
+    } else if (node.kind == syntax::SyntaxKind.offsetof_expression) {
+        valid = node.child_count >= 1;
+    } else if (node.kind == syntax::SyntaxKind.cast_expression) {
+        if (node.child_count == 2 &&
+            validate_const_expression(
+                context, unit_index, node.first_child)) {
+            let target: usize =
+                types::resolve_type_node(
+                    context, unit_index, context::node(context, unit_index, node.first_child).next_sibling);
+            valid = target != none && const_scalar_type(context, target);
+        }
+    } else if (node.kind == syntax::SyntaxKind.call_expression) {
+        valid = validate_const_call(context, unit_index, node);
+    }
+    if (!valid) {
+        report_invalid_const_function(context, unit_index, node.span);
+    }
+    return valid;
+}
+
+fn validate_const_statement(context: *context::Context, unit_index: usize, node_index: usize) -> bool {
+    let none: usize = context::no_id();
+    let node: syntax::SyntaxNode = context::node(context, unit_index, node_index);
+    var valid: bool = false;
+    if (node.kind == syntax::SyntaxKind.block_statement) {
+        valid = true;
+        var child: usize = node.first_child;
+        while (child != none && valid) {
+            valid = validate_const_statement(context, unit_index, child);
+            child = context::node(context, unit_index, child).next_sibling;
+        }
+        return valid;
+    }
+    if (node.kind == syntax::SyntaxKind.variable_declaration || node.kind == syntax::SyntaxKind.const_declaration) {
+        if (node.child_count == 2 && (node.flags & ((syntax::SyntaxFlag.inferred_type as usize) |
+                    (syntax::SyntaxFlag.volatile_ as usize))) == 0) {
+            let type_id: usize = types::resolve_type_node(context, unit_index, node.first_child);
+            valid = type_id != none && const_scalar_type(context, type_id) &&
+                validate_const_expression(
+                    context, unit_index, context::node(context, unit_index, node.first_child).next_sibling);
+        }
+    } else if (node.kind == syntax::SyntaxKind.assignment_statement) {
+        valid = node.child_count == 2 &&
+            context::token(context, unit_index, node.token_index).kind == lexer::TokenKind.equal &&
+            context::node(context, unit_index, node.first_child).kind == syntax::SyntaxKind.name_expression &&
+            validate_const_expression(
+                context, unit_index, context::node(context, unit_index, node.first_child).next_sibling);
+    } else if (node.kind == syntax::SyntaxKind.expression_statement) {
+        valid = node.child_count == 1 && validate_const_expression(context, unit_index, node.first_child);
+    } else if (node.kind == syntax::SyntaxKind.if_statement) {
+        if (node.child_count >= 2 && node.child_count <= 3 &&
+            validate_const_expression(
+                context, unit_index, node.first_child)) {
+            let then_id: usize = context::node(context, unit_index, node.first_child).next_sibling;
+            valid = validate_const_statement(context, unit_index, then_id);
+            if (valid && node.child_count == 3) {
+                valid = validate_const_statement(
+                    context, unit_index, context::node(context, unit_index, then_id).next_sibling);
+            }
+        }
+    } else if (node.kind == syntax::SyntaxKind.return_statement) {
+        valid = node.child_count == 1 && validate_const_expression(context, unit_index, node.first_child);
+    }
+    if (!valid) {
+        report_invalid_const_function(context, unit_index, node.span);
+    }
+    return valid;
+}
+
+fn validate_const_function(context: *context::Context, const_function_id: usize) -> bool {
+    let none: usize = context::no_id();
+    let records: *const context::ConstFunction = context->const_functions.data as
+            *const context::ConstFunction;
+    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let symbol: context::Symbol = symbols[records[const_function_id].symbol_id];
+    var body_id: usize = none;
+    var child: usize = context::node(context, symbol.declaration_unit, symbol.declaration_node).first_child;
+    while (child != none) {
+        let part: syntax::SyntaxNode = context::node(context, symbol.declaration_unit, child);
+        if (part.kind == syntax::SyntaxKind.block_statement) {
+            body_id = child;
+        }
+        child = part.next_sibling;
+    }
+    if (body_id == none) {
+        report_invalid_const_function(
+            context, symbol.declaration_unit,
+            context::node(context, symbol.declaration_unit, symbol.declaration_node).span);
+        return false;
+    }
+    var valid: bool = true;
+    var statement: usize = context::node(context, symbol.declaration_unit, body_id).first_child;
+    while (statement != none && valid && context->error == runtime::Error.none) {
+        valid = validate_const_statement(context, symbol.declaration_unit, statement);
+        statement = context::node(context, symbol.declaration_unit, statement).next_sibling;
+    }
+    return valid;
+}
+
+fn collect_const_function(
+    context: *context::Context, module_id: usize, unit_index: usize, declaration_id: usize,
+    declaration: syntax::SyntaxNode, interface_unit: bool) -> bool {
+    let none: usize = context::no_id();
+    if (interface_unit) {
+        // Interface units carry no bodies, and a const fn without a body
+        // is useless to the evaluator.
+        report_invalid_const_function(context, unit_index, declaration.span);
+        return context->error == runtime::Error.none;
+    }
+    if ((declaration.flags & (syntax::SyntaxFlag.exported as usize)) != 0) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_export, unit_index, declaration.span, none, context::empty_span(),
+            0);
+    }
+    let duplicate: usize = names::find_any_local_symbol(context, module_id, unit_index, declaration.token_index);
+    if (duplicate != none) {
+        let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+        context::add_diagnostic(
+            context, context::DiagnosticKind.duplicate_name, unit_index,
+            context::token(context, unit_index, declaration.token_index).span, symbols[duplicate].declaration_unit,
+            context::token(context, symbols[duplicate].declaration_unit, symbols[duplicate].name_token).span,
+            duplicate);
+        return context->error == runtime::Error.none;
+    }
+    var parameter_count: usize = 0;
+    var return_node: usize = none;
+    var body_node: usize = none;
+    if (!function_parts(
+            context, unit_index, declaration, &parameter_count, &return_node, &body_node)) {
+        return false;
+    }
+    if ((declaration.flags & (syntax::SyntaxFlag.variadic as usize)) != 0) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_variadic, unit_index, declaration.span, context::no_id(),
+            context::empty_span(), 0);
+        return context->error == runtime::Error.none;
+    }
+    if (body_node == none || return_node == none) {
+        report_invalid_const_function(context, unit_index, declaration.span);
+        return context->error == runtime::Error.none;
+    }
+    let return_type: usize = types::resolve_type_node(context, unit_index, return_node);
+    if (return_type == none) {
+        return context->error == runtime::Error.none;
+    }
+    if (!const_scalar_type(context, return_type)) {
+        report_invalid_const_function(context, unit_index, context::node(context, unit_index, return_node).span);
+    }
+    let symbol_id: usize = names::append_symbol(
+        context, {
+            kind = context::SymbolKind.const_function, module_id = module_id, declaration_unit = unit_index,
+            declaration_node = declaration_id, name_token = declaration.token_index, type_id = return_type,
+            function_id = context->const_function_count, integer_value = 0, flags = context::SymbolFlag.none as usize,
+        });
+    if (symbol_id == none) {
+        return false;
+    }
+    let const_id: usize =
+        append_const_function(
+            context, {
+                symbol_id = symbol_id, return_type = return_type, first_parameter = none, parameter_count = 0,
+            });
+    if (const_id == none) {
+        return false;
+    }
+    var child: usize = declaration.first_child;
+    var index: usize = 0;
+    while (index < parameter_count) {
+        let parameter_node: syntax::SyntaxNode = context::node(context, unit_index, child);
+        let type_id: usize = types::resolve_type_node(context, unit_index, parameter_node.first_child);
+        if (type_id == none) {
+            return context->error == runtime::Error.none;
+        }
+        if (!const_scalar_type(
+                context, type_id)) {
+            report_invalid_const_function(context, unit_index, parameter_node.span);
+        }
+        let records: *const context::ConstFunction = context->const_functions.data as
+                *const context::ConstFunction;
+        let parameters: *const context::Parameter = context->parameters.data as
+                *const context::Parameter;
+        let base: usize = records[const_id].first_parameter;
+        let collected: usize = records[const_id].parameter_count;
+        var previous: usize = 0;
+        while (previous < collected) {
+            if (context::tokens_equal(
+                    context, unit_index, parameter_node.token_index, parameters[base + previous].unit_index,
+                    parameters[base + previous].name_token)) {
+                report_invalid_const_function(context, unit_index, parameter_node.span);
+            }
+            previous += 1;
+        }
+        if (append_parameter(
+                context, {
+                    function_id = none, type_id = type_id, unit_index = unit_index, declaration_node = child,
+                    name_token = parameter_node.token_index,
+                }) == none) {
+            return false;
+        }
+        let writable: *context::ConstFunction = context->const_functions.data as
+                *context::ConstFunction;
+        if (writable[const_id].parameter_count == 0) {
+            writable[const_id].first_parameter = context->parameter_count - 1;
+        }
+        writable[const_id].parameter_count += 1;
+        child = parameter_node.next_sibling;
+        index += 1;
+    }
+    return context->error == runtime::Error.none;
+}
+fn collect_const_functions_in_unit(
+    context: *context::Context, module_id: usize, unit_index: usize, interface_unit: bool) -> bool {
+    let none: usize = context::no_id();
+    if (unit_index == none) {
+        return true;
+    }
+    var declaration_id: usize = names::first_declaration(context, unit_index);
+    while (declaration_id != none && context->error == runtime::Error.none) {
+        let declaration: syntax::SyntaxNode = context::node(context, unit_index, declaration_id);
+        if (declaration.kind == syntax::SyntaxKind.function_declaration && (declaration.flags &
+                (syntax::SyntaxFlag.const_function as usize)) != 0 &&
+            !collect_const_function(
+                context, module_id, unit_index, declaration_id, declaration, interface_unit)) {
+            return false;
+        }
+        declaration_id = declaration.next_sibling;
+    }
+    return context->error == runtime::Error.none;
+}
+
+fn collect_const_functions(context: *context::Context) -> bool {
+    var module_id: usize = 0;
+    while (module_id < context->module_count && context->error == runtime::Error.none) {
+        let modules: *const context::Module = context->modules.data as *const context::Module;
+        if (!collect_const_functions_in_unit(context, module_id, modules[module_id].interface_unit, true)) {
+            return false;
+        }
+        var implementation_index: usize = 0;
+        while (implementation_index < modules[module_id].implementation_count) {
+            let implementation_unit: usize =
+                names::module_implementation_unit(context, module_id, implementation_index);
+            if (implementation_unit == context::no_id() ||
+                !collect_const_functions_in_unit(
+                    context, module_id, implementation_unit, false)) {
+                return false;
+            }
+            implementation_index += 1;
+        }
+        module_id += 1;
+    }
+    var index: usize = 0;
+    while (index < context->const_function_count && context->error == runtime::Error.none) {
+        validate_const_function(context, index);
+        index += 1;
+    }
+    return context->error == runtime::Error.none;
+}

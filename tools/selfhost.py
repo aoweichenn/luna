@@ -108,7 +108,11 @@ LIBRARIES = {
     ),
     "sem_attributes": compiler_module("luna.bootstrap.middleend.semantic.attributes", "middleend/semantic/attributes"),
     "sem_modules": compiler_module("luna.bootstrap.middleend.semantic.modules", "middleend/semantic/modules"),
-    "sem_types": compiler_module("luna.bootstrap.middleend.semantic.types", "middleend/semantic/types"),
+    "sem_types": compiler_module(
+        "luna.bootstrap.middleend.semantic.types",
+        "middleend/semantic/types",
+        "middleend/semantic/types/layout",
+    ),
     "sem_types_lookup": compiler_module(
         "luna.bootstrap.middleend.semantic.types.lookup",
         "middleend/semantic/types/lookup",
@@ -124,10 +128,15 @@ LIBRARIES = {
     "sem_consteval_engine": compiler_module(
         "luna.bootstrap.middleend.semantic.consteval.engine",
         "middleend/semantic/consteval/engine",
+        "middleend/semantic/consteval/engine/execute",
     ),
     "sem_consteval": compiler_module("luna.bootstrap.middleend.semantic.consteval", "middleend/semantic/consteval"),
     "sem_intrinsics": compiler_module("luna.bootstrap.middleend.semantic.intrinsics", "middleend/semantic/intrinsics"),
-    "sem_funcs": compiler_module("luna.bootstrap.middleend.semantic.functions", "middleend/semantic/functions"),
+    "sem_funcs": compiler_module(
+        "luna.bootstrap.middleend.semantic.functions",
+        "middleend/semantic/functions",
+        "middleend/semantic/functions/const",
+    ),
     "sem_funcs_ir": compiler_module(
         "luna.bootstrap.middleend.semantic.functions.ir",
         "middleend/semantic/functions/ir",
