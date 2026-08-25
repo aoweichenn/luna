@@ -461,7 +461,7 @@ the expected case), inlining of asm bodies is revisited.
 
 The same milestone migrates the `luna.linux.syscall` definitions from
 their linker-injected special case to honest `asm fn` source in
-`library/linux/syscall.la` — including the argument-register shuffle the
+`library/src/linux/syscall.la` — including the argument-register shuffle the
 `syscall` instruction requires (`rcx` arrives as `r10`).
 
 ## Milestone m1.9 — source position intrinsics

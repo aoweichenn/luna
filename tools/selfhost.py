@@ -14,6 +14,7 @@ rebuilding itself and comparing every artifact byte-for-byte.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import filecmp
 import os
 import pathlib
@@ -37,182 +38,169 @@ MODULE_PATTERN = re.compile(
     re.MULTILINE,
 )
 
-# key -> (module name, source stem). Dependencies and build order are derived
-# from the registered sources, so adding a module has one configuration site.
+
+@dataclass(frozen=True)
+class RegisteredModule:
+    name: str
+    interface: str
+    implementation: str
+
+
+def library_module(name: str, implementation_stem: str) -> RegisteredModule:
+    module_path = name.replace(".", "/")
+    return RegisteredModule(
+        name=name,
+        interface=f"library/include/{module_path}.lh",
+        implementation=f"library/src/{implementation_stem}.la",
+    )
+
+
+def compiler_module(name: str, implementation_stem: str) -> RegisteredModule:
+    module_path = name.replace(".", "/")
+    return RegisteredModule(
+        name=name,
+        interface=f"compiler/include/{module_path}.lh",
+        implementation=f"compiler/src/{implementation_stem}.la",
+    )
+
+
+# key -> explicit interface/implementation source record. Dependencies and
+# build order are derived, so adding a module still has one configuration site.
 LIBRARIES = {
-    "ascii": ("luna.std.ascii", "library/std/ascii"),
-    "checked": ("luna.std.checked", "library/std/checked"),
-    "syscall": ("luna.linux.syscall", "library/linux/syscall"),
-    "runtime": ("luna.runtime", "library/runtime"),
-    "memory": ("luna.std.memory", "library/std/memory"),
-    "bytes": ("luna.std.bytes", "library/std/bytes"),
-    "binary": ("luna.std.binary", "library/std/binary"),
-    "text": ("luna.std.text", "library/std/text"),
-    "path": ("luna.std.path", "library/std/path"),
-    "io": ("luna.std.io", "library/std/io"),
-    "lexer": ("luna.bootstrap.frontend.lexer", "compiler/frontend/lexer"),
-    "syntax": ("luna.bootstrap.frontend.syntax", "compiler/frontend/syntax"),
-    "parser_state": ("luna.bootstrap.frontend.parser.state", "compiler/frontend/parser/state"),
-    "parser_expression": (
-        "luna.bootstrap.frontend.parser.expression",
-        "compiler/frontend/parser/expression",
-    ),
-    "parser_statements": (
-        "luna.bootstrap.frontend.parser.statements",
-        "compiler/frontend/parser/statements",
-    ),
-    "parser_declarations": (
+    "ascii": library_module("luna.std.ascii", "std/ascii"),
+    "checked": library_module("luna.std.checked", "std/checked"),
+    "syscall": library_module("luna.linux.syscall", "linux/syscall"),
+    "runtime": library_module("luna.runtime", "runtime"),
+    "memory": library_module("luna.std.memory", "std/memory"),
+    "bytes": library_module("luna.std.bytes", "std/bytes"),
+    "binary": library_module("luna.std.binary", "std/binary"),
+    "text": library_module("luna.std.text", "std/text"),
+    "path": library_module("luna.std.path", "std/path"),
+    "io": library_module("luna.std.io", "std/io"),
+    "lexer": compiler_module("luna.bootstrap.frontend.lexer", "frontend/lexer"),
+    "syntax": compiler_module("luna.bootstrap.frontend.syntax", "frontend/syntax"),
+    "parser_state": compiler_module("luna.bootstrap.frontend.parser.state", "frontend/parser/state"),
+    "parser_expression": compiler_module("luna.bootstrap.frontend.parser.expression", "frontend/parser/expression"),
+    "parser_statements": compiler_module("luna.bootstrap.frontend.parser.statements", "frontend/parser/statements"),
+    "parser_declarations": compiler_module(
         "luna.bootstrap.frontend.parser.declarations",
-        "compiler/frontend/parser/declarations",
+        "frontend/parser/declarations",
     ),
-    "parser": ("luna.bootstrap.frontend.parser", "compiler/frontend/parser"),
-    "type": ("luna.bootstrap.middleend.type", "compiler/middleend/type"),
-    "ir": ("luna.bootstrap.middleend.ir", "compiler/middleend/ir"),
-    "ir_verify": ("luna.bootstrap.middleend.ir.verify", "compiler/middleend/ir/verify"),
-    "sem_ctx": ("luna.bootstrap.middleend.semantic.context", "compiler/middleend/semantic/context"),
-    "sem_ctx_lookup": (
+    "parser": compiler_module("luna.bootstrap.frontend.parser", "frontend/parser"),
+    "type": compiler_module("luna.bootstrap.middleend.type", "middleend/type"),
+    "ir": compiler_module("luna.bootstrap.middleend.ir", "middleend/ir"),
+    "ir_verify": compiler_module("luna.bootstrap.middleend.ir.verify", "middleend/ir/verify"),
+    "sem_ctx": compiler_module("luna.bootstrap.middleend.semantic.context", "middleend/semantic/context"),
+    "sem_ctx_lookup": compiler_module(
         "luna.bootstrap.middleend.semantic.context.lookup",
-        "compiler/middleend/semantic/context/lookup",
+        "middleend/semantic/context/lookup",
     ),
-    "sem_ctx_builder": (
+    "sem_ctx_builder": compiler_module(
         "luna.bootstrap.middleend.semantic.context.builder",
-        "compiler/middleend/semantic/context/builder",
+        "middleend/semantic/context/builder",
     ),
-    "sem_attributes": (
-        "luna.bootstrap.middleend.semantic.attributes",
-        "compiler/middleend/semantic/attributes",
-    ),
-    "sem_modules": ("luna.bootstrap.middleend.semantic.modules", "compiler/middleend/semantic/modules"),
-    "sem_types": ("luna.bootstrap.middleend.semantic.types", "compiler/middleend/semantic/types"),
-    "sem_types_lookup": (
+    "sem_attributes": compiler_module("luna.bootstrap.middleend.semantic.attributes", "middleend/semantic/attributes"),
+    "sem_modules": compiler_module("luna.bootstrap.middleend.semantic.modules", "middleend/semantic/modules"),
+    "sem_types": compiler_module("luna.bootstrap.middleend.semantic.types", "middleend/semantic/types"),
+    "sem_types_lookup": compiler_module(
         "luna.bootstrap.middleend.semantic.types.lookup",
-        "compiler/middleend/semantic/types/lookup",
+        "middleend/semantic/types/lookup",
     ),
-    "sem_types_visibility": (
+    "sem_types_visibility": compiler_module(
         "luna.bootstrap.middleend.semantic.types.visibility",
-        "compiler/middleend/semantic/types/visibility",
+        "middleend/semantic/types/visibility",
     ),
-    "sem_consteval_model": (
+    "sem_consteval_model": compiler_module(
         "luna.bootstrap.middleend.semantic.consteval.model",
-        "compiler/middleend/semantic/consteval/model",
+        "middleend/semantic/consteval/model",
     ),
-    "sem_consteval_engine": (
+    "sem_consteval_engine": compiler_module(
         "luna.bootstrap.middleend.semantic.consteval.engine",
-        "compiler/middleend/semantic/consteval/engine",
+        "middleend/semantic/consteval/engine",
     ),
-    "sem_consteval": (
-        "luna.bootstrap.middleend.semantic.consteval",
-        "compiler/middleend/semantic/consteval",
-    ),
-    "sem_intrinsics": (
-        "luna.bootstrap.middleend.semantic.intrinsics",
-        "compiler/middleend/semantic/intrinsics",
-    ),
-    "sem_funcs": ("luna.bootstrap.middleend.semantic.functions", "compiler/middleend/semantic/functions"),
-    "sem_funcs_ir": (
+    "sem_consteval": compiler_module("luna.bootstrap.middleend.semantic.consteval", "middleend/semantic/consteval"),
+    "sem_intrinsics": compiler_module("luna.bootstrap.middleend.semantic.intrinsics", "middleend/semantic/intrinsics"),
+    "sem_funcs": compiler_module("luna.bootstrap.middleend.semantic.functions", "middleend/semantic/functions"),
+    "sem_funcs_ir": compiler_module(
         "luna.bootstrap.middleend.semantic.functions.ir",
-        "compiler/middleend/semantic/functions/ir",
+        "middleend/semantic/functions/ir",
     ),
-    "sem_expr_base": (
-        "luna.bootstrap.middleend.semantic.expr.base",
-        "compiler/middleend/semantic/expr/base",
-    ),
-    "sem_expr_numeric": (
+    "sem_expr_base": compiler_module("luna.bootstrap.middleend.semantic.expr.base", "middleend/semantic/expr/base"),
+    "sem_expr_numeric": compiler_module(
         "luna.bootstrap.middleend.semantic.expr.numeric",
-        "compiler/middleend/semantic/expr/numeric",
+        "middleend/semantic/expr/numeric",
     ),
-    "sem_expr_strings": (
+    "sem_expr_strings": compiler_module(
         "luna.bootstrap.middleend.semantic.expr.strings",
-        "compiler/middleend/semantic/expr/strings",
+        "middleend/semantic/expr/strings",
     ),
-    "sem_expr_api": (
-        "luna.bootstrap.middleend.semantic.expr.api",
-        "compiler/middleend/semantic/expr/api",
-    ),
-    "sem_expr_initializer": (
+    "sem_expr_api": compiler_module("luna.bootstrap.middleend.semantic.expr.api", "middleend/semantic/expr/api"),
+    "sem_expr_initializer": compiler_module(
         "luna.bootstrap.middleend.semantic.expr.initializer",
-        "compiler/middleend/semantic/expr/initializer",
+        "middleend/semantic/expr/initializer",
     ),
-    "sem_expr_access": (
+    "sem_expr_access": compiler_module(
         "luna.bootstrap.middleend.semantic.expr.access",
-        "compiler/middleend/semantic/expr/access",
+        "middleend/semantic/expr/access",
     ),
-    "sem_expr_operators": (
+    "sem_expr_operators": compiler_module(
         "luna.bootstrap.middleend.semantic.expr.operators",
-        "compiler/middleend/semantic/expr/operators",
+        "middleend/semantic/expr/operators",
     ),
-    "sem_expr": ("luna.bootstrap.middleend.semantic.expr", "compiler/middleend/semantic/expr"),
-    "sem_stmt_api": (
-        "luna.bootstrap.middleend.semantic.stmt.api",
-        "compiler/middleend/semantic/stmt/api",
-    ),
-    "sem_stmt_labels": (
+    "sem_expr": compiler_module("luna.bootstrap.middleend.semantic.expr", "middleend/semantic/expr"),
+    "sem_stmt_api": compiler_module("luna.bootstrap.middleend.semantic.stmt.api", "middleend/semantic/stmt/api"),
+    "sem_stmt_labels": compiler_module(
         "luna.bootstrap.middleend.semantic.stmt.labels",
-        "compiler/middleend/semantic/stmt/labels",
+        "middleend/semantic/stmt/labels",
     ),
-    "sem_stmt": ("luna.bootstrap.middleend.semantic.stmt", "compiler/middleend/semantic/stmt"),
-    "sema": ("luna.bootstrap.middleend.sema", "compiler/middleend/sema"),
-    "x86_64_text": ("luna.bootstrap.backend.x86_64.text", "compiler/backend/x86_64/text"),
-    "x86_64_abi": ("luna.bootstrap.backend.x86_64.abi", "compiler/backend/x86_64/abi"),
-    "x86_64_frame": ("luna.bootstrap.backend.x86_64.frame", "compiler/backend/x86_64/frame"),
-    "x86_64_codegen_support": (
+    "sem_stmt": compiler_module("luna.bootstrap.middleend.semantic.stmt", "middleend/semantic/stmt"),
+    "sema": compiler_module("luna.bootstrap.middleend.sema", "middleend/sema"),
+    "x86_64_text": compiler_module("luna.bootstrap.backend.x86_64.text", "backend/x86_64/text"),
+    "x86_64_abi": compiler_module("luna.bootstrap.backend.x86_64.abi", "backend/x86_64/abi"),
+    "x86_64_frame": compiler_module("luna.bootstrap.backend.x86_64.frame", "backend/x86_64/frame"),
+    "x86_64_codegen_support": compiler_module(
         "luna.bootstrap.backend.x86_64.codegen.support",
-        "compiler/backend/x86_64/codegen/support",
+        "backend/x86_64/codegen/support",
     ),
-    "x86_64_codegen_instruction_value": (
+    "x86_64_codegen_instruction_value": compiler_module(
         "luna.bootstrap.backend.x86_64.codegen.instruction.value",
-        "compiler/backend/x86_64/codegen/instruction/value",
+        "backend/x86_64/codegen/instruction/value",
     ),
-    "x86_64_codegen_instruction_call": (
+    "x86_64_codegen_instruction_call": compiler_module(
         "luna.bootstrap.backend.x86_64.codegen.instruction.call",
-        "compiler/backend/x86_64/codegen/instruction/call",
+        "backend/x86_64/codegen/instruction/call",
     ),
-    "x86_64_codegen_instruction": (
+    "x86_64_codegen_instruction": compiler_module(
         "luna.bootstrap.backend.x86_64.codegen.instruction",
-        "compiler/backend/x86_64/codegen/instruction",
+        "backend/x86_64/codegen/instruction",
     ),
-    "x86_64_codegen": (
-        "luna.bootstrap.backend.x86_64.codegen",
-        "compiler/backend/x86_64/codegen",
-    ),
-    "x86_64_object": ("luna.bootstrap.backend.x86_64.object", "compiler/backend/x86_64/object"),
-    "x86_64_elf_format": (
-        "luna.bootstrap.backend.x86_64.elf.format",
-        "compiler/backend/x86_64/elf/format",
-    ),
-    "x86_64_elf_reader": (
-        "luna.bootstrap.backend.x86_64.elf.reader",
-        "compiler/backend/x86_64/elf/reader",
-    ),
-    "x86_64_elf_writer": (
-        "luna.bootstrap.backend.x86_64.elf.writer",
-        "compiler/backend/x86_64/elf/writer",
-    ),
-    "x86_64_elf": ("luna.bootstrap.backend.x86_64.elf", "compiler/backend/x86_64/elf"),
-    "x86_64_assembler_operands": (
+    "x86_64_codegen": compiler_module("luna.bootstrap.backend.x86_64.codegen", "backend/x86_64/codegen"),
+    "x86_64_object": compiler_module("luna.bootstrap.backend.x86_64.object", "backend/x86_64/object"),
+    "x86_64_elf_format": compiler_module("luna.bootstrap.backend.x86_64.elf.format", "backend/x86_64/elf/format"),
+    "x86_64_elf_reader": compiler_module("luna.bootstrap.backend.x86_64.elf.reader", "backend/x86_64/elf/reader"),
+    "x86_64_elf_writer": compiler_module("luna.bootstrap.backend.x86_64.elf.writer", "backend/x86_64/elf/writer"),
+    "x86_64_elf": compiler_module("luna.bootstrap.backend.x86_64.elf", "backend/x86_64/elf"),
+    "x86_64_assembler_operands": compiler_module(
         "luna.bootstrap.backend.x86_64.assembler.operands",
-        "compiler/backend/x86_64/assembler/operands",
+        "backend/x86_64/assembler/operands",
     ),
-    "x86_64_assembler_encoding": (
+    "x86_64_assembler_encoding": compiler_module(
         "luna.bootstrap.backend.x86_64.assembler.encoding",
-        "compiler/backend/x86_64/assembler/encoding",
+        "backend/x86_64/assembler/encoding",
     ),
-    "x86_64_assembler_source": (
+    "x86_64_assembler_source": compiler_module(
         "luna.bootstrap.backend.x86_64.assembler.source",
-        "compiler/backend/x86_64/assembler/source",
+        "backend/x86_64/assembler/source",
     ),
-    "x86_64_assembler": (
-        "luna.bootstrap.backend.x86_64.assembler",
-        "compiler/backend/x86_64/assembler",
-    ),
-    "x86_64_linker": ("luna.bootstrap.backend.x86_64.linker", "compiler/backend/x86_64/linker"),
+    "x86_64_assembler": compiler_module("luna.bootstrap.backend.x86_64.assembler", "backend/x86_64/assembler"),
+    "x86_64_linker": compiler_module("luna.bootstrap.backend.x86_64.linker", "backend/x86_64/linker"),
 }
 
 # tool name -> driver source. Interface and object closures are derived.
 DRIVERS = {
-    "lunac": "drivers/stage_compiler.la",
-    "luna-as": "drivers/stage_assembler.la",
-    "luna-link": "drivers/stage_linker.la",
+    "lunac": "drivers/src/stage_compiler.la",
+    "luna-as": "drivers/src/stage_assembler.la",
+    "luna-link": "drivers/src/stage_linker.la",
 }
 
 NATIVE_TIMEOUT_SECONDS = 600
@@ -256,13 +244,21 @@ def run(
 
 
 def module_keys_by_name() -> dict[str, str]:
-    return {module_name: key for key, (module_name, _stem) in LIBRARIES.items()}
+    return {module.name: key for key, module in LIBRARIES.items()}
 
 
-def library_stem(key: str) -> pathlib.Path:
+def registered_module(key: str) -> RegisteredModule:
     if key not in LIBRARIES:
         fail(f"unknown library key {key}")
-    return ROOT / LIBRARIES[key][1]
+    return LIBRARIES[key]
+
+
+def library_interface(key: str) -> pathlib.Path:
+    return ROOT / registered_module(key).interface
+
+
+def library_implementation(key: str) -> pathlib.Path:
+    return ROOT / registered_module(key).implementation
 
 
 def source_dependency_keys(paths: tuple[pathlib.Path, ...]) -> tuple[str, ...]:
@@ -278,10 +274,9 @@ def source_dependency_keys(paths: tuple[pathlib.Path, ...]) -> tuple[str, ...]:
 
 
 def library_dependencies(key: str, *, implementation: bool) -> tuple[str, ...]:
-    stem = library_stem(key)
-    paths = [stem.with_suffix(".lh")]
+    paths = [library_interface(key)]
     if implementation:
-        paths.append(stem.with_suffix(".la"))
+        paths.append(library_implementation(key))
     return source_dependency_keys(tuple(paths))
 
 
@@ -334,11 +329,10 @@ def implementation_closure(direct_dependencies: tuple[str, ...]) -> list[str]:
 
 
 def library_units(key: str) -> list[pathlib.Path]:
-    stem = library_stem(key)
-    units = [stem.with_suffix(".la"), stem.with_suffix(".lh")]
+    units = [library_implementation(key), library_interface(key)]
     direct_dependencies = library_dependencies(key, implementation=True)
     units.extend(
-        library_stem(dependency).with_suffix(".lh")
+        library_interface(dependency)
         for dependency in interface_closure(direct_dependencies)
     )
     return units
@@ -351,7 +345,7 @@ def driver_dependencies(source: pathlib.Path) -> tuple[str, ...]:
 def driver_units(source: pathlib.Path) -> list[pathlib.Path]:
     units = [source]
     units.extend(
-        library_stem(dependency).with_suffix(".lh")
+        library_interface(dependency)
         for dependency in interface_closure(driver_dependencies(source))
     )
     return units
@@ -371,7 +365,8 @@ def audit_sources() -> None:
     warnings: list[str] = []
 
     names_to_keys: dict[str, str] = {}
-    for key, (name, _stem) in LIBRARIES.items():
+    for key, module in LIBRARIES.items():
+        name = module.name
         if name in names_to_keys:
             errors.append(
                 f"module {name} is registered by both {names_to_keys[name]} and {key}"
@@ -379,10 +374,10 @@ def audit_sources() -> None:
         names_to_keys[name] = key
 
     source_paths: list[pathlib.Path] = []
-    for _key, (name, stem_name) in LIBRARIES.items():
-        stem = ROOT / stem_name
-        interface = stem.with_suffix(".lh")
-        implementation = stem.with_suffix(".la")
+    for _key, module in LIBRARIES.items():
+        name = module.name
+        interface = ROOT / module.interface
+        implementation = ROOT / module.implementation
         source_paths.extend((interface, implementation))
         for path, should_export in (
             (interface, True),
@@ -427,7 +422,7 @@ def audit_sources() -> None:
         )
         if duplicate_pair_imports:
             errors.append(
-                f"{stem.relative_to(ROOT)} interface/implementation both import "
+                f"module {name} interface/implementation both import "
                 f"{sorted(duplicate_pair_imports)}"
             )
     for _name, source_name in DRIVERS.items():
@@ -598,13 +593,7 @@ SEMANTIC_DIAGNOSTIC_BASE = 64
 
 def semantic_diagnostic_kinds() -> dict[str, int]:
     """Map context::DiagnosticKind names to their enum ordinals."""
-    interface = (
-        ROOT
-        / "compiler"
-        / "middleend"
-        / "semantic"
-        / "context.lh"
-    )
+    interface = library_interface("sem_ctx")
     text = interface.read_text(encoding="utf-8")
     match = re.search(
         r"enum DiagnosticKind[^}]*\{(.*?)\}", text, re.S

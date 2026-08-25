@@ -57,7 +57,7 @@ tables included).
 `<case>.la FAIL <diagnostic-kind>`, asserting that compilation fails
 with exactly that leading `BootstrapSemanticDiagnosticKind` (exit status
 `64 + kind`, compile-only, no linking). Kind ordinals are parsed from
-`compiler/middleend/semantic/context.lh`.
+`compiler/include/luna/bootstrap/middleend/semantic/context.lh`.
 
 ## Step 1 — m1.2 qualifiers, attributes and static assertions — done
 

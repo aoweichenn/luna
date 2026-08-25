@@ -15,14 +15,22 @@ self-hosting loop.
 ## Layout
 
 ```text
-anchor/     fixed-point toolchain from m0 (the sole binary trust root)
-library/    runtime, Linux syscall layer, standard library (pure Luna)
-compiler/   frontend, middle end, x86-64 backend (pure Luna)
-drivers/    freestanding lunac / luna-as / luna-link driver programs
-tests/      executable behavior cases + expected exit codes
-tools/      selfhost.py: build / verify / test driver
-docs/       design record (language, semantics, seed contract)
+anchor/                    fixed-point toolchain from m0; sole binary trust root
+library/include/luna/      runtime and standard-library interfaces (.lh)
+library/src/               runtime and standard-library implementations (.la)
+compiler/include/luna/     compiler interfaces under luna/bootstrap/ (.lh)
+compiler/src/              frontend, middle end and x86-64 backend (.la)
+drivers/src/               freestanding lunac / luna-as / luna-link drivers
+tests/                     behavior and FFI fixtures + expected results
+tools/                     selfhost.py: audit / build / verify / test driver
+docs/                      design record (language, semantics, seed contract)
 ```
+
+Interface paths mirror their full module names; implementation paths mirror
+the subsystem tree. For example, `luna.std.text` pairs
+`library/include/luna/std/text.lh` with `library/src/std/text.la`.
+`tools/selfhost.py` records both paths explicitly, so source discovery does not
+depend on interfaces and implementations occupying the same directory.
 
 ## Build
 

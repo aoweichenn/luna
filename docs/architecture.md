@@ -43,6 +43,31 @@ order, scalar sizes and ABI alignments. The target description is carried by
 the typed IR module so target-sized language types never depend on host C
 properties.
 
+## Source-tree layering
+
+Production Luna code has three dependency layers: `library` is the foundation,
+`compiler` builds on it, and the executable `drivers` compose compiler and
+library modules. Interfaces and implementations are physically separated:
+
+- `library/include/luna/**/*.lh` contains exported library interfaces;
+- `library/src/**/*.la` contains library implementations;
+- `compiler/include/luna/bootstrap/**/*.lh` contains compiler interfaces;
+- `compiler/src/**/*.la` contains compiler implementations;
+- `drivers/src/*.la` contains source-only executable entry modules.
+
+An interface path mirrors its complete module name, while its implementation
+path mirrors the subsystem hierarchy. Thus `luna.std.text` is the pair
+`library/include/luna/std/text.lh` and `library/src/std/text.la`, and
+`luna.bootstrap.middleend.sema` is the pair
+`compiler/include/luna/bootstrap/middleend/sema.lh` and
+`compiler/src/middleend/sema.la`.
+
+Physical adjacency is not module identity. The `LIBRARIES` registry in
+`tools/selfhost.py` records both paths for every module; dependency order and
+driver link closures are derived from declared imports. The source audit
+rejects missing or unregistered units, so moving or adding one side of a pair
+cannot silently remove it from the fixed-point build.
+
 ## Pipeline
 
 ```text

@@ -59,15 +59,16 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
   plus a loop, never long if-chains.
 - A source file is a soft 2,000-line ceiling; split along pass
   boundaries into interface/implementation module pairs — a `foo/`
-  subdirectory behind a thin `foo.la` facade that keeps the public
-  entry points — and register the new modules in `LIBRARIES`.
+  implementation subdirectory behind a thin `foo.la` facade that keeps
+  the public entry points — and register the new modules in `LIBRARIES`.
 - A submodule may never import its parent facade (imports are acyclic);
   when a pass must recurse through the facade, hand the entry point
   down as a function pointer (see the `Lowerer` type in
-  `compiler/middleend/semantic/expr/api.lh`).
-- Semantic lowering lives under `compiler/middleend/semantic/` with the
-  pipeline entry remaining in `sema.la`; imports flow strictly downward
-  in this order: `context` (+ `context/{lookup,builder}`),
+  `compiler/include/luna/bootstrap/middleend/semantic/expr/api.lh`).
+- Semantic lowering implementations live under
+  `compiler/src/middleend/semantic/`, with the pipeline entry remaining
+  in `compiler/src/middleend/sema.la`; imports flow strictly downward in
+  this order: `context` (+ `context/{lookup,builder}`),
   `attributes`, `modules`, `types` (+ `types/{lookup,visibility}`),
   `consteval` (+ `consteval/{model,engine}`), `intrinsics`,
   `functions` (+ `functions/ir`), `expr` (+ `expr/{base,numeric,
@@ -78,19 +79,22 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
 
 - `anchor/` — fixed-point `lunac`, `luna-as`, `luna-link` from m0, with
   `SHA256SUMS` + `PROVENANCE.md`. Sole binary trust root.
-- `library/` — runtime, Linux syscall layer (`linux/`), standard library
-  (`std/`): allocation, byte buffers, checked arithmetic (`checked`),
-  ASCII classification (`ascii`), binary encoding (`binary`), UTF-8
-  text, paths, file I/O.
-- `compiler/` — `frontend/` (lexer, syntax, parser over
+- `library/include/luna/` — library interface units, mirroring module
+  names (`luna.std.text` is `luna/std/text.lh`).
+- `library/src/` — runtime, Linux syscall and standard-library
+  implementations: allocation, byte buffers, checked arithmetic, ASCII
+  classification, binary encoding, UTF-8 text, paths and file I/O.
+- `compiler/include/luna/bootstrap/` — compiler interface units,
+  mirroring the `luna.bootstrap.*` module namespace.
+- `compiler/src/` — `frontend/` (lexer, syntax, parser over
   `parser/{state,expression,statements,declarations}`), `middleend/`
   (type, ir + `ir/verify`, sema, `semantic/*` — see Style for the
   lowering order), `backend/x86_64/` (text, abi, frame, codegen over
   `codegen/{support,instruction/{value,call}}`, object, elf over
   `elf/{format,reader,writer}`, assembler over
-  `assembler/{operands,encoding,source}`, linker).
-  Correctness-first, no optimization.
-- `drivers/` — freestanding argument-driven tool programs.
+  `assembler/{operands,encoding,source}`, linker). Correctness-first,
+  no optimization.
+- `drivers/src/` — freestanding argument-driven tool programs.
 - `tests/cases/` — executable behavior programs returning their verdict
   as the exit status.
 - `tests/ffi/` — hand-encoded ELF64 ET_REL fixtures
@@ -110,7 +114,8 @@ From `docs/architecture.md` — do not violate:
   `library/` and link no libc.
 - Only target is `x86_64-unknown-linux-gnu`; `isize`/`usize` are target-sized.
 - Luna modules are matched interface/implementation pairs
-  (`foo.lh` declares exports; `foo.la` defines).
+  (`include/**/*.lh` declares exports; `src/**/*.la` defines); the two
+  paths need not be co-located and are paired explicitly by `LIBRARIES`.
 - New modules must be registered in `tools/selfhost.py`'s `LIBRARIES`
   (the single registry — build order and driver closures are derived
   from source imports) so the fixed point covers them; `audit` must
