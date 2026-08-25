@@ -27,9 +27,10 @@ docs/                      design record (language, semantics, seed contract)
 ```
 
 Interface paths mirror their full module names; implementation paths mirror
-the subsystem tree. For example, `luna.std.text` pairs
-`library/include/luna/std/text.lh` with `library/src/std/text.la`.
-`tools/selfhost.py` records both paths explicitly, so source discovery does not
+the subsystem tree. For example, `luna.std.text` currently groups
+`library/include/luna/std/text.lh` with `library/src/std/text.la`, while a
+larger module may register several `.la` implementation units.
+`tools/selfhost.py` records all paths explicitly, so source discovery does not
 depend on interfaces and implementations occupying the same directory.
 
 ## Build

@@ -22,7 +22,7 @@
 
 当前模块系统的表面规则总体正确：
 
-- 一个模块至多有一个接口单元和一个实现单元；
+- 一个模块至多有一个接口单元，并可由多个实现单元共同实现；
 - 普通 import 只绑定模块限定符，不自动平铺名字；
 - selective import 才显式引入未限定名字；
 - import 是直接、非传递的；
@@ -36,9 +36,8 @@
 2. 名字查找仍反复扫描全局 symbol 表；
 3. `Import` 同时承担依赖边和名字绑定；
 4. module graph 仍依赖 AST node/token 身份；
-5. 一个模块只能有一个实现文件；
-6. 缺少 opaque/incomplete aggregate；
-7. 驱动的 64 source-unit 上限比语义层的 1024 module 上限更早生效。
+5. 缺少 opaque/incomplete aggregate；
+6. 驱动的 64 source-unit 上限比语义层的 1024 module 上限更早生效。
 
 `.lmi` 指纹拆分不是当前第一优先级。只有重新引入二进制模块接口、增量缓存或
 已编译包分发时，才应重新设计 public API identity、内部接口 identity 和单符号
@@ -57,7 +56,7 @@ LIBRARIES registry
         |
 Python import scan
         |
-root implementation + root interface + dependency interfaces
+root implementations + root interface + dependency interfaces
         |
 lunac
         |
@@ -77,7 +76,7 @@ assembly -> luna-as -> object -> luna-link
 - library compilation 的 root 是输入单元 0 所属模块；
 - 每个 direct import 必须在所提供的 source units 中解析成功；
 - 所有提供的模块必须从 root 可达，并且整个所提供模块图无环；
-- 提供了 implementation 的每个模块都必须满足自己的 matching interface；
+- 提供了 implementation units 的每个模块都必须满足自己的 matching interface；
 - interface-only dependency 的函数定义由另外编译和链接的模块对象提供。
 
 source unit 的 module/import 前缀语法是：
@@ -94,9 +93,10 @@ ImportBinding     ::= "as" Identifier
 import 必须紧跟 module declaration 并形成连续前缀。selective list 非空、名字不重复，
 允许一个 trailing comma；alias 和 selective binding 互斥。
 
-interface import 及其 alias/selective binding 会被 implementation 继承；implementation
-import 对 interface 不可见。同一 target module 在一个模块的 `.lh + .la` 中合计最多
-import 一次，implementation 不能为 interface 已导入的 target 另建 binding。
+interface import 及其 alias/selective binding 会被所有 implementation units 继承；
+任一 implementation unit 写下的 import 会进入共享的 module-private implementation
+scope，但对 interface 不可见。同一 target module 在一个模块的 `.lh + 全部 .la` 中
+合计最多 import 一次。
 
 ### 语义模型
 
@@ -105,7 +105,7 @@ import 一次，implementation 不能为 interface 已导入的 target 另建 bi
 ```text
 Module {
     interface_unit
-    implementation_unit
+    implementation_count
     name_unit/name_node
     first_import/import_count
 }
@@ -270,7 +270,7 @@ container node。限定符解析会回到目标模块 AST，找到模块名最�
 
 - module graph 依赖 parser 的具体 child 布局；
 - 同一名字反复从 token/source 恢复；
-- 将来加入 compiler module scanner、多实现单元或二进制接口时难以复用图层。
+- 将来加入 compiler module scanner 或二进制接口时难以复用图层。
 
 合适的规范化边界是：
 
@@ -288,29 +288,32 @@ Descriptor 应保存规范化 ModuleNameId、unit kind、import slice 和只用�
 SourceRef。声明 AST 仍可供类型检查和函数降低使用；只需让模块图不再依赖 AST
 结构即可，不必试图提前释放整棵语法树。
 
-## 六、一个模块只有一个实现文件
+## 六、多个实现单元
 
-当前 `Module` 固定保存一个 `implementation_unit`，第二个同名 implementation
-直接报告 `duplicate_implementation`。`tools/selfhost.py` 的注册表同样只保存一个
-implementation path。
-
-支持一个接口、多个实现单元是合理的扩展：
+一个模块可以由多个 `.la` 共同实现，而公共接口仍至多只有一个 `.lh`：
 
 ```luna
 module luna.std.fs;
 ```
 
-可以出现在多个 `.la` 中，而公共接口仍只有一个 `.lh`。但这不是只把一个字段改成
-数组：
+这些文件不是 partitions，也不产生新的限定名。当前采用简单的合并语义：
 
-- 类型、常量、const fn、普通函数收集都要遍历 implementation unit 列表；
-- implementation import 必须按 unit 隔离；
-- 同模块私有名字仍应共享模块名字空间；
-- 同一个接口函数在所有实现文件中合计必须恰好定义一次；
-- 构建注册表、source-unit 上限和确定性排序都要同步修改。
+- 所有 implementation units 共享一个 module-private declaration namespace；
+- 私有类型、常量、const fn 和普通函数可以跨实现文件直接引用；
+- 任一 implementation unit 的 import 对全部 implementation units 可见；
+- 同一 target 在 interface 和全部 implementations 中合计最多 import 一次；
+- 一个接口函数在全部 implementations 中合计必须恰好定义一次；
+- 重复私有声明和重复函数定义按普通 module duplicate 规则诊断；
+- 所有实现文件一起降低为这个模块的一个 assembly/object artifact。
 
-因此，DependencyEdge/ImportBinding 分离和 UnitImportScope 是多实现单元的前置
-工作。
+`Module` 只记录 `implementation_count`；当前最多 64 个 source units，语义 pass 在
+需要时扫描 unit records 取得第 N 个实现单元。这避免为了早期规模引入额外索引或
+partition graph。`LIBRARIES` 可显式登记一个有序 implementation path tuple，依赖图
+取所有实现文件 imports 的并集。按照自举迭代纪律，生产模块要等支持该能力的工具链
+提升为 anchor 后才能实际拆分；本阶段由 stage-next 模块案例覆盖该能力。
+
+这个模型借用了 C++ named modules 的多 implementation unit 能力，但没有引入 global
+module fragment、header unit、partition、隐式 re-export 或 BMI 选择规则。
 
 ## 七、opaque/incomplete aggregate
 
@@ -402,6 +405,7 @@ variadic、layout attributes、flexible members、anonymous members、bitfields 
 5. `validate_imported_names()` 跳过全部 non-selective imports；
 6. missing-definition 检查所有提供了 implementation 的模块；
 7. 测试 harness 支持显式有序 source set，并覆盖模块错误矩阵。
+8. 支持一个接口、多个共享私有作用域的 implementation units。
 
 ### 近期：保持简单
 
@@ -413,9 +417,8 @@ variadic、layout attributes、flexible members、anonymous members、bitfields 
 
 1. NameId、ModuleSymbolIndex 和 UnitImportScope；
 2. DependencyEdge/ImportBinding 分离及 AST 规范化；
-3. 一个接口、多个实现单元；
-4. opaque/incomplete aggregate；
-5. selective import 的表面修改。
+3. opaque/incomplete aggregate；
+4. selective import 的表面修改。
 
 ### 将来存在二进制分发需求时
 
@@ -430,6 +433,6 @@ variadic、layout attributes、flexible members、anonymous members、bitfields 
 > 声明查找，AST 只提供声明语义和诊断来源。
 
 保持 `::` 为模块限定符、保持 `.` 为字段和成员访问是正确方向。当前语言明确禁止
-函数重载，因此也不应为了假设中的 C++ 式方法重载提前复杂化 Binding。当前阶段先
-保持一接口、一实现和源码依赖闭包模型，等测试或测量证明需要时再扩展内部结构，
-风险最低。
+函数重载，因此也不应为了假设中的 C++ 式方法重载提前复杂化 Binding。当前阶段
+保持一个接口、共享私有作用域的多个实现文件和源码依赖闭包模型，等测试或测量证明
+需要时再扩展内部结构，风险最低。

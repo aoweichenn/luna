@@ -18,7 +18,7 @@ fn collect_modules(context: *context::Context) -> bool {
         if (module_id == context::no_id()) {
             module_id = names::append_module(
                 context, {
-                    interface_unit = context::no_id(), implementation_unit = context::no_id(), name_unit = unit_index,
+                    interface_unit = context::no_id(), implementation_count = 0, name_unit = unit_index,
                     name_node = name_node, first_import = context::no_id(), import_count = 0, visit_state = 0,
                     reachable = false,
                 });
@@ -27,18 +27,17 @@ fn collect_modules(context: *context::Context) -> bool {
             return false;
         }
         let modules: *context::Module = context->modules.data as *context::Module;
-        let previous: usize = interface_unit ? modules[module_id].interface_unit :
-            modules[module_id].implementation_unit;
-        if (previous != context::no_id()) {
+        let previous: usize = modules[module_id].interface_unit;
+        if (interface_unit && previous != context::no_id()) {
             let previous_node: usize = names::program_module_node(context, previous);
             context::add_diagnostic(
-                context, interface_unit ? context::DiagnosticKind.duplicate_interface : context::DiagnosticKind
-                        .duplicate_implementation, unit_index, context::node(context, unit_index, name_node).span,
+                context, context::DiagnosticKind.duplicate_interface, unit_index,
+                context::node(context, unit_index, name_node).span,
                 previous, context::node(context, previous, previous_node).span, module_id);
         } else if (interface_unit) {
             modules[module_id].interface_unit = unit_index;
         } else {
-            modules[module_id].implementation_unit = unit_index;
+            modules[module_id].implementation_count += 1;
         }
         if (!names::append_unit_info(
                 context, {
@@ -147,11 +146,19 @@ fn collect_imports(context: *context::Context) -> bool {
         let modules: *const context::Module = context->modules.data as
                 *const context::Module;
         let interface_unit: usize = modules[module_id].interface_unit;
-        let implementation_unit: usize = modules[module_id].implementation_unit;
-        if (!collect_unit_imports(context, module_id, interface_unit, true) ||
-            !collect_unit_imports(
-                context, module_id, implementation_unit, false)) {
+        if (!collect_unit_imports(context, module_id, interface_unit, true)) {
             return false;
+        }
+        var implementation_index: usize = 0;
+        while (implementation_index < modules[module_id].implementation_count) {
+            let implementation_unit: usize =
+                names::module_implementation_unit(context, module_id, implementation_index);
+            if (implementation_unit == context::no_id() ||
+                !collect_unit_imports(
+                    context, module_id, implementation_unit, false)) {
+                return false;
+            }
+            implementation_index += 1;
         }
         module_id += 1;
     }

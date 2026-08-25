@@ -42,6 +42,7 @@ M0 supports enough language to compile arithmetic functions, local variables,
 - [x] type-only target layout queries
 - [x] aggregate initialization
 - [x] module interface and implementation matching
+- [x] multiple implementation units sharing one module-private scope
 - [x] import visibility and dependency validation
 - [x] separate compiled module metadata
 

@@ -61,7 +61,10 @@ In library mode, the first source unit's module is the root. Every supplied
 module must be reachable from that root, every import must resolve within the
 supplied set, and the supplied graph must be acyclic. An interface-only
 dependency may leave its definitions to a separately linked module object;
-every supplied implementation must satisfy its own matching interface.
+every module with supplied implementation units must satisfy its own matching
+interface. Multiple implementation units with the same module name share one
+module-private declaration and import scope and are emitted into the same
+assembly output.
 
 `luna-as` accepts exactly one assembly input and emits `LUNAOBJ1`.
 `luna-link` accepts one to 64 `LUNAOBJ1` inputs and emits one static x86-64

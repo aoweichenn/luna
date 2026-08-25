@@ -43,29 +43,36 @@ MODULE_PATTERN = re.compile(
 class RegisteredModule:
     name: str
     interface: str
-    implementation: str
+    implementations: tuple[str, ...]
 
 
-def library_module(name: str, implementation_stem: str) -> RegisteredModule:
+def library_module(name: str, *implementation_stems: str) -> RegisteredModule:
     module_path = name.replace(".", "/")
     return RegisteredModule(
         name=name,
         interface=f"library/include/{module_path}.lh",
-        implementation=f"library/src/{implementation_stem}.la",
+        implementations=tuple(
+            f"library/src/{implementation_stem}.la"
+            for implementation_stem in implementation_stems
+        ),
     )
 
 
-def compiler_module(name: str, implementation_stem: str) -> RegisteredModule:
+def compiler_module(name: str, *implementation_stems: str) -> RegisteredModule:
     module_path = name.replace(".", "/")
     return RegisteredModule(
         name=name,
         interface=f"compiler/include/{module_path}.lh",
-        implementation=f"compiler/src/{implementation_stem}.la",
+        implementations=tuple(
+            f"compiler/src/{implementation_stem}.la"
+            for implementation_stem in implementation_stems
+        ),
     )
 
 
-# key -> explicit interface/implementation source record. Dependencies and
-# build order are derived, so adding a module still has one configuration site.
+# key -> explicit interface and implementation source records. Dependencies
+# and build order are derived, so adding or splitting a module still has one
+# configuration site.
 LIBRARIES = {
     "ascii": library_module("luna.std.ascii", "std/ascii"),
     "checked": library_module("luna.std.checked", "std/checked"),
@@ -257,8 +264,8 @@ def library_interface(key: str) -> pathlib.Path:
     return ROOT / registered_module(key).interface
 
 
-def library_implementation(key: str) -> pathlib.Path:
-    return ROOT / registered_module(key).implementation
+def library_implementations(key: str) -> tuple[pathlib.Path, ...]:
+    return tuple(ROOT / path for path in registered_module(key).implementations)
 
 
 def source_dependency_keys(paths: tuple[pathlib.Path, ...]) -> tuple[str, ...]:
@@ -276,7 +283,7 @@ def source_dependency_keys(paths: tuple[pathlib.Path, ...]) -> tuple[str, ...]:
 def library_dependencies(key: str, *, implementation: bool) -> tuple[str, ...]:
     paths = [library_interface(key)]
     if implementation:
-        paths.append(library_implementation(key))
+        paths.extend(library_implementations(key))
     return source_dependency_keys(tuple(paths))
 
 
@@ -329,7 +336,7 @@ def implementation_closure(direct_dependencies: tuple[str, ...]) -> list[str]:
 
 
 def library_units(key: str) -> list[pathlib.Path]:
-    units = [library_implementation(key), library_interface(key)]
+    units = [*library_implementations(key), library_interface(key)]
     direct_dependencies = library_dependencies(key, implementation=True)
     units.extend(
         library_interface(dependency)
@@ -377,12 +384,13 @@ def audit_sources() -> None:
     for _key, module in LIBRARIES.items():
         name = module.name
         interface = ROOT / module.interface
-        implementation = ROOT / module.implementation
-        source_paths.extend((interface, implementation))
-        for path, should_export in (
-            (interface, True),
-            (implementation, False),
-        ):
+        implementations = tuple(ROOT / path for path in module.implementations)
+        if not implementations:
+            errors.append(f"module {name} has no registered implementation")
+        source_paths.extend((interface, *implementations))
+        units = [(interface, True)]
+        units.extend((implementation, False) for implementation in implementations)
+        for path, should_export in units:
             if not path.is_file():
                 errors.append(f"missing registered source {path.relative_to(ROOT)}")
                 continue
@@ -400,31 +408,30 @@ def audit_sources() -> None:
                     f"{expected} {name}"
                 )
 
-        imports_by_path: dict[pathlib.Path, list[str]] = {}
-        for path in (interface, implementation):
+        first_import_path: dict[str, pathlib.Path] = {}
+        for path in (interface, *implementations):
             if not path.is_file():
                 continue
             imported_names = IMPORT_PATTERN.findall(
                 path.read_text(encoding="utf-8")
             )
-            imports_by_path[path] = imported_names
             if len(imported_names) != len(set(imported_names)):
                 errors.append(f"{path.relative_to(ROOT)} imports a module more than once")
             for imported_name in imported_names:
+                previous_path = first_import_path.get(imported_name)
+                if previous_path is not None:
+                    errors.append(
+                        f"module {name} imports {imported_name} in both "
+                        f"{previous_path.relative_to(ROOT)} and {path.relative_to(ROOT)}"
+                    )
+                else:
+                    first_import_path[imported_name] = path
                 dependency = names_to_keys.get(imported_name)
                 if dependency is None:
                     errors.append(
                         f"{path.relative_to(ROOT)} imports unregistered module "
                         f"{imported_name}"
                     )
-        duplicate_pair_imports = set(imports_by_path.get(interface, [])) & set(
-            imports_by_path.get(implementation, [])
-        )
-        if duplicate_pair_imports:
-            errors.append(
-                f"module {name} interface/implementation both import "
-                f"{sorted(duplicate_pair_imports)}"
-            )
     for _name, source_name in DRIVERS.items():
         source = ROOT / source_name
         source_paths.append(source)

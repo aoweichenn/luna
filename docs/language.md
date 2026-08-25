@@ -44,36 +44,41 @@ ordinary top-level declaration. A selective list is nonempty, contains no
 duplicate name and may end in one trailing comma. Alias and selective bindings
 are mutually exclusive.
 
-A module has at most one interface and one implementation unit. Only
-declarations marked `export` in the interface are visible to importers. Module
-names organize visibility and dependencies, and the last segment of an
-imported module's name also serves as a qualification prefix at the use
-site.
+A module has at most one interface and one or more implementation units. Only
+declarations marked `export` in the interface are visible to importers. All
+implementation units contribute to one shared module-private declaration and
+import scope; their physical file boundaries do not create submodules or
+namespaces. Module names organize visibility and dependencies, and the last
+segment of an imported module's name also serves as a qualification prefix at
+the use site.
 
 An interface contains type, constant and function declarations. Its aggregate
 definitions, aliases and constants are canonical definitions directly
 available in the matching implementation and cannot be repeated there. Every
-non-`extern` interface function must have exactly one definition when that
-module's implementation is supplied. Matching compares the function name,
+non-`extern` interface function must have exactly one definition across all
+implementation units when that module's implementation is supplied. Matching
+compares the function name,
 parameter count and order, every parameter type and pointer qualifier, the
 variadic state and the return type. Parameter names and the choice between an
 ordinary function body and an `asm fn` body are not part of the signature. An
 `extern fn` in the interface names an external C symbol and therefore has no
 Luna definition.
 
-An implementation unit cannot contain `export`. Functions omitted from the
-interface are module-private and need no prior declaration. Interface types
-and function signatures must resolve using the interface itself; they cannot
-depend on a type declared only in the implementation.
+An implementation unit cannot contain `export`. Declarations omitted from the
+interface are module-private, need no prior declaration and are visible to all
+implementation units of the module. Interface types and function signatures
+must resolve using the interface itself; they cannot depend on a type declared
+only in an implementation unit.
 
-An import written in an interface is visible to both units of that module,
-including its alias or selective flat bindings. An implementation may add
-imports that remain private to the implementation. The same target module may
-be imported at most once across the interface and implementation together, so
-an implementation cannot re-import an interface dependency under another
-binding. Imports are direct and non-transitive: importing one module does not
-expose that module's imports. An exported function or aggregate type cannot
-expose a module-private named type in its public signature or fields.
+An import written in an interface is visible to every implementation unit,
+including its alias or selective flat bindings. An implementation unit may add
+an import that remains private to the module but is shared by all its
+implementation units. The same target module may be imported at most once
+across the interface and all implementations together, so another
+implementation unit cannot repeat it or establish another binding. Imports
+are direct and non-transitive: importing one module does not expose that
+module's imports. An exported function or aggregate type cannot expose a
+module-private named type in its public signature or fields.
 
 Every import binds a module qualifier: a plain `import a.b.c;` binds the last
 segment `c`, and an alias import `import a.b.c as t;` binds `t`. `c::name`
@@ -106,11 +111,11 @@ interface; interface-only dependencies leave those definitions to separately
 compiled objects.
 
 An imported dependency must be supplied at least as its source interface. Its
-implementation may be omitted from the compilation; a separately compiled
-module object then supplies the definitions at final link time. The self-host
-build compiles each library from its implementation, its matching interface
-and the reachable dependency interfaces, then links the independently built
-module objects.
+implementation units may be omitted from the compilation; a separately
+compiled module object then supplies the definitions at final link time. The
+self-host build compiles each library from all its implementation units, its
+matching interface and the reachable dependency interfaces, then links the
+independently built module objects.
 
 The current `lunac` modes are `--executable` and `--library`, both producing
 x86-64 assembly. Stage 1 and later do not emit or consume compiled `.lmi`

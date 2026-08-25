@@ -289,13 +289,15 @@ are rejected.
 
 ## Module contracts
 
-An interface and implementation form one compilation module only when their
-module names are identical. Interface function declarations are matched before
-any body is lowered. Matching is exact for function kind, parameter count and
+An interface and one or more implementations form one compilation module only
+when their module names are identical. Interface function declarations are
+matched before any body is lowered. Matching is exact for parameter count and
 order, semantic parameter types including every pointer read-only qualifier,
-and return type; parameter names may differ. Every ordinary interface function
-has one implementation body. An interface `extern fn` remains an external
-symbol declaration and cannot also have an implementation declaration.
+variadic state and return type; parameter names may differ, and an ordinary
+interface declaration may be implemented by an `asm fn` body. Every ordinary
+interface function has exactly one implementation body across all
+implementation units. An interface `extern fn` remains an external symbol
+declaration and cannot also have an implementation declaration.
 
 Interface type definitions are canonical definitions shared with the
 implementation. Repeating one in the implementation is a duplicate
@@ -305,12 +307,13 @@ silently depend on implementation details. Executable root selection is
 independent of command-line order because it follows the unique `main`;
 library mode deliberately selects the first input unit's module as its root.
 
-An interface import is visible while checking both the interface and its
-implementation, including its alias or selective flat bindings. An
-implementation-only import is visible only in that implementation. One target
-module may be imported at most once across the interface and implementation
-together. Only declarations explicitly exported by the imported interface
-enter scope, and imports are not transitively visible or re-exported.
+An interface import is visible while checking the interface and every
+implementation unit, including its alias or selective flat bindings. An import
+written in any implementation unit is module-private but visible to every
+implementation unit. One target module may be imported at most once across the
+interface and all implementations together. Only declarations explicitly
+exported by the imported interface enter scope, and imports are not
+transitively visible or re-exported.
 Conflicting qualifiers are rejected at their import declarations even when
 unused; conflicting unqualified imported names and local shadowing of imported
 names are also rejected.

@@ -60,9 +60,9 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
 - Enumerative mappings (keywords, token-to-kind tables) are data tables
   plus a loop, never long if-chains.
 - A source file is a soft 2,000-line ceiling; split along pass
-  boundaries into interface/implementation module pairs — a `foo/`
-  implementation subdirectory behind a thin `foo.la` facade that keeps
-  the public entry points — and register the new modules in `LIBRARIES`.
+  boundaries. Additional `.la` files may implement the same module and share
+  its private declarations/imports; use a new submodule only for a real
+  dependency boundary. Register every implementation path in `LIBRARIES`.
 - A submodule may never import its parent facade (imports are acyclic);
   when a pass must recurse through the facade, hand the entry point
   down as a function pointer (see the `Lowerer` type in
@@ -115,9 +115,9 @@ From `docs/architecture.md` — do not violate:
 - Generated programs are freestanding; runtime/syscall wrappers live in
   `library/` and link no libc.
 - Only target is `x86_64-unknown-linux-gnu`; `isize`/`usize` are target-sized.
-- Luna modules are matched interface/implementation pairs
-  (`include/**/*.lh` declares exports; `src/**/*.la` defines); the two
-  paths need not be co-located and are paired explicitly by `LIBRARIES`.
+- Luna modules have at most one interface and one or more implementation units
+  (`include/**/*.lh` declares exports; `src/**/*.la` defines); paths need not
+  be co-located and are grouped explicitly by `LIBRARIES`.
 - New modules must be registered in `tools/selfhost.py`'s `LIBRARIES`
   (the single registry — build order and driver closures are derived
   from source imports) so the fixed point covers them; `audit` must

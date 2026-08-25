@@ -55,18 +55,18 @@ library modules. Interfaces and implementations are physically separated:
 - `compiler/src/**/*.la` contains compiler implementations;
 - `drivers/src/*.la` contains source-only executable entry modules.
 
-An interface path mirrors its complete module name, while its implementation
-path mirrors the subsystem hierarchy. Thus `luna.std.text` is the pair
-`library/include/luna/std/text.lh` and `library/src/std/text.la`, and
-`luna.bootstrap.middleend.sema` is the pair
-`compiler/include/luna/bootstrap/middleend/sema.lh` and
-`compiler/src/middleend/sema.la`.
+An interface path mirrors its complete module name, while implementation paths
+mirror the subsystem hierarchy. A small module may use one implementation,
+such as `luna.std.text` with `library/include/luna/std/text.lh` and
+`library/src/std/text.la`; a larger module may register additional `.la` units
+under an implementation subdirectory.
 
 Physical adjacency is not module identity. The `LIBRARIES` registry in
-`tools/selfhost.py` records both paths for every module; dependency order and
-driver link closures are derived from declared imports. The source audit
-rejects missing or unregistered units, so moving or adding one side of a pair
-cannot silently remove it from the fixed-point build.
+`tools/selfhost.py` records the interface and all implementation paths for
+every module; dependency order and driver link closures are derived from the
+union of declared imports. The source audit rejects missing or unregistered
+units, so moving or adding a unit cannot silently remove it from the
+fixed-point build.
 
 ## Pipeline
 
@@ -160,7 +160,8 @@ layout-query instruction.
 Compilation is split into global and local phases:
 
 1. load, lex and parse every source unit;
-2. group interface and implementation units by exact module name;
+2. group the optional interface and all implementation units by exact module
+   name;
 3. collect direct imports and reject unknown, repeated and self imports;
 4. validate an acyclic module graph;
 5. validate attributes and collect named types;
@@ -174,9 +175,11 @@ This order removes source-order dependencies and ordinary forward declarations.
 For executables, the module resolver identifies the unique implementation
 containing `main` and requires every supplied module to be reachable from it.
 For libraries, the first input unit's module is the selected root. Interface
-imports enter both interface and implementation scope; implementation-only
-imports never enter interface scope. Only exported declarations enter an
-importer's scope, and visibility is never transitive.
+imports enter interface scope and the shared implementation scope; imports
+written in any implementation unit enter only that shared implementation
+scope. Module-private declarations are likewise shared by every implementation
+unit. Only exported declarations enter an importer's scope, and visibility is
+never transitive.
 
 The compiler never discovers or loads a module from its name. Its caller
 supplies the complete source-interface closure; module declarations establish
@@ -200,11 +203,11 @@ types, so nested arrays, named-type identity and pointer read-only qualifiers
 cannot match accidentally by spelling or layout.
 
 Separate compilation is source-interface based. Each library invocation
-receives the selected module's implementation and interface plus the reachable
-dependency interfaces. Imported implementations may be absent; their
-independently generated objects provide definitions at final link time. This
-source graph is the stage-1-and-later replacement for the archived stage-0
-`.lmi` path.
+receives all of the selected module's implementation units, its interface and
+the reachable dependency interfaces. Imported implementations may be absent;
+their independently generated objects provide definitions at final link time.
+This source graph is the stage-1-and-later replacement for the archived
+stage-0 `.lmi` path.
 
 The current compiler emits assembly in `--library` or `--executable` mode.
 Ordinary Luna symbols encode the canonical module name and function name, not
