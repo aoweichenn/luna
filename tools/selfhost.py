@@ -8,6 +8,7 @@ rebuilding itself and comparing every artifact byte-for-byte.
     python3 tools/selfhost.py build    # anchor -> out/stage-next
     python3 tools/selfhost.py verify   # stage-next -> stage-fixed, byte compare
     python3 tools/selfhost.py test     # run tests/cases through stage-next
+    python3 tools/selfhost.py audit    # read-only anchor/module/source checks
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import filecmp
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -24,307 +26,485 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 # Optional emulator prefix (e.g. "qemu-x86_64-static") applied to every
 # toolchain binary invocation, for cross-architecture development hosts.
-TOOL_RUNNER = tuple(os.environ.get("LUNA_TOOL_RUNNER", "").split())
+DEFAULT_RUNNER = tuple(shlex.split(os.environ.get("LUNA_TOOL_RUNNER", "")))
 IMPORT_PATTERN = re.compile(
     r"^[ \t]*import[ \t]+([A-Za-z0-9_.]+)(?:[ \t]+as[ \t]+[A-Za-z0-9_]+)?"
     r"(?:[ \t]*::[ \t]*\{[^}]*\})?[ \t]*;[ \t]*$",
     re.MULTILINE,
 )
+MODULE_PATTERN = re.compile(
+    r"^[ \t]*(export[ \t]+)?module[ \t]+([A-Za-z0-9_.]+)[ \t]*;[ \t]*$",
+    re.MULTILINE,
+)
 
-# key -> (module name, source stem, direct dependencies)
+# key -> (module name, source stem). Dependencies and build order are derived
+# from the registered sources, so adding a module has one configuration site.
 LIBRARIES = {
-    "syscall": ("luna.linux.syscall", "library/linux/syscall", ()),
-    "runtime": ("luna.runtime", "library/runtime", ("syscall",)),
-    "memory": ("luna.std.memory", "library/std/memory", ("runtime",)),
-    "bytes": ("luna.std.bytes", "library/std/bytes", ("runtime", "memory")),
-    "text": ("luna.std.text", "library/std/text", ("runtime", "bytes")),
-    "path": ("luna.std.path", "library/std/path", ("runtime", "bytes", "text")),
-    "io": (
-        "luna.std.io",
-        "library/std/io",
-        ("runtime", "bytes", "text", "path"),
+    "ascii": ("luna.std.ascii", "library/std/ascii"),
+    "checked": ("luna.std.checked", "library/std/checked"),
+    "syscall": ("luna.linux.syscall", "library/linux/syscall"),
+    "runtime": ("luna.runtime", "library/runtime"),
+    "memory": ("luna.std.memory", "library/std/memory"),
+    "bytes": ("luna.std.bytes", "library/std/bytes"),
+    "binary": ("luna.std.binary", "library/std/binary"),
+    "text": ("luna.std.text", "library/std/text"),
+    "path": ("luna.std.path", "library/std/path"),
+    "io": ("luna.std.io", "library/std/io"),
+    "lexer": ("luna.bootstrap.frontend.lexer", "compiler/frontend/lexer"),
+    "syntax": ("luna.bootstrap.frontend.syntax", "compiler/frontend/syntax"),
+    "parser_state": ("luna.bootstrap.frontend.parser.state", "compiler/frontend/parser/state"),
+    "parser_expression": (
+        "luna.bootstrap.frontend.parser.expression",
+        "compiler/frontend/parser/expression",
     ),
-    "lexer": (
-        "luna.bootstrap.frontend.lexer",
-        "compiler/frontend/lexer",
-        ("runtime", "bytes", "text"),
+    "parser_statements": (
+        "luna.bootstrap.frontend.parser.statements",
+        "compiler/frontend/parser/statements",
     ),
-    "parser": (
-        "luna.bootstrap.frontend.parser",
-        "compiler/frontend/parser",
-        ("runtime", "bytes", "text", "lexer"),
+    "parser_declarations": (
+        "luna.bootstrap.frontend.parser.declarations",
+        "compiler/frontend/parser/declarations",
     ),
-    "type": (
-        "luna.bootstrap.middleend.type",
-        "compiler/middleend/type",
-        ("runtime", "bytes", "text", "lexer"),
+    "parser": ("luna.bootstrap.frontend.parser", "compiler/frontend/parser"),
+    "type": ("luna.bootstrap.middleend.type", "compiler/middleend/type"),
+    "ir": ("luna.bootstrap.middleend.ir", "compiler/middleend/ir"),
+    "ir_verify": ("luna.bootstrap.middleend.ir.verify", "compiler/middleend/ir/verify"),
+    "sem_ctx": ("luna.bootstrap.middleend.semantic.context", "compiler/middleend/semantic/context"),
+    "sem_ctx_lookup": (
+        "luna.bootstrap.middleend.semantic.context.lookup",
+        "compiler/middleend/semantic/context/lookup",
     ),
-    "ir": (
-        "luna.bootstrap.middleend.ir",
-        "compiler/middleend/ir",
-        ("runtime", "bytes", "text", "lexer", "type"),
-    ),
-        "sem_ctx": (
-        "luna.bootstrap.middleend.semantic.context",
-        "compiler/middleend/semantic/context",
-        ("runtime", "bytes", "text", "lexer", "parser", "type", "ir"),
+    "sem_ctx_builder": (
+        "luna.bootstrap.middleend.semantic.context.builder",
+        "compiler/middleend/semantic/context/builder",
     ),
     "sem_attributes": (
         "luna.bootstrap.middleend.semantic.attributes",
         "compiler/middleend/semantic/attributes",
-        ("runtime", "bytes", "text", "lexer", "parser", "type", "ir",
-         "sem_ctx"),
     ),
-    "sem_modules": (
-        "luna.bootstrap.middleend.semantic.modules",
-        "compiler/middleend/semantic/modules",
-        ("runtime", "bytes", "text", "lexer", "parser", "type", "ir",
-         "sem_ctx"),
+    "sem_modules": ("luna.bootstrap.middleend.semantic.modules", "compiler/middleend/semantic/modules"),
+    "sem_types": ("luna.bootstrap.middleend.semantic.types", "compiler/middleend/semantic/types"),
+    "sem_types_lookup": (
+        "luna.bootstrap.middleend.semantic.types.lookup",
+        "compiler/middleend/semantic/types/lookup",
     ),
-    "sem_types": (
-        "luna.bootstrap.middleend.semantic.types",
-        "compiler/middleend/semantic/types",
-        ("runtime", "bytes", "text", "lexer", "parser", "type", "ir",
-         "sem_ctx", "sem_attributes"),
+    "sem_types_visibility": (
+        "luna.bootstrap.middleend.semantic.types.visibility",
+        "compiler/middleend/semantic/types/visibility",
+    ),
+    "sem_consteval_model": (
+        "luna.bootstrap.middleend.semantic.consteval.model",
+        "compiler/middleend/semantic/consteval/model",
+    ),
+    "sem_consteval_engine": (
+        "luna.bootstrap.middleend.semantic.consteval.engine",
+        "compiler/middleend/semantic/consteval/engine",
     ),
     "sem_consteval": (
         "luna.bootstrap.middleend.semantic.consteval",
         "compiler/middleend/semantic/consteval",
-        ("runtime", "bytes", "text", "lexer", "parser", "type", "ir",
-         "sem_ctx", "sem_types"),
     ),
     "sem_intrinsics": (
         "luna.bootstrap.middleend.semantic.intrinsics",
         "compiler/middleend/semantic/intrinsics",
-        ("runtime", "bytes", "text", "lexer", "parser", "type", "ir",
-         "sem_ctx", "sem_types"),
     ),
-    "sem_funcs": (
-        "luna.bootstrap.middleend.semantic.functions",
-        "compiler/middleend/semantic/functions",
-        ("runtime", "bytes", "text", "lexer", "parser", "type", "ir",
-         "sem_ctx", "sem_attributes", "sem_types"),
+    "sem_funcs": ("luna.bootstrap.middleend.semantic.functions", "compiler/middleend/semantic/functions"),
+    "sem_funcs_ir": (
+        "luna.bootstrap.middleend.semantic.functions.ir",
+        "compiler/middleend/semantic/functions/ir",
     ),
-    "sem_expr": (
-        "luna.bootstrap.middleend.semantic.expr",
-        "compiler/middleend/semantic/expr",
-        ("runtime", "bytes", "text", "path", "io", "lexer", "parser",
-         "type", "ir", "sem_ctx", "sem_types", "sem_consteval",
-         "sem_intrinsics"),
+    "sem_expr_base": (
+        "luna.bootstrap.middleend.semantic.expr.base",
+        "compiler/middleend/semantic/expr/base",
     ),
-    "sem_stmt": (
-        "luna.bootstrap.middleend.semantic.stmt",
-        "compiler/middleend/semantic/stmt",
-        ("runtime", "bytes", "text", "lexer", "parser", "type", "ir",
-         "sem_ctx", "sem_attributes", "sem_types", "sem_consteval",
-         "sem_funcs", "sem_expr"),
+    "sem_expr_numeric": (
+        "luna.bootstrap.middleend.semantic.expr.numeric",
+        "compiler/middleend/semantic/expr/numeric",
     ),
-    "sema": (
-        "luna.bootstrap.middleend.sema",
-        "compiler/middleend/sema",
-        ("runtime", "bytes", "text", "lexer", "parser", "type", "ir",
-         "sem_ctx", "sem_attributes", "sem_modules", "sem_types",
-         "sem_consteval", "sem_funcs", "sem_expr", "sem_stmt"),
+    "sem_expr_strings": (
+        "luna.bootstrap.middleend.semantic.expr.strings",
+        "compiler/middleend/semantic/expr/strings",
     ),
-    "x86_64_text": (
-        "luna.bootstrap.backend.x86_64.text",
-        "compiler/backend/x86_64/text",
-        ("runtime", "bytes", "text"),
+    "sem_expr_api": (
+        "luna.bootstrap.middleend.semantic.expr.api",
+        "compiler/middleend/semantic/expr/api",
     ),
-    "x86_64_abi": (
-        "luna.bootstrap.backend.x86_64.abi",
-        "compiler/backend/x86_64/abi",
-        ("runtime", "bytes", "text", "lexer", "type", "ir"),
+    "sem_expr_initializer": (
+        "luna.bootstrap.middleend.semantic.expr.initializer",
+        "compiler/middleend/semantic/expr/initializer",
     ),
-    "x86_64_frame": (
-        "luna.bootstrap.backend.x86_64.frame",
-        "compiler/backend/x86_64/frame",
-        ("runtime", "bytes", "text", "lexer", "type", "ir", "x86_64_abi"),
+    "sem_expr_access": (
+        "luna.bootstrap.middleend.semantic.expr.access",
+        "compiler/middleend/semantic/expr/access",
+    ),
+    "sem_expr_operators": (
+        "luna.bootstrap.middleend.semantic.expr.operators",
+        "compiler/middleend/semantic/expr/operators",
+    ),
+    "sem_expr": ("luna.bootstrap.middleend.semantic.expr", "compiler/middleend/semantic/expr"),
+    "sem_stmt_api": (
+        "luna.bootstrap.middleend.semantic.stmt.api",
+        "compiler/middleend/semantic/stmt/api",
+    ),
+    "sem_stmt_labels": (
+        "luna.bootstrap.middleend.semantic.stmt.labels",
+        "compiler/middleend/semantic/stmt/labels",
+    ),
+    "sem_stmt": ("luna.bootstrap.middleend.semantic.stmt", "compiler/middleend/semantic/stmt"),
+    "sema": ("luna.bootstrap.middleend.sema", "compiler/middleend/sema"),
+    "x86_64_text": ("luna.bootstrap.backend.x86_64.text", "compiler/backend/x86_64/text"),
+    "x86_64_abi": ("luna.bootstrap.backend.x86_64.abi", "compiler/backend/x86_64/abi"),
+    "x86_64_frame": ("luna.bootstrap.backend.x86_64.frame", "compiler/backend/x86_64/frame"),
+    "x86_64_codegen_support": (
+        "luna.bootstrap.backend.x86_64.codegen.support",
+        "compiler/backend/x86_64/codegen/support",
+    ),
+    "x86_64_codegen_instruction_value": (
+        "luna.bootstrap.backend.x86_64.codegen.instruction.value",
+        "compiler/backend/x86_64/codegen/instruction/value",
+    ),
+    "x86_64_codegen_instruction_call": (
+        "luna.bootstrap.backend.x86_64.codegen.instruction.call",
+        "compiler/backend/x86_64/codegen/instruction/call",
+    ),
+    "x86_64_codegen_instruction": (
+        "luna.bootstrap.backend.x86_64.codegen.instruction",
+        "compiler/backend/x86_64/codegen/instruction",
     ),
     "x86_64_codegen": (
         "luna.bootstrap.backend.x86_64.codegen",
         "compiler/backend/x86_64/codegen",
-        (
-            "runtime",
-            "bytes",
-            "text",
-            "lexer",
-            "parser",
-            "type",
-            "ir",
-            "sem_ctx",
-            "x86_64_text",
-            "x86_64_abi",
-            "x86_64_frame",
-        ),
     ),
-    "x86_64_object": (
-        "luna.bootstrap.backend.x86_64.object",
-        "compiler/backend/x86_64/object",
-        ("runtime", "bytes", "text"),
+    "x86_64_object": ("luna.bootstrap.backend.x86_64.object", "compiler/backend/x86_64/object"),
+    "x86_64_elf_format": (
+        "luna.bootstrap.backend.x86_64.elf.format",
+        "compiler/backend/x86_64/elf/format",
     ),
-    "x86_64_elf": (
-        "luna.bootstrap.backend.x86_64.elf",
-        "compiler/backend/x86_64/elf",
-        ("runtime", "bytes", "text", "x86_64_object"),
+    "x86_64_elf_reader": (
+        "luna.bootstrap.backend.x86_64.elf.reader",
+        "compiler/backend/x86_64/elf/reader",
+    ),
+    "x86_64_elf_writer": (
+        "luna.bootstrap.backend.x86_64.elf.writer",
+        "compiler/backend/x86_64/elf/writer",
+    ),
+    "x86_64_elf": ("luna.bootstrap.backend.x86_64.elf", "compiler/backend/x86_64/elf"),
+    "x86_64_assembler_operands": (
+        "luna.bootstrap.backend.x86_64.assembler.operands",
+        "compiler/backend/x86_64/assembler/operands",
+    ),
+    "x86_64_assembler_encoding": (
+        "luna.bootstrap.backend.x86_64.assembler.encoding",
+        "compiler/backend/x86_64/assembler/encoding",
+    ),
+    "x86_64_assembler_source": (
+        "luna.bootstrap.backend.x86_64.assembler.source",
+        "compiler/backend/x86_64/assembler/source",
     ),
     "x86_64_assembler": (
         "luna.bootstrap.backend.x86_64.assembler",
         "compiler/backend/x86_64/assembler",
-        ("runtime", "bytes", "text", "x86_64_object"),
     ),
-    "x86_64_linker": (
-        "luna.bootstrap.backend.x86_64.linker",
-        "compiler/backend/x86_64/linker",
-        ("runtime", "bytes", "text", "x86_64_object"),
-    ),
+    "x86_64_linker": ("luna.bootstrap.backend.x86_64.linker", "compiler/backend/x86_64/linker"),
 }
 
-LIBRARY_ORDER = (
-    "syscall",
-    "runtime",
-    "memory",
-    "bytes",
-    "text",
-    "path",
-    "io",
-    "lexer",
-    "parser",
-    "type",
-    "ir",
-    "sem_ctx",
-    "sem_attributes",
-    "sem_modules",
-    "sem_types",
-    "sem_consteval",
-    "sem_intrinsics",
-    "sem_funcs",
-    "sem_expr",
-    "sem_stmt",
-    "sema",
-    "x86_64_text",
-    "x86_64_abi",
-    "x86_64_frame",
-    "x86_64_codegen",
-    "x86_64_object",
-    "x86_64_elf",
-    "x86_64_assembler",
-    "x86_64_linker",
-)
-
-# tool name -> (driver source, interface keys)
+# tool name -> driver source. Interface and object closures are derived.
 DRIVERS = {
-    "lunac": (
-        "drivers/stage_compiler.la",
-        (
-            "runtime",
-            "bytes",
-            "text",
-            "path",
-            "io",
-            "lexer",
-            "parser",
-            "type",
-            "ir",
-            "sem_ctx",
-            "sem_attributes",
-            "sem_modules",
-            "sem_types",
-            "sem_consteval",
-            "sem_intrinsics",
-            "sem_funcs",
-            "sem_expr",
-            "sem_stmt",
-            "sema",
-            "x86_64_text",
-            "x86_64_abi",
-            "x86_64_frame",
-            "x86_64_codegen",
-        ),
-    ),
-    "luna-as": (
-        "drivers/stage_assembler.la",
-        (
-            "runtime",
-            "bytes",
-            "text",
-            "path",
-            "io",
-            "x86_64_object",
-            "x86_64_elf",
-            "x86_64_assembler",
-        ),
-    ),
-    "luna-link": (
-        "drivers/stage_linker.la",
-        (
-            "runtime",
-            "bytes",
-            "text",
-            "path",
-            "io",
-            "x86_64_text",
-            "x86_64_object",
-            "x86_64_elf",
-            "x86_64_linker",
-        ),
-    ),
+    "lunac": "drivers/stage_compiler.la",
+    "luna-as": "drivers/stage_assembler.la",
+    "luna-link": "drivers/stage_linker.la",
 }
 
-TIMEOUT_SECONDS = 600 if not TOOL_RUNNER else 3600
+NATIVE_TIMEOUT_SECONDS = 600
+EMULATED_TIMEOUT_SECONDS = 3600
 
 
 def fail(message: str) -> None:
     raise SystemExit(f"error: {message}")
 
 
-def tool(directory: pathlib.Path, name: str) -> list[str | pathlib.Path]:
-    return [*TOOL_RUNNER, directory / name]
+def timeout_seconds(runner: tuple[str, ...]) -> int:
+    return EMULATED_TIMEOUT_SECONDS if runner else NATIVE_TIMEOUT_SECONDS
 
 
-def run(command: list[str], *, cwd: pathlib.Path | None = None) -> None:
+def tool(
+    directory: pathlib.Path,
+    name: str,
+    runner: tuple[str, ...],
+) -> list[str | pathlib.Path]:
+    return [*runner, directory / name]
+
+
+def run(
+    command: list[str | pathlib.Path],
+    *,
+    cwd: pathlib.Path | None = None,
+    timeout: int = NATIVE_TIMEOUT_SECONDS,
+) -> None:
     printable = " ".join(str(part) for part in command)
-    print(f"  $ {printable}")
+    print(f"  $ {printable}", flush=True)
     try:
         completed = subprocess.run(
             [str(part) for part in command],
             cwd=None if cwd is None else str(cwd),
-            timeout=TIMEOUT_SECONDS,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        fail(f"command timed out after {TIMEOUT_SECONDS}s: {printable}")
+        fail(f"command timed out after {timeout}s: {printable}")
     if completed.returncode != 0:
         fail(f"command returned {completed.returncode}: {printable}")
 
 
-def import_closure(key: str) -> list[str]:
-    """Transitively resolve interface imports starting from direct deps."""
-    names_to_keys = {module[0]: name for name, module in LIBRARIES.items()}
-    required: set[str] = set(LIBRARIES[key][2])
-    pending = sorted(required)
+def module_keys_by_name() -> dict[str, str]:
+    return {module_name: key for key, (module_name, _stem) in LIBRARIES.items()}
+
+
+def library_stem(key: str) -> pathlib.Path:
+    if key not in LIBRARIES:
+        fail(f"unknown library key {key}")
+    return ROOT / LIBRARIES[key][1]
+
+
+def source_dependency_keys(paths: tuple[pathlib.Path, ...]) -> tuple[str, ...]:
+    names_to_keys = module_keys_by_name()
+    required: set[str] = set()
+    for path in paths:
+        for module_name in IMPORT_PATTERN.findall(path.read_text(encoding="utf-8")):
+            dependency = names_to_keys.get(module_name)
+            if dependency is None:
+                fail(f"{path.relative_to(ROOT)} imports unregistered module {module_name}")
+            required.add(dependency)
+    return tuple(key for key in LIBRARIES if key in required)
+
+
+def library_dependencies(key: str, *, implementation: bool) -> tuple[str, ...]:
+    stem = library_stem(key)
+    paths = [stem.with_suffix(".lh")]
+    if implementation:
+        paths.append(stem.with_suffix(".la"))
+    return source_dependency_keys(tuple(paths))
+
+
+def library_order() -> list[str]:
+    """Topologically order the implementation graph with stable tie breaks."""
+    dependencies = {
+        key: set(library_dependencies(key, implementation=True))
+        for key in LIBRARIES
+    }
+    ordered: list[str] = []
+    placed: set[str] = set()
+    while len(ordered) != len(LIBRARIES):
+        progress = False
+        for key in LIBRARIES:
+            if key not in placed and dependencies[key] <= placed:
+                ordered.append(key)
+                placed.add(key)
+                progress = True
+        if not progress:
+            cycle = sorted(set(LIBRARIES) - placed)
+            fail(f"library implementation dependency cycle: {cycle}")
+    return ordered
+
+
+def dependency_closure(
+    direct_dependencies: tuple[str, ...],
+    *,
+    implementation: bool,
+) -> list[str]:
+    required: set[str] = set(direct_dependencies)
+    pending = list(direct_dependencies)
     while pending:
         current = pending.pop()
-        stem = ROOT / LIBRARIES[current][1]
-        text = stem.with_suffix(".lh").read_text(encoding="utf-8")
-        for name in IMPORT_PATTERN.findall(text):
-            dependency = names_to_keys.get(name)
-            if dependency is None:
-                fail(f"{stem}.lh imports unknown module {name}")
+        for dependency in library_dependencies(
+            current,
+            implementation=implementation,
+        ):
             if dependency not in required:
                 required.add(dependency)
                 pending.append(dependency)
-    return [key for key in LIBRARY_ORDER if key in required]
+    return [key for key in library_order() if key in required]
+
+
+def interface_closure(direct_dependencies: tuple[str, ...]) -> list[str]:
+    return dependency_closure(direct_dependencies, implementation=False)
+
+
+def implementation_closure(direct_dependencies: tuple[str, ...]) -> list[str]:
+    return dependency_closure(direct_dependencies, implementation=True)
 
 
 def library_units(key: str) -> list[pathlib.Path]:
-    module = LIBRARIES[key]
-    stem = ROOT / module[1]
+    stem = library_stem(key)
     units = [stem.with_suffix(".la"), stem.with_suffix(".lh")]
+    direct_dependencies = library_dependencies(key, implementation=True)
     units.extend(
-        (ROOT / LIBRARIES[dependency][1]).with_suffix(".lh")
-        for dependency in import_closure(key)
+        library_stem(dependency).with_suffix(".lh")
+        for dependency in interface_closure(direct_dependencies)
     )
     return units
+
+
+def driver_dependencies(source: pathlib.Path) -> tuple[str, ...]:
+    return source_dependency_keys((source,))
+
+
+def driver_units(source: pathlib.Path) -> list[pathlib.Path]:
+    units = [source]
+    units.extend(
+        library_stem(dependency).with_suffix(".lh")
+        for dependency in interface_closure(driver_dependencies(source))
+    )
+    return units
+
+
+def declared_module(path: pathlib.Path) -> tuple[bool, str] | None:
+    matches = MODULE_PATTERN.findall(path.read_text(encoding="utf-8"))
+    if len(matches) != 1:
+        return None
+    exported, name = matches[0]
+    return bool(exported), name
+
+
+def audit_sources() -> None:
+    """Validate the registered module graph and non-mutating source rules."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    names_to_keys: dict[str, str] = {}
+    for key, (name, _stem) in LIBRARIES.items():
+        if name in names_to_keys:
+            errors.append(
+                f"module {name} is registered by both {names_to_keys[name]} and {key}"
+            )
+        names_to_keys[name] = key
+
+    source_paths: list[pathlib.Path] = []
+    for _key, (name, stem_name) in LIBRARIES.items():
+        stem = ROOT / stem_name
+        interface = stem.with_suffix(".lh")
+        implementation = stem.with_suffix(".la")
+        source_paths.extend((interface, implementation))
+        for path, should_export in (
+            (interface, True),
+            (implementation, False),
+        ):
+            if not path.is_file():
+                errors.append(f"missing registered source {path.relative_to(ROOT)}")
+                continue
+            declaration = declared_module(path)
+            if declaration is None:
+                errors.append(
+                    f"{path.relative_to(ROOT)} must contain exactly one module declaration"
+                )
+                continue
+            exported, actual_name = declaration
+            if actual_name != name or exported != should_export:
+                expected = "export module" if should_export else "module"
+                errors.append(
+                    f"{path.relative_to(ROOT)} declares {actual_name!r}; expected "
+                    f"{expected} {name}"
+                )
+
+        imports_by_path: dict[pathlib.Path, list[str]] = {}
+        for path in (interface, implementation):
+            if not path.is_file():
+                continue
+            imported_names = IMPORT_PATTERN.findall(
+                path.read_text(encoding="utf-8")
+            )
+            imports_by_path[path] = imported_names
+            if len(imported_names) != len(set(imported_names)):
+                errors.append(f"{path.relative_to(ROOT)} imports a module more than once")
+            for imported_name in imported_names:
+                dependency = names_to_keys.get(imported_name)
+                if dependency is None:
+                    errors.append(
+                        f"{path.relative_to(ROOT)} imports unregistered module "
+                        f"{imported_name}"
+                    )
+        duplicate_pair_imports = set(imports_by_path.get(interface, [])) & set(
+            imports_by_path.get(implementation, [])
+        )
+        if duplicate_pair_imports:
+            errors.append(
+                f"{stem.relative_to(ROOT)} interface/implementation both import "
+                f"{sorted(duplicate_pair_imports)}"
+            )
+    for _name, source_name in DRIVERS.items():
+        source = ROOT / source_name
+        source_paths.append(source)
+        if not source.is_file():
+            errors.append(f"missing driver source {source_name}")
+            continue
+        declaration = declared_module(source)
+        if declaration is None or declaration[0]:
+            errors.append(f"driver {source_name} must contain one non-export module")
+        imported_names = IMPORT_PATTERN.findall(
+            source.read_text(encoding="utf-8")
+        )
+        if len(imported_names) != len(set(imported_names)):
+            errors.append(f"driver {source_name} imports a module more than once")
+        for imported_name in imported_names:
+            dependency = names_to_keys.get(imported_name)
+            if dependency is None:
+                errors.append(
+                    f"driver {source_name} imports unregistered module {imported_name}"
+                )
+
+    registered_paths = {path.resolve() for path in source_paths}
+    discovered_paths = {
+        path.resolve()
+        for area in (ROOT / "compiler", ROOT / "library", ROOT / "drivers")
+        for suffix in ("*.la", "*.lh")
+        for path in area.rglob(suffix)
+    }
+    for path in sorted(discovered_paths - registered_paths):
+        errors.append(f"unregistered source {path.relative_to(ROOT)}")
+
+    for path in source_paths:
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if not text.endswith("\n"):
+            errors.append(f"{path.relative_to(ROOT)} has no final newline")
+        lines = text.splitlines()
+        if len(lines) > 2000:
+            warnings.append(
+                f"{path.relative_to(ROOT)} exceeds the soft 2,000-line ceiling "
+                f"({len(lines)} lines)"
+            )
+        for line_number, line in enumerate(lines, 1):
+            if "\t" in line:
+                errors.append(
+                    f"{path.relative_to(ROOT)}:{line_number} contains a tab"
+                )
+            if line.rstrip() != line:
+                errors.append(
+                    f"{path.relative_to(ROOT)}:{line_number} has trailing whitespace"
+                )
+            if len(line) > 120:
+                errors.append(
+                    f"{path.relative_to(ROOT)}:{line_number} exceeds 120 columns "
+                    f"({len(line)})"
+                )
+
+    for warning in warnings:
+        print(f"WARN {warning}")
+    if errors:
+        fail("source audit failed:\n  " + "\n  ".join(errors))
+    ordered = library_order()
+    for name, source_name in DRIVERS.items():
+        source = ROOT / source_name
+        direct = driver_dependencies(source)
+        interfaces = interface_closure(direct)
+        objects = implementation_closure(direct)
+        print(
+            f"AUDIT driver {name}: {len(interfaces)} interfaces, "
+            f"{len(objects)} library objects"
+        )
+    print(
+        f"AUDIT: {len(ordered)} modules and {len(DRIVERS)} drivers are consistent"
+    )
 
 
 def reset(directory: pathlib.Path) -> None:
@@ -336,12 +516,13 @@ def reset(directory: pathlib.Path) -> None:
 def build_stage(
     tools: pathlib.Path,
     out: pathlib.Path,
-    runner: list[str],
+    runner: tuple[str, ...],
 ) -> dict[str, pathlib.Path]:
     """Compile, assemble and link one complete toolchain into `out`."""
-    compiler = tool(tools, "lunac")
-    assembler = tool(tools, "luna-as")
-    linker = tool(tools, "luna-link")
+    compiler = tool(tools, "lunac", runner)
+    assembler = tool(tools, "luna-as", runner)
+    linker = tool(tools, "luna-link", runner)
+    timeout = timeout_seconds(runner)
     for prefix in (compiler, assembler, linker):
         if not prefix[-1].is_file():
             fail(f"missing tool {prefix[-1]}")
@@ -353,30 +534,37 @@ def build_stage(
     reset(object_root)
     reset(binary_root)
 
+    order = library_order()
     objects: dict[str, pathlib.Path] = {}
-    for key in LIBRARY_ORDER:
+    for key in order:
         assembly = assembly_root / f"{key}.s"
         object_file = object_root / f"{key}.lo"
-        run([*compiler, "--library", "-o", assembly, *library_units(key)])
-        run([*assembler, "-o", object_file, assembly])
+        run(
+            [*compiler, "--library", "-o", assembly, *library_units(key)],
+            timeout=timeout,
+        )
+        run([*assembler, "-o", object_file, assembly], timeout=timeout)
         objects[key] = object_file
         print(f"  built library {key}")
 
     executables: dict[str, pathlib.Path] = {}
-    for name, (source, interface_keys) in DRIVERS.items():
+    for name, source_name in DRIVERS.items():
+        source = ROOT / source_name
         driver_object = object_root / f"{name}.lo"
         assembly = assembly_root / f"{name}.s"
-        units = [ROOT / source]
-        units.extend(
-            (ROOT / LIBRARIES[key][1]).with_suffix(".lh")
-            for key in interface_keys
+        run(
+            [*compiler, "--executable", "-o", assembly, *driver_units(source)],
+            timeout=timeout,
         )
-        run([*compiler, "--executable", "-o", assembly, *units])
-        run([*assembler, "-o", driver_object, assembly])
+        run([*assembler, "-o", driver_object, assembly], timeout=timeout)
         executable = binary_root / name
-        run([*linker, "-o", executable, driver_object, *(objects[k] for k in LIBRARY_ORDER)])
+        link_keys = implementation_closure(driver_dependencies(source))
+        run(
+            [*linker, "-o", executable, driver_object, *(objects[key] for key in link_keys)],
+            timeout=timeout,
+        )
         executables[name] = executable
-        print(f"  linked {name}")
+        print(f"  linked {name} ({len(link_keys)} library objects)")
 
     return {"assemblies": assembly_root, "objects": object_root, "binaries": binary_root}
 
@@ -448,19 +636,52 @@ GCC_FIXTURE_FLAGS = (
 )
 
 
-def build_gcc_fixtures(ffi: pathlib.Path) -> pathlib.Path | None:
-    """Compile tests/ffi/fixture.c with the host gcc, when one is available.
+def ffi_compiler() -> tuple[str, ...] | None:
+    """Return an x86-64 C compiler command for optional FFI tests.
 
-    Returns the directory holding the fresh objects, or None when no gcc is
-    present; expectations naming a gcc-built fixture are skipped then.
+    `LUNA_FFI_CC` may name a native or cross compiler, including command
+    prefixes such as `ccache x86_64-linux-gnu-gcc`. A present compiler for a
+    different target is not useful: its ET_REL objects cannot enter Luna's
+    x86-64-only linker, and its hosted executables cannot consume Luna objects.
     """
-    compiler = shutil.which("gcc")
+    configured = tuple(shlex.split(os.environ.get("LUNA_FFI_CC", "gcc")))
+    if not configured:
+        print("SKIP host FFI: LUNA_FFI_CC is empty")
+        return None
+    executable = shutil.which(configured[0])
+    if executable is None:
+        print(f"SKIP host FFI: compiler not found: {configured[0]}")
+        return None
+    compiler = (executable, *configured[1:])
+    try:
+        target = subprocess.run(
+            [*compiler, "-dumpmachine"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=NATIVE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"SKIP host FFI: cannot query compiler target: {error}")
+        return None
+    triple = target.stdout.strip()
+    if target.returncode != 0 or re.match(r"^(x86_64|amd64)(-|$)", triple) is None:
+        description = triple or f"status {target.returncode}"
+        print(f"SKIP host FFI: compiler target is not x86-64: {description}")
+        return None
+    return compiler
+
+
+def build_gcc_fixtures(
+    ffi: pathlib.Path,
+    compiler: tuple[str, ...] | None,
+) -> pathlib.Path | None:
+    """Compile tests/ffi/fixture.c when an x86-64 C compiler is available."""
     if compiler is None:
-        print("SKIP gcc fixtures: no gcc found on this host")
         return None
     work = ROOT / "out" / "tests" / "ffi-gcc"
     reset(work)
-    run([compiler, *GCC_FIXTURE_FLAGS, "-o", work / "fixture.o", ffi / "fixture.c"])
+    run([*compiler, *GCC_FIXTURE_FLAGS, "-o", work / "fixture.o", ffi / "fixture.c"])
     return work
 
 
@@ -504,14 +725,17 @@ def syscall_object(stage_bin: pathlib.Path) -> pathlib.Path:
     return stage_bin.parent / "objects" / "syscall.lo"
 
 
-def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, list[str]]:
+def execute_ffi_tests(
+    stage_bin: pathlib.Path,
+    runner: tuple[str, ...],
+) -> tuple[int, list[str], int]:
     """Link tests/ffi cases against the checked-in ELF64 fixture objects.
 
     Each expectation line is `<case>.la <fixture>.o <exit>`, or
     `<case>.la <fixture>.o link:<status>` when luna-link itself must fail
     with the given exit status (malformed or unresolvable fixtures). Fixtures
-    not checked in (fixture.o) are built from C sources with the host gcc;
-    without a gcc their cases are skipped, not failed.
+    not checked in (fixture.o) are built from C sources with an x86-64 C
+    compiler; without one their cases are skipped, not failed.
 
     Two more shapes exercise the luna-as --emit elf writer:
     `<case>.la elf-link <fixture>.o <exit>` (or link:<status>) assembles the
@@ -519,16 +743,19 @@ def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, 
     luna-link exactly as above — a writer -> reader -> linker round-trip;
     `<case>.la host-link <cmain>.c <exit>` compiles the case with
     `lunac --library`, assembles it with --emit elf and links the object
-    against a C main with the host gcc, running the resulting hosted
-    executable (skipped when no gcc is present).
+    against a C main with the same compiler, running the resulting hosted
+    executable (skipped when no suitable compiler is present).
     """
     ffi = ROOT / "tests" / "ffi"
     expectations = ffi / "expectations.txt"
     if not expectations.is_file():
-        return 0, []
-    gcc_fixtures = build_gcc_fixtures(ffi)
+        return 0, [], 0
+    compiler = ffi_compiler()
+    gcc_fixtures = build_gcc_fixtures(ffi, compiler)
+    timeout = timeout_seconds(runner)
     passed = 0
     failed: list[str] = []
+    skipped = 0
     for line in expectations.read_text(encoding="utf-8").splitlines():
         if not line.strip() or line.startswith("#"):
             continue
@@ -547,29 +774,31 @@ def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, 
                 cmain = ffi / fixture
                 if not cmain.is_file():
                     raise AssertionError(f"missing C main {cmain}")
-                compiler = shutil.which("gcc")
                 if compiler is None:
-                    print(f"SKIP {name}: no gcc found on this host")
+                    print(f"SKIP {name}: no x86-64 C compiler is available")
+                    skipped += 1
                     continue
                 object_file = work / f"{name}.o"
                 run(
                     [
-                        *tool(stage_bin, "lunac"),
+                        *tool(stage_bin, "lunac", runner),
                         "--library",
                         "-o",
                         assembly,
                         *ffi_units(ffi, name),
-                    ]
+                    ],
+                    timeout=timeout,
                 )
                 run(
                     [
-                        *tool(stage_bin, "luna-as"),
+                        *tool(stage_bin, "luna-as", runner),
                         "--emit",
                         "elf",
                         "-o",
                         object_file,
                         assembly,
-                    ]
+                    ],
+                    timeout=timeout,
                 )
                 # Link flags mirror GCC_FIXTURE_FLAGS where they apply to a
                 # hosted link: Luna objects use small-model non-PIC addressing
@@ -577,7 +806,7 @@ def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, 
                 # PIE default; -Wall -Werror keeps the C main warning-clean.
                 run(
                     [
-                        compiler,
+                        *compiler,
                         "-Wall",
                         "-Werror",
                         "-no-pie",
@@ -589,7 +818,7 @@ def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, 
                 )
                 completed = subprocess.run(
                     [*runner, str(executable)],
-                    timeout=TIMEOUT_SECONDS,
+                    timeout=timeout,
                 )
                 if completed.returncode != int(expected):
                     raise AssertionError(
@@ -602,32 +831,37 @@ def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, 
             if not fixture_path.is_file():
                 if gcc_fixtures is None:
                     print(f"SKIP {name}: gcc-built fixture {fixture} unavailable")
+                    skipped += 1
                     continue
                 fixture_path = gcc_fixtures / fixture
             object_file = work / f"{name}.lo" if mode == "luna-link" else work / f"{name}.o"
             run(
                 [
-                    *tool(stage_bin, "lunac"),
+                    *tool(stage_bin, "lunac", runner),
                     "--executable",
                     "-o",
                     assembly,
                     *ffi_units(ffi, name),
-                ]
+                ],
+                timeout=timeout,
             )
-            assemble_command = [*tool(stage_bin, "luna-as")]
+            assemble_command = [*tool(stage_bin, "luna-as", runner)]
             if mode == "elf-link":
                 assemble_command += ["--emit", "elf"]
-            run([*assemble_command, "-o", object_file, assembly])
+            run(
+                [*assemble_command, "-o", object_file, assembly],
+                timeout=timeout,
+            )
             linked = subprocess.run(
                 [
-                    *tool(stage_bin, "luna-link"),
+                    *tool(stage_bin, "luna-link", runner),
                     "-o",
                     executable,
                     object_file,
                     fixture_path,
                     syscall_object(stage_bin),
                 ],
-                timeout=TIMEOUT_SECONDS,
+                timeout=timeout,
             )
             if expected.startswith("link:"):
                 wanted = int(expected.removeprefix("link:"))
@@ -642,7 +876,7 @@ def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, 
                     )
                 completed = subprocess.run(
                     [*runner, str(executable)],
-                    timeout=TIMEOUT_SECONDS,
+                    timeout=timeout,
                 )
                 if completed.returncode != int(expected):
                     raise AssertionError(
@@ -653,13 +887,14 @@ def execute_ffi_tests(stage_bin: pathlib.Path, runner: list[str]) -> tuple[int, 
         except Exception as error:  # noqa: BLE001 - report and continue
             failed.append(name)
             print(f"FAIL {name}: {error}")
-    return passed, failed
+    return passed, failed, skipped
 
 
-def execute_tests(stage_bin: pathlib.Path, runner: list[str]) -> int:
+def execute_tests(stage_bin: pathlib.Path, runner: tuple[str, ...]) -> int:
     expectations = ROOT / "tests" / "expectations.txt"
     cases = ROOT / "tests" / "cases"
     kinds = semantic_diagnostic_kinds()
+    timeout = timeout_seconds(runner)
     passed = 0
     failed: list[str] = []
     for line in expectations.read_text(encoding="utf-8").splitlines():
@@ -677,13 +912,13 @@ def execute_tests(stage_bin: pathlib.Path, runner: list[str]) -> int:
                     raise AssertionError(f"unknown diagnostic kind {kind}")
                 completed = subprocess.run(
                     [
-                        *tool(stage_bin, "lunac"),
+                        *tool(stage_bin, "lunac", runner),
                         "--executable",
                         "-o",
                         assembly,
                         *case_units(cases, name),
                     ],
-                    timeout=TIMEOUT_SECONDS,
+                    timeout=timeout,
                     capture_output=True,
                     text=True,
                 )
@@ -704,26 +939,31 @@ def execute_tests(stage_bin: pathlib.Path, runner: list[str]) -> int:
             executable = work / name.removesuffix(".la")
             run(
                 [
-                    *tool(stage_bin, "lunac"),
+                    *tool(stage_bin, "lunac", runner),
                     "--executable",
                     "-o",
                     assembly,
                     *case_units(cases, name),
-                ]
+                ],
+                timeout=timeout,
             )
-            run([*tool(stage_bin, "luna-as"), "-o", object_file, assembly])
+            run(
+                [*tool(stage_bin, "luna-as", runner), "-o", object_file, assembly],
+                timeout=timeout,
+            )
             run(
                 [
-                    *tool(stage_bin, "luna-link"),
+                    *tool(stage_bin, "luna-link", runner),
                     "-o",
                     executable,
                     object_file,
                     syscall_object(stage_bin),
-                ]
+                ],
+                timeout=timeout,
             )
             completed = subprocess.run(
                 [*runner, str(executable)],
-                timeout=TIMEOUT_SECONDS,
+                timeout=timeout,
             )
             if completed.returncode != expected:
                 raise AssertionError(
@@ -734,10 +974,10 @@ def execute_tests(stage_bin: pathlib.Path, runner: list[str]) -> int:
         except Exception as error:  # noqa: BLE001 - report and continue
             failed.append(name)
             print(f"FAIL {name}: {error}")
-    ffi_passed, ffi_failed = execute_ffi_tests(stage_bin, runner)
+    ffi_passed, ffi_failed, ffi_skipped = execute_ffi_tests(stage_bin, runner)
     passed += ffi_passed
     failed.extend(ffi_failed)
-    print(f"{passed} passed, {len(failed)} failed")
+    print(f"{passed} passed, {len(failed)} failed, {ffi_skipped} skipped")
     return 1 if failed else 0
 
 
@@ -747,7 +987,12 @@ def main() -> None:
 
     def add_common(sub: argparse.ArgumentParser) -> None:
         sub.add_argument("--anchor", type=pathlib.Path, default=ROOT / "anchor")
-        sub.add_argument("--runner", nargs="*", default=[])
+        sub.add_argument(
+            "--runner",
+            nargs="*",
+            default=list(DEFAULT_RUNNER),
+            help="prefix for x86-64 tools and generated programs",
+        )
 
     build_parser = subparsers.add_parser("build", help="anchor -> out/stage-next")
     add_common(build_parser)
@@ -755,33 +1000,55 @@ def main() -> None:
 
     verify_parser = subparsers.add_parser("verify", help="fixed-point gate")
     add_common(verify_parser)
-    verify_parser.add_argument("--out", type=pathlib.Path)
+    verify_parser.add_argument(
+        "--out",
+        type=pathlib.Path,
+        help="output root containing stage-next and stage-fixed",
+    )
 
     test_parser = subparsers.add_parser("test", help="run behavior tests")
     add_common(test_parser)
     test_parser.add_argument("--stage", type=pathlib.Path)
 
+    audit_parser = subparsers.add_parser(
+        "audit",
+        help="check anchor, module graph, and source rules without writing",
+    )
+    audit_parser.add_argument(
+        "--anchor",
+        type=pathlib.Path,
+        default=ROOT / "anchor",
+    )
+
     arguments = parser.parse_args()
     default_out = ROOT / "out"
 
+    if arguments.command == "audit":
+        verify_anchor(arguments.anchor)
+        audit_sources()
+        return
+
+    runner = tuple(arguments.runner)
+    audit_sources()
     if arguments.command == "build":
         out = arguments.out or default_out / "stage-next"
         verify_anchor(arguments.anchor)
-        build_stage(arguments.anchor, out, arguments.runner)
+        build_stage(arguments.anchor, out, runner)
     elif arguments.command == "verify":
-        next_out = default_out / "stage-next"
-        fixed_out = default_out / "stage-fixed"
+        verify_root = arguments.out or default_out
+        next_out = verify_root / "stage-next"
+        fixed_out = verify_root / "stage-fixed"
         verify_anchor(arguments.anchor)
-        artifacts = build_stage(arguments.anchor, next_out, arguments.runner)
+        build_stage(arguments.anchor, next_out, runner)
         print("building the fixed-point stage from its own output")
-        build_stage(next_out / "bin", fixed_out, arguments.runner)
+        build_stage(next_out / "bin", fixed_out, runner)
         compare_stages(next_out, fixed_out)
         print("FIXED POINT: all artifacts byte-identical")
     else:
         stage = arguments.stage or default_out / "stage-next" / "bin"
         if not (stage / "lunac").is_file():
             fail(f"no built toolchain under {stage}; run 'build' first")
-        raise SystemExit(execute_tests(stage, arguments.runner))
+        raise SystemExit(execute_tests(stage, runner))
 
 
 if __name__ == "__main__":

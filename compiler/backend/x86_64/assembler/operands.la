@@ -1,0 +1,434 @@
+module luna.bootstrap.backend.x86_64.assembler.operands;
+
+fn empty_register()
+    -> Register {
+    return {
+        class = RegisterClass.general, code = 0, width = 0,
+    };
+}
+
+fn empty_memory() -> Memory {
+    return {
+        symbol = { data = null, length = 0, }, displacement = 0, base = empty_register(),
+        index = empty_register(), scale = 1, rip_relative = false, has_index = false,
+    };
+}
+
+fn empty_operand()
+    -> Operand {
+    return {
+        kind = OperandKind.none, immediate = 0, register = empty_register(),
+        memory = empty_memory(), label = { data = null, length = 0, },
+    };
+}
+
+fn empty_operands()
+    -> Operands {
+    var result: Operands = {};
+    result.count = 0;
+    return result;
+}
+
+fn is_space(value: u8) -> bool {
+    return value == ' ' || value == '\t' || value == '\r';
+}
+
+fn is_letter(value: u8) -> bool {
+    return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z');
+}
+
+fn is_decimal_digit(value: u8) -> bool {
+    return value >= '0' && value <= '9';
+}
+
+fn digit(value: u8, base: u64, result: *u64) -> bool {
+    if (result == null || base < 2 || base > 16) {
+        return false;
+    }
+    var decoded: u64 = 0;
+    if (is_decimal_digit(value)) {
+        decoded = (value - '0') as u64;
+    } else if (value >= 'a' && value <= 'f') {
+        decoded = (value - 'a' + 10) as u64;
+    } else if (value >= 'A' && value <= 'F') {
+        decoded = (value - 'A' + 10) as u64;
+    } else {
+        return false;
+    }
+    if (decoded >= base) {
+        return false;
+    }
+    *result = decoded;
+    return true;
+}
+
+fn trim(view: text::View) -> text::View {
+    var offset: usize = 0;
+    while (offset < view.length && is_space(view.data[offset])) {
+        offset += 1;
+    }
+    var end: usize = view.length;
+    while (end > offset && is_space(view.data[end - 1])) {
+        end -= 1;
+    }
+    return {
+        data = end == offset ? null as *const u8 : &view.data[offset], length = end - offset,
+    };
+}
+
+fn equal(view: text::View, text: *const u8, length: usize) -> bool {
+    if (view.length != length || (length != 0 && (view.data == null || text == null))) {
+        return false;
+    }
+    var index: usize = 0;
+    while (index < length) {
+        if (view.data[index] != text[index]) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn starts_with(view: text::View, text: *const u8, length: usize) -> bool {
+    if (view.length < length || (length != 0 && (view.data == null || text == null))) {
+        return false;
+    }
+    var index: usize = 0;
+    while (index < length) {
+        if (view.data[index] != text[index]) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn slice(view: text::View, offset: usize, length: usize) -> text::View {
+    if (offset > view.length || length > view.length - offset || length == 0) {
+        return { data = null, length = 0, };
+    }
+    return {
+        data = &view.data[offset], length = length,
+    };
+}
+
+fn find(view: text::View, value: u8) -> usize {
+    var index: usize = 0;
+    while (index < view.length) {
+        if (view.data[index] == value) {
+            return index;
+        }
+        index += 1;
+    }
+    return view.length;
+}
+
+fn parse_bits(input: text::View, result: *u64) -> bool {
+    let view: text::View = trim(input);
+    if (view.length == 0 || result == null) {
+        return false;
+    }
+    var offset: usize = 0;
+    var negative: bool = false;
+    if (view.data[0] == '-') {
+        negative = true;
+        offset = 1;
+        if (offset == view.length) {
+            return false;
+        }
+    }
+    var base: u64 = 10;
+    if (view.length - offset >= 2 && view.data[offset] == '0' && (view.data[offset + 1] == 'x' ||
+         view.data[offset + 1] == 'X')) {
+        base = 16;
+        offset += 2;
+        if (offset == view.length) {
+            return false;
+        }
+    }
+    var value: u64 = 0;
+    while (offset < view.length) {
+        var digit_value: u64 = 0;
+        if (!digit(view.data[offset], base, &digit_value) ||
+            value > (18446744073709551615 as u64 - digit_value) / base) {
+            return false;
+        }
+        value = value * base + digit_value;
+        offset += 1;
+    }
+    if (!negative) {
+        *result = value;
+        return true;
+    }
+    if (value > 9223372036854775808 as u64) {
+        return false;
+    }
+    if (value == 9223372036854775808 as u64) {
+        *result = value;
+    } else {
+        *result = (-(value as isize)) as u64;
+    }
+    return true;
+}
+
+fn parse_i32(input: text::View, result: *isize) -> bool {
+    let view: text::View = trim(input);
+    var bits: u64 = 0;
+    if (!parse_bits(view, &bits) || result == null) {
+        return false;
+    }
+    if (view.data[0] != '-' && bits > 2147483647 as u64) {
+        return false;
+    }
+    let value: isize = bits as isize;
+    if (value < -2147483648 || value > 2147483647) {
+        return false;
+    }
+    *result = value;
+    return true;
+}
+
+fn parse_usize(input: text::View, result: *usize) -> bool {
+    let view: text::View = trim(input);
+    var bits: u64 = 0;
+    if (view.length == 0 || view.data[0] == '-' || !parse_bits(view, &bits) ||
+        bits > 18446744073709551615 as u64 || result == null) {
+        return false;
+    }
+    *result = bits as usize;
+    return true;
+}
+
+fn named_register(view: text::View, name: *const u8, length: usize, code: u8, width: usize, result: *Register) -> bool {
+    if (!equal(view, name, length)) {
+        return false;
+    }
+    result->class = RegisterClass.general;
+    result->code = code;
+    result->width = width;
+    return true;
+}
+
+fn parse_register(input: text::View, result: *Register) -> bool {
+    let view: text::View = trim(input);
+    if (result == null || view.length < 2 || view.data[0] != '%') {
+        return false;
+    }
+    let name: text::View = slice(view, 1, view.length - 1);
+    if (named_register(name, "al", 2, 0, 8, result) || named_register(name, "cl", 2, 1, 8, result) ||
+        named_register(name, "dl", 2, 2, 8, result) || named_register(name, "bl", 2, 3, 8, result) ||
+        named_register(name, "spl", 3, 4, 8, result) || named_register(name, "bpl", 3, 5, 8, result) ||
+        named_register(name, "sil", 3, 6, 8, result) || named_register(name, "dil", 3, 7, 8, result) ||
+        named_register(name, "ax", 2, 0, 16, result) || named_register(name, "cx", 2, 1, 16, result) ||
+        named_register(name, "dx", 2, 2, 16, result) || named_register(name, "bx", 2, 3, 16, result) ||
+        named_register(name, "sp", 2, 4, 16, result) || named_register(name, "bp", 2, 5, 16, result) ||
+        named_register(name, "si", 2, 6, 16, result) || named_register(name, "di", 2, 7, 16, result) ||
+        named_register(name, "eax", 3, 0, 32, result) || named_register(name, "ecx", 3, 1, 32, result) ||
+        named_register(name, "edx", 3, 2, 32, result) || named_register(name, "ebx", 3, 3, 32, result) ||
+        named_register(name, "esp", 3, 4, 32, result) || named_register(name, "ebp", 3, 5, 32, result) ||
+        named_register(name, "esi", 3, 6, 32, result) || named_register(name, "edi", 3, 7, 32, result) ||
+        named_register(name, "rax", 3, 0, 64, result) || named_register(name, "rcx", 3, 1, 64, result) ||
+        named_register(name, "rdx", 3, 2, 64, result) || named_register(name, "rbx", 3, 3, 64, result) ||
+        named_register(name, "rsp", 3, 4, 64, result) || named_register(name, "rbp", 3, 5, 64, result) ||
+        named_register(name, "rsi", 3, 6, 64, result) ||
+        named_register(
+            name, "rdi", 3, 7, 64, result)) {
+        return true;
+    }
+    var vector: bool = false;
+    var digit_offset: usize = 0;
+    if (starts_with(name, "xmm", 3)) {
+        vector = true;
+        digit_offset = 3;
+    } else if (name.length >= 2 && name.data[0] == 'r') {
+        digit_offset = 1;
+    } else {
+        return false;
+    }
+    var code: usize = 0;
+    let digit_start: usize = digit_offset;
+    while (digit_offset < name.length && is_decimal_digit(name.data[digit_offset])) {
+        code = code * 10 + (name.data[digit_offset] - '0') as usize;
+        if (code > 15) {
+            return false;
+        }
+        digit_offset += 1;
+    }
+    if (digit_offset == digit_start) {
+        return false;
+    }
+    if (vector) {
+        if (digit_offset != name.length) {
+            return false;
+        }
+        result->class = RegisterClass.vector;
+        result->code = code as u8;
+        result->width = 128;
+        return true;
+    }
+    if (code < 8) {
+        return false;
+    }
+    var width: usize = 64;
+    if (digit_offset < name.length) {
+        if (digit_offset + 1 != name.length) {
+            return false;
+        }
+        let suffix: u8 = name.data[digit_offset];
+        if (suffix == 'b') {
+            width = 8;
+        } else if (suffix == 'w') {
+            width = 16;
+        } else if (suffix == 'd') {
+            width = 32;
+        } else {
+            return false;
+        }
+    }
+    result->class = RegisterClass.general;
+    result->code = code as u8;
+    result->width = width;
+    return true;
+}
+
+fn parse_memory(input: text::View, result: *Memory) -> bool {
+    let view: text::View = trim(input);
+    let open: usize = find(view, '(');
+    if (result == null || open == view.length || view.length < open + 3 || view.data[view.length - 1] != ')') {
+        return false;
+    }
+    *result = empty_memory();
+    let displacement: text::View = trim(slice(view, 0, open));
+    let inside: text::View = slice(view, open + 1, view.length - open - 2);
+    var pieces: [3]text::View = {};
+    var piece_count: usize = 0;
+    var start: usize = 0;
+    var index: usize = 0;
+    while (index <= inside.length) {
+        if (index == inside.length || inside.data[index] == ',') {
+            if (piece_count >= 3) {
+                return false;
+            }
+            pieces[piece_count] = trim(slice(inside, start, index - start));
+            piece_count += 1;
+            start = index + 1;
+        }
+        index += 1;
+    }
+    if (piece_count == 0 || pieces[0].length == 0) {
+        return false;
+    }
+    if (equal(pieces[0], "%rip", 4)) {
+        if (piece_count != 1 || displacement.length == 0) {
+            return false;
+        }
+        result->rip_relative = true;
+        result->symbol = displacement;
+        return true;
+    }
+    if (!parse_register(pieces[0], &result->base) ||
+        result->base.class != RegisterClass.general || result->base.width != 64) {
+        return false;
+    }
+    if (displacement.length != 0 &&
+        !parse_i32(
+            displacement, &result->displacement)) {
+        return false;
+    }
+    if (piece_count >= 2 && pieces[1].length != 0) {
+        if (!parse_register(pieces[1], &result->index) ||
+            result->index.class != RegisterClass.general || result->index.width != 64 || result->index.code == 4) {
+            return false;
+        }
+        result->has_index = true;
+    }
+    if (piece_count == 3) {
+        var scale: u64 = 0;
+        if (!result->has_index || !parse_bits(pieces[2], &scale) || (scale != 1 && scale != 2 &&
+             scale != 4 && scale != 8)) {
+            return false;
+        }
+        result->scale = scale as u8;
+    }
+    return true;
+}
+
+fn parse_operand(input: text::View, result: *Operand) -> bool {
+    let trimmed: text::View = trim(input);
+    if (result == null || trimmed.length == 0) {
+        return false;
+    }
+    var view: text::View = trimmed;
+    if (view.data[0] == '*') {
+        view = trim(slice(view, 1, view.length - 1));
+        if (view.length == 0) {
+            return false;
+        }
+    }
+    *result = empty_operand();
+    if (view.data[0] == '$') {
+        result->kind = OperandKind.immediate;
+        return parse_bits(slice(view, 1, view.length - 1), &result->immediate);
+    }
+    if (view.data[0] == '%') {
+        result->kind = OperandKind.register;
+        return parse_register(view, &result->register);
+    }
+    if (find(view, '(') != view.length) {
+        result->kind = OperandKind.memory;
+        return parse_memory(view, &result->memory);
+    }
+    result->kind = OperandKind.label;
+    result->label = view;
+    return true;
+}
+
+fn parse_operands(input: text::View, result: *Operands) -> bool {
+    if (result == null) {
+        return false;
+    }
+    *result = empty_operands();
+    let text: text::View = trim(input);
+    if (text.length == 0) {
+        return true;
+    }
+    var depth: usize = 0;
+    var start: usize = 0;
+    var index: usize = 0;
+    while (index <= text.length) {
+        if (index < text.length && text.data[index] == '(') {
+            depth += 1;
+        } else if (index < text.length && text.data[index] == ')') {
+            if (depth == 0) {
+                return false;
+            }
+            depth -= 1;
+        }
+        if (index == text.length || (text.data[index] == ',' && depth == 0)) {
+            if (result->count >= 3 ||
+                !parse_operand(
+                    slice(text, start, index - start), &result->values[result->count])) {
+                return false;
+            }
+            result->count += 1;
+            start = index + 1;
+        }
+        index += 1;
+    }
+    return depth == 0;
+}
+
+fn is_gpr(operand: *const Operand, width: usize) -> bool {
+    return operand != null && operand->kind == OperandKind.register && operand->register.class ==
+            RegisterClass.general && operand->register.width == width;
+}
+
+fn is_xmm(operand: *const Operand) -> bool {
+    return operand != null && operand->kind == OperandKind.register && operand->register.class == RegisterClass.vector;
+}
+
+fn is_rm(operand: *const Operand, width: usize) -> bool {
+    return operand != null && (operand->kind == OperandKind.memory || is_gpr(operand, width));
+}
+

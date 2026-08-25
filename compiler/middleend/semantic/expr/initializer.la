@@ -1,0 +1,350 @@
+module luna.bootstrap.middleend.semantic.expr.initializer;
+
+import luna.bootstrap.middleend.semantic.types.lookup as type_lookup;
+
+import luna.bootstrap.middleend.semantic.context.builder as builder;
+
+import luna.bootstrap.frontend.syntax as syntax;
+import luna.bootstrap.middleend.ir as ir;
+import luna.bootstrap.middleend.semantic.consteval as consteval;
+import luna.bootstrap.middleend.semantic.consteval.engine as const_engine;
+import luna.bootstrap.middleend.semantic.consteval.model as const_model;
+import luna.bootstrap.middleend.semantic.expr.base as base;
+import luna.bootstrap.middleend.semantic.types as types;
+import luna.bootstrap.middleend.type as type_info;
+import luna.runtime as runtime;
+import luna.std.bytes as bytes;
+
+fn lower_scalar_zero_initializer(
+    context: *context::Context, node: syntax::SyntaxNode, expected_type: usize, type_record: type_info::Record
+) -> context::Expression {
+    if (type_record.kind == type_info::Kind.boolean) {
+        return builder::emit_boolean_constant(context, node, false);
+    }
+    if (type_info::is_integer(type_record.kind) || type_record.kind == type_info::Kind.enumeration) {
+        return builder::emit_integer_constant(context, node, expected_type, 0);
+    }
+    var instruction: ir::Instruction = builder::instruction(ir::Opcode.invalid, node);
+    if (type_info::is_float(type_record.kind)) {
+        instruction.opcode = ir::Opcode.constant_float;
+        instruction.floating = 0.0;
+    } else if (type_record.kind == type_info::Kind.pointer) {
+        instruction.opcode = ir::Opcode.constant_null;
+    } else {
+        return base::invalid_expression();
+    }
+    let value_id: usize = builder::emit_value(context, instruction, expected_type);
+    return {
+        type_id = expected_type, value_id = value_id, address_id = context::no_id(), constant_value = 0,
+        has_constant = false, lvalue = false, mutable_lvalue = false, volatile_lvalue = false,
+        valid = value_id != context::no_id(), bitfield_segment = context::no_id(),
+    };
+}
+
+fn validate_initializer_fields(
+    context: *context::Context, node: syntax::SyntaxNode, expected_type: usize, type_record: type_info::Record
+) -> bool {
+    let none: usize = context::no_id();
+    var seen_fields: bytes::Buffer = bytes::empty();
+    var child: usize = node.first_child;
+    var initializer_count: usize = 0;
+    var valid: bool = true;
+    while (child != none && context->error == runtime::Error.none) {
+        let initializer: syntax::SyntaxNode = context::node(context, context->current_unit, child);
+        if (initializer.kind == syntax::SyntaxKind.initializer_element) {
+            // Positional and indexed entries are only valid for arrays.
+            context::add_diagnostic(
+                context, context::DiagnosticKind.invalid_initializer, context->current_unit, initializer.span, none,
+                context::empty_span(), expected_type);
+            valid = false;
+            child = initializer.next_sibling;
+            continue;
+        }
+        let lookup: types::FieldLookup =
+            type_lookup::lookup_field(context, expected_type, context->current_unit, initializer.token_index);
+        if (lookup.status == types::FieldStatus.ambiguous) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.ambiguous_field, context->current_unit, initializer.span, none,
+                context::empty_span(), expected_type);
+            valid = false;
+        } else if (lookup.status != types::FieldStatus.found) {
+            let segment_id: usize =
+                builder::lookup_bitfield_segment(
+                    context, expected_type, context->current_unit, initializer.token_index);
+            // Segments are not directly initializable yet; naming one is a
+            // bitfield error rather than an unknown field.
+            context::add_diagnostic(
+                context, segment_id != none ? context::DiagnosticKind.invalid_bitfield :
+                    context::DiagnosticKind.unknown_field, context->current_unit, initializer.span, none,
+                context::empty_span(), segment_id != none ? segment_id : expected_type);
+            valid = false;
+        } else {
+            let field_id: usize = lookup.field_id;
+            let seen: *const usize = seen_fields.data as *const usize;
+            var duplicate: bool = false;
+            var seen_index: usize = 0;
+            while (seen_index < seen_fields.length / sizeof(usize)) {
+                if (seen[seen_index] == field_id) {
+                    duplicate = true;
+                    break;
+                }
+                seen_index += 1;
+            }
+            if (duplicate || (type_record.kind == type_info::Kind.record_union && initializer_count != 0)) {
+                context::add_diagnostic(
+                    context, context::DiagnosticKind.duplicate_initializer_field, context->current_unit,
+                    initializer.span, none, context::empty_span(), field_id);
+                valid = false;
+            } else {
+                let appended: bytes::BufferResult =
+                    bytes::append(seen_fields, (&field_id) as *const usize as *const u8, sizeof(usize));
+                seen_fields = appended.buffer;
+                context->error = appended.error;
+                initializer_count += 1;
+            }
+        }
+        child = initializer.next_sibling;
+    }
+    let release_error: runtime::Error = bytes::release(seen_fields);
+    if (context->error == runtime::Error.none) {
+        context->error = release_error;
+    }
+    return valid && context->error == runtime::Error.none;
+}
+
+fn lower_array_initializer(
+    context: *context::Context, node: syntax::SyntaxNode, address_id: usize, expected_type: usize,
+    type_record: type_info::Record, lowerer: api::Lowerer) -> bool {
+    let none: usize = context::no_id();
+    let element_type: usize = type_record.element_type;
+    let element_count: usize = type_record.element_count;
+    let element_record: type_info::Record = context::type_record(context, element_type);
+    let pointer: type_info::IdResult = type_info::table_pointer(&context->types, element_type, false, false);
+    context->error = pointer.error;
+    if (context->error != runtime::Error.none) {
+        return false;
+    }
+    var seen_indices: bytes::Buffer = bytes::empty();
+    var cursor: usize = 0;
+    var valid: bool = true;
+    var child: usize = node.first_child;
+    while (child != none && context->error == runtime::Error.none) {
+        let element: syntax::SyntaxNode = context::node(context, context->current_unit, child);
+        if (element.kind != syntax::SyntaxKind.initializer_element) {
+            // Named `field =` entries are only valid for records.
+            context::add_diagnostic(
+                context, context::DiagnosticKind.invalid_initializer, context->current_unit, element.span, none,
+                context::empty_span(), expected_type);
+            valid = false;
+            child = element.next_sibling;
+            continue;
+        }
+        var position: u64 = cursor as u64;
+        var value_child: usize = element.first_child;
+        if ((element.flags & (syntax::SyntaxFlag.indexed as usize)) != 0) {
+            if (element.child_count != 2) {
+                context->error = runtime::Error.invalid_argument;
+                break;
+            }
+            let index: const_model::Value = const_engine::expression(context, context->current_unit,
+                element.first_child);
+            if (!index.is_constant || index.error || index.is_boolean) {
+                context::add_diagnostic(
+                    context, context::DiagnosticKind.invalid_index, context->current_unit,
+                    context::node(context, context->current_unit, element.first_child).span,
+                    none, context::empty_span(), expected_type);
+                valid = false;
+                child = element.next_sibling;
+                continue;
+            }
+            position = index.value;
+            value_child = context::node(context, context->current_unit, element.first_child).next_sibling;
+        }
+        if (position >= element_count as u64) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.invalid_index, context->current_unit, element.span, none,
+                context::empty_span(), expected_type);
+            valid = false;
+            child = element.next_sibling;
+            continue;
+        }
+        let slot: usize = position as usize;
+        let seen: *const usize = seen_indices.data as *const usize;
+        var duplicate: bool = false;
+        var seen_index: usize = 0;
+        while (seen_index < seen_indices.length / sizeof(usize)) {
+            if (seen[seen_index] == slot) {
+                duplicate = true;
+                break;
+            }
+            seen_index += 1;
+        }
+        if (duplicate) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.duplicate_initializer_field, context->current_unit, element.span, none,
+                context::empty_span(), expected_type);
+            valid = false;
+            child = element.next_sibling;
+            continue;
+        }
+        let appended: bytes::BufferResult =
+            bytes::append(seen_indices, (&slot) as *const usize as *const u8, sizeof(usize));
+        seen_indices = appended.buffer;
+        context->error = appended.error;
+        cursor = slot + 1;
+        let value_node: syntax::SyntaxNode = context::node(context, context->current_unit, value_child);
+        if (element_record.kind == type_info::Kind.array && value_node.kind ==
+                syntax::SyntaxKind.aggregate_initializer) {
+            // Nested array-of-array lists are deferred.
+            context::add_diagnostic(
+                context, context::DiagnosticKind.invalid_initializer, context->current_unit, value_node.span, none,
+                context::empty_span(), expected_type);
+            valid = false;
+            child = element.next_sibling;
+            continue;
+        }
+        // Element addresses use pointer_offset with a constant index, the
+        // same instruction shape as array indexing; member_address only
+        // validates against record fields.
+        let index_constant: context::Expression =
+            builder::emit_integer_constant(
+                context, element, type_info::BuiltinType.unsigned_size as usize, slot as u64);
+        var element_instruction: ir::Instruction = builder::instruction(ir::Opcode.pointer_offset, element);
+        element_instruction.left = address_id;
+        element_instruction.right = index_constant.value_id;
+        element_instruction.auxiliary = element_record.size_bytes;
+        let element_address: usize = builder::emit_value(context, element_instruction, pointer.type_id);
+        let value: context::Expression = api::invoke(lowerer, context, value_child, element_type);
+        if (value.type_id != element_type) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.type_mismatch, context->current_unit, element.span, none,
+                context::empty_span(), element_type);
+            valid = false;
+        } else {
+            builder::store_to_address(context, element, element_address, element_type, value);
+        }
+        child = element.next_sibling;
+    }
+    let release_error: runtime::Error = bytes::release(seen_indices);
+    if (context->error == runtime::Error.none) {
+        context->error = release_error;
+    }
+    return valid && context->error == runtime::Error.none;
+}
+
+fn lower_initializer(context: *context::Context, node_id: usize, expected_type: usize,
+    lowerer: api::Lowerer) -> context::Expression {
+    let none: usize = context::no_id();
+    let node: syntax::SyntaxNode = context::node(context, context->current_unit, node_id);
+    let type_record: type_info::Record = context::type_record(context, expected_type);
+    if (node.kind == syntax::SyntaxKind.aggregate_initializer && type_record.kind != type_info::Kind.structure &&
+        type_record.kind != type_info::Kind.record_union && type_record.kind != type_info::Kind.array) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_initializer, context->current_unit, node.span, none,
+            context::empty_span(), expected_type);
+        return base::invalid_expression();
+    }
+    if (node.kind == syntax::SyntaxKind.aggregate_initializer && type_record.kind != type_info::Kind.array &&
+        !validate_initializer_fields(
+            context, node, expected_type, type_record)) {
+        return base::invalid_expression();
+    }
+    if (!type_info::is_memory(type_record.kind)) {
+        if (node.kind == syntax::SyntaxKind.zero_initializer) {
+            let zero: context::Expression = lower_scalar_zero_initializer(context, node, expected_type, type_record);
+            if (zero.valid) {
+                return zero;
+            }
+        }
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_initializer, context->current_unit, node.span, none,
+            context::empty_span(), expected_type);
+        return base::invalid_expression();
+    }
+    let slot_id: usize = ir::add_slot(
+        &context->ir, builder::current_ir_function(context), expected_type, true, false, 0);
+    let address_id: usize = builder::address_of_slot(context, node, slot_id, expected_type, false, false);
+    if (slot_id == none || address_id == none ||
+        !builder::zero_slot(
+            context, node, slot_id, expected_type)) {
+        return base::invalid_expression();
+    }
+    if (node.kind == syntax::SyntaxKind.aggregate_initializer && type_record.kind == type_info::Kind.array) {
+        if (!lower_array_initializer(
+                context, node, address_id, expected_type, type_record, lowerer)) {
+            return base::invalid_expression();
+        }
+    } else if (node.kind == syntax::SyntaxKind.aggregate_initializer) {
+        let fields: *const type_info::Field = context->types.fields.data as
+                *const type_info::Field;
+        var seen_fields: bytes::Buffer = bytes::empty();
+        var child: usize = node.first_child;
+        var initializer_count: usize = 0;
+        while (child != none && context->error == runtime::Error.none) {
+            let initializer: syntax::SyntaxNode = context::node(context, context->current_unit, child);
+            let lookup: types::FieldLookup =
+                type_lookup::lookup_field(context, expected_type, context->current_unit, initializer.token_index);
+            if (lookup.status == types::FieldStatus.ambiguous) {
+                context::add_diagnostic(
+                    context, context::DiagnosticKind.ambiguous_field, context->current_unit, initializer.span, none,
+                    context::empty_span(), expected_type);
+            } else if (lookup.status != types::FieldStatus.found) {
+                context::add_diagnostic(
+                    context, context::DiagnosticKind.unknown_field, context->current_unit, initializer.span, none,
+                    context::empty_span(), expected_type);
+            } else {
+                let field_id: usize = lookup.field_id;
+                let seen: *const usize = seen_fields.data as *const usize;
+                var duplicate: bool = false;
+                var seen_index: usize = 0;
+                while (seen_index < seen_fields.length / sizeof(usize)) {
+                    if (seen[seen_index] == field_id) {
+                        duplicate = true;
+                        break;
+                    }
+                    seen_index += 1;
+                }
+                if (duplicate || (type_record.kind == type_info::Kind.record_union && initializer_count != 0)) {
+                    context::add_diagnostic(
+                        context, context::DiagnosticKind.duplicate_initializer_field, context->current_unit,
+                        initializer.span, none, context::empty_span(), field_id);
+                } else if (initializer.child_count == 1) {
+                    let added: bytes::BufferResult =
+                        bytes::append(seen_fields, (&field_id) as *const usize as *const u8, sizeof(usize));
+                    seen_fields = added.buffer;
+                    context->error = added.error;
+                    let field: type_info::Field = fields[field_id];
+                    let pointer: type_info::IdResult =
+                        type_info::table_pointer(&context->types, field.type_id, false, false);
+                    context->error = pointer.error;
+                    var member_instruction: ir::Instruction =
+                        builder::instruction(ir::Opcode.member_address, initializer);
+                    member_instruction.left = address_id;
+                    member_instruction.auxiliary = lookup.offset_bytes;
+                    let field_address: usize = builder::emit_value(context, member_instruction, pointer.type_id);
+                    let value: context::Expression = api::invoke(lowerer, context, initializer.first_child,
+                        field.type_id);
+                    if (value.type_id != field.type_id) {
+                        context::add_diagnostic(
+                            context, context::DiagnosticKind.type_mismatch, context->current_unit, initializer.span,
+                            none, context::empty_span(), field.type_id);
+                    } else {
+                        builder::store_to_address(context, initializer, field_address, field.type_id, value);
+                    }
+                    initializer_count += 1;
+                }
+            }
+            child = initializer.next_sibling;
+        }
+        let release_error: runtime::Error = bytes::release(seen_fields);
+        if (context->error == runtime::Error.none) {
+            context->error = release_error;
+        }
+    }
+    return {
+        type_id = expected_type, value_id = none, address_id = address_id, constant_value = 0, has_constant = false,
+        lvalue = false, mutable_lvalue = false, volatile_lvalue = false, valid = address_id != none,
+        bitfield_segment = context::no_id(),
+    };
+}
+

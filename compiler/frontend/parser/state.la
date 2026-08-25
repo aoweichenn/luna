@@ -1,0 +1,316 @@
+module luna.bootstrap.frontend.parser.state;
+
+import luna.std.bytes as bytes;
+
+enum ParserLimit: usize {
+    maximum_size = 18446744073709551615, maximum_nesting = 256, maximum_nodes = 262144,
+}
+
+fn parser_empty_span() -> lexer::SourceSpan {
+    return {
+        offset = 0, length = 0, line = 0, column = 0,
+    };
+}
+
+fn parser_invalid_token() -> lexer::Token {
+    return {
+        kind = lexer::TokenKind.invalid, span = parser_empty_span(),
+    };
+}
+
+fn parser_token_at(state: *State, index: usize) -> lexer::Token {
+    let result: lexer::TokenResult = lexer::token_buffer_get(state->tokens, index);
+    if (result.error != runtime::Error.none) {
+        if (state->error == runtime::Error.none) {
+            state->error = result.error;
+        }
+        return {
+            kind = lexer::TokenKind.invalid, span = {
+                offset = 0, length = 0, line = 0, column = 0,
+            },
+        };
+    }
+    return result.token;
+}
+
+fn parser_identifier_text_is(state: *State, token: lexer::Token, expected: *const u8, length: usize) -> bool {
+    if (token.kind != lexer::TokenKind.identifier || token.span.length != length) {
+        return false;
+    }
+    let source: text::View = state->source;
+    var index: usize = 0;
+    while (index < length) {
+        if (source.data[token.span.offset + index] != expected[index]) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn parser_span_is_valid(source: text::View, span: lexer::SourceSpan) -> bool {
+    return span.offset <= source.length && span.length <= source.length - span.offset &&
+        span.line != 0 && span.column != 0;
+}
+
+fn parser_source_is_valid(source: text::View) -> bool {
+    if (!text::is_valid_utf8(source)) {
+        return false;
+    }
+    var index: usize = 0;
+    while (index < source.length) {
+        if (source.data[index] == 0) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn parser_input_is_valid(source: text::View, tokens: lexer::TokenBuffer) -> bool {
+    if (!parser_source_is_valid(source) || !lexer::token_buffer_is_valid(tokens) || tokens.count == 0) {
+        return false;
+    }
+
+    var previous_end: usize = 0;
+    var scan_offset: usize = 0;
+    var scan_line: usize = 1;
+    var scan_column: usize = 1;
+    var index: usize = 0;
+    while (index < tokens.count) {
+        let token_result: lexer::TokenResult = lexer::token_buffer_get(tokens, index);
+        if (token_result.error != runtime::Error.none) {
+            return false;
+        }
+        let token: lexer::Token = token_result.token;
+        if ((token.kind as usize) > (lexer::TokenKind.colon_colon as usize) ||
+            !parser_span_is_valid(source, token.span) || token.span.offset < previous_end) {
+            return false;
+        }
+        while (scan_offset < token.span.offset) {
+            if (source.data[scan_offset] == '\n') {
+                scan_line += 1;
+                scan_column = 1;
+            } else {
+                scan_column += 1;
+            }
+            scan_offset += 1;
+        }
+        if (token.span.line != scan_line || token.span.column != scan_column) {
+            return false;
+        }
+        previous_end = token.span.offset + token.span.length;
+        if (index + 1 == tokens.count) {
+            return token.kind == lexer::TokenKind.end && token.span.length == 0 && token.span.offset == source.length;
+        }
+        if (token.kind == lexer::TokenKind.end) {
+            return false;
+        }
+        index += 1;
+    }
+    return false;
+}
+
+fn parser_join_spans(first: lexer::SourceSpan, last: lexer::SourceSpan) -> lexer::SourceSpan {
+    if (last.offset < first.offset || last.length > (ParserLimit.maximum_size as usize) - last.offset) {
+        return first;
+    }
+    let last_end: usize = last.offset + last.length;
+    if (last_end < first.offset) {
+        return first;
+    }
+    return {
+        offset = first.offset, length = last_end - first.offset, line = first.line, column = first.column,
+    };
+}
+
+fn parser_add_diagnostic(
+    state: *State, kind: lexer::DiagnosticKind, span: lexer::SourceSpan,
+    expected: lexer::TokenKind, found: lexer::TokenKind, detail: usize) -> bool {
+    if (state->error != runtime::Error.none) {
+        return false;
+    }
+    let added: lexer::DiagnosticBufferResult =
+        lexer::diagnostic_buffer_add(
+            state->diagnostics, {
+                kind = kind, span = span, expected = expected, found = found, detail = detail,
+            });
+    state->diagnostics = added.buffer;
+    state->error = added.error;
+    return added.error == runtime::Error.none;
+}
+
+fn parser_new_node(state: *State, kind: syntax::SyntaxKind, span: lexer::SourceSpan, token_index: usize) -> usize {
+    let none: usize = syntax::syntax_no_index();
+    if (state->error != runtime::Error.none) {
+        return none;
+    }
+    if (!syntax::syntax_tree_storage_is_valid(state->tree)) {
+        state->error = runtime::Error.invalid_argument;
+        return none;
+    }
+    if (state->tree.count >= ParserLimit.maximum_nodes as usize) {
+        parser_add_diagnostic(
+            state, lexer::DiagnosticKind.resource_limit, span, lexer::TokenKind.invalid, state->current.kind,
+            ParserLimit.maximum_nodes as usize);
+        state->error = runtime::Error.out_of_memory;
+        return none;
+    }
+    let node: syntax::SyntaxNode = {
+        kind = kind, span = span, token_index = token_index, parent = none, first_child = none, last_child = none,
+        next_sibling = none, child_count = 0, flags = syntax::SyntaxFlag.none as usize,
+    };
+    let appended: bytes::BufferResult = bytes::append(
+        state->tree.storage, (&node) as *const syntax::SyntaxNode as *const u8, sizeof(syntax::SyntaxNode));
+    state->tree.storage = appended.buffer;
+    state->error = appended.error;
+    if (appended.error != runtime::Error.none) {
+        return none;
+    }
+    let index: usize = state->tree.count;
+    state->tree.count += 1;
+    return index;
+}
+
+fn parser_node_pointer(state: *State, index: usize) -> *syntax::SyntaxNode {
+    if (state->error != runtime::Error.none) {
+        return null;
+    }
+    if (index >= state->tree.count) {
+        if (state->error == runtime::Error.none) {
+            state->error = runtime::Error.invalid_argument;
+        }
+        return null;
+    }
+    let nodes: *syntax::SyntaxNode = state->tree.storage.data as *syntax::SyntaxNode;
+    return &nodes[index];
+}
+
+fn parser_set_node_span(state: *State, index: usize, span: lexer::SourceSpan) -> bool {
+    let node: *syntax::SyntaxNode = parser_node_pointer(state, index);
+    if (node == null) {
+        return false;
+    }
+    node->span = span;
+    return true;
+}
+
+fn parser_add_node_flags(state: *State, index: usize, flags: usize) -> bool {
+    let node: *syntax::SyntaxNode = parser_node_pointer(state, index);
+    if (node == null) {
+        return false;
+    }
+    node->flags |= flags;
+    return true;
+}
+
+fn parser_add_child(state: *State, parent_index: usize, child_index: usize) -> bool {
+    let none: usize = syntax::syntax_no_index();
+    if (state->error != runtime::Error.none) {
+        return false;
+    }
+    if (parent_index >= state->tree.count || child_index >= state->tree.count || parent_index == child_index) {
+        if (state->error == runtime::Error.none) {
+            state->error = runtime::Error.invalid_argument;
+        }
+        return false;
+    }
+    let nodes: *syntax::SyntaxNode = state->tree.storage.data as *syntax::SyntaxNode;
+    if (nodes[child_index].parent != none || nodes[child_index].next_sibling != none ||
+        nodes[parent_index].child_count == ParserLimit.maximum_size as usize) {
+        if (state->error == runtime::Error.none) {
+            state->error = runtime::Error.invalid_argument;
+        }
+        return false;
+    }
+    if (nodes[parent_index].child_count == 0) {
+        nodes[parent_index].first_child = child_index;
+    } else {
+        nodes[nodes[parent_index].last_child].next_sibling = child_index;
+    }
+    nodes[child_index].parent = parent_index;
+    nodes[parent_index].last_child = child_index;
+    nodes[parent_index].child_count += 1;
+    return true;
+}
+
+fn parser_advance(state: *State) -> void {
+    if (state->error != runtime::Error.none) {
+        return;
+    }
+    state->previous = state->current;
+    while (state->cursor < state->tokens.count) {
+        let token_result: lexer::TokenResult = lexer::token_buffer_get(state->tokens, state->cursor);
+        if (token_result.error != runtime::Error.none) {
+            state->error = token_result.error;
+            return;
+        }
+        state->current = token_result.token;
+        state->current_index = state->cursor;
+        state->cursor += 1;
+        if (state->current.kind != lexer::TokenKind.invalid) {
+            return;
+        }
+    }
+    state->error = runtime::Error.invalid_argument;
+}
+
+fn parser_check(state: *State, kind: lexer::TokenKind) -> bool {
+    return state->current.kind == kind;
+}
+
+fn parser_peek_kind(state: *State) -> lexer::TokenKind {
+    var cursor: usize = state->cursor;
+    while (cursor < state->tokens.count) {
+        let token_result: lexer::TokenResult = lexer::token_buffer_get(state->tokens, cursor);
+        if (token_result.error != runtime::Error.none) {
+            state->error = token_result.error;
+            return lexer::TokenKind.invalid;
+        }
+        if (token_result.token.kind != lexer::TokenKind.invalid) {
+            return token_result.token.kind;
+        }
+        cursor += 1;
+    }
+    return lexer::TokenKind.invalid;
+}
+
+fn parser_match(state: *State, kind: lexer::TokenKind) -> bool {
+    if (!parser_check(state, kind)) {
+        return false;
+    }
+    if (kind != lexer::TokenKind.end) {
+        parser_advance(state);
+    }
+    return true;
+}
+
+fn parser_expect(state: *State, kind: lexer::TokenKind) -> bool {
+    if (parser_match(state, kind)) {
+        return true;
+    }
+    return parser_add_diagnostic(
+        state, lexer::DiagnosticKind.expected_token, state->current.span, kind, state->current.kind, 0) && false;
+}
+
+fn parser_enter_nesting(state: *State, span: lexer::SourceSpan) -> bool {
+    if (state->nesting_depth >= ParserLimit.maximum_nesting as usize) {
+        parser_add_diagnostic(
+            state, lexer::DiagnosticKind.nesting_limit, span, lexer::TokenKind.invalid, state->current.kind,
+            state->nesting_depth);
+        return false;
+    }
+    state->nesting_depth += 1;
+    return true;
+}
+
+fn parser_leave_nesting(state: *State) -> void {
+    if (state->nesting_depth == 0) {
+        if (state->error == runtime::Error.none) {
+            state->error = runtime::Error.invalid_argument;
+        }
+        return;
+    }
+    state->nesting_depth -= 1;
+}
+

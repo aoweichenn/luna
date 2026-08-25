@@ -1,0 +1,340 @@
+module luna.bootstrap.backend.x86_64.codegen.support;
+
+fn no_id() -> usize {
+    return Limit.maximum_size as usize;
+}
+
+fn fail(context: *Context, error: runtime::Error) -> bool {
+    if (context != null && context->error == runtime::Error.none) {
+        context->error = error;
+    }
+    return false;
+}
+
+fn literal(context: *Context, literal: *const u8) -> bool {
+    if (context == null || context->error != runtime::Error.none ||
+        !asm_text::append_c_string(
+            &context->text, literal, Limit.text_limit as usize)) {
+        if (context != null && context->error == runtime::Error.none) {
+            context->error = context->text.error;
+        }
+        return false;
+    }
+    return true;
+}
+
+fn append_usize(context: *Context, value: usize) -> bool {
+    if (context == null || context->error != runtime::Error.none ||
+        !asm_text::append_usize(
+            &context->text, value)) {
+        if (context != null && context->error == runtime::Error.none) {
+            context->error = context->text.error;
+        }
+        return false;
+    }
+    return true;
+}
+
+fn hex(context: *Context, value: u64, digits: usize) -> bool {
+    if (context == null || context->error != runtime::Error.none ||
+        !asm_text::append_hex(
+            &context->text, value, digits)) {
+        if (context != null && context->error == runtime::Error.none) {
+            context->error = context->text.error;
+        }
+        return false;
+    }
+    return true;
+}
+
+fn type(context: *Context, type_id: usize) -> *const type_info::Record {
+    if (context == null || type_id >= context->types.type_count) {
+        fail(context, runtime::Error.invalid_argument);
+        return null;
+    }
+    let records: *const type_info::Record = context->types.types.data as
+            *const type_info::Record;
+    return &records[type_id];
+}
+
+fn unit(context: *Context, unit_id: usize) -> *const context::Unit {
+    if (context == null || unit_id >= context->semantic_input.unit_count) {
+        fail(context, runtime::Error.invalid_argument);
+        return null;
+    }
+    let units: *const context::Unit = context->semantic_input.units.data as
+            *const context::Unit;
+    return &units[unit_id];
+}
+
+fn token(context: *Context, unit_id: usize, token_id: usize) -> lexer::Token {
+    let unit: *const context::Unit = unit(context, unit_id);
+    if (unit == null || token_id >= unit->tokens.count) {
+        fail(context, runtime::Error.invalid_argument);
+        return {
+            kind = lexer::TokenKind.invalid, span = {
+                offset = 0, length = 0, line = 0, column = 0,
+            },
+        };
+    }
+    let tokens: *const lexer::Token = unit->tokens.storage.data as *const lexer::Token;
+    return tokens[token_id];
+}
+
+fn node(context: *Context, unit_id: usize, node_id: usize) -> syntax::SyntaxNode {
+    let unit: *const context::Unit = unit(context, unit_id);
+    if (unit == null || node_id >= unit->tree.count) {
+        fail(context, runtime::Error.invalid_argument);
+        return {
+            kind = syntax::SyntaxKind.invalid, span = {
+                offset = 0, length = 0, line = 0, column = 0,
+            }, token_index = 0, parent = 0, first_child = 0, last_child = 0, next_sibling = 0, child_count = 0,
+            flags = 0,
+        };
+    }
+    let nodes: *const syntax::SyntaxNode = unit->tree.storage.data as *const syntax::SyntaxNode;
+    return nodes[node_id];
+}
+
+fn append_token_hex(context: *Context, unit_id: usize, token_id: usize) -> bool {
+    let unit: *const context::Unit = unit(context, unit_id);
+    let token: lexer::Token = token(context, unit_id, token_id);
+    if (unit == null || token.kind != lexer::TokenKind.identifier || token.span.offset > unit->source.length ||
+        token.span.length > unit->source.length - token.span.offset) {
+        return fail(context, runtime::Error.invalid_argument);
+    }
+    if (!asm_text::append_hex_bytes(
+            &context->text, &unit->source.data[token.span.offset], token.span.length)) {
+        context->error = context->text.error;
+        return false;
+    }
+    return true;
+}
+
+fn append_module_hex(context: *Context, unit_id: usize) -> bool {
+    let unit: *const context::Unit = unit(context, unit_id);
+    if (unit == null) {
+        return false;
+    }
+    let root: syntax::SyntaxNode = node(context, unit_id, unit->tree.root);
+    let declaration: syntax::SyntaxNode = node(context, unit_id, root.first_child);
+    if (root.kind != syntax::SyntaxKind.program || declaration.kind != syntax::SyntaxKind.module_declaration ||
+        declaration.child_count == 0) {
+        return fail(context, runtime::Error.invalid_argument);
+    }
+    var child: usize = declaration.first_child;
+    var index: usize = 0;
+    while (index < declaration.child_count) {
+        let name: syntax::SyntaxNode = node(context, unit_id, child);
+        if (name.kind != syntax::SyntaxKind.name_expression || (index != 0 &&
+                !hex(
+                    context, 46, 2)) ||
+            !append_token_hex(
+                context, unit_id, name.token_index)) {
+            return false;
+        }
+        child = name.next_sibling;
+        index += 1;
+    }
+    return true;
+}
+
+fn append_mangled_function_symbol(context: *Context, function_id: usize) -> bool {
+    let functions: *const ir::Function = context->ir.functions.data as
+            *const ir::Function;
+    let function: ir::Function = functions[function_id];
+    return literal(context, "_L") && append_module_hex(context, function.declaration_unit) && literal(context, "_") &&
+        append_token_hex(context, function.declaration_unit, function.name_token);
+}
+
+fn append_function_symbol(context: *Context, function_id: usize) -> bool {
+    if (context == null || function_id >= context->ir.function_count) {
+        return fail(context, runtime::Error.invalid_argument);
+    }
+    let functions: *const ir::Function = context->ir.functions.data as
+            *const ir::Function;
+    let function: ir::Function = functions[function_id];
+    // @export_name: the string literal's inner bytes are the symbol,
+    // verbatim (no _L mangling). Calls and the definition agree because
+    // both name the function through this routine.
+    if (function.export_name_token != no_id()) {
+        let unit: *const context::Unit = unit(context, function.export_name_unit);
+        let token: lexer::Token = token(context, function.export_name_unit, function.export_name_token);
+        if (unit == null || token.span.length < 2 || token.span.offset > unit->source.length ||
+            token.span.length > unit->source.length - token.span.offset ||
+            !asm_text::append(
+                &context->text, &unit->source.data[token.span.offset + 1], token.span.length - 2)) {
+            return fail(context, runtime::Error.invalid_argument);
+        }
+        return true;
+    }
+    if (function.linkage == ir::Linkage.external_c) {
+        let unit: *const context::Unit = unit(context, function.declaration_unit);
+        let token: lexer::Token = token(context, function.declaration_unit, function.name_token);
+        if (unit == null || token.kind != lexer::TokenKind.identifier || token.span.offset > unit->source.length ||
+            token.span.length > unit->source.length - token.span.offset ||
+            !asm_text::append(
+                &context->text, &unit->source.data[token.span.offset], token.span.length)) {
+            return fail(context, runtime::Error.invalid_argument);
+        }
+        return true;
+    }
+    return append_mangled_function_symbol(context, function_id);
+}
+
+fn storage(context: *Context, kind: frame::StorageKind, source_id: usize) -> frame::Storage {
+    let found: frame::StorageResult = frame::storage_find(context->frames, context->current_function, kind, source_id);
+    if (found.error != runtime::Error.none) {
+        fail(context, found.error);
+    }
+    return found.storage;
+}
+
+fn append_stack(context: *Context, storage: frame::Storage) -> bool {
+    let frame: frame::Result = frame::get(context->frames, context->current_function);
+    if (frame.error == runtime::Error.none && frame.frame.dynamic_alignment != 0) {
+        // Dynamic alignment: the prologue aligned rsp down to the frame's
+        // dynamic boundary, so storage is addressed from rsp with the
+        // frame-relative offset inverted (rsp = aligned_base - frame_size),
+        // plus any live outgoing call argument area below rsp.
+        return append_usize(context, context->call_frame_depth + frame.frame.frame_size_bytes - storage.offset_bytes) &&
+            literal(context, "(%rsp)");
+    }
+    return literal(context, "-") && append_usize(context, storage.offset_bytes) && literal(context, "(%rbp)");
+}
+
+fn append_value(context: *Context, value_id: usize) -> bool {
+    let storage: frame::Storage = storage(context, frame::StorageKind.value, value_id);
+    return context->error == runtime::Error.none && append_stack(context, storage);
+}
+
+fn append_slot(context: *Context, slot_id: usize) -> bool {
+    let storage: frame::Storage = storage(context, frame::StorageKind.slot, slot_id);
+    return context->error == runtime::Error.none && append_stack(context, storage);
+}
+
+fn block_label(context: *Context, block_id: usize) -> bool {
+    return literal(context, ".Lbf") && append_usize(context, context->current_function) &&
+        literal(context, "_bb") && append_usize(context, block_id);
+}
+
+fn return_label(context: *Context) -> bool {
+    return literal(context, ".Lbf") && append_usize(context, context->current_function) && literal(context, "_return");
+}
+
+fn instruction_label(context: *Context, instruction_id: usize, suffix: *const u8) -> bool {
+    return literal(context, ".Lbi") && append_usize(context, instruction_id) &&
+        literal(context, "_") && literal(context, suffix);
+}
+
+fn append_global_label(context: *Context, global_id: usize) -> bool {
+    return literal(context, ".Lbg") && append_usize(context, global_id);
+}
+
+fn bit_width(record: *const type_info::Record) -> usize {
+    if (record == null) {
+        return 0;
+    }
+    if (record->kind == type_info::Kind.enumeration) {
+        return record->size_bytes * 8;
+    }
+    if (record->kind == type_info::Kind.pointer) {
+        return 64;
+    }
+    if (type_info::is_memory(record->kind)) {
+        return 64;
+    }
+    return type_info::bit_width(record->kind);
+}
+
+fn is_signed(context: *Context, record: *const type_info::Record) -> bool {
+    if (record == null) {
+        return false;
+    }
+    if (record->kind == type_info::Kind.enumeration) {
+        let underlying: *const type_info::Record = type(context, record->element_type);
+        return underlying != null && type_info::is_signed_integer(underlying->kind);
+    }
+    return type_info::is_signed_integer(record->kind);
+}
+
+fn load_integer(
+    context: *Context, value_id: usize, record: *const type_info::Record,
+    destination_32: *const u8, destination_64: *const u8, signed_value: bool) -> bool {
+    let width: usize = bit_width(record);
+    var mnemonic: *const u8 = null;
+    var destination: *const u8 = destination_32;
+    if (signed_value && width == 8) {
+        mnemonic = "    movsbl ";
+    } else if (signed_value && width == 16) {
+        mnemonic = "    movswl ";
+    } else if (signed_value && width == 32 && destination_64 != null) {
+        mnemonic = "    movslq ";
+        destination = destination_64;
+    } else if (width <= 32) {
+        mnemonic = "    movl ";
+    } else if (width == 64) {
+        mnemonic = "    movq ";
+        destination = destination_64;
+    } else {
+        return fail(context, runtime::Error.invalid_argument);
+    }
+    return literal(context, mnemonic) && append_value(context, value_id) && literal(context, ", ") &&
+        literal(context, destination) && literal(context, "\n");
+}
+
+fn load_rax(context: *Context, value_id: usize, record: *const type_info::Record) -> bool {
+    return load_integer(context, value_id, record, "%eax", "%rax", false);
+}
+
+fn load_rcx(context: *Context, value_id: usize, record: *const type_info::Record) -> bool {
+    return load_integer(context, value_id, record, "%ecx", "%rcx", false);
+}
+
+fn load_signed_rax(context: *Context, value_id: usize, record: *const type_info::Record) -> bool {
+    let width: usize = bit_width(record);
+    let mnemonic: *const u8 = width == 8 ? "    movsbq " : width == 16 ? "    movswq " : width == 32 ? "    movslq " :
+        width == 64 ? "    movq " : null;
+    if (mnemonic == null) {
+        return fail(context, runtime::Error.invalid_argument);
+    }
+    return literal(context, mnemonic) && append_value(context, value_id) && literal(context, ", %rax\n");
+}
+
+fn store_rax(context: *Context, result: usize, record: *const type_info::Record) -> bool {
+    let width: usize = bit_width(record);
+    if (width == 8 &&
+        !literal(
+            context, "    andl $255, %eax\n")) {
+        return false;
+    }
+    if (width == 16 &&
+        !literal(
+            context, "    andl $65535, %eax\n")) {
+        return false;
+    }
+    return literal(context, width <= 32 ? "    movl %eax, " : "    movq %rax, ") &&
+        append_value(context, result) && literal(context, "\n");
+}
+
+fn float_move(record: *const type_info::Record) -> *const u8 {
+    if (record == null) {
+        return null;
+    }
+    return record->kind == type_info::Kind.float_32 ? "movss" : "movsd";
+}
+
+fn load_xmm(context: *Context, value_id: usize, record: *const type_info::Record, register_name: *const u8) -> bool {
+    let mnemonic: *const u8 = float_move(record);
+    return literal(context, "    ") && literal(context, mnemonic) &&
+        literal(context, " ") && append_value(context, value_id) &&
+        literal(context, ", ") && literal(context, register_name) && literal(context, "\n");
+}
+
+fn store_xmm(context: *Context, result: usize, record: *const type_info::Record, register_name: *const u8) -> bool {
+    let mnemonic: *const u8 = float_move(record);
+    return literal(context, "    ") && literal(context, mnemonic) &&
+        literal(context, " ") && literal(context, register_name) &&
+        literal(context, ", ") && append_value(context, result) && literal(context, "\n");
+}
+

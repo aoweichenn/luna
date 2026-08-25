@@ -1,0 +1,976 @@
+module luna.bootstrap.middleend.semantic.consteval.engine;
+
+import luna.bootstrap.middleend.semantic.context.builder as builder;
+import luna.bootstrap.middleend.semantic.context.lookup as names;
+import luna.bootstrap.middleend.semantic.types as types;
+import luna.bootstrap.middleend.semantic.types.lookup as type_lookup;
+import luna.runtime as runtime;
+import luna.std.bytes as bytes;
+
+fn const_integer_fits(kind: type_info::Kind, value: u64) -> bool {
+    let width: usize = type_info::bit_width(kind);
+    if (width >= 64) {
+        return true;
+    }
+    let masked: u64 = builder::mask_integer(value, width);
+    if (!type_info::is_signed_integer(kind)) {
+        return masked == value;
+    }
+    var extended: u64 = masked;
+    if ((masked & ((1 as u64) << ((width - 1) as u64))) != 0) {
+        extended = masked | ~(((1 as u64) << (width as u64)) - 1);
+    }
+    return extended == value;
+}
+
+fn integer(value: u64) -> model::Value {
+    return {
+        is_constant = true, is_boolean = false, value = value, error = false,
+    };
+}
+
+fn boolean(value: bool) -> model::Value {
+    var result: model::Value = {
+        is_constant = true, is_boolean = true, value = 0, error = false,
+    };
+    if (value) {
+        result.value = 1;
+    }
+    return result;
+}
+
+fn not_constant() -> model::Value {
+    return {
+        is_constant = false, is_boolean = false, value = 0, error = false,
+    };
+}
+
+fn error() -> model::Value {
+    return {
+        is_constant = false, is_boolean = false, value = 0, error = true,
+    };
+}
+
+fn eval_enum_member(context: *context::Context, unit_index: usize, node: syntax::SyntaxNode) -> model::Value {
+    if (node.child_count != 2) {
+        return not_constant();
+    }
+    let owner_node: syntax::SyntaxNode = context::node(context, unit_index, node.first_child);
+    let member_node: syntax::SyntaxNode = context::node(context, unit_index, owner_node.next_sibling);
+    if (owner_node.kind != syntax::SyntaxKind.name_expression || member_node.kind !=
+            syntax::SyntaxKind.name_expression) {
+        return not_constant();
+    }
+    let type_symbol: usize =
+        names::lookup_qualified_symbol(context, unit_index, owner_node, context::SymbolKind.named_type, false);
+    if (type_symbol == context::no_id()) {
+        return not_constant();
+    }
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    var type_id: usize = symbols[type_symbol].type_id;
+    let alias_record: type_info::Record = context::type_record(context, type_id);
+    if (alias_record.kind == type_info::Kind.alias &&
+        types::require_complete_type(
+            context, type_id)) {
+        type_id = context::type_record(context, type_id).element_type;
+    }
+    if (context::type_record(context, type_id).kind != type_info::Kind.enumeration ||
+        !types::require_complete_type(
+            context, type_id)) {
+        return not_constant();
+    }
+    let member_symbol: usize = types::find_enum_member(context, type_id, unit_index, member_node.token_index);
+    if (member_symbol == context::no_id()) {
+        return not_constant();
+    }
+    // require_complete_type may have appended member symbols, so take a
+    // fresh pointer before reading them.
+    let resolved_symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    if ((resolved_symbols[member_symbol].flags & (context::SymbolFlag.enum_value_pending as usize)) == 0) {
+        return integer(resolved_symbols[member_symbol].integer_value);
+    }
+    if (!resolve_enum_constant_values(
+            context, type_id)) {
+        return error();
+    }
+    let folded: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    if ((folded[member_symbol].flags & (context::SymbolFlag.enum_value_pending as usize)) != 0) {
+        return error();
+    }
+    return integer(folded[member_symbol].integer_value);
+}
+
+fn eval_name(context: *context::Context, unit_index: usize, node: syntax::SyntaxNode) -> model::Value {
+    let none: usize = context::no_id();
+    if (node.child_count == 0) {
+        if (context->const_call_depth > 0) {
+            let slot: usize = env_find(context, unit_index, node.token_index);
+            if (slot != none) {
+                let bindings: *const context::ConstLocal = context->const_locals.data as
+                        *const context::ConstLocal;
+                let binding: context::ConstLocal = bindings[slot];
+                if (binding.is_boolean) {
+                    return boolean(binding.value != 0);
+                }
+                return integer(binding.value);
+            }
+        }
+        let local_id: usize = builder::find_local(context, unit_index, node.token_index);
+        if (local_id != none) {
+            let locals: *const context::Local = context->locals.data as *const context::Local;
+            let local: context::Local = locals[local_id];
+            if (!local.constant_binding) {
+                return not_constant();
+            }
+            if (local.type_id == (type_info::BuiltinType.boolean as usize)) {
+                return boolean(local.integer_value != 0);
+            }
+            return integer(local.integer_value);
+        }
+    }
+    let symbol_id: usize =
+        names::lookup_qualified_symbol(context, unit_index, node, context::SymbolKind.constant, false);
+    if (symbol_id == none) {
+        return not_constant();
+    }
+    var symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    var symbol: context::Symbol = symbols[symbol_id];
+    if ((symbol.flags & (context::SymbolFlag.constant_resolved as usize)) == 0) {
+        // Resolve the initializer on demand so constants declared anywhere
+        // (including later passes' feeding sites) are visible here.
+        if (!resolve_constant(context, symbol_id)) {
+            return not_constant();
+        }
+        symbols = context->symbols.data as
+            *const context::Symbol;
+        symbol = symbols[symbol_id];
+    }
+    if (symbol.type_id == (type_info::BuiltinType.boolean as usize)) {
+        return boolean(symbol.integer_value != 0);
+    }
+    return integer(symbol.integer_value);
+}
+
+fn eval_unary(context: *context::Context, unit_index: usize, node: syntax::SyntaxNode) -> model::Value {
+    if (node.child_count != 1) {
+        return not_constant();
+    }
+    let operation: lexer::TokenKind = context::token(context, unit_index, node.token_index).kind;
+    let operand: model::Value = expression(context, unit_index, node.first_child);
+    if (!operand.is_constant || operand.error) {
+        return operand;
+    }
+    if (operation == lexer::TokenKind.minus) {
+        return integer((0 as u64) - operand.value);
+    }
+    if (operation == lexer::TokenKind.tilde) {
+        return integer(~(operand.value));
+    }
+    if (operation == lexer::TokenKind.bang) {
+        if (!operand.is_boolean) {
+            return error();
+        }
+        return boolean(operand.value == 0);
+    }
+    return not_constant();
+}
+
+fn eval_logical(
+    context: *context::Context, unit_index: usize, left_index: usize, right_index: usize, operation: lexer::TokenKind
+) -> model::Value {
+    let left: model::Value = expression(context, unit_index, left_index);
+    if (!left.is_constant || left.error) {
+        return left;
+    }
+    if (!left.is_boolean) {
+        return error();
+    }
+    if (operation == lexer::TokenKind.logical_and && left.value == 0) {
+        return boolean(false);
+    }
+    if (operation == lexer::TokenKind.logical_or && left.value != 0) {
+        return boolean(true);
+    }
+    let right: model::Value = expression(context, unit_index, right_index);
+    if (!right.is_constant || right.error) {
+        return right;
+    }
+    if (!right.is_boolean) {
+        return error();
+    }
+    return boolean(right.value != 0);
+}
+
+fn eval_binary(context: *context::Context, unit_index: usize, node: syntax::SyntaxNode) -> model::Value {
+    if (node.child_count != 2) {
+        return not_constant();
+    }
+    let operation: lexer::TokenKind = context::token(context, unit_index, node.token_index).kind;
+    let left_node: syntax::SyntaxNode = context::node(context, unit_index, node.first_child);
+    let right_index: usize = left_node.next_sibling;
+    if (operation == lexer::TokenKind.logical_and || operation == lexer::TokenKind.logical_or) {
+        return eval_logical(context, unit_index, node.first_child, right_index, operation);
+    }
+    let left: model::Value = expression(context, unit_index, node.first_child);
+    if (!left.is_constant || left.error) {
+        return left;
+    }
+    let right: model::Value = expression(context, unit_index, right_index);
+    if (!right.is_constant || right.error) {
+        return right;
+    }
+    if (operation == lexer::TokenKind.plus) {
+        return integer(left.value + right.value);
+    }
+    if (operation == lexer::TokenKind.minus) {
+        return integer(left.value - right.value);
+    }
+    if (operation == lexer::TokenKind.star) {
+        return integer(left.value * right.value);
+    }
+    if (operation == lexer::TokenKind.slash || operation == lexer::TokenKind.percent) {
+        if (right.value == 0) {
+            return error();
+        }
+        let dividend: i64 = left.value as i64;
+        let divisor: i64 = right.value as i64;
+        if (divisor == -1 && left.value == ((1 as u64) << 63)) {
+            return error();
+        }
+        if (operation == lexer::TokenKind.slash) {
+            return integer((dividend / divisor) as u64);
+        }
+        return integer((dividend % divisor) as u64);
+    }
+    if (operation == lexer::TokenKind.shift_left || operation == lexer::TokenKind.shift_right) {
+        if (right.value >= 64) {
+            return error();
+        }
+        if (operation == lexer::TokenKind.shift_left) {
+            return integer(left.value << right.value);
+        }
+        var shifted: u64 = left.value >> right.value;
+        if (right.value != 0 && (left.value & ((1 as u64) << 63)) != 0) {
+            shifted = shifted | ~((~((0 as u64))) >> right.value);
+        }
+        return integer(shifted);
+    }
+    if (operation == lexer::TokenKind.ampersand) {
+        return integer(left.value & right.value);
+    }
+    if (operation == lexer::TokenKind.pipe) {
+        return integer(left.value | right.value);
+    }
+    if (operation == lexer::TokenKind.caret) {
+        return integer(left.value ^ right.value);
+    }
+    if (operation == lexer::TokenKind.equal_equal) {
+        return boolean(left.value == right.value);
+    }
+    if (operation == lexer::TokenKind.bang_equal) {
+        return boolean(left.value != right.value);
+    }
+    if (operation == lexer::TokenKind.less) {
+        return boolean((left.value as i64) < (right.value as i64));
+    }
+    if (operation == lexer::TokenKind.less_equal) {
+        return boolean((left.value as i64) <= (right.value as i64));
+    }
+    if (operation == lexer::TokenKind.greater) {
+        return boolean((left.value as i64) > (right.value as i64));
+    }
+    if (operation == lexer::TokenKind.greater_equal) {
+        return boolean((left.value as i64) >= (right.value as i64));
+    }
+    return not_constant();
+}
+
+fn eval_conditional(context: *context::Context, unit_index: usize, node: syntax::SyntaxNode) -> model::Value {
+    if (node.child_count != 3) {
+        return not_constant();
+    }
+    let condition_node: syntax::SyntaxNode = context::node(context, unit_index, node.first_child);
+    let then_node: syntax::SyntaxNode = context::node(context, unit_index, condition_node.next_sibling);
+    let condition: model::Value = expression(context, unit_index, node.first_child);
+    if (!condition.is_constant || condition.error) {
+        return condition;
+    }
+    if (!condition.is_boolean) {
+        return error();
+    }
+    if (condition.value != 0) {
+        return expression(context, unit_index, condition_node.next_sibling);
+    }
+    return expression(context, unit_index, then_node.next_sibling);
+}
+
+fn eval_layout_query(context: *context::Context, unit_index: usize, node: syntax::SyntaxNode) -> model::Value {
+    if (node.child_count == 0) {
+        return error();
+    }
+    let type_id: usize = types::resolve_type_node(context, unit_index, node.first_child);
+    if (type_id == context::no_id() ||
+        !types::require_complete_type(
+            context, type_id)) {
+        return error();
+    }
+    let record: type_info::Record = context::type_record(context, type_id);
+    if (record.kind == type_info::Kind.type_void || record.size_bytes == 0 || record.alignment_bytes == 0) {
+        return error();
+    }
+    var value: usize = 0;
+    if (node.kind == syntax::SyntaxKind.sizeof_expression) {
+        value = record.size_bytes;
+    } else if (node.kind == syntax::SyntaxKind.alignof_expression) {
+        value = record.alignment_bytes;
+    } else if (node.kind == syntax::SyntaxKind.offsetof_expression && node.child_count >= 2) {
+        let type_node: syntax::SyntaxNode = context::node(context, unit_index, node.first_child);
+        let fields: *const type_info::Field = context->types.fields.data as
+                *const type_info::Field;
+        var current_type: usize = type_id;
+        var member_index: usize = type_node.next_sibling;
+        while (member_index != context::no_id()) {
+            let member: syntax::SyntaxNode = context::node(context, unit_index, member_index);
+            let lookup: types::FieldLookup = type_lookup::lookup_field(context, current_type, unit_index,
+                member.token_index);
+            if (lookup.status != types::FieldStatus.found) {
+                return error();
+            }
+            value += lookup.offset_bytes;
+            current_type = fields[lookup.field_id].type_id;
+            member_index = member.next_sibling;
+        }
+    } else {
+        return error();
+    }
+    return integer(value as u64);
+}
+
+fn eval_cast(context: *context::Context, unit_index: usize, node: syntax::SyntaxNode) -> model::Value {
+    if (node.child_count != 2) {
+        return not_constant();
+    }
+    let operand_node: syntax::SyntaxNode = context::node(context, unit_index, node.first_child);
+    let target_type: usize = types::resolve_type_node(context, unit_index, operand_node.next_sibling);
+    if (target_type == context::no_id()) {
+        return error();
+    }
+    let operand: model::Value = expression(context, unit_index, node.first_child);
+    if (!operand.is_constant || operand.error) {
+        return operand;
+    }
+    let target_record: type_info::Record = context::type_record(context, target_type);
+    if (!type_info::is_integer(target_record.kind)) {
+        return not_constant();
+    }
+    let width: usize = type_info::bit_width(target_record.kind);
+    var value: u64 = builder::mask_integer(operand.value, width);
+    if (width < 64 && type_info::is_signed_integer(target_record.kind) &&
+        (value & ((1 as u64) << ((width - 1) as u64))) != 0) {
+        value = value | ~(((1 as u64) << (width as u64)) - 1);
+    }
+    return integer(value);
+}
+
+// --------------------------------------------------------------------------- // const fn interpreter
+// // A `const fn` call whose arguments are all constant is evaluated by
+// tree-walking the callee body with a parameter environment. Environment
+// entries share the model::Value currency (u64 value + boolean flag)
+// and live on a single stack in the context; each call frame records the
+// stack base and truncates on exit. Evaluation is bounded by a per-top-level
+// -call step budget (statements + expression nodes) and a call depth cap;
+// hitting either makes the call non-constant, and the use site diagnoses.
+
+struct Exec {
+    valid: bool;
+    returned: bool;
+    is_boolean: bool;
+    value: u64;
+}
+
+fn exec_invalid() -> Exec {
+    return {
+        valid = false, returned = false, is_boolean = false, value = 0,
+    };
+}
+
+fn exec_continue() -> Exec {
+    return {
+        valid = true, returned = false, is_boolean = false, value = 0,
+    };
+}
+
+fn exec_return(value: model::Value) -> Exec {
+    return {
+        valid = true, returned = true, is_boolean = value.is_boolean, value = value.value,
+    };
+}
+
+fn step(context: *context::Context) -> bool {
+    if (context->const_steps == 0) {
+        return false;
+    }
+    context->const_steps -= 1;
+    return true;
+}
+
+fn env_find(context: *context::Context, unit_index: usize, name_token: usize) -> usize {
+    let bindings: *const context::ConstLocal = context->const_locals.data as
+            *const context::ConstLocal;
+    var index: usize = context->const_local_count;
+    while (index > 0) {
+        index -= 1;
+        if (context::tokens_equal(
+                context, unit_index, name_token, bindings[index].unit_index, bindings[index].name_token)) {
+            return index;
+        }
+    }
+    return context::no_id();
+}
+
+fn env_push(context: *context::Context, binding: context::ConstLocal) -> bool {
+    if (!names::append_record(
+            context, &context->const_locals, (&binding) as
+                *const context::ConstLocal as *const u8, sizeof(context::ConstLocal))) {
+        return false;
+    }
+    context->const_local_count += 1;
+    return true;
+}
+
+// Frame/block teardown: the buffer must shrink with the watermark so the
+// context storage invariant (count == length / sizeof) keeps holding.
+fn env_truncate(context: *context::Context, base: usize) -> bool {
+    let truncated: bytes::BufferResult = bytes::truncate(context->const_locals, base * sizeof(context::ConstLocal));
+    context->const_locals = truncated.buffer;
+    if (truncated.error != runtime::Error.none) {
+        context->error = truncated.error;
+        return false;
+    }
+    context->const_local_count = base;
+    return true;
+}
+
+// Unwraps aliases; the result is type_info::Kind.invalid unless the type
+// resolves to an integer scalar or bool.
+fn scalar_kind(context: *context::Context, type_id: usize) -> type_info::Kind {
+    var record: type_info::Record = context::type_record(context, type_id);
+    if (record.kind == type_info::Kind.alias && types::require_complete_type(context, type_id)) {
+        record = context::type_record(context, record.element_type);
+    }
+    if (!type_info::is_integer(record.kind) && record.kind != type_info::Kind.boolean) {
+        return type_info::Kind.invalid;
+    }
+    return record.kind;
+}
+
+fn narrow_value(kind: type_info::Kind, value: u64) -> u64 {
+    let width: usize = type_info::bit_width(kind);
+    var narrowed: u64 = builder::mask_integer(value, width);
+    if (width < 64 && type_info::is_signed_integer(kind) && (narrowed & ((1 as u64) << ((width - 1) as u64))) != 0) {
+        narrowed = narrowed | ~(((1 as u64) << (width as u64)) - 1);
+    }
+    return narrowed;
+}
+
+fn exec_block(context: *context::Context, unit_index: usize, block_index: usize) -> Exec {
+    let scope_base: usize = context->const_local_count;
+    var result: Exec = exec_continue();
+    var child: usize = context::node(context, unit_index, block_index).first_child;
+    while (child != context::no_id() && result.valid && !result.returned && context->error == runtime::Error.none) {
+        result = exec_statement(context, unit_index, child);
+        child = context::node(context, unit_index, child).next_sibling;
+    }
+    if (!env_truncate(context, scope_base)) {
+        return exec_invalid();
+    }
+    return result;
+}
+
+fn exec_statement(context: *context::Context, unit_index: usize, node_index: usize) -> Exec {
+    if (!step(context)) {
+        return exec_invalid();
+    }
+    let node: syntax::SyntaxNode = context::node(context, unit_index, node_index);
+    if (node.kind == syntax::SyntaxKind.block_statement) {
+        return exec_block(context, unit_index, node_index);
+    }
+    if (node.kind == syntax::SyntaxKind.variable_declaration || node.kind == syntax::SyntaxKind.const_declaration) {
+        if (node.child_count != 2) {
+            return exec_invalid();
+        }
+        let type_id: usize = types::resolve_type_node(context, unit_index, node.first_child);
+        if (type_id == context::no_id()) {
+            return exec_invalid();
+        }
+        let kind: type_info::Kind = scalar_kind(context, type_id);
+        if (kind == type_info::Kind.invalid) {
+            return exec_invalid();
+        }
+        let initializer_id: usize = context::node(context, unit_index, node.first_child).next_sibling;
+        let value: model::Value = expression(context, unit_index, initializer_id);
+        if (!value.is_constant || value.error) {
+            return exec_invalid();
+        }
+        let is_boolean: bool = kind == type_info::Kind.boolean;
+        if (value.is_boolean != is_boolean || (!is_boolean &&
+                !const_integer_fits(
+                    kind, value.value))) {
+            return exec_invalid();
+        }
+        var stored: u64 = 0;
+        if (value.value != 0) {
+            stored = 1;
+        }
+        if (!is_boolean) {
+            stored = narrow_value(kind, value.value);
+        }
+        if (!env_push(
+                context, {
+                    unit_index = unit_index, name_token = node.token_index, type_id = type_id, value = stored,
+                    is_boolean = is_boolean, mutable_binding = (node.flags & (syntax::SyntaxFlag.mutable_binding as
+                            usize)) != 0,
+                })) {
+            return exec_invalid();
+        }
+        return exec_continue();
+    }
+    if (node.kind == syntax::SyntaxKind.assignment_statement) {
+        if (node.child_count != 2 ||
+            context::token(
+                context, unit_index, node.token_index).kind != lexer::TokenKind.equal) {
+            return exec_invalid();
+        }
+        let target: syntax::SyntaxNode = context::node(context, unit_index, node.first_child);
+        if (target.kind != syntax::SyntaxKind.name_expression) {
+            return exec_invalid();
+        }
+        let slot: usize = env_find(context, unit_index, target.token_index);
+        if (slot == context::no_id()) {
+            return exec_invalid();
+        }
+        let value_id: usize = target.next_sibling;
+        let value: model::Value = expression(context, unit_index, value_id);
+        if (!value.is_constant || value.error) {
+            return exec_invalid();
+        }
+        // Nested calls may have grown the binding stack; take a fresh
+        // pointer before mutating.
+        let bindings: *context::ConstLocal = context->const_locals.data as
+                *context::ConstLocal;
+        let kind: type_info::Kind = scalar_kind(context, bindings[slot].type_id);
+        if (kind == type_info::Kind.invalid || !bindings[slot].mutable_binding ||
+            bindings[slot].is_boolean != value.is_boolean || (!value.is_boolean &&
+                !const_integer_fits(
+                    kind, value.value))) {
+            return exec_invalid();
+        }
+        var stored: u64 = 0;
+        if (value.value != 0) {
+            stored = 1;
+        }
+        if (!value.is_boolean) {
+            stored = narrow_value(kind, value.value);
+        }
+        bindings[slot].value = stored;
+        return exec_continue();
+    }
+    if (node.kind == syntax::SyntaxKind.expression_statement) {
+        if (node.child_count != 1) {
+            return exec_invalid();
+        }
+        let value: model::Value = expression(context, unit_index, node.first_child);
+        if (!value.is_constant || value.error) {
+            return exec_invalid();
+        }
+        return exec_continue();
+    }
+    if (node.kind == syntax::SyntaxKind.if_statement) {
+        if (node.child_count < 2 || node.child_count > 3) {
+            return exec_invalid();
+        }
+        let condition: model::Value = expression(context, unit_index, node.first_child);
+        if (!condition.is_constant || condition.error || !condition.is_boolean) {
+            return exec_invalid();
+        }
+        let then_id: usize = context::node(context, unit_index, node.first_child).next_sibling;
+        if (condition.value != 0) {
+            return exec_statement(context, unit_index, then_id);
+        }
+        if (node.child_count == 3) {
+            return exec_statement(context, unit_index, context::node(context, unit_index, then_id).next_sibling);
+        }
+        return exec_continue();
+    }
+    if (node.kind == syntax::SyntaxKind.return_statement) {
+        if (node.child_count != 1) {
+            return exec_invalid();
+        }
+        let value: model::Value = expression(context, unit_index, node.first_child);
+        if (!value.is_constant || value.error) {
+            return exec_invalid();
+        }
+        return exec_return(value);
+    }
+    return exec_invalid();
+}
+
+fn eval_call(context: *context::Context, unit_index: usize, node: syntax::SyntaxNode) -> model::Value {
+    let none: usize = context::no_id();
+    if (node.child_count == 0) {
+        return not_constant();
+    }
+    let callee: syntax::SyntaxNode = context::node(context, unit_index, node.first_child);
+    if (callee.kind != syntax::SyntaxKind.name_expression) {
+        return not_constant();
+    }
+    var symbol_id: usize = context::no_id();
+    if (callee.child_count != 0) {
+        symbol_id = names::lookup_qualified_symbol(
+            context, unit_index, callee, context::SymbolKind.const_function, false);
+    } else if (env_find(
+            context, unit_index, callee.token_index) == none) {
+        symbol_id = names::lookup_symbol(context, unit_index, callee.token_index, context::SymbolKind.const_function);
+    }
+    if (symbol_id == none || context->const_call_depth >= context::Limit.maximum_const_call_depth as usize) {
+        return not_constant();
+    }
+    if (context->const_call_depth == 0) {
+        context->const_steps = context::Limit.maximum_const_steps as usize;
+    }
+    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let symbol: context::Symbol = symbols[symbol_id];
+    let const_functions: *const context::ConstFunction = context->const_functions.data as
+            *const context::ConstFunction;
+    let record: context::ConstFunction = const_functions[symbol.function_id];
+    if (node.child_count - 1 != record.parameter_count) {
+        return not_constant();
+    }
+    let body_unit: usize = symbol.declaration_unit;
+    var body_id: usize = none;
+    var child: usize = context::node(context, body_unit, symbol.declaration_node).first_child;
+    while (child != none) {
+        let part: syntax::SyntaxNode = context::node(context, body_unit, child);
+        if (part.kind == syntax::SyntaxKind.block_statement) {
+            body_id = child;
+        }
+        child = part.next_sibling;
+    }
+    if (body_id == none) {
+        return not_constant();
+    }
+    let parameters: *const context::Parameter = context->parameters.data as
+            *const context::Parameter;
+    let frame_base: usize = context->const_local_count;
+    var argument_id: usize = callee.next_sibling;
+    var index: usize = 0;
+    var arguments_ok: bool = true;
+    while (index < record.parameter_count && arguments_ok) {
+        let parameter: context::Parameter = parameters[record.first_parameter + index];
+        let kind: type_info::Kind = scalar_kind(context, parameter.type_id);
+        let value: model::Value = expression(context, unit_index, argument_id);
+        let is_boolean: bool = kind == type_info::Kind.boolean;
+        if (kind == type_info::Kind.invalid || !value.is_constant || value.error || value.is_boolean != is_boolean ||
+            (!is_boolean &&
+                !const_integer_fits(
+                    kind, value.value))) {
+            arguments_ok = false;
+            break;
+        }
+        var stored: u64 = 0;
+        if (value.value != 0) {
+            stored = 1;
+        }
+        if (!is_boolean) {
+            stored = narrow_value(kind, value.value);
+        }
+        arguments_ok = env_push(
+            context, {
+                unit_index = body_unit, name_token = parameter.name_token, type_id = parameter.type_id, value = stored,
+                is_boolean = is_boolean, mutable_binding = false,
+            });
+        argument_id = context::node(context, unit_index, argument_id).next_sibling;
+        index += 1;
+    }
+    var result: Exec = exec_invalid();
+    if (arguments_ok) {
+        context->const_call_depth += 1;
+        result = exec_block(context, body_unit, body_id);
+        context->const_call_depth -= 1;
+    }
+    if (!env_truncate(context, frame_base)) {
+        return not_constant();
+    }
+    if (!result.valid || !result.returned) {
+        return not_constant();
+    }
+    let return_kind: type_info::Kind = scalar_kind(context, record.return_type);
+    let return_boolean: bool = return_kind == type_info::Kind.boolean;
+    if (return_kind == type_info::Kind.invalid || result.is_boolean != return_boolean || (!return_boolean &&
+            !const_integer_fits(
+                return_kind, result.value))) {
+        return not_constant();
+    }
+    if (return_boolean) {
+        return boolean(result.value != 0);
+    }
+    return integer(result.value);
+}
+
+fn expression(context: *context::Context, unit_index: usize, node_index: usize) -> model::Value {
+    if (context->const_call_depth > 0 && !step(context)) {
+        return not_constant();
+    }
+    let node: syntax::SyntaxNode = context::node(context, unit_index, node_index);
+    if (node.kind == syntax::SyntaxKind.integer_expression) {
+        var value: u64 = 0;
+        if (!context::parse_unsigned(
+                context, unit_index, node.token_index, &value)) {
+            return error();
+        }
+        return integer(value);
+    }
+    if (node.kind == syntax::SyntaxKind.character_expression) {
+        var value: u64 = 0;
+        if (!context::decode_character(
+                context, unit_index, node.token_index, &value)) {
+            return error();
+        }
+        return integer(value);
+    }
+    if (node.kind == syntax::SyntaxKind.boolean_expression) {
+        return boolean(context::token(context, unit_index, node.token_index).kind == lexer::TokenKind.keyword_true);
+    }
+    if (node.kind == syntax::SyntaxKind.parenthesized_expression) {
+        if (node.child_count != 1) {
+            return not_constant();
+        }
+        return expression(context, unit_index, node.first_child);
+    }
+    if (node.kind == syntax::SyntaxKind.member_expression) {
+        return eval_enum_member(context, unit_index, node);
+    }
+    if (node.kind == syntax::SyntaxKind.name_expression) {
+        return eval_name(context, unit_index, node);
+    }
+    if (node.kind == syntax::SyntaxKind.unary_expression) {
+        return eval_unary(context, unit_index, node);
+    }
+    if (node.kind == syntax::SyntaxKind.binary_expression) {
+        return eval_binary(context, unit_index, node);
+    }
+    if (node.kind == syntax::SyntaxKind.conditional_expression) {
+        return eval_conditional(context, unit_index, node);
+    }
+    if (node.kind == syntax::SyntaxKind.sizeof_expression || node.kind == syntax::SyntaxKind.alignof_expression ||
+        node.kind == syntax::SyntaxKind.offsetof_expression) {
+        return eval_layout_query(context, unit_index, node);
+    }
+    if (node.kind == syntax::SyntaxKind.cast_expression) {
+        return eval_cast(context, unit_index, node);
+    }
+    if (node.kind == syntax::SyntaxKind.call_expression) {
+        return eval_call(context, unit_index, node);
+    }
+    if (node.kind == syntax::SyntaxKind.intrinsic_expression) {
+        // @line() is a constant; @file() is a pointer and never folds.
+        if (node.child_count == 0 &&
+            context::token_equals_bytes(
+                context, unit_index, node.token_index, "line", 4)) {
+            return integer(node.span.line as u64);
+        }
+        return not_constant();
+    }
+    return not_constant();
+}
+
+fn resolve_enum_constant_values(context: *context::Context, type_id: usize) -> bool {
+    let none: usize = context::no_id();
+    let pending_flag: usize = context::SymbolFlag.enum_value_pending as usize;
+    let resolving_flag: usize = context::SymbolFlag.enum_values_resolving as usize;
+    if (!types::require_complete_type(context, type_id)) {
+        return false;
+    }
+    var has_pending: bool = false;
+    var scan: usize = 0;
+    let all_symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    while (scan < context->symbol_count) {
+        let candidate: context::Symbol = all_symbols[scan];
+        if (candidate.kind == context::SymbolKind.enum_member && candidate.type_id == type_id &&
+            (candidate.flags & pending_flag) != 0) {
+            has_pending = true;
+        }
+        scan += 1;
+    }
+    if (!has_pending) {
+        return true;
+    }
+    let type_symbol: usize = types::find_type_symbol(context, type_id);
+    if (type_symbol == none) {
+        return false;
+    }
+    let symbols: *context::Symbol = context->symbols.data as *context::Symbol;
+    if ((symbols[type_symbol].flags & resolving_flag) != 0) {
+        return false;
+    }
+    symbols[type_symbol].flags |= resolving_flag;
+    let record: type_info::Record = context::type_record(context, type_id);
+    let underlying_kind: type_info::Kind = context::type_record(context, record.element_type).kind;
+    let bits: usize = type_info::bit_width(underlying_kind);
+    var success: bool = true;
+    var next_value: u64 = 0;
+    var next_value_valid: bool = true;
+    var member_id: usize = context::node(
+        context, record.declaration_unit,
+        context::node(context, record.declaration_unit, record.declaration_node).first_child).next_sibling;
+    while (member_id != none && success && context->error == runtime::Error.none) {
+        let member: syntax::SyntaxNode = context::node(context, record.declaration_unit, member_id);
+        if (member.kind == syntax::SyntaxKind.attribute) {
+            member_id = member.next_sibling;
+            continue;
+        }
+        var member_symbol: usize = none;
+        var index: usize = 0;
+        let members: *const context::Symbol = context->symbols.data as
+                *const context::Symbol;
+        while (index < context->symbol_count) {
+            let candidate: context::Symbol = members[index];
+            if (candidate.kind == context::SymbolKind.enum_member && candidate.type_id == type_id &&
+                candidate.declaration_node == member_id) {
+                member_symbol = index;
+            }
+            index += 1;
+        }
+        if (member_symbol == none) {
+            // A duplicate member (already diagnosed) has no symbol.
+            member_id = member.next_sibling;
+            continue;
+        }
+        let current: context::Symbol = members[member_symbol];
+        if ((current.flags & pending_flag) == 0) {
+            next_value = builder::mask_integer(current.integer_value + 1, bits);
+            next_value_valid = types::enum_can_increment(underlying_kind, current.integer_value);
+        } else {
+            var value: u64 = next_value;
+            if (member.child_count == 0) {
+                if (!next_value_valid) {
+                    success = false;
+                    break;
+                }
+            } else {
+                let evaluated: model::Value = expression(context, record.declaration_unit, member.first_child);
+                if (!evaluated.is_constant || evaluated.error || evaluated.is_boolean ||
+                    !const_integer_fits(
+                        underlying_kind, evaluated.value)) {
+                    success = false;
+                    break;
+                }
+                value = builder::mask_integer(evaluated.value, bits);
+            }
+            let fresh: *context::Symbol = context->symbols.data as *context::Symbol;
+            fresh[member_symbol].integer_value = value;
+            fresh[member_symbol].flags = fresh[member_symbol].flags & ~pending_flag;
+            next_value = builder::mask_integer(value + 1, bits);
+            next_value_valid = types::enum_can_increment(underlying_kind, value);
+        }
+        member_id = member.next_sibling;
+    }
+    let done: *context::Symbol = context->symbols.data as *context::Symbol;
+    done[type_symbol].flags = done[type_symbol].flags & ~resolving_flag;
+    return success && context->error == runtime::Error.none;
+}
+
+fn const_value_conforms(
+    context: *context::Context, unit_index: usize, span: lexer::SourceSpan, type_id: usize,
+        value: model::Value) -> bool {
+    let record: type_info::Record = context::type_record(context, type_id);
+    let boolean_type: bool = record.kind == type_info::Kind.boolean;
+    if (value.is_boolean != boolean_type) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.type_mismatch, unit_index, span, context::no_id(), context::empty_span(),
+            type_id);
+        return false;
+    }
+    if (!boolean_type &&
+        !const_integer_fits(
+            record.kind, value.value)) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.integer_overflow, unit_index, span, context::no_id(),
+            context::empty_span(), type_id);
+        return false;
+    }
+    return true;
+}
+
+
+fn resolve_constant(context: *context::Context, symbol_id: usize) -> bool {
+    let resolved_flag: usize = context::SymbolFlag.constant_resolved as usize;
+    let resolving_flag: usize = context::SymbolFlag.constant_resolving as usize;
+    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let symbol: context::Symbol = symbols[symbol_id];
+    if ((symbol.flags & resolved_flag) != 0) {
+        return true;
+    }
+    if ((symbol.flags & resolving_flag) != 0) {
+        return false;
+    }
+    let writable: *context::Symbol = context->symbols.data as *context::Symbol;
+    writable[symbol_id].flags |= resolving_flag;
+    let declaration: syntax::SyntaxNode = context::node(context, symbol.declaration_unit, symbol.declaration_node);
+    let initializer_id: usize = context::node(context, symbol.declaration_unit, declaration.first_child).next_sibling;
+    let value: model::Value = expression(context, symbol.declaration_unit, initializer_id);
+    // Consteval may complete enum layouts and append member symbols, so
+    // take a fresh pointer before mutating.
+    let fresh: *context::Symbol = context->symbols.data as *context::Symbol;
+    fresh[symbol_id].flags = fresh[symbol_id].flags & ~resolving_flag;
+    if (!value.is_constant || value.error) {
+        return false;
+    }
+    fresh[symbol_id].flags |= resolved_flag;
+    if (const_value_conforms(
+            context, symbol.declaration_unit, context::node(context, symbol.declaration_unit, initializer_id).span,
+            symbol.type_id, value)) {
+        fresh[symbol_id].integer_value = value.value;
+    }
+    return true;
+}
+
+// Initializers may reference constants declared later in the unit or in
+// another module, so evaluation runs as a fixpoint: every resolved constant
+// enables more evaluations, and whatever remains unresolved afterwards is
+// diagnosed as non-constant (including cyclic definitions).
+
+fn resolve_constants(context: *context::Context) -> bool {
+    let resolved_flag: usize = context::SymbolFlag.constant_resolved as usize;
+    var progress: bool = true;
+    while (progress && context->error == runtime::Error.none) {
+        progress = false;
+        var symbol_id: usize = 0;
+        while (symbol_id < context->symbol_count && context->error == runtime::Error.none) {
+            let symbols: *const context::Symbol = context->symbols.data as
+                    *const context::Symbol;
+            let symbol: context::Symbol = symbols[symbol_id];
+            if (symbol.kind == context::SymbolKind.constant && (symbol.flags & resolved_flag) == 0 &&
+                resolve_constant(
+                    context, symbol_id)) {
+                progress = true;
+            }
+            symbol_id += 1;
+        }
+    }
+    var symbol_id: usize = 0;
+    while (symbol_id < context->symbol_count && context->error == runtime::Error.none) {
+        let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+        let symbol: context::Symbol = symbols[symbol_id];
+        if (symbol.kind == context::SymbolKind.constant && (symbol.flags & resolved_flag) == 0) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.non_constant_expression, symbol.declaration_unit,
+                context::node(context, symbol.declaration_unit, symbol.declaration_node).span,
+                context::no_id(), context::empty_span(), symbol_id);
+        }
+        symbol_id += 1;
+    }
+    return context->error == runtime::Error.none;
+}
+

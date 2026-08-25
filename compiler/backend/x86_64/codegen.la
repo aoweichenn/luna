@@ -1,2283 +1,47 @@
 module luna.bootstrap.backend.x86_64.codegen;
 
+import luna.bootstrap.middleend.ir.verify as ir_check;
+
+import luna.bootstrap.backend.x86_64.codegen.instruction as instruction;
+import luna.bootstrap.backend.x86_64.codegen.instruction.call as call;
+import luna.bootstrap.backend.x86_64.codegen.support as support;
 import luna.bootstrap.backend.x86_64.text as asm_text;
 import luna.bootstrap.frontend.lexer as lexer;
-import luna.bootstrap.frontend.parser as parser;
-
-enum Limit: usize {
-    maximum_size = 18446744073709551615, text_limit = 4096, general_argument_registers = 6,
-    vector_argument_registers = 8, variadic_stack_slot = 8, call_stack_alignment = 16,
-}
-
-struct Context {
-    semantic_input: context::Input;
-    ir: ir::Store;
-    types: type_info::Table;
-    abi: abi::Abi;
-    frames: frame::Plan;
-    text: asm_text::Text;
-    current_function: usize;
-    // Live bytes subtracted from rsp for outgoing call argument areas; only
-    // nonzero between a call's subq and its matching addq.
-    call_frame_depth: usize;
-    error: runtime::Error;
-}
-
-fn no_id() -> usize {
-    return Limit.maximum_size as usize;
-}
+import luna.bootstrap.frontend.syntax as syntax;
+import luna.std.ascii as ascii;
 
 fn backend_empty()
     -> BackendResult {
     return {
-        assembly = bytes::empty(), abi = abi::empty(),
-        frames = frame::plan_empty(), error = runtime::Error.none,
+        assembly = bytes::empty(), abi = abi::empty(), frames = frame::plan_empty(), error = runtime::Error.none,
     };
 }
 
-fn fail(context: *Context, error: runtime::Error) -> bool {
-    if (context != null && context->error == runtime::Error.none) {
-        context->error = error;
-    }
-    return false;
-}
-
-fn literal(context: *Context, literal: *const u8) -> bool {
-    if (context == null || context->error != runtime::Error.none ||
-        !asm_text::append_c_string(
-            &context->text, literal, Limit.text_limit as usize)) {
-        if (context != null && context->error == runtime::Error.none) {
-            context->error = context->text.error;
-        }
-        return false;
-    }
-    return true;
-}
-
-fn append_usize(context: *Context, value: usize) -> bool {
-    if (context == null || context->error != runtime::Error.none ||
-        !asm_text::append_usize(
-            &context->text, value)) {
-        if (context != null && context->error == runtime::Error.none) {
-            context->error = context->text.error;
-        }
-        return false;
-    }
-    return true;
-}
-
-fn hex(context: *Context, value: u64, digits: usize) -> bool {
-    if (context == null || context->error != runtime::Error.none ||
-        !asm_text::append_hex(
-            &context->text, value, digits)) {
-        if (context != null && context->error == runtime::Error.none) {
-            context->error = context->text.error;
-        }
-        return false;
-    }
-    return true;
-}
-
-fn type(context: *Context, type_id: usize) -> *const type_info::Record {
-    if (context == null || type_id >= context->types.type_count) {
-        fail(context, runtime::Error.invalid_argument);
-        return null;
-    }
-    let records: *const type_info::Record = context->types.types.data as
-            *const type_info::Record;
-    return &records[type_id];
-}
-
-fn unit(
-    context: *Context, unit_id: usize) -> *const context::Unit {
-    if (context == null || unit_id >= context->semantic_input.unit_count) {
-        fail(context, runtime::Error.invalid_argument);
-        return null;
-    }
-    let units: *const context::Unit = context->semantic_input.units.data as
-            *const context::Unit;
-    return &units[unit_id];
-}
-
-fn token(
-    context: *Context, unit_id: usize, token_id: usize) -> lexer::Token {
-    let unit: *const context::Unit = unit(context, unit_id);
-    if (unit == null || token_id >= unit->tokens.count) {
-        fail(context, runtime::Error.invalid_argument);
-        return {
-            kind = lexer::TokenKind.invalid, span = {
-                offset = 0, length = 0, line = 0, column = 0,
-            },
-        };
-    }
-    let tokens: *const lexer::Token = unit->tokens.storage.data as *const lexer::Token;
-    return tokens[token_id];
-}
-
-fn node(
-    context: *Context, unit_id: usize, node_id: usize) -> parser::SyntaxNode {
-    let unit: *const context::Unit = unit(context, unit_id);
-    if (unit == null || node_id >= unit->tree.count) {
-        fail(context, runtime::Error.invalid_argument);
-        return {
-            kind = parser::SyntaxKind.invalid, span = {
-                offset = 0, length = 0, line = 0, column = 0,
-            }, token_index = 0, parent = 0, first_child = 0, last_child = 0, next_sibling = 0, child_count = 0,
-            flags = 0,
-        };
-    }
-    let nodes: *const parser::SyntaxNode = unit->tree.storage.data as *const parser::SyntaxNode;
-    return nodes[node_id];
-}
-
-fn append_token_hex(
-    context: *Context, unit_id: usize, token_id: usize) -> bool {
-    let unit: *const context::Unit = unit(context, unit_id);
-    let token: lexer::Token = token(context, unit_id, token_id);
-    if (unit == null || token.kind != lexer::TokenKind.identifier || token.span.offset > unit->source.length ||
-        token.span.length > unit->source.length - token.span.offset) {
-        return fail(context, runtime::Error.invalid_argument);
-    }
-    if (!asm_text::append_hex_bytes(
-            &context->text, &unit->source.data[token.span.offset], token.span.length)) {
-        context->error = context->text.error;
-        return false;
-    }
-    return true;
-}
-
-fn append_module_hex(context: *Context, unit_id: usize) -> bool {
-    let unit: *const context::Unit = unit(context, unit_id);
-    if (unit == null) {
-        return false;
-    }
-    let root: parser::SyntaxNode = node(context, unit_id, unit->tree.root);
-    let declaration: parser::SyntaxNode = node(context, unit_id, root.first_child);
-    if (root.kind != parser::SyntaxKind.program || declaration.kind != parser::SyntaxKind.module_declaration ||
-        declaration.child_count == 0) {
-        return fail(context, runtime::Error.invalid_argument);
-    }
-    var child: usize = declaration.first_child;
-    var index: usize = 0;
-    while (index < declaration.child_count) {
-        let name: parser::SyntaxNode = node(context, unit_id, child);
-        if (name.kind != parser::SyntaxKind.name_expression || (index != 0 &&
-                !hex(
-                    context, 46, 2)) ||
-            !append_token_hex(
-                context, unit_id, name.token_index)) {
-            return false;
-        }
-        child = name.next_sibling;
-        index += 1;
-    }
-    return true;
-}
-
-fn append_mangled_function_symbol(
-    context: *Context, function_id: usize) -> bool {
-    let functions: *const ir::Function = context->ir.functions.data as
-            *const ir::Function;
-    let function: ir::Function = functions[function_id];
-    return literal(context, "_L") &&
-        append_module_hex(context, function.declaration_unit) &&
-        literal(context, "_") &&
-        append_token_hex(context, function.declaration_unit, function.name_token);
-}
-
-fn append_function_symbol(context: *Context, function_id: usize) -> bool {
-    if (context == null || function_id >= context->ir.function_count) {
-        return fail(context, runtime::Error.invalid_argument);
-    }
-    let functions: *const ir::Function = context->ir.functions.data as
-            *const ir::Function;
-    let function: ir::Function = functions[function_id];
-    // @export_name: the string literal's inner bytes are the symbol,
-    // verbatim (no _L mangling). Calls and the definition agree because
-    // both name the function through this routine.
-    if (function.export_name_token != no_id()) {
-        let unit: *const context::Unit = unit(context, function.export_name_unit);
-        let token: lexer::Token =
-            token(context, function.export_name_unit, function.export_name_token);
-        if (unit == null || token.span.length < 2 || token.span.offset > unit->source.length ||
-            token.span.length > unit->source.length - token.span.offset ||
-            !asm_text::append(
-                &context->text, &unit->source.data[token.span.offset + 1], token.span.length - 2)) {
-            return fail(context, runtime::Error.invalid_argument);
-        }
-        return true;
-    }
-    if (function.linkage == ir::Linkage.external_c) {
-        let unit: *const context::Unit = unit(context, function.declaration_unit);
-        let token: lexer::Token =
-            token(context, function.declaration_unit, function.name_token);
-        if (unit == null || token.kind != lexer::TokenKind.identifier || token.span.offset > unit->source.length ||
-            token.span.length > unit->source.length - token.span.offset ||
-            !asm_text::append(
-                &context->text, &unit->source.data[token.span.offset], token.span.length)) {
-            return fail(context, runtime::Error.invalid_argument);
-        }
-        return true;
-    }
-    return append_mangled_function_symbol(context, function_id);
-}
-
-fn storage(
-    context: *Context, kind: frame::StorageKind, source_id: usize
-) -> frame::Storage {
-    let found: frame::StorageResult =
-        frame::storage_find(context->frames, context->current_function, kind, source_id);
-    if (found.error != runtime::Error.none) {
-        fail(context, found.error);
-    }
-    return found.storage;
-}
-
-fn append_stack(
-    context: *Context, storage: frame::Storage) -> bool {
-    let frame: frame::Result = frame::get(context->frames, context->current_function);
-    if (frame.error == runtime::Error.none && frame.frame.dynamic_alignment != 0) {
-        // Dynamic alignment: the prologue aligned rsp down to the frame's
-        // dynamic boundary, so storage is addressed from rsp with the
-        // frame-relative offset inverted (rsp = aligned_base - frame_size),
-        // plus any live outgoing call argument area below rsp.
-        return append_usize(
-                context,
-                context->call_frame_depth + frame.frame.frame_size_bytes - storage.offset_bytes) &&
-            literal(context, "(%rsp)");
-    }
-    return literal(context, "-") &&
-        append_usize(context, storage.offset_bytes) &&
-        literal(context, "(%rbp)");
-}
-
-fn append_value(context: *Context, value_id: usize) -> bool {
-    let storage: frame::Storage =
-        storage(context, frame::StorageKind.value, value_id);
-    return context->error == runtime::Error.none && append_stack(context, storage);
-}
-
-fn append_slot(context: *Context, slot_id: usize) -> bool {
-    let storage: frame::Storage =
-        storage(context, frame::StorageKind.slot, slot_id);
-    return context->error == runtime::Error.none && append_stack(context, storage);
-}
-
-fn block_label(context: *Context, block_id: usize) -> bool {
-    return literal(context, ".Lbf") &&
-        append_usize(context, context->current_function) &&
-        literal(context, "_bb") && append_usize(context, block_id);
-}
-
-fn return_label(context: *Context) -> bool {
-    return literal(context, ".Lbf") &&
-        append_usize(context, context->current_function) &&
-        literal(context, "_return");
-}
-
-fn instruction_label(
-    context: *Context, instruction_id: usize, suffix: *const u8) -> bool {
-    return literal(context, ".Lbi") &&
-        append_usize(context, instruction_id) &&
-        literal(context, "_") && literal(context, suffix);
-}
-
-fn append_global_label(context: *Context, global_id: usize) -> bool {
-    return literal(context, ".Lbg") && append_usize(context, global_id);
-}
-
-fn bit_width(record: *const type_info::Record) -> usize {
-    if (record == null) {
-        return 0;
-    }
-    if (record->kind == type_info::Kind.enumeration) {
-        return record->size_bytes * 8;
-    }
-    if (record->kind == type_info::Kind.pointer) {
-        return 64;
-    }
-    if (type_info::is_memory(record->kind)) {
-        return 64;
-    }
-    return type_info::bit_width(record->kind);
-}
-
-fn is_signed(
-    context: *Context, record: *const type_info::Record) -> bool {
-    if (record == null) {
-        return false;
-    }
-    if (record->kind == type_info::Kind.enumeration) {
-        let underlying: *const type_info::Record = type(context, record->element_type);
-        return underlying != null && type_info::is_signed_integer(underlying->kind);
-    }
-    return type_info::is_signed_integer(record->kind);
-}
-
-fn load_integer(
-    context: *Context, value_id: usize, record: *const type_info::Record,
-    destination_32: *const u8, destination_64: *const u8, signed_value: bool) -> bool {
-    let width: usize = bit_width(record);
-    var mnemonic: *const u8 = null;
-    var destination: *const u8 = destination_32;
-    if (signed_value && width == 8) {
-        mnemonic = "    movsbl ";
-    } else if (signed_value && width == 16) {
-        mnemonic = "    movswl ";
-    } else if (signed_value && width == 32 && destination_64 != null) {
-        mnemonic = "    movslq ";
-        destination = destination_64;
-    } else if (width <= 32) {
-        mnemonic = "    movl ";
-    } else if (width == 64) {
-        mnemonic = "    movq ";
-        destination = destination_64;
-    } else {
-        return fail(context, runtime::Error.invalid_argument);
-    }
-    return literal(context, mnemonic) &&
-        append_value(context, value_id) && literal(context, ", ") &&
-        literal(context, destination) && literal(context, "\n");
-}
-
-fn load_rax(
-    context: *Context, value_id: usize, record: *const type_info::Record) -> bool {
-    return load_integer(context, value_id, record, "%eax", "%rax", false);
-}
-
-fn load_rcx(
-    context: *Context, value_id: usize, record: *const type_info::Record) -> bool {
-    return load_integer(context, value_id, record, "%ecx", "%rcx", false);
-}
-
-fn load_signed_rax(
-    context: *Context, value_id: usize, record: *const type_info::Record) -> bool {
-    let width: usize = bit_width(record);
-    let mnemonic: *const u8 = width == 8 ? "    movsbq " : width == 16 ? "    movswq " : width == 32 ? "    movslq " :
-        width == 64 ? "    movq " : null;
-    if (mnemonic == null) {
-        return fail(context, runtime::Error.invalid_argument);
-    }
-    return literal(context, mnemonic) &&
-        append_value(context, value_id) &&
-        literal(context, ", %rax\n");
-}
-
-fn store_rax(
-    context: *Context, result: usize, record: *const type_info::Record) -> bool {
-    let width: usize = bit_width(record);
-    if (width == 8 &&
-        !literal(
-            context, "    andl $255, %eax\n")) {
-        return false;
-    }
-    if (width == 16 &&
-        !literal(
-            context, "    andl $65535, %eax\n")) {
-        return false;
-    }
-    return literal(context, width <= 32 ? "    movl %eax, " : "    movq %rax, ") &&
-        append_value(context, result) && literal(context, "\n");
-}
-
-fn float_move(record: *const type_info::Record) -> *const u8 {
-    if (record == null) {
-        return null;
-    }
-    return record->kind == type_info::Kind.float_32 ? "movss" : "movsd";
-}
-
-fn load_xmm(
-    context: *Context, value_id: usize, record: *const type_info::Record,
-    register_name: *const u8) -> bool {
-    let mnemonic: *const u8 = float_move(record);
-    return literal(context, "    ") && literal(context, mnemonic) &&
-        literal(context, " ") && append_value(context, value_id) &&
-        literal(context, ", ") && literal(context, register_name) &&
-        literal(context, "\n");
-}
-
-fn store_xmm(
-    context: *Context, result: usize, record: *const type_info::Record, register_name: *const u8
-) -> bool {
-    let mnemonic: *const u8 = float_move(record);
-    return literal(context, "    ") && literal(context, mnemonic) &&
-        literal(context, " ") && literal(context, register_name) &&
-        literal(context, ", ") && append_value(context, result) &&
-        literal(context, "\n");
-}
-
-fn emit_constant(
-    context: *Context, instruction: ir::Instruction) -> bool {
-    let record: *const type_info::Record = type(context, instruction.type_id);
-    if (record == null) {
-        return false;
-    }
-    if (instruction.opcode == ir::Opcode.constant_null) {
-        return literal(context, "    xorq %rax, %rax\n") &&
-            store_rax(context, instruction.result, record);
-    }
-    if (instruction.opcode == ir::Opcode.constant_boolean || instruction.opcode ==
-            ir::Opcode.constant_integer) {
-        let width: usize = bit_width(record);
-        if (width <= 32) {
-            if (!literal(context, "    movl $0x") ||
-                !hex(context, instruction.immediate & 4294967295, 8) ||
-                !literal(
-                    context, ", %eax\n")) {
-                return false;
-            }
-        } else if (!literal(context, "    movabsq $0x") ||
-            !hex(context, instruction.immediate, 16) ||
-            !literal(
-                context, ", %rax\n")) {
-            return false;
-        }
-        return store_rax(context, instruction.result, record);
-    }
-    if (instruction.opcode == ir::Opcode.constant_float) {
-        if (record->kind == type_info::Kind.float_32) {
-            let value: f32 = instruction.floating as f32;
-            let bits: u32 = *((&value) as *const f32 as *const u32);
-            return literal(context, "    movl $0x") &&
-                hex(context, bits as u64, 8) &&
-                literal(context, ", %eax\n    movl %eax, ") &&
-                append_value(context, instruction.result) &&
-                literal(context, "\n");
-        }
-        let bits: u64 = *((&instruction.floating) as *const f64 as *const u64);
-        return literal(context, "    movabsq $0x") &&
-            hex(context, bits, 16) &&
-            literal(context, ", %rax\n    movq %rax, ") &&
-            append_value(context, instruction.result) &&
-            literal(context, "\n");
-    }
-    return fail(context, runtime::Error.invalid_argument);
-}
-
-fn emit_address(
-    context: *Context, instruction: ir::Instruction) -> bool {
-    if (instruction.opcode == ir::Opcode.address_of_slot) {
-        return literal(context, "    leaq ") &&
-            append_slot(context, instruction.auxiliary) &&
-            literal(context, ", %rax\n") &&
-            store_rax(
-                context, instruction.result, type(context, instruction.type_id));
-    }
-    if (instruction.opcode == ir::Opcode.global_address) {
-        return literal(context, "    leaq ") &&
-            append_global_label(context, instruction.auxiliary) &&
-            literal(context, "(%rip), %rax\n") &&
-            store_rax(
-                context, instruction.result, type(context, instruction.type_id));
-    }
-    if (instruction.opcode == ir::Opcode.function_address) {
-        return literal(context, "    leaq ") &&
-            append_function_symbol(context, instruction.auxiliary) &&
-            literal(context, "(%rip), %rax\n") &&
-            store_rax(
-                context, instruction.result, type(context, instruction.type_id));
-    }
-    if (instruction.opcode == ir::Opcode.member_address) {
-        if (!load_rax(
-                context, instruction.left, type(context, instruction.type_id)) ||
-            !literal(context, "    addq $") ||
-            !append_usize(context, instruction.auxiliary) ||
-            !literal(
-                context, ", %rax\n")) {
-            return false;
-        }
-        return store_rax(
-            context, instruction.result, type(context, instruction.type_id));
-    }
-    if (instruction.opcode == ir::Opcode.pointer_offset) {
-        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
-        let left_record: *const type_info::Record =
-            type(context, values[instruction.left].type_id);
-        let index_record: *const type_info::Record =
-            type(context, values[instruction.right].type_id);
-        if (left_record == null || index_record == null || (left_record->kind != type_info::Kind.pointer &&
-                left_record->kind != type_info::Kind.array) || instruction.auxiliary == 0 ||
-            !load_rax(context, instruction.left, left_record) ||
-            !load_rcx(
-                context, instruction.right, index_record)) {
-            return false;
-        }
-        if (!literal(context, "    movabsq $0x") ||
-            !hex(context, instruction.auxiliary as u64, 16) ||
-            !literal(
-                context, ", %rdx\n    imulq %rdx, %rcx\n    addq %rcx, %rax\n")) {
-            return false;
-        }
-        return store_rax(
-            context, instruction.result, type(context, instruction.type_id));
-    }
-    return fail(context, runtime::Error.invalid_argument);
-}
-
-fn emit_zero(
-    context: *Context, instruction: ir::Instruction) -> bool {
-    let slot: frame::Storage =
-        storage(context, frame::StorageKind.slot, instruction.auxiliary);
-    if (context->error != runtime::Error.none) {
-        return false;
-    }
-    return literal(context, "    leaq ") &&
-        append_stack(context, slot) &&
-        literal(context, ", %rdi\n    xorl %eax, %eax\n    movq $") &&
-        append_usize(context, slot.size_bytes) &&
-        literal(context, ", %rcx\n    rep stosb\n");
-}
-
-fn emit_memory_copy(
-    context: *Context, instruction: ir::Instruction, instruction_id: usize) -> bool {
-    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
-    let pointer_record: *const type_info::Record =
-        type(context, values[instruction.left].type_id);
-    if (pointer_record == null ||
-        !load_integer(context, instruction.left, pointer_record, "%edi", "%rdi", false) ||
-        !load_integer(context, instruction.right, pointer_record, "%esi", "%rsi", false) ||
-        !literal(context, "    movabsq $0x") ||
-        !hex(context, instruction.auxiliary as u64, 16) ||
-        !literal(context, ", %rcx\n    cmpq %rsi, %rdi\n    jbe ") ||
-        !instruction_label(context, instruction_id, "copy_forward") ||
-        !literal(context, "\n    leaq (%rsi,%rcx), %rax\n    cmpq %rax, %rdi\n    jae ") ||
-        !instruction_label(context, instruction_id, "copy_forward") ||
-        !literal(context, "\n    testq %rcx, %rcx\n    je ") ||
-        !instruction_label(context, instruction_id, "copy_done") ||
-        !literal(
-            context,
-            "\n    leaq -1(%rsi,%rcx), %rsi\n    leaq -1(%rdi,%rcx), %rdi\n    std\n    rep movsb\n    cld\n    jmp "
-        ) || !instruction_label(context, instruction_id, "copy_done") ||
-        !literal(context, "\n") ||
-        !instruction_label(context, instruction_id, "copy_forward") ||
-        !literal(context, ":\n    cld\n    rep movsb\n") ||
-        !instruction_label(context, instruction_id, "copy_done") ||
-        !literal(context, ":\n")) {
-        return false;
-    }
-    return true;
-}
-
-fn indirect_load_mnemonic(record: *const type_info::Record) -> *const u8 {
-    if (record == null) {
-        return null;
-    }
-    if (record->kind == type_info::Kind.float_32) {
-        return "movss";
-    }
-    if (record->kind == type_info::Kind.float_64) {
-        return "movsd";
-    }
-    let width: usize = bit_width(record);
-    if (width == 8) {
-        return "movzbl";
-    }
-    if (width == 16) {
-        return "movzwl";
-    }
-    if (width == 32) {
-        return "movl";
-    }
-    return width == 64 ? "movq" : null;
-}
-
-fn emit_load_indirect(
-    context: *Context, instruction: ir::Instruction) -> bool {
-    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
-    let pointer_record: *const type_info::Record =
-        type(context, values[instruction.left].type_id);
-    let record: *const type_info::Record = type(context, instruction.type_id);
-    let mnemonic: *const u8 = indirect_load_mnemonic(record);
-    if (pointer_record == null || record == null || mnemonic == null ||
-        !load_rax(
-            context, instruction.left, pointer_record)) {
-        return false;
-    }
-    if (type_info::is_float(record->kind)) {
-        return literal(context, "    ") &&
-            literal(context, mnemonic) &&
-            literal(context, " (%rax), %xmm0\n") &&
-            store_xmm(context, instruction.result, record, "%xmm0");
-    }
-    if (!literal(context, "    ") || !literal(context, mnemonic) ||
-        !literal(context, " (%rax), ") ||
-        !literal(
-            context, bit_width(record) <= 32 ? "%eax\n" : "%rax\n")) {
-        return false;
-    }
-    if (record->kind == type_info::Kind.boolean &&
-        !literal(
-            context, "    testl %eax, %eax\n    setne %al\n    movzbl %al, %eax\n")) {
-        return false;
-    }
-    return store_rax(context, instruction.result, record);
-}
-
-fn emit_store_indirect(
-    context: *Context, instruction: ir::Instruction) -> bool {
-    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
-    let pointer_record: *const type_info::Record =
-        type(context, values[instruction.left].type_id);
-    let record: *const type_info::Record = type(context, instruction.type_id);
-    if (pointer_record == null || record == null ||
-        !load_rax(
-            context, instruction.left, pointer_record)) {
-        return false;
-    }
-    if (type_info::is_float(record->kind)) {
-        return load_xmm(context, instruction.right, record, "%xmm0") &&
-            literal(context, "    ") &&
-            literal(context, float_move(record)) &&
-            literal(context, " %xmm0, (%rax)\n");
-    }
-    if (!load_rcx(
-            context, instruction.right, record)) {
-        return false;
-    }
-    let width: usize = bit_width(record);
-    return literal(
-            context, width == 8 ? "    movb %cl, (%rax)\n" : width == 16 ? "    movw %cx, (%rax)\n" :
-            width == 32 ? "    movl %ecx, (%rax)\n" : "    movq %rcx, (%rax)\n");
-}
-
-fn emit_slot_access(
-    context: *Context, instruction: ir::Instruction) -> bool {
-    let record: *const type_info::Record = type(context, instruction.type_id);
-    if (record == null) {
-        return false;
-    }
-    if (instruction.opcode == ir::Opcode.load) {
-        if (type_info::is_float(record->kind)) {
-            return literal(context, "    ") &&
-                literal(context, float_move(record)) &&
-                literal(context, " ") &&
-                append_slot(context, instruction.auxiliary) &&
-                literal(context, ", %xmm0\n") &&
-                store_xmm(context, instruction.result, record, "%xmm0");
-        }
-        let width: usize = bit_width(record);
-        if (!literal(context, width <= 32 ? "    movl " : "    movq ") ||
-            !append_slot(context, instruction.auxiliary) ||
-            !literal(
-                context, width <= 32 ? ", %eax\n" : ", %rax\n")) {
-            return false;
-        }
-        if (record->kind == type_info::Kind.boolean &&
-            !literal(
-                context, "    testl %eax, %eax\n    setne %al\n    movzbl %al, %eax\n")) {
-            return false;
-        }
-        return store_rax(context, instruction.result, record);
-    }
-    if (instruction.opcode == ir::Opcode.store) {
-        if (type_info::is_float(record->kind)) {
-            return load_xmm(context, instruction.left, record, "%xmm0") &&
-                literal(context, "    ") &&
-                literal(context, float_move(record)) &&
-                literal(context, " %xmm0, ") &&
-                append_slot(context, instruction.auxiliary) &&
-                literal(context, "\n");
-        }
-        let width: usize = bit_width(record);
-        return load_rax(context, instruction.left, record) &&
-            literal(context, width <= 32 ? "    movl %eax, " : "    movq %rax, ") &&
-            append_slot(context, instruction.auxiliary) &&
-            literal(context, "\n");
-    }
-    return fail(context, runtime::Error.invalid_argument);
-}
-
-fn emit_check(
-    context: *Context, instruction: ir::Instruction, instruction_id: usize) -> bool {
-    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
-    let left_record: *const type_info::Record =
-        type(context, values[instruction.left].type_id);
-    if (left_record == null ||
-        !load_rax(
-            context, instruction.left, left_record)) {
-        return false;
-    }
-    if (instruction.opcode == ir::Opcode.null_check) {
-        return literal(context, "    testq %rax, %rax\n    jne ") &&
-            instruction_label(context, instruction_id, "check_ok") &&
-            literal(context, "\n    ud2\n") &&
-            instruction_label(context, instruction_id, "check_ok") &&
-            literal(context, ":\n");
-    }
-    let right_record: *const type_info::Record =
-        type(context, values[instruction.right].type_id);
-    return right_record != null && load_rcx(context, instruction.right, right_record) &&
-        literal(context, "    cmpq %rcx, %rax\n    jb ") &&
-        instruction_label(context, instruction_id, "check_ok") &&
-        literal(context, "\n    ud2\n") &&
-        instruction_label(context, instruction_id, "check_ok") &&
-        literal(context, ":\n");
-}
-
-fn emit_unary(
-    context: *Context, instruction: ir::Instruction) -> bool {
-    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
-    let record: *const type_info::Record = type(context, values[instruction.left].type_id);
-    if (record == null) {
-        return false;
-    }
-    if (instruction.opcode == ir::Opcode.boolean_not) {
-        return load_rax(context, instruction.left, record) &&
-            literal(context, "    testl %eax, %eax\n    sete %al\n    movzbl %al, %eax\n") &&
-            store_rax(
-                context, instruction.result, type(context, instruction.type_id));
-    }
-    if (instruction.opcode == ir::Opcode.unary_float) {
-        let width: usize = bit_width(record);
-        return load_rax(context, instruction.left, record) &&
-            literal(
-                context, width == 32 ? "    xorl $0x80000000, %eax\n" :
-                    "    movabsq $0x8000000000000000, %rcx\n    xorq %rcx, %rax\n") &&
-            store_rax(context, instruction.result, record);
-    }
-    let width: usize = bit_width(record);
-    let mnemonic: *const u8 = instruction.operation == lexer::TokenKind.minus ? (width <= 32 ? "    negl %eax\n" :
-                "    negq %rax\n") : (width <= 32 ? "    notl %eax\n" : "    notq %rax\n");
-    return load_rax(context, instruction.left, record) &&
-        literal(context, mnemonic) &&
-        store_rax(context, instruction.result, record);
-}
-
-fn binary_mnemonic(operation: lexer::TokenKind, width: usize) -> *const u8 {
-    if (operation == lexer::TokenKind.plus) {
-        return width <= 32 ? "addl" : "addq";
-    }
-    if (operation == lexer::TokenKind.minus) {
-        return width <= 32 ? "subl" : "subq";
-    }
-    if (operation == lexer::TokenKind.star) {
-        return width <= 32 ? "imull" : "imulq";
-    }
-    if (operation == lexer::TokenKind.ampersand) {
-        return width <= 32 ? "andl" : "andq";
-    }
-    if (operation == lexer::TokenKind.pipe) {
-        return width <= 32 ? "orl" : "orq";
-    }
-    if (operation == lexer::TokenKind.caret) {
-        return width <= 32 ? "xorl" : "xorq";
-    }
-    return null;
-}
-
-fn emit_division(
-    context: *Context, instruction: ir::Instruction, record: *const type_info::Record,
-    instruction_id: usize) -> bool {
-    let width: usize = bit_width(record);
-    let signed_value: bool = is_signed(context, record);
-    if (width < 32 && signed_value) {
-        if (!load_integer(context, instruction.left, record, "%eax", "%rax", true) ||
-            !load_integer(context, instruction.right, record, "%ecx", "%rcx", true) ||
-            !literal(
-                context, width == 8 ? "    cmpl $-128, %eax\n" : "    cmpl $-32768, %eax\n") ||
-            !literal(context, "    jne ") ||
-            !instruction_label(context, instruction_id, "division_safe") ||
-            !literal(context, "\n    cmpl $-1, %ecx\n    jne ") ||
-            !instruction_label(context, instruction_id, "division_safe") ||
-            !literal(context, "\n    xorl %edx, %edx\n    xorl %ecx, %ecx\n    divl %ecx\n") ||
-            !instruction_label(context, instruction_id, "division_safe") ||
-            !literal(
-                context, ":\n    cltd\n    idivl %ecx\n")) {
-            return false;
-        }
-    } else {
-        if (!load_rax(context, instruction.left, record) ||
-            !load_rcx(
-                context, instruction.right, record)) {
-            return false;
-        }
-        if (width <= 32) {
-            if (!literal(
-                    context, signed_value ? "    cltd\n    idivl %ecx\n" : "    xorl %edx, %edx\n    divl %ecx\n")) {
-                return false;
-            }
-        } else if (!literal(
-                context, signed_value ? "    cqto\n    idivq %rcx\n" : "    xorq %rdx, %rdx\n    divq %rcx\n")) {
-            return false;
-        }
-    }
-    if (instruction.operation == lexer::TokenKind.percent &&
-        !literal(
-            context, width <= 32 ? "    movl %edx, %eax\n" : "    movq %rdx, %rax\n")) {
-        return false;
-    }
-    return store_rax(context, instruction.result, record);
-}
-
-fn emit_binary_integer(
-    context: *Context, instruction: ir::Instruction, instruction_id: usize) -> bool {
-    let record: *const type_info::Record = type(context, instruction.type_id);
-    if (record == null) {
-        return false;
-    }
-    let width: usize = bit_width(record);
-    if (instruction.operation == lexer::TokenKind.slash || instruction.operation == lexer::TokenKind.percent) {
-        return emit_division(context, instruction, record, instruction_id);
-    }
-    if (instruction.operation == lexer::TokenKind.shift_left || instruction.operation ==
-            lexer::TokenKind.shift_right) {
-        let signed_narrow_right: bool = instruction.operation == lexer::TokenKind.shift_right &&
-            is_signed(context, record) && width < 32;
-        if (!(signed_narrow_right ?
-                load_integer(context, instruction.left, record, "%eax", "%rax", true) :
-                load_rax(
-                    context, instruction.left, record)) ||
-            !load_rcx(
-                context, instruction.right, record)) {
-            return false;
-        }
-        if (width < 32 && (!literal(context, "    andl $") ||
-            !append_usize(context, width - 1) ||
-            !literal(
-                context, ", %ecx\n"))) {
-            return false;
-        }
-        let mnemonic: *const u8 = instruction.operation == lexer::TokenKind.shift_left ?
-                (width <= 32 ? "    shll %cl, %eax\n" : "    shlq %cl, %rax\n") :
-                (is_signed(context, record) ?
-                    (width <= 32 ? "    sarl %cl, %eax\n" : "    sarq %cl, %rax\n") : (width <= 32 ?
-                        "    shrl %cl, %eax\n" : "    shrq %cl, %rax\n"));
-        return literal(context, mnemonic) &&
-            store_rax(context, instruction.result, record);
-    }
-    let mnemonic: *const u8 = binary_mnemonic(instruction.operation, width);
-    if (mnemonic == null || !load_rax(context, instruction.left, record) ||
-        !load_rcx(context, instruction.right, record) ||
-        !literal(context, "    ") || !literal(context, mnemonic) ||
-        !literal(context, " ") ||
-        !literal(
-            context, width <= 32 ? "%ecx, %eax\n" : "%rcx, %rax\n")) {
-        return false;
-    }
-    return store_rax(context, instruction.result, record);
-}
-
-fn emit_binary_float(
-    context: *Context, instruction: ir::Instruction) -> bool {
-    let record: *const type_info::Record = type(context, instruction.type_id);
-    if (record == null ||
-        !load_xmm(
-            context, instruction.left, record, "%xmm0")) {
-        return false;
-    }
-    var mnemonic: *const u8 = null;
-    if (instruction.opcode == ir::Opcode.float_min) {
-        mnemonic = record->kind == type_info::Kind.float_32 ? "minss" : "minsd";
-    } else if (instruction.opcode == ir::Opcode.float_max) {
-        mnemonic = record->kind == type_info::Kind.float_32 ? "maxss" : "maxsd";
-    } else if (instruction.operation == lexer::TokenKind.plus) {
-        mnemonic = record->kind == type_info::Kind.float_32 ? "addss" : "addsd";
-    } else if (instruction.operation == lexer::TokenKind.minus) {
-        mnemonic = record->kind == type_info::Kind.float_32 ? "subss" : "subsd";
-    } else if (instruction.operation == lexer::TokenKind.star) {
-        mnemonic = record->kind == type_info::Kind.float_32 ? "mulss" : "mulsd";
-    } else if (instruction.operation == lexer::TokenKind.slash) {
-        mnemonic = record->kind == type_info::Kind.float_32 ? "divss" : "divsd";
-    }
-    if (mnemonic == null || !literal(context, "    ") ||
-        !literal(context, mnemonic) || !literal(context, " ") ||
-        !append_value(context, instruction.right) ||
-        !literal(
-            context, ", %xmm0\n")) {
-        return false;
-    }
-    return store_xmm(context, instruction.result, record, "%xmm0");
-}
-
-fn emit_float_sqrt(
-    context: *Context, instruction: ir::Instruction) -> bool {
-    let record: *const type_info::Record = type(context, instruction.type_id);
-    return record != null && load_xmm(context, instruction.left, record, "%xmm0") &&
-        literal(
-            context, record->kind == type_info::Kind.float_32 ? "    sqrtss %xmm0, %xmm0\n" :
-                "    sqrtsd %xmm0, %xmm0\n") &&
-        store_xmm(context, instruction.result, record, "%xmm0");
-}
-
-// Reads the flags left by the immediately preceding 64-bit add/sub/imul (auxiliary != 0 selects the signed
-// overflow flag, otherwise the carry flag). Every emission between that arithmetic and this setcc is a mov,
-// which does not modify flags.
-fn emit_overflow_flag(
-    context: *Context, instruction: ir::Instruction) -> bool {
-    let record: *const type_info::Record = type(context, instruction.type_id);
-    if (record == null) {
-        return false;
-    }
-    return literal(
-            context, instruction.auxiliary != 0 ? "    seto %al\n" : "    setc %al\n") &&
-        literal(context, "    movzbl %al, %eax\n") &&
-        store_rax(context, instruction.result, record);
-}
-
-fn condition(operation: lexer::TokenKind, signed_value: bool) -> *const u8 {
-    if (operation == lexer::TokenKind.equal_equal) {
-        return "sete";
-    }
-    if (operation == lexer::TokenKind.bang_equal) {
-        return "setne";
-    }
-    if (operation == lexer::TokenKind.less) {
-        return signed_value ? "setl" : "setb";
-    }
-    if (operation == lexer::TokenKind.less_equal) {
-        return signed_value ? "setle" : "setbe";
-    }
-    if (operation == lexer::TokenKind.greater) {
-        return signed_value ? "setg" : "seta";
-    }
-    if (operation == lexer::TokenKind.greater_equal) {
-        return signed_value ? "setge" : "setae";
-    }
-    return null;
-}
-
-fn emit_compare_float(
-    context: *Context, instruction: ir::Instruction, record: *const type_info::Record
-) -> bool {
-    if (!load_xmm(context, instruction.left, record, "%xmm0") ||
-        !literal(
-            context, record->kind == type_info::Kind.float_32 ? "    ucomiss " : "    ucomisd ") ||
-        !append_value(context, instruction.right) ||
-        !literal(
-            context, ", %xmm0\n")) {
-        return false;
-    }
-    var sequence: *const u8 = null;
-    if (instruction.operation == lexer::TokenKind.equal_equal) {
-        sequence = "    sete %al\n    setnp %cl\n    andb %cl, %al\n";
-    } else if (instruction.operation == lexer::TokenKind.bang_equal) {
-        sequence = "    setne %al\n    setp %cl\n    orb %cl, %al\n";
-    } else if (instruction.operation == lexer::TokenKind.less) {
-        sequence = "    setb %al\n    setnp %cl\n    andb %cl, %al\n";
-    } else if (instruction.operation == lexer::TokenKind.less_equal) {
-        sequence = "    setbe %al\n    setnp %cl\n    andb %cl, %al\n";
-    } else if (instruction.operation == lexer::TokenKind.greater) {
-        sequence = "    seta %al\n";
-    } else if (instruction.operation == lexer::TokenKind.greater_equal) {
-        sequence = "    setae %al\n";
-    }
-    return sequence != null && literal(context, sequence) &&
-        literal(context, "    movzbl %al, %eax\n") &&
-        store_rax(
-            context, instruction.result, type(context, instruction.type_id));
-}
-
-fn emit_compare(
-    context: *Context, instruction: ir::Instruction) -> bool {
-    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
-    let record: *const type_info::Record = type(context, values[instruction.left].type_id);
-    if (record == null) {
-        return false;
-    }
-    if (type_info::is_float(record->kind)) {
-        return emit_compare_float(context, instruction, record);
-    }
-    let condition: *const u8 =
-        condition(instruction.operation, is_signed(context, record));
-    let width: usize = bit_width(record);
-    if (condition == null) {
-        return fail(context, runtime::Error.invalid_argument);
-    }
-    if (is_signed(context, record) && width < 32) {
-        if (!load_integer(context, instruction.left, record, "%eax", "%rax", true) ||
-            !load_integer(context, instruction.right, record, "%ecx", "%rcx", true) ||
-            !literal(
-                context, "    cmpl %ecx, %eax\n")) {
-            return false;
-        }
-    } else if (!load_rax(context, instruction.left, record) ||
-        !load_rcx(context, instruction.right, record) ||
-        !literal(
-            context, width <= 32 ? "    cmpl %ecx, %eax\n" : "    cmpq %rcx, %rax\n")) {
-        return false;
-    }
-    return literal(context, "    ") && literal(context, condition) &&
-        literal(context, " %al\n    movzbl %al, %eax\n") &&
-        store_rax(
-            context, instruction.result, type(context, instruction.type_id));
-}
-
-fn float_power_bits(
-    record: *const type_info::Record, exponent: usize, negative: bool) -> u64 {
-    if (record->kind == type_info::Kind.float_32) {
-        let sign: u64 = negative ? 2147483648 : 0;
-        return sign | ((exponent as u64 + 127) << 23);
-    }
-    let sign: u64 = negative ? 9223372036854775808 : 0;
-    return sign | ((exponent as u64 + 1023) << 52);
-}
-
-fn float_maximum_bits(record: *const type_info::Record, integer_width: usize) -> u64 {
-    let precision: usize = record->kind == type_info::Kind.float_32 ? 24 : 53;
-    let fraction_width: usize = record->kind == type_info::Kind.float_32 ? 23 : 52;
-    let bias: usize = record->kind == type_info::Kind.float_32 ? 127 : 1023;
-    let fraction: u64 = ((1 as u64 << ((integer_width - 1) as u64)) - 1) << ((precision - integer_width) as u64);
-    return (((integer_width - 1 + bias) as u64) << (fraction_width as u64)) | fraction;
-}
-
-fn emit_float_bits_xmm1(
-    context: *Context, record: *const type_info::Record, bits: u64) -> bool {
-    if (record->kind == type_info::Kind.float_32) {
-        return literal(context, "    movl $0x") &&
-            hex(context, bits & 4294967295, 8) &&
-            literal(context, ", %eax\n    movd %eax, %xmm1\n");
-    }
-    return literal(context, "    movabsq $0x") &&
-        hex(context, bits, 16) &&
-        literal(context, ", %rax\n    movq %rax, %xmm1\n");
-}
-
-fn emit_integer_conversion(
-    context: *Context, instruction: ir::Instruction, source: *const type_info::Record,
-    target: *const type_info::Record) -> bool {
-    let source_width: usize = bit_width(source);
-    let target_width: usize = bit_width(target);
-    let signed_source: bool = is_signed(context, source);
-    // A signed source widens by sign extension at any wider target width,
-    // not only 64-bit targets: value homes are zero-masked, so a plain movl
-    // would turn a negative i8/i16 into a large positive i32.
-    if (signed_source && source_width < 64 && target_width > source_width) {
-        if (!load_signed_rax(
-                context, instruction.left, source)) {
-            return false;
-        }
-    } else if (!load_rax(
-            context, instruction.left, source)) {
-        return false;
-    }
-    return store_rax(context, instruction.result, target);
-}
-
-fn emit_integer_to_float(
-    context: *Context, instruction: ir::Instruction, source: *const type_info::Record,
-    target: *const type_info::Record, instruction_id: usize) -> bool {
-    let source_width: usize = bit_width(source);
-    let signed_source: bool = is_signed(context, source);
-    let convert: *const u8 = target->kind == type_info::Kind.float_32 ? "    cvtsi2ssq %rax, %xmm0\n" :
-            "    cvtsi2sdq %rax, %xmm0\n";
-    let add: *const u8 = target->kind == type_info::Kind.float_32 ? "    addss %xmm0, %xmm0\n" :
-            "    addsd %xmm0, %xmm0\n";
-    if (signed_source && source_width < 64) {
-        if (!load_signed_rax(
-                context, instruction.left, source)) {
-            return false;
-        }
-    } else if (!load_rax(
-            context, instruction.left, source)) {
-        return false;
-    }
-    if (signed_source || source_width < 64) {
-        if (!literal(
-                context, convert)) {
-            return false;
-        }
-    } else if (!literal(context, "    testq %rax, %rax\n    js ") ||
-        !instruction_label(context, instruction_id, "uitofp_large") ||
-        !literal(context, "\n") || !literal(context, convert) ||
-        !literal(context, "    jmp ") ||
-        !instruction_label(context, instruction_id, "uitofp_done") ||
-        !literal(context, "\n") ||
-        !instruction_label(context, instruction_id, "uitofp_large") ||
-        !literal(
-            context, ":\n    movq %rax, %rdx\n    shrq $1, %rax\n    andl $1, %edx\n    orq %rdx, %rax\n") ||
-        !literal(context, convert) || !literal(context, add) ||
-        !instruction_label(context, instruction_id, "uitofp_done") ||
-        !literal(context, ":\n")) {
-        return false;
-    }
-    return store_xmm(context, instruction.result, target, "%xmm0");
-}
-
-fn emit_float_range_check(
-    context: *Context, instruction: ir::Instruction, source: *const type_info::Record,
-    target: *const type_info::Record, instruction_id: usize) -> bool {
-    let target_width: usize = bit_width(target);
-    let signed_target: bool = is_signed(context, target);
-    let bound_exponent: usize = signed_target ? target_width - 1 : target_width;
-    let maximum_width: usize = signed_target ? target_width - 1 : target_width;
-    let precision: usize = source->kind == type_info::Kind.float_32 ? 24 : 53;
-    let exact_maximum: bool = maximum_width <= precision;
-    let lower_bits: u64 = signed_target ? float_power_bits(source, bound_exponent, true) : 0;
-    let upper_bits: u64 = exact_maximum ? float_maximum_bits(source, maximum_width) :
-        float_power_bits(source, bound_exponent, false);
-    let compare: *const u8 = source->kind == type_info::Kind.float_32 ? "    ucomiss %xmm1, %xmm0\n" :
-            "    ucomisd %xmm1, %xmm0\n";
-    return emit_float_bits_xmm1(context, source, lower_bits) &&
-        literal(context, compare) && literal(context, "    jb ") &&
-        instruction_label(context, instruction_id, "fptoi_trap") &&
-        literal(context, "\n") &&
-        emit_float_bits_xmm1(context, source, upper_bits) &&
-        literal(context, compare) &&
-        literal(context, exact_maximum ? "    ja " : "    jae ") &&
-        instruction_label(context, instruction_id, "fptoi_trap") &&
-        literal(context, "\n");
-}
-
-fn emit_float_to_integer(
-    context: *Context, instruction: ir::Instruction, source: *const type_info::Record,
-    target: *const type_info::Record, instruction_id: usize) -> bool {
-    if (!load_xmm(context, instruction.left, source, "%xmm0") ||
-        !emit_float_range_check(
-            context, instruction, source, target, instruction_id)) {
-        return false;
-    }
-    let target_width: usize = bit_width(target);
-    let signed_target: bool = is_signed(context, target);
-    let convert_32: *const u8 = source->kind == type_info::Kind.float_32 ? "    cvttss2si %xmm0, %eax\n" :
-            "    cvttsd2si %xmm0, %eax\n";
-    let convert_64: *const u8 = source->kind == type_info::Kind.float_32 ? "    cvttss2siq %xmm0, %rax\n" :
-            "    cvttsd2siq %xmm0, %rax\n";
-    if (signed_target) {
-        if (!literal(
-                context, target_width == 64 ? convert_64 : convert_32)) {
-            return false;
-        }
-    } else if (target_width < 64) {
-        if (!literal(
-                context, convert_64)) {
-            return false;
-        }
-    } else {
-        let split_bits: u64 = float_power_bits(source, 63, false);
-        if (!emit_float_bits_xmm1(context, source, split_bits) ||
-            !literal(
-                context, source->kind == type_info::Kind.float_32 ? "    ucomiss %xmm1, %xmm0\n" :
-                    "    ucomisd %xmm1, %xmm0\n") || !literal(context, "    jb ") ||
-            !instruction_label(context, instruction_id, "fptoi_low") ||
-            !literal(
-                context, source->kind == type_info::Kind.float_32 ? "\n    subss %xmm1, %xmm0\n" :
-                    "\n    subsd %xmm1, %xmm0\n") || !literal(context, convert_64) ||
-            !literal(
-                context, "    movabsq $0x8000000000000000, %rdx\n    orq %rdx, %rax\n    jmp ") ||
-            !instruction_label(context, instruction_id, "fptoi_converted") ||
-            !literal(context, "\n") ||
-            !instruction_label(context, instruction_id, "fptoi_low") ||
-            !literal(context, ":\n") ||
-            !literal(context, convert_64) ||
-            !instruction_label(context, instruction_id, "fptoi_converted") ||
-            !literal(context, ":\n")) {
-            return false;
-        }
-    }
-    if (!store_rax(context, instruction.result, target) ||
-        !literal(context, "    jmp ") ||
-        !instruction_label(context, instruction_id, "fptoi_done") ||
-        !literal(context, "\n") ||
-        !instruction_label(context, instruction_id, "fptoi_trap") ||
-        !literal(context, ":\n    ud2\n") ||
-        !instruction_label(context, instruction_id, "fptoi_done") ||
-        !literal(context, ":\n")) {
-        return false;
-    }
-    return true;
-}
-
-fn emit_convert(
-    context: *Context, instruction: ir::Instruction, instruction_id: usize) -> bool {
-    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
-    let source: *const type_info::Record = type(context, values[instruction.left].type_id);
-    let target: *const type_info::Record = type(context, instruction.type_id);
-    if (source == null || target == null) {
-        return false;
-    }
-    if (type_info::is_float(source->kind) && type_info::is_float(target->kind)) {
-        return load_xmm(context, instruction.left, source, "%xmm0") &&
-            literal(
-                context, source->kind == type_info::Kind.float_32 ? "    cvtss2sd %xmm0, %xmm0\n" :
-                    "    cvtsd2ss %xmm0, %xmm0\n") &&
-            store_xmm(context, instruction.result, target, "%xmm0");
-    }
-    if (type_info::is_float(target->kind)) {
-        return emit_integer_to_float(context, instruction, source, target, instruction_id);
-    }
-    if (type_info::is_float(source->kind)) {
-        return emit_float_to_integer(context, instruction, source, target, instruction_id);
-    }
-    return emit_integer_conversion(context, instruction, source, target);
-}
-
-fn general_register_64(index: usize) -> *const u8 {
-    if (index == 0) {
-        return "%rdi";
-    }
-    if (index == 1) {
-        return "%rsi";
-    }
-    if (index == 2) {
-        return "%rdx";
-    }
-    if (index == 3) {
-        return "%rcx";
-    }
-    if (index == 4) {
-        return "%r8";
-    }
-    return index == 5 ? "%r9" : null;
-}
-
-fn general_register_32(index: usize) -> *const u8 {
-    if (index == 0) {
-        return "%edi";
-    }
-    if (index == 1) {
-        return "%esi";
-    }
-    if (index == 2) {
-        return "%edx";
-    }
-    if (index == 3) {
-        return "%ecx";
-    }
-    if (index == 4) {
-        return "%r8d";
-    }
-    return index == 5 ? "%r9d" : null;
-}
-
-fn vector_register(index: usize) -> *const u8 {
-    if (index == 0) {
-        return "%xmm0";
-    }
-    if (index == 1) {
-        return "%xmm1";
-    }
-    if (index == 2) {
-        return "%xmm2";
-    }
-    if (index == 3) {
-        return "%xmm3";
-    }
-    if (index == 4) {
-        return "%xmm4";
-    }
-    if (index == 5) {
-        return "%xmm5";
-    }
-    if (index == 6) {
-        return "%xmm6";
-    }
-    return index == 7 ? "%xmm7" : null;
-}
-
-fn return_general_register(index: usize) -> *const u8 {
-    if (index == 0) {
-        return "%rax";
-    }
-    return index == 1 ? "%rdx" : null;
-}
-
-fn argument_at(
-    context: *Context, instruction_id: usize, argument_index: usize) -> usize {
-    let arguments: *const ir::Argument = context->ir.arguments.data as
-            *const ir::Argument;
-    var found: usize = 0;
-    var index: usize = 0;
-    while (index < context->ir.argument_count) {
-        if (arguments[index].instruction_id == instruction_id) {
-            if (found == argument_index) {
-                return arguments[index].value_id;
-            }
-            found += 1;
-        }
-        index += 1;
-    }
-    fail(context, runtime::Error.invalid_argument);
-    return no_id();
-}
-
-fn call_argument_total(
-    context: *Context, instruction_id: usize) -> usize {
-    let arguments: *const ir::Argument = context->ir.arguments.data as
-            *const ir::Argument;
-    var found: usize = 0;
-    var index: usize = 0;
-    while (index < context->ir.argument_count) {
-        if (arguments[index].instruction_id == instruction_id) {
-            found += 1;
-        }
-        index += 1;
-    }
-    return found;
-}
-
-// Classifies one scalar variadic extra against the running register/stack
-// cursors, continuing where the named parameters left off, and synthesizes
-// the ABI parameter record the call argument emitters already consume.
-fn variadic_extra_parameter(
-    context: *Context, argument: usize, general_used: *usize, vector_used: *usize,
-    stack_cursor: *usize) -> abi::Parameter {
-    let none: usize = no_id();
-    var parameter: abi::Parameter = {
-        function_id = none, parameter_index = none, abi_class = abi::Class.invalid,
-        location = abi::LocationKind.invalid, register_index = none, stack_offset_bytes = none,
-        stack_size_bytes = 0, type_id = none, size_bytes = 0, alignment_bytes = 0, first_piece = none, piece_count = 0,
-        aggregate = false,
-    };
-    if (general_used == null || vector_used == null || stack_cursor == null || context->error != runtime::Error.none) {
-        return parameter;
-    }
-    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
-    let record: *const type_info::Record = type(context, values[argument].type_id);
-    if (record == null || type_info::is_memory(record->kind)) {
-        return parameter;
-    }
-    parameter.type_id = values[argument].type_id;
-    parameter.size_bytes = record->size_bytes;
-    parameter.alignment_bytes = record->alignment_bytes;
-    parameter.abi_class = type_info::is_float(record->kind) ? abi::Class.sse :
-            abi::Class.integer;
-    if (parameter.abi_class == abi::Class.integer && *general_used <
-            (Limit.general_argument_registers as usize)) {
-        parameter.location = abi::LocationKind.general_register;
-        parameter.register_index = *general_used;
-        *general_used += 1;
-        return parameter;
-    }
-    if (parameter.abi_class == abi::Class.sse && *vector_used <
-            (Limit.vector_argument_registers as usize)) {
-        parameter.location = abi::LocationKind.vector_register;
-        parameter.register_index = *vector_used;
-        *vector_used += 1;
-        return parameter;
-    }
-    parameter.location = abi::LocationKind.stack;
-    parameter.stack_offset_bytes = *stack_cursor;
-    parameter.stack_size_bytes = Limit.variadic_stack_slot as usize;
-    *stack_cursor += Limit.variadic_stack_slot as usize;
-    return parameter;
-}
-
-fn emit_load_piece(
-    context: *Context, piece: abi::Piece, destination: *const u8) -> bool {
-    if (piece.size_bytes == 8) {
-        return literal(context, "    movq ") &&
-            append_usize(context, piece.value_offset_bytes) &&
-            literal(context, "(%r11), ") &&
-            literal(context, destination) && literal(context, "\n");
-    }
-    if (piece.size_bytes == 4) {
-        return literal(context, "    movl ") &&
-            append_usize(context, piece.value_offset_bytes) &&
-            literal(context, "(%r11), %eax\n    movq %rax, ") &&
-            literal(context, destination) && literal(context, "\n");
-    }
-    if (piece.size_bytes == 2) {
-        return literal(context, "    movzwl ") &&
-            append_usize(context, piece.value_offset_bytes) &&
-            literal(context, "(%r11), %eax\n    movq %rax, ") &&
-            literal(context, destination) && literal(context, "\n");
-    }
-    if (piece.size_bytes == 1) {
-        return literal(context, "    movzbl ") &&
-            append_usize(context, piece.value_offset_bytes) &&
-            literal(context, "(%r11), %eax\n    movq %rax, ") &&
-            literal(context, destination) && literal(context, "\n");
-    }
-    if (piece.size_bytes == 0 || piece.size_bytes > 8 ||
-        !literal(
-            context, "    xorq %rax, %rax\n")) {
-        return fail(context, runtime::Error.invalid_argument);
-    }
-    var index: usize = 0;
-    while (index < piece.size_bytes) {
-        if (!literal(context, "    movzbl ") ||
-            !append_usize(context, piece.value_offset_bytes + index) ||
-            !literal(context, "(%r11), %r10d\n") || (index != 0 &&
-                (!literal(context, "    shlq $") ||
-                !append_usize(context, index * 8) ||
-                !literal(
-                    context, ", %r10\n"))) ||
-            !literal(
-                context, "    orq %r10, %rax\n")) {
-            return false;
-        }
-        index += 1;
-    }
-    return literal(context, "    movq %rax, ") &&
-        literal(context, destination) && literal(context, "\n");
-}
-
-fn emit_store_piece(
-    context: *Context, piece: abi::Piece, source: *const u8) -> bool {
-    if (piece.size_bytes == 0 || piece.size_bytes > 8 || !literal(context, "    movq ") ||
-        !literal(context, source) ||
-        !literal(
-            context, ", %r10\n")) {
-        return fail(context, runtime::Error.invalid_argument);
-    }
-    var index: usize = 0;
-    while (index < piece.size_bytes) {
-        if (!literal(context, "    movb %r10b, ") ||
-            !append_usize(context, piece.value_offset_bytes + index) ||
-            !literal(context, "(%r11)\n") || (index + 1 != piece.size_bytes &&
-                !literal(
-                    context, "    shrq $8, %r10\n"))) {
-            return false;
-        }
-        index += 1;
-    }
-    return true;
-}
-
-fn emit_call_stack_argument(
-    context: *Context, parameter: abi::Parameter, argument: usize, external_c: bool
-) -> bool {
-    let record: *const type_info::Record = type(context, parameter.type_id);
-    if (record == null) {
-        return false;
-    }
-    if (parameter.aggregate) {
-        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
-        let pointer_record: *const type_info::Record =
-            type(context, values[argument].type_id);
-        return pointer_record != null &&
-            load_integer(context, argument, pointer_record, "%esi", "%rsi", false) &&
-            literal(context, "    leaq ") &&
-            append_usize(context, parameter.stack_offset_bytes) &&
-            literal(context, "(%rsp), %rdi\n    movq $") &&
-            append_usize(context, parameter.size_bytes) &&
-            literal(context, ", %rcx\n    cld\n    rep movsb\n");
-    }
-    if (type_info::is_float(record->kind)) {
-        return load_xmm(context, argument, record, "%xmm0") &&
-            literal(context, "    ") &&
-            literal(context, float_move(record)) &&
-            literal(context, " %xmm0, ") &&
-            append_usize(context, parameter.stack_offset_bytes) &&
-            literal(context, "(%rsp)\n");
-    }
-    let width: usize = bit_width(record);
-    let extend_signed: bool = external_c && is_signed(context, record) && width < 32;
-    return (extend_signed ? load_integer(context, argument, record, "%eax", "%rax", true) :
-            load_rax(
-                context, argument, record)) &&
-        literal(context, width <= 32 ? "    movl %eax, " : "    movq %rax, ") &&
-        append_usize(context, parameter.stack_offset_bytes) &&
-        literal(context, "(%rsp)\n");
-}
-
-fn emit_call_register_argument(
-    context: *Context, parameter: abi::Parameter, argument: usize, external_c: bool
-) -> bool {
-    let record: *const type_info::Record = type(context, parameter.type_id);
-    if (record == null) {
-        return false;
-    }
-    if (parameter.aggregate) {
-        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
-        let pointer_record: *const type_info::Record =
-            type(context, values[argument].type_id);
-        if (pointer_record == null ||
-            !load_integer(
-                context, argument, pointer_record, "%r11d", "%r11", false)) {
-            return false;
-        }
-        let pieces: *const abi::Piece = context->abi.pieces.data as
-                *const abi::Piece;
-        var index: usize = 0;
-        while (index < parameter.piece_count) {
-            let piece: abi::Piece = pieces[parameter.first_piece + index];
-            if (piece.abi_class == abi::Class.integer) {
-                let destination: *const u8 = general_register_64(piece.register_index);
-                if (destination == null ||
-                    !emit_load_piece(
-                        context, piece, destination)) {
-                    return false;
-                }
-            } else {
-                let destination: *const u8 = vector_register(piece.register_index);
-                if (destination == null || (piece.size_bytes != 4 && piece.size_bytes != 8) ||
-                    !literal(context, piece.size_bytes == 4 ? "    movss " : "    movq ") ||
-                    !append_usize(context, piece.value_offset_bytes) ||
-                    !literal(context, "(%r11), ") ||
-                    !literal(context, destination) ||
-                    !literal(
-                        context, "\n")) {
-                    return false;
-                }
-            }
-            index += 1;
-        }
-        return true;
-    }
-    if (parameter.location == abi::LocationKind.vector_register) {
-        let destination: *const u8 = vector_register(parameter.register_index);
-        return destination != null && load_xmm(context, argument, record, destination);
-    }
-    let width: usize = bit_width(record);
-    let destination: *const u8 = width <= 32 ? general_register_32(parameter.register_index) :
-            general_register_64(parameter.register_index);
-    if (destination == null) {
-        return fail(context, runtime::Error.invalid_argument);
-    }
-    return load_integer(
-        context, argument, record, destination, destination, external_c &&
-            is_signed(context, record) && width < 32);
-}
-
-fn emit_call_result(
-    context: *Context, instruction: ir::Instruction, function_abi: abi::Function
-) -> bool {
-    let record: *const type_info::Record = type(context, instruction.type_id);
-    if (record == null || record->kind == type_info::Kind.type_void) {
-        return record != null;
-    }
-    if (!function_abi.return_aggregate) {
-        if (type_info::is_float(record->kind)) {
-            return store_xmm(context, instruction.result, record, "%xmm0");
-        }
-        if (record->kind == type_info::Kind.boolean &&
-            !literal(
-                context, "    testl %eax, %eax\n    setne %al\n    movzbl %al, %eax\n")) {
-            return false;
-        }
-        return store_rax(context, instruction.result, record);
-    }
-    let destination: frame::Storage =
-        storage(context, frame::StorageKind.aggregate_call_result, instruction.result);
-    if (context->error != runtime::Error.none || !literal(context, "    leaq ") ||
-        !append_stack(context, destination) ||
-        !literal(
-            context, ", %r11\n")) {
-        return false;
-    }
-    if (!function_abi.hidden_return_pointer) {
-        let pieces: *const abi::Piece = context->abi.pieces.data as
-                *const abi::Piece;
-        var index: usize = 0;
-        while (index < function_abi.return_piece_count) {
-            let piece: abi::Piece = pieces[function_abi.first_return_piece + index];
-            if (piece.abi_class == abi::Class.integer) {
-                let source: *const u8 = return_general_register(piece.register_index);
-                if (source == null ||
-                    !emit_store_piece(
-                        context, piece, source)) {
-                    return false;
-                }
-            } else {
-                let source: *const u8 = vector_register(piece.register_index);
-                if (source == null || (piece.size_bytes != 4 && piece.size_bytes != 8) ||
-                    !literal(context, piece.size_bytes == 4 ? "    movss " : "    movq ") ||
-                    !literal(context, source) ||
-                    !literal(context, ", ") ||
-                    !append_usize(context, piece.value_offset_bytes) ||
-                    !literal(
-                        context, "(%r11)\n")) {
-                    return false;
-                }
-            }
-            index += 1;
-        }
-    }
-    return literal(context, "    leaq ") &&
-        append_stack(context, destination) &&
-        literal(context, ", %rax\n    movq %rax, ") &&
-        append_value(context, instruction.result) &&
-        literal(context, "\n");
-}
-
-fn function_pointer_abi_index(
-    context: *Context, type_id: usize) -> usize {
-    let records: *const type_info::Record = context->types.types.data as
-            *const type_info::Record;
-    var ordinal: usize = 0;
-    var index: usize = 0;
-    while (index < type_id) {
-        if (records[index].kind == type_info::Kind.function_pointer) {
-            ordinal += 1;
-        }
-        index += 1;
-    }
-    return context->ir.function_count + ordinal;
-}
-
-fn emit_call_indirect(
-    context: *Context, instruction: ir::Instruction, instruction_id: usize) -> bool {
-    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
-    let callee_type: usize = values[instruction.left].type_id;
-    let abi_index: usize = function_pointer_abi_index(context, callee_type);
-    let abi_functions: *const abi::Function = context->abi.functions.data as
-            *const abi::Function;
-    let function_abi: abi::Function = abi_functions[abi_index];
-    let parameters: *const abi::Parameter = context->abi.parameters.data as
-            *const abi::Parameter;
-    if (function_abi.call_frame_size_bytes != 0 && (!literal(context, "    subq $") ||
-        !append_usize(context, function_abi.call_frame_size_bytes) ||
-        !literal(
-            context, ", %rsp\n"))) {
-        return false;
-    }
-    context->call_frame_depth += function_abi.call_frame_size_bytes;
-    var index: usize = 0;
-    while (index < function_abi.parameter_count) {
-        let parameter: abi::Parameter = parameters[function_abi.first_parameter + index];
-        if (parameter.location == abi::LocationKind.stack) {
-            let argument: usize = argument_at(context, instruction_id, index);
-            if (argument == no_id() ||
-                !emit_call_stack_argument(
-                    context, parameter, argument, false)) {
-                return false;
-            }
-        }
-        index += 1;
-    }
-    if (function_abi.hidden_return_pointer) {
-        let destination: frame::Storage =
-            storage(
-                context, frame::StorageKind.aggregate_call_result, instruction.result);
-        if (context->error != runtime::Error.none || !literal(context, "    leaq ") ||
-            !append_stack(context, destination) ||
-            !literal(
-                context, ", %rdi\n")) {
-            return false;
-        }
-    }
-    index = 0;
-    while (index < function_abi.parameter_count) {
-        let parameter: abi::Parameter = parameters[function_abi.first_parameter + index];
-        if (parameter.location != abi::LocationKind.stack) {
-            let argument: usize = argument_at(context, instruction_id, index);
-            if (argument == no_id() ||
-                !emit_call_register_argument(
-                    context, parameter, argument, false)) {
-                return false;
-            }
-        }
-        index += 1;
-    }
-    if (!load_rax(
-            context, instruction.left, type(context, callee_type)) ||
-        !literal(
-            context, "    movq %rax, %r11\n    call *%r11\n")) {
-        return false;
-    }
-    context->call_frame_depth -= function_abi.call_frame_size_bytes;
-    if (function_abi.call_frame_size_bytes != 0 && (!literal(context, "    addq $") ||
-        !append_usize(context, function_abi.call_frame_size_bytes) ||
-        !literal(
-            context, ", %rsp\n"))) {
-        return false;
-    }
-    return emit_call_result(context, instruction, function_abi);
-}
-
-fn emit_call(
-    context: *Context, instruction: ir::Instruction, instruction_id: usize) -> bool {
-    if (instruction.auxiliary >= context->ir.function_count) {
-        return fail(context, runtime::Error.invalid_argument);
-    }
-    let abi_functions: *const abi::Function = context->abi.functions.data as
-            *const abi::Function;
-    let function_abi: abi::Function = abi_functions[instruction.auxiliary];
-    let functions: *const ir::Function = context->ir.functions.data as
-            *const ir::Function;
-    let external_c: bool = functions[instruction.auxiliary].linkage == ir::Linkage.external_c;
-    let parameters: *const abi::Parameter = context->abi.parameters.data as
-            *const abi::Parameter;
-    // A variadic callee takes extra arguments past its named parameters; they
-    // classify against cursors continuing where the named list stopped, and
-    // the call must set %al to the total number of vector registers used.
-    let variadic: bool = functions[instruction.auxiliary].variadic;
-    var extra_count: usize = 0;
-    var vector_count: usize = function_abi.vector_register_count;
-    var frame_size: usize = function_abi.call_frame_size_bytes;
-    if (variadic) {
-        extra_count = call_argument_total(context, instruction_id) -
-            function_abi.parameter_count;
-        var general_used: usize = function_abi.general_register_count;
-        var stack_cursor: usize = function_abi.stack_argument_size_bytes;
-        var extra: usize = 0;
-        while (extra < extra_count) {
-            let argument: usize = argument_at(
-                context, instruction_id, function_abi.parameter_count + extra);
-            if (argument == no_id() ||
-                variadic_extra_parameter(
-                        context, argument, &general_used, &vector_count, &stack_cursor).location ==
-                    abi::LocationKind.invalid) {
-                return fail(context, runtime::Error.invalid_argument);
-            }
-            extra += 1;
-        }
-        frame_size = (stack_cursor + (Limit.call_stack_alignment as usize) - 1) &
-            ~((Limit.call_stack_alignment as usize) - 1);
-    }
-    if (frame_size != 0 && (!literal(context, "    subq $") ||
-        !append_usize(context, frame_size) ||
-        !literal(
-            context, ", %rsp\n"))) {
-        return false;
-    }
-    context->call_frame_depth += frame_size;
-    var index: usize = 0;
-    while (index < function_abi.parameter_count) {
-        let parameter: abi::Parameter = parameters[function_abi.first_parameter + index];
-        if (parameter.location == abi::LocationKind.stack) {
-            let argument: usize = argument_at(context, instruction_id, index);
-            if (argument == no_id() ||
-                !emit_call_stack_argument(
-                    context, parameter, argument, external_c)) {
-                return false;
-            }
-        }
-        index += 1;
-    }
-    if (variadic) {
-        var general_used: usize = function_abi.general_register_count;
-        var vector_used: usize = function_abi.vector_register_count;
-        var stack_cursor: usize = function_abi.stack_argument_size_bytes;
-        var extra: usize = 0;
-        while (extra < extra_count) {
-            let argument: usize = argument_at(
-                context, instruction_id, function_abi.parameter_count + extra);
-            let parameter: abi::Parameter = variadic_extra_parameter(
-                context, argument, &general_used, &vector_used, &stack_cursor);
-            if (parameter.location == abi::LocationKind.invalid) {
-                return fail(context, runtime::Error.invalid_argument);
-            }
-            if (parameter.location == abi::LocationKind.stack &&
-                !emit_call_stack_argument(
-                    context, parameter, argument, external_c)) {
-                return false;
-            }
-            extra += 1;
-        }
-    }
-    if (function_abi.hidden_return_pointer) {
-        let destination: frame::Storage =
-            storage(
-                context, frame::StorageKind.aggregate_call_result, instruction.result);
-        if (context->error != runtime::Error.none || !literal(context, "    leaq ") ||
-            !append_stack(context, destination) ||
-            !literal(
-                context, ", %rdi\n")) {
-            return false;
-        }
-    }
-    index = 0;
-    while (index < function_abi.parameter_count) {
-        let parameter: abi::Parameter = parameters[function_abi.first_parameter + index];
-        if (parameter.location != abi::LocationKind.stack) {
-            let argument: usize = argument_at(context, instruction_id, index);
-            if (argument == no_id() ||
-                !emit_call_register_argument(
-                    context, parameter, argument, external_c)) {
-                return false;
-            }
-        }
-        index += 1;
-    }
-    if (variadic) {
-        var general_used: usize = function_abi.general_register_count;
-        var vector_used: usize = function_abi.vector_register_count;
-        var stack_cursor: usize = function_abi.stack_argument_size_bytes;
-        var extra: usize = 0;
-        while (extra < extra_count) {
-            let argument: usize = argument_at(
-                context, instruction_id, function_abi.parameter_count + extra);
-            let parameter: abi::Parameter = variadic_extra_parameter(
-                context, argument, &general_used, &vector_used, &stack_cursor);
-            if (parameter.location == abi::LocationKind.invalid) {
-                return fail(context, runtime::Error.invalid_argument);
-            }
-            if (parameter.location != abi::LocationKind.stack &&
-                !emit_call_register_argument(
-                    context, parameter, argument, external_c)) {
-                return false;
-            }
-            extra += 1;
-        }
-        if (!literal(context, "    movb $") ||
-            !append_usize(context, vector_count) ||
-            !literal(context, ", %al\n")) {
-            return false;
-        }
-    }
-    if (!literal(context, "    call ") ||
-        !append_function_symbol(context, instruction.auxiliary) ||
-        !literal(context, "\n")) {
-        return false;
-    }
-    context->call_frame_depth -= frame_size;
-    if (frame_size != 0 && (!literal(context, "    addq $") ||
-        !append_usize(context, frame_size) ||
-        !literal(
-            context, ", %rsp\n"))) {
-        return false;
-    }
-    return emit_call_result(context, instruction, function_abi);
-}
-
-fn emit_parameter_register(
-    context: *Context, parameter: abi::Parameter, ir_parameter: ir::Parameter
-) -> bool {
-    let record: *const type_info::Record = type(context, parameter.type_id);
-    if (record == null) {
-        return false;
-    }
-    if (parameter.aggregate) {
-        if (!literal(context, "    leaq ") ||
-            !append_slot(context, ir_parameter.slot_id) ||
-            !literal(
-                context, ", %r11\n")) {
-            return false;
-        }
-        let pieces: *const abi::Piece = context->abi.pieces.data as
-                *const abi::Piece;
-        var index: usize = 0;
-        while (index < parameter.piece_count) {
-            let piece: abi::Piece = pieces[parameter.first_piece + index];
-            if (piece.abi_class == abi::Class.integer) {
-                let source: *const u8 = general_register_64(piece.register_index);
-                if (source == null ||
-                    !emit_store_piece(
-                        context, piece, source)) {
-                    return false;
-                }
-            } else {
-                let source: *const u8 = vector_register(piece.register_index);
-                if (source == null || (piece.size_bytes != 4 && piece.size_bytes != 8) ||
-                    !literal(context, piece.size_bytes == 4 ? "    movss " : "    movq ") ||
-                    !literal(context, source) ||
-                    !literal(context, ", ") ||
-                    !append_usize(context, piece.value_offset_bytes) ||
-                    !literal(
-                        context, "(%r11)\n")) {
-                    return false;
-                }
-            }
-            index += 1;
-        }
-        return true;
-    }
-    if (parameter.location == abi::LocationKind.vector_register) {
-        let source: *const u8 = vector_register(parameter.register_index);
-        return source != null && literal(context, "    ") &&
-            literal(context, float_move(record)) &&
-            literal(context, " ") && literal(context, source) &&
-            literal(context, ", ") &&
-            append_slot(context, ir_parameter.slot_id) &&
-            literal(context, "\n");
-    }
-    let width: usize = bit_width(record);
-    let source: *const u8 = width <= 32 ? general_register_32(parameter.register_index) :
-            general_register_64(parameter.register_index);
-    return source != null && literal(context, width <= 32 ? "    movl " : "    movq ") &&
-        literal(context, source) && literal(context, ", ") &&
-        append_slot(context, ir_parameter.slot_id) &&
-        literal(context, "\n");
-}
-
-// Spills the incoming argument registers into the frame's 176-byte System V
-// register save area: gp registers always at +0..+40, then — only when the
-// caller set %al — xmm0-7 in 16-byte slots at +48..+175. Only the low 8
-// bytes of each SSE slot are ever read (f64/f32), so a plain movq suffices.
-fn emit_register_save(context: *Context, function_id: usize) -> bool {
-    let storage: frame::Storage =
-        storage(context, frame::StorageKind.register_save_area, function_id);
-    if (context->error != runtime::Error.none || !literal(context, "    leaq ") ||
-        !append_stack(context, storage) ||
-        !literal(context, ", %r11\n")) {
-        return false;
-    }
-    var index: usize = 0;
-    while (index < (Limit.general_argument_registers as usize)) {
-        let source: *const u8 = general_register_64(index);
-        if (source == null || !literal(context, "    movq ") ||
-            !literal(context, source) ||
-            !literal(context, ", ") ||
-            !append_usize(context, index * 8) ||
-            !literal(context, "(%r11)\n")) {
-            return false;
-        }
-        index += 1;
-    }
-    if (!literal(context, "    testb %al, %al\n    je ") ||
-        !literal(context, ".Lbf") ||
-        !append_usize(context, function_id) ||
-        !literal(context, "_va_save\n")) {
-        return false;
-    }
-    index = 0;
-    while (index < (Limit.vector_argument_registers as usize)) {
-        let source: *const u8 = vector_register(index);
-        if (source == null || !literal(context, "    movq ") ||
-            !literal(context, source) ||
-            !literal(context, ", ") ||
-            !append_usize(context, 48 + index * 16) ||
-            !literal(context, "(%r11)\n")) {
-            return false;
-        }
-        index += 1;
-    }
-    return literal(context, ".Lbf") &&
-        append_usize(context, function_id) &&
-        literal(context, "_va_save:\n");
-}
-
-fn emit_va_start(
-    context: *Context, instruction: ir::Instruction) -> bool {
-    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
-    let abi_functions: *const abi::Function = context->abi.functions.data as
-            *const abi::Function;
-    let function_abi: abi::Function = abi_functions[context->current_function];
-    let storage: frame::Storage =
-        storage(
-            context, frame::StorageKind.register_save_area, context->current_function);
-    if (context->error != runtime::Error.none ||
-        !load_rax(
-            context, instruction.left, type(context, values[instruction.left].type_id))) {
-        return false;
-    }
-    // %rax holds the va_list address. gp_offset/fp_offset skip exactly the
-    // named register parameters (general_register_count already counts the
-    // hidden return pointer), the overflow area begins past the named stack
-    // arguments, and the save area is this frame's prologue spill slot.
-    return literal(context, "    movl $") &&
-        append_usize(context, function_abi.general_register_count * 8) &&
-        literal(context, ", 0(%rax)\n    movl $") &&
-        append_usize(context, 48 + function_abi.vector_register_count * 16) &&
-        literal(context, ", 4(%rax)\n    leaq ") &&
-        append_usize(context, 16 + function_abi.stack_argument_size_bytes) &&
-        literal(context, "(%rbp), %r10\n    movq %r10, 8(%rax)\n    leaq ") &&
-        append_stack(context, storage) &&
-        literal(context, ", %r10\n    movq %r10, 16(%rax)\n");
-}
-
-fn emit_va_arg(
-    context: *Context, instruction: ir::Instruction, instruction_id: usize) -> bool {
-    let record: *const type_info::Record = type(context, instruction.type_id);
-    if (record == null || !literal(context, "    movq ") ||
-        !append_value(context, instruction.left) ||
-        !literal(context, ", %r11\n")) {
-        return false;
-    }
-    if (type_info::is_float(record->kind)) {
-        // SSE class: 16-byte save slots at fp_offset while it stays below
-        // 176 (f32 reads the slot's low 4 bytes, f64 the low 8), then 8-byte
-        // overflow slots.
-        if (!literal(context, "    movl 4(%r11), %eax\n    cmpl $176, %eax\n    jae ") ||
-            !instruction_label(context, instruction_id, "va_overflow") ||
-            !literal(context, "\n    movq 16(%r11), %r10\n    ") ||
-            !literal(context, float_move(record)) ||
-            !literal(context, " (%r10,%rax), %xmm0\n    addl $16, 4(%r11)\n    jmp ") ||
-            !instruction_label(context, instruction_id, "va_done") ||
-            !literal(context, "\n") ||
-            !instruction_label(context, instruction_id, "va_overflow") ||
-            !literal(context, ":\n    movq 8(%r11), %r10\n    ") ||
-            !literal(context, float_move(record)) ||
-            !literal(context, " (%r10), %xmm0\n    addq $8, %r10\n    movq %r10, 8(%r11)\n") ||
-            !instruction_label(context, instruction_id, "va_done") ||
-            !literal(context, ":\n")) {
-            return false;
-        }
-        return store_xmm(context, instruction.result, record, "%xmm0");
-    }
-    // INTEGER class: 8-byte gp save slots at gp_offset while it stays below
-    // 48, then the overflow area. Luna passes variadic extras at their
-    // declared width (no C default argument promotions) and va_arg reads the
-    // requested width back out of the slot — the divergence from C is
-    // deliberate.
-    if (!literal(context, "    movl 0(%r11), %eax\n    cmpl $48, %eax\n    jae ") ||
-        !instruction_label(context, instruction_id, "va_overflow") ||
-        !literal(
-            context, "\n    movq 16(%r11), %r10\n    movq (%r10,%rax), %rax\n    addl $8, 0(%r11)\n    jmp ") ||
-        !instruction_label(context, instruction_id, "va_done") ||
-        !literal(context, "\n") ||
-        !instruction_label(context, instruction_id, "va_overflow") ||
-        !literal(
-            context, ":\n    movq 8(%r11), %r10\n    movq (%r10), %rax\n    addq $8, %r10\n    movq %r10, 8(%r11)\n") ||
-        !instruction_label(context, instruction_id, "va_done") ||
-        !literal(context, ":\n")) {
-        return false;
-    }
-    return store_rax(context, instruction.result, record);
-}
-
-fn emit_parameter_stack(
-    context: *Context, parameter: abi::Parameter, ir_parameter: ir::Parameter
-) -> bool {
-    let record: *const type_info::Record = type(context, parameter.type_id);
-    let source_offset: usize = parameter.stack_offset_bytes + 16;
-    if (record == null) {
-        return false;
-    }
-    if (parameter.aggregate) {
-        return literal(context, "    leaq ") &&
-            append_usize(context, source_offset) &&
-            literal(context, "(%rbp), %rsi\n    leaq ") &&
-            append_slot(context, ir_parameter.slot_id) &&
-            literal(context, ", %rdi\n    movq $") &&
-            append_usize(context, parameter.size_bytes) &&
-            literal(context, ", %rcx\n    cld\n    rep movsb\n");
-    }
-    if (type_info::is_float(record->kind)) {
-        return literal(context, "    ") &&
-            literal(context, float_move(record)) &&
-            literal(context, " ") && append_usize(context, source_offset) &&
-            literal(context, "(%rbp), %xmm15\n    ") &&
-            literal(context, float_move(record)) &&
-            literal(context, " %xmm15, ") &&
-            append_slot(context, ir_parameter.slot_id) &&
-            literal(context, "\n");
-    }
-    let width: usize = bit_width(record);
-    return literal(context, width <= 32 ? "    movl " : "    movq ") &&
-        append_usize(context, source_offset) &&
-        literal(
-            context, width <= 32 ? "(%rbp), %eax\n    movl %eax, " : "(%rbp), %rax\n    movq %rax, ") &&
-        append_slot(context, ir_parameter.slot_id) &&
-        literal(context, "\n");
-}
-
-fn emit_parameters(
-    context: *Context, function: ir::Function, function_abi: abi::Function
-) -> bool {
-    let parameters: *const abi::Parameter = context->abi.parameters.data as
-            *const abi::Parameter;
-    let ir_parameters: *const ir::Parameter = context->ir.parameters.data as
-            *const ir::Parameter;
-    if (function_abi.hidden_return_pointer) {
-        let storage: frame::Storage =
-            storage(
-                context, frame::StorageKind.hidden_return_pointer, context->current_function);
-        if (context->error != runtime::Error.none || !literal(context, "    movq %rdi, ") ||
-            !append_stack(context, storage) ||
-            !literal(context, "\n")) {
-            return false;
-        }
-    }
-    var phase: usize = 0;
-    while (phase < 2) {
-        var index: usize = 0;
-        while (index < function.parameter_count) {
-            let parameter: abi::Parameter = parameters[function_abi.first_parameter + index];
-            let is_stack: bool = parameter.location == abi::LocationKind.stack;
-            if ((phase == 0 && !is_stack) || (phase == 1 && is_stack)) {
-                let ir_parameter: ir::Parameter = ir_parameters[ function.first_parameter + index];
-                let emitted: bool = is_stack ?
-                    emit_parameter_stack(context, parameter, ir_parameter) :
-                    emit_parameter_register(context, parameter, ir_parameter);
-                if (!emitted) {
-                    return false;
-                }
-            }
-            index += 1;
-        }
-        phase += 1;
-    }
-    return true;
-}
-
-fn emit_return(
-    context: *Context, instruction: ir::Instruction) -> bool {
-    let functions: *const ir::Function = context->ir.functions.data as
-            *const ir::Function;
-    let abi_functions: *const abi::Function = context->abi.functions.data as
-            *const abi::Function;
-    let function: ir::Function = functions[context->current_function];
-    let function_abi: abi::Function = abi_functions[context->current_function];
-    let record: *const type_info::Record = type(context, function.return_type);
-    if (record == null) {
-        return false;
-    }
-    if (instruction.opcode == ir::Opcode.return_value && function_abi.return_aggregate) {
-        if (!load_rax(context, instruction.left, record) ||
-            !literal(
-                context, "    movq %rax, %r11\n")) {
-            return false;
-        }
-        if (function_abi.hidden_return_pointer) {
-            let hidden: frame::Storage =
-                storage(
-                    context, frame::StorageKind.hidden_return_pointer, context->current_function);
-            if (context->error != runtime::Error.none || !literal(context, "    movq ") ||
-                !append_stack(context, hidden) ||
-                !literal(
-                    context, ", %rdi\n    movq %rdi, %rax\n    movq %r11, %rsi\n    movq $") ||
-                !append_usize(context, function_abi.return_size_bytes) ||
-                !literal(
-                    context, ", %rcx\n    cld\n    rep movsb\n")) {
-                return false;
-            }
-        } else {
-            let pieces: *const abi::Piece = context->abi.pieces.data as
-                    *const abi::Piece;
-            var reverse: usize = function_abi.return_piece_count;
-            while (reverse != 0) {
-                reverse -= 1;
-                let piece: abi::Piece = pieces[ function_abi.first_return_piece + reverse];
-                if (piece.abi_class == abi::Class.integer) {
-                    let destination: *const u8 = return_general_register(piece.register_index);
-                    if (destination == null ||
-                        !emit_load_piece(
-                            context, piece, destination)) {
-                        return false;
-                    }
-                } else {
-                    let destination: *const u8 = vector_register(piece.register_index);
-                    if (destination == null || (piece.size_bytes != 4 && piece.size_bytes != 8) ||
-                        !literal(
-                            context, piece.size_bytes == 4 ? "    movss " : "    movq ") ||
-                        !append_usize(context, piece.value_offset_bytes) ||
-                        !literal(context, "(%r11), ") ||
-                        !literal(context, destination) ||
-                        !literal(
-                            context, "\n")) {
-                        return false;
-                    }
-                }
-            }
-        }
-    } else if (instruction.opcode == ir::Opcode.return_value) {
-        if (type_info::is_float(record->kind)) {
-            if (!load_xmm(
-                    context, instruction.left, record, "%xmm0")) {
-                return false;
-            }
-        } else if (!load_rax(
-                context, instruction.left, record)) {
-            return false;
-        }
-    }
-    return literal(context, "    jmp ") &&
-        return_label(context) && literal(context, "\n");
-}
-
-fn emit_control(
-    context: *Context, instruction: ir::Instruction) -> bool {
-    if (instruction.opcode == ir::Opcode.jump) {
-        return literal(context, "    jmp ") &&
-            block_label(context, instruction.auxiliary) &&
-            literal(context, "\n");
-    }
-    if (instruction.opcode == ir::Opcode.branch) {
-        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
-        let record: *const type_info::Record =
-            type(context, values[instruction.left].type_id);
-        return record != null && load_rax(context, instruction.left, record) &&
-            literal(context, "    testl %eax, %eax\n    jne ") &&
-            block_label(context, instruction.auxiliary) &&
-            literal(context, "\n    jmp ") &&
-            block_label(context, instruction.third) &&
-            literal(context, "\n");
-    }
-    return emit_return(context, instruction);
-}
-
-fn emit_instruction(
-    context: *Context, instruction: ir::Instruction, instruction_id: usize) -> bool {
-    if (instruction.opcode == ir::Opcode.constant_integer || instruction.opcode ==
-            ir::Opcode.constant_float || instruction.opcode == ir::Opcode.constant_boolean ||
-        instruction.opcode == ir::Opcode.constant_null) {
-        return emit_constant(context, instruction);
-    }
-    if (instruction.opcode == ir::Opcode.address_of_slot || instruction.opcode ==
-            ir::Opcode.member_address || instruction.opcode == ir::Opcode.global_address ||
-        instruction.opcode == ir::Opcode.function_address || instruction.opcode ==
-            ir::Opcode.pointer_offset) {
-        return emit_address(context, instruction);
-    }
-    if (instruction.opcode == ir::Opcode.zero_slot) {
-        return emit_zero(context, instruction);
-    }
-    if (instruction.opcode == ir::Opcode.memory_copy) {
-        return emit_memory_copy(context, instruction, instruction_id);
-    }
-    if (instruction.opcode == ir::Opcode.load || instruction.opcode == ir::Opcode.store) {
-        return emit_slot_access(context, instruction);
-    }
-    if (instruction.opcode == ir::Opcode.load_indirect) {
-        return emit_load_indirect(context, instruction);
-    }
-    if (instruction.opcode == ir::Opcode.store_indirect) {
-        return emit_store_indirect(context, instruction);
-    }
-    if (instruction.opcode == ir::Opcode.null_check || instruction.opcode == ir::Opcode.bounds_check) {
-        return emit_check(context, instruction, instruction_id);
-    }
-    if (instruction.opcode == ir::Opcode.unary_integer || instruction.opcode == ir::Opcode.unary_float ||
-        instruction.opcode == ir::Opcode.boolean_not) {
-        return emit_unary(context, instruction);
-    }
-    if (instruction.opcode == ir::Opcode.convert) {
-        return emit_convert(context, instruction, instruction_id);
-    }
-    if (instruction.opcode == ir::Opcode.binary_integer) {
-        return emit_binary_integer(context, instruction, instruction_id);
-    }
-    if (instruction.opcode == ir::Opcode.binary_float || instruction.opcode == ir::Opcode.float_min ||
-        instruction.opcode == ir::Opcode.float_max) {
-        return emit_binary_float(context, instruction);
-    }
-    if (instruction.opcode == ir::Opcode.float_sqrt) {
-        return emit_float_sqrt(context, instruction);
-    }
-    if (instruction.opcode == ir::Opcode.overflow_flag) {
-        return emit_overflow_flag(context, instruction);
-    }
-    if (instruction.opcode == ir::Opcode.compare) {
-        return emit_compare(context, instruction);
-    }
-    if (instruction.opcode == ir::Opcode.call) {
-        return emit_call(context, instruction, instruction_id);
-    }
-    if (instruction.opcode == ir::Opcode.call_indirect) {
-        return emit_call_indirect(context, instruction, instruction_id);
-    }
-    if (instruction.opcode == ir::Opcode.va_list_start) {
-        return emit_va_start(context, instruction);
-    }
-    if (instruction.opcode == ir::Opcode.va_list_arg) {
-        return emit_va_arg(context, instruction, instruction_id);
-    }
-    if (instruction.opcode == ir::Opcode.jump || instruction.opcode == ir::Opcode.branch ||
-        instruction.opcode == ir::Opcode.return_value || instruction.opcode == ir::Opcode.return_void) {
-        return emit_control(context, instruction);
-    }
-    if (instruction.opcode == ir::Opcode.unreachable) {
-        return literal(context, "    ud2\n");
-    }
-    return fail(context, runtime::Error.invalid_argument);
-}
-
-fn emit_globals(context: *Context) -> bool {
+fn emit_globals(context: *support::Context) -> bool {
     let globals: *const ir::Global = context->ir.globals.data as *const ir::Global;
     var global_id: usize = 0;
     while (global_id < context->ir.global_count) {
         let global: ir::Global = globals[global_id];
-        if (!literal(
-                context, global.read_only ? "    .section .rodata,\"a\",@progbits\n" : "    .data\n") ||
-            !literal(context, "    .balign ") ||
-            !append_usize(context, global.alignment_bytes) ||
-            !literal(context, "\n    .type ") ||
-            !append_global_label(context, global_id) ||
-            !literal(context, ", @object\n") ||
-            !append_global_label(context, global_id) ||
-            !literal(context, ":\n")) {
+        if (!support::literal(context, global.read_only ? "    .section .rodata,\"a\",@progbits\n" : "    .data\n") ||
+            !support::literal(context, "    .balign ") || !support::append_usize(context, global.alignment_bytes) ||
+            !support::literal(context, "\n    .type ") || !support::append_global_label(context, global_id) ||
+            !support::literal(context, ", @object\n") || !support::append_global_label(context, global_id) ||
+                !support::literal(context, ":\n")) {
             return false;
         }
         var byte_index: usize = 0;
         while (byte_index < global.byte_count) {
-            if (!literal(context, "    .byte 0x") ||
-                !hex(
-                    context, context->ir.global_bytes.data[ global.byte_offset + byte_index] as u64, 2) ||
-                !literal(
+            if (!support::literal(context, "    .byte 0x") ||
+                !support::hex(context, context->ir.global_bytes.data[ global.byte_offset + byte_index] as u64, 2) ||
+                !support::literal(
                     context, "\n")) {
                 return false;
             }
             byte_index += 1;
         }
-        if (!literal(context, "    .size ") ||
-            !append_global_label(context, global_id) ||
-            !literal(context, ", .-") ||
-            !append_global_label(context, global_id) ||
-            !literal(
+        if (!support::literal(context, "    .size ") || !support::append_global_label(context, global_id) ||
+            !support::literal(context, ", .-") || !support::append_global_label(context, global_id) ||
+            !support::literal(
                 context, "\n\n")) {
             return false;
         }
@@ -2286,7 +50,7 @@ fn emit_globals(context: *Context) -> bool {
     return true;
 }
 
-fn emit_declarations(context: *Context) -> bool {
+fn emit_declarations(context: *support::Context) -> bool {
     let functions: *const ir::Function = context->ir.functions.data as
             *const ir::Function;
     var function_id: usize = 0;
@@ -2294,9 +58,8 @@ fn emit_declarations(context: *Context) -> bool {
     while (function_id < context->ir.function_count) {
         let function: ir::Function = functions[function_id];
         if (!function.has_body) {
-            if (!literal(context, "    .extern ") ||
-                !append_function_symbol(context, function_id) ||
-                !literal(
+            if (!support::literal(context, "    .extern ") || !support::append_function_symbol(context, function_id) ||
+                !support::literal(
                     context, "\n")) {
                 return false;
             }
@@ -2304,30 +67,29 @@ fn emit_declarations(context: *Context) -> bool {
         }
         function_id += 1;
     }
-    return !emitted || literal(context, "\n");
+    return !emitted || support::literal(context, "\n");
 }
 
-fn emit_entry(context: *Context) -> bool {
+fn emit_entry(context: *support::Context) -> bool {
     if (context->ir.entry_function == ir::no_id()) {
         return true;
     }
     let functions: *const ir::Function = context->ir.functions.data as
             *const ir::Function;
     let has_command_line_parameters: bool = functions[context->ir.entry_function].parameter_count == 2;
-    return literal(
-            context, "    .globl _start\n    .type _start, @function\n_start:\n    xorl %ebp, %ebp\n") &&
+    return support::literal(context,
+        "    .globl _start\n    .type _start, @function\n_start:\n    xorl %ebp, %ebp\n") &&
         (!has_command_line_parameters ||
-            literal(
+            support::literal(
                 context, "    movq (%rsp), %rdi\n    leaq 8(%rsp), %rsi\n")) &&
-        literal(
-            context,
-            "    andq $-16, %rsp\n    subq $16, %rsp\n    movl $0x1f80, (%rsp)\n    ldmxcsr (%rsp)\n    addq $16, %rsp\n    call "
-        ) && append_function_symbol(context, context->ir.entry_function) &&
-        literal(
-            context, "\n    movl %eax, %edi\n    movl $60, %eax\n    syscall\n    .size _start, .-_start\n\n");
+        support::literal(
+            context, "    andq $-16, %rsp\n    subq $16, %rsp\n    movl $0x1f80, (%rsp)\n"
+            "    ldmxcsr (%rsp)\n    addq $16, %rsp\n    call "
+        ) && support::append_function_symbol(context, context->ir.entry_function) && support::literal(context,
+            "\n    movl %eax, %edi\n    movl $60, %eax\n    syscall\n    .size _start, .-_start\n\n");
 }
 
-fn append_byte(context: *Context, value: u8) -> bool {
+fn append_byte(context: *support::Context, value: u8) -> bool {
     var byte: u8 = value;
     if (!asm_text::append(&context->text, (&byte) as *const u8, 1)) {
         context->error = context->text.error;
@@ -2337,21 +99,12 @@ fn append_byte(context: *Context, value: u8) -> bool {
 }
 
 fn hex_digit(byte: u8) -> usize {
-    if (byte >= 48 && byte <= 57) {
-        return (byte - 48) as usize;
-    }
-    if (byte >= 65 && byte <= 70) {
-        return (byte - 65 + 10) as usize;
-    }
-    if (byte >= 97 && byte <= 102) {
-        return (byte - 97 + 10) as usize;
-    }
-    return 16;
+    return ascii::hex_value(byte);
 }
 
 // Appends one code point to the emitted text, UTF-8 encoded (asm bodies
 // are plain-width strings, mirroring the semantic width-1 decoding).
-fn append_code_point(context: *Context, code_point: usize) -> bool {
+fn append_code_point(context: *support::Context, code_point: usize) -> bool {
     if (code_point < 128) {
         return append_byte(context, code_point as u8);
     }
@@ -2373,18 +126,17 @@ fn append_code_point(context: *Context, code_point: usize) -> bool {
 // Decodes one plain string literal token of an asm fn body (the span
 // includes the quotes) into the emitted text, resolving the usual escape
 // sequences; the semantic pass already restricted bodies to plain strings.
-fn append_asm_string(
-    context: *Context, unit_id: usize, token_id: usize) -> bool {
-    let unit: *const context::Unit = unit(context, unit_id);
-    let token: lexer::Token = token(context, unit_id, token_id);
+fn append_asm_string(context: *support::Context, unit_id: usize, token_id: usize) -> bool {
+    let unit: *const context::Unit = support::unit(context, unit_id);
+    let token: lexer::Token = support::token(context, unit_id, token_id);
     if (unit == null || token.kind != lexer::TokenKind.string || token.span.length < 2 ||
         token.span.offset > unit->source.length || token.span.length > unit->source.length - token.span.offset) {
-        return fail(context, runtime::Error.invalid_argument);
+        return support::fail(context, runtime::Error.invalid_argument);
     }
     var index: usize = 1;
     while (index + 1 < token.span.length && context->error == runtime::Error.none) {
         var byte: u8 = unit->source.data[token.span.offset + index];
-        if (byte != 92) {
+        if (byte != '\\') {
             if (!append_byte(context, byte)) {
                 return false;
             }
@@ -2393,36 +145,35 @@ fn append_asm_string(
         }
         index += 1;
         byte = unit->source.data[token.span.offset + index];
-        if (byte == 120) {
+        if (byte == 'x') {
             if (index + 3 >= token.span.length) {
-                return fail(context, runtime::Error.invalid_argument);
+                return support::fail(context, runtime::Error.invalid_argument);
             }
             let high: usize = hex_digit(unit->source.data[token.span.offset + index + 1]);
             let low: usize = hex_digit(unit->source.data[token.span.offset + index + 2]);
-            if (high >= 16 || low >= 16 ||
-                !append_byte(context, (high * 16 + low) as u8)) {
-                return fail(context, runtime::Error.invalid_argument);
+            if (high >= 16 || low >= 16 || !append_byte(context, (high * 16 + low) as u8)) {
+                return support::fail(context, runtime::Error.invalid_argument);
             }
             index += 3;
             continue;
         }
-        if (byte == 117) {
+        if (byte == 'u') {
             var code_point: usize = 0;
             index += 1;
-            if (index + 1 >= token.span.length || unit->source.data[token.span.offset + index] != 123) {
-                return fail(context, runtime::Error.invalid_argument);
+            if (index + 1 >= token.span.length || unit->source.data[token.span.offset + index] != '{') {
+                return support::fail(context, runtime::Error.invalid_argument);
             }
             index += 1;
-            while (index + 1 < token.span.length && unit->source.data[token.span.offset + index] != 125) {
+            while (index + 1 < token.span.length && unit->source.data[token.span.offset + index] != '}') {
                 let digit: usize = hex_digit(unit->source.data[token.span.offset + index]);
                 if (digit >= 16) {
-                    return fail(context, runtime::Error.invalid_argument);
+                    return support::fail(context, runtime::Error.invalid_argument);
                 }
                 code_point = code_point * 16 + digit;
                 index += 1;
             }
             if (index + 1 >= token.span.length) {
-                return fail(context, runtime::Error.invalid_argument);
+                return support::fail(context, runtime::Error.invalid_argument);
             }
             index += 1;
             if (!append_code_point(context, code_point)) {
@@ -2430,13 +181,13 @@ fn append_asm_string(
             }
             continue;
         }
-        if (byte == 110) {
-            byte = 10;
-        } else if (byte == 114) {
-            byte = 13;
-        } else if (byte == 116) {
-            byte = 9;
-        } else if (byte == 48) {
+        if (byte == 'n') {
+            byte = '\n';
+        } else if (byte == 'r') {
+            byte = '\r';
+        } else if (byte == 't') {
+            byte = '\t';
+        } else if (byte == '0') {
             byte = 0;
         }
         if (!append_byte(context, byte)) {
@@ -2449,12 +200,11 @@ fn append_asm_string(
 
 // Splices the decoded string literals of an asm fn body into the emitted
 // text; the semantic pass validated the body holds nothing else.
-fn emit_asm_body(
-    context: *Context, function: ir::Function) -> bool {
+fn emit_asm_body(context: *support::Context, function: ir::Function) -> bool {
     let unit_id: usize = function.asm_body_unit;
-    let body: parser::SyntaxNode = node(context, unit_id, function.asm_body_node);
-    if (body.kind != parser::SyntaxKind.string_expression) {
-        return fail(context, runtime::Error.invalid_argument);
+    let body: syntax::SyntaxNode = support::node(context, unit_id, function.asm_body_node);
+    if (body.kind != syntax::SyntaxKind.string_expression) {
+        return support::fail(context, runtime::Error.invalid_argument);
     }
     if (!append_asm_string(context, unit_id, body.token_index)) {
         return false;
@@ -2462,9 +212,9 @@ fn emit_asm_body(
     var part: usize = body.first_child;
     var index: usize = 0;
     while (index < body.child_count && context->error == runtime::Error.none) {
-        let part_node: parser::SyntaxNode = node(context, unit_id, part);
-        if (part_node.kind != parser::SyntaxKind.string_expression) {
-            return fail(context, runtime::Error.invalid_argument);
+        let part_node: syntax::SyntaxNode = support::node(context, unit_id, part);
+        if (part_node.kind != syntax::SyntaxKind.string_expression) {
+            return support::fail(context, runtime::Error.invalid_argument);
         }
         if (!append_asm_string(context, unit_id, part_node.token_index)) {
             return false;
@@ -2475,7 +225,7 @@ fn emit_asm_body(
     return context->error == runtime::Error.none;
 }
 
-fn emit_function(context: *Context, function_id: usize) -> bool {
+fn emit_function(context: *support::Context, function_id: usize) -> bool {
     let functions: *const ir::Function = context->ir.functions.data as
             *const ir::Function;
     let blocks: *const ir::Block = context->ir.blocks.data as *const ir::Block;
@@ -2491,11 +241,9 @@ fn emit_function(context: *Context, function_id: usize) -> bool {
     }
     context->current_function = function_id;
     context->call_frame_depth = 0;
-    if ((function.linkage == ir::Linkage.module_export ||
-            function.export_name_token != no_id()) &&
-        (!literal(context, "    .globl ") ||
-        !append_function_symbol(context, function_id) ||
-        !literal(context, "\n"))) {
+    if ((function.linkage == ir::Linkage.module_export || function.export_name_token != support::no_id()) &&
+        (!support::literal(context, "    .globl ") || !support::append_function_symbol(context, function_id) ||
+        !support::literal(context, "\n"))) {
         return false;
     }
     // An exported @export_name definition answers to two names: the
@@ -2503,59 +251,49 @@ fn emit_function(context: *Context, function_id: usize) -> bool {
     // mangled module symbol (module consumers importing the interface
     // reference that one, since the export name lives on the
     // implementation they never see).
-    if (function.linkage == ir::Linkage.module_export &&
-        function.export_name_token != no_id() &&
-        (!literal(context, "    .globl ") ||
-        !append_mangled_function_symbol(context, function_id) ||
-        !literal(context, "\n"))) {
+    if (function.linkage == ir::Linkage.module_export && function.export_name_token != support::no_id() &&
+        (!support::literal(context, "    .globl ") || !support::append_mangled_function_symbol(context, function_id) ||
+        !support::literal(context, "\n"))) {
         return false;
     }
-    if (!literal(context, "    .p2align 4\n    .type ") ||
-        !append_function_symbol(context, function_id) ||
-        !literal(context, ", @function\n") ||
-        !append_function_symbol(context, function_id) ||
-        !literal(context, ":\n")) {
+    if (!support::literal(context, "    .p2align 4\n    .type ") || !support::append_function_symbol(context,
+        function_id) ||
+        !support::literal(context, ", @function\n") || !support::append_function_symbol(context, function_id) ||
+        !support::literal(context, ":\n")) {
         return false;
     }
-    if (function.linkage == ir::Linkage.module_export &&
-        function.export_name_token != no_id() &&
-        (!append_mangled_function_symbol(context, function_id) ||
-        !literal(context, ":\n"))) {
+    if (function.linkage == ir::Linkage.module_export && function.export_name_token != support::no_id() &&
+        (!support::append_mangled_function_symbol(context, function_id) || !support::literal(context, ":\n"))) {
         return false;
     }
     // An asm fn is naked: the decoded body follows the label directly, and
     // register use, stack discipline and the return sequence belong to the
     // author (luna-as validates and encodes every instruction).
-    if (function.asm_body_node != no_id()) {
-        return emit_asm_body(context, function) &&
-            literal(context, "    .size ") &&
-            append_function_symbol(context, function_id) &&
-            literal(context, ", .-") &&
-            append_function_symbol(context, function_id) &&
-            literal(context, "\n\n");
+    if (function.asm_body_node != support::no_id()) {
+        return emit_asm_body(context, function) && support::literal(context, "    .size ") &&
+            support::append_function_symbol(context, function_id) && support::literal(context, ", .-") &&
+            support::append_function_symbol(context, function_id) && support::literal(context, "\n\n");
     }
-    if (!literal(context, "    pushq %rbp\n    movq %rsp, %rbp\n")) {
+    if (!support::literal(context, "    pushq %rbp\n    movq %rsp, %rbp\n")) {
         return false;
     }
-    if (frames[function_id].dynamic_alignment != 0 &&
-        (!literal(context, "    andq $-") ||
-            !append_usize(context, frames[function_id].dynamic_alignment) ||
-            !literal(context, ", %rsp\n"))) {
+    if (frames[function_id].dynamic_alignment != 0 && (!support::literal(context, "    andq $-") ||
+            !support::append_usize(context, frames[function_id].dynamic_alignment) || !support::literal(context,
+                ", %rsp\n"))) {
         return false;
     }
-    if (frames[function_id].frame_size_bytes != 0 && (!literal(context, "    subq $") ||
-        !append_usize(context, frames[function_id].frame_size_bytes) ||
-        !literal(
+    if (frames[function_id].frame_size_bytes != 0 && (!support::literal(context, "    subq $") ||
+        !support::append_usize(context, frames[function_id].frame_size_bytes) ||
+        !support::literal(
             context, ", %rsp\n"))) {
         return false;
     }
     // A variadic prologue spills the argument registers before anything can
-    // clobber them (parameter homes below reuse %rax/%r10/%r11 and the SSE
-    // temporaries).
-    if (function.variadic && !emit_register_save(context, function_id)) {
+    // clobber them (parameter homes below reuse %rax/%r10/%r11 and the SSE // temporaries).
+    if (function.variadic && !call::emit_register_save(context, function_id)) {
         return false;
     }
-    if (!emit_parameters(
+    if (!call::emit_parameters(
             context, function, abi_functions[function_id])) {
         return false;
     }
@@ -2563,34 +301,30 @@ fn emit_function(context: *Context, function_id: usize) -> bool {
     while (block_index < function.block_count) {
         let block_id: usize = function.first_block + block_index;
         let block: ir::Block = blocks[block_id];
-        if (!block_label(context, block_id) ||
-            !literal(context, ":\n")) {
+        if (!support::block_label(context, block_id) || !support::literal(context, ":\n")) {
             return false;
         }
         var instruction_id: usize = block.first_instruction;
         var instruction_index: usize = 0;
         while (instruction_index < block.instruction_count) {
             if (instruction_id >= context->ir.instruction_count ||
-                !emit_instruction(
+                !instruction::emit_instruction(
                     context, instructions[instruction_id], instruction_id)) {
-                return fail(context, runtime::Error.invalid_argument);
+                return support::fail(context, runtime::Error.invalid_argument);
             }
             instruction_id = instructions[instruction_id].next_instruction;
             instruction_index += 1;
         }
         block_index += 1;
     }
-    return return_label(context) &&
-        literal(context, ":\n    leave\n    ret\n    .size ") &&
-        append_function_symbol(context, function_id) &&
-        literal(context, ", .-") &&
-        append_function_symbol(context, function_id) &&
-        literal(context, "\n\n");
+    return support::return_label(context) && support::literal(context, ":\n    leave\n    ret\n    .size ") &&
+        support::append_function_symbol(context, function_id) && support::literal(context, ", .-") &&
+        support::append_function_symbol(context, function_id) && support::literal(context, "\n\n");
 }
 
-fn emit_module(context: *Context) -> bool {
+fn emit_module(context: *support::Context) -> bool {
     if (!emit_globals(context) || !emit_declarations(context) ||
-        !literal(context, "    .text\n") || !emit_entry(context)) {
+        !support::literal(context, "    .text\n") || !emit_entry(context)) {
         return false;
     }
     var function_id: usize = 0;
@@ -2601,23 +335,20 @@ fn emit_module(context: *Context) -> bool {
         }
         function_id += 1;
     }
-    return literal(context, "    .section .note.GNU-stack,\"\",@progbits\n");
+    return support::literal(context, "    .section .note.GNU-stack,\"\",@progbits\n");
 }
 
 fn backend_is_success(
-    result: BackendResult, semantic_input: context::Input, ir: ir::Store,
-    types: type_info::Table) -> bool {
+    result: BackendResult, semantic_input: context::Input, ir: ir::Store, types: type_info::Table) -> bool {
     return result.error == runtime::Error.none && result.assembly.length != 0 &&
         bytes::is_valid(result.assembly) && context::input_is_valid(semantic_input) &&
-        ir::is_valid(ir, types) && abi::is_valid(result.abi, ir, types) &&
+        ir_check::is_valid(ir, types) && abi::is_valid(result.abi, ir, types) &&
         frame::plan_is_valid(result.frames, ir, types, result.abi);
 }
 
-fn emit_assembly(
-    semantic_input: context::Input, ir: ir::Store, types: type_info::Table
-) -> BackendResult {
+fn emit_assembly(semantic_input: context::Input, ir: ir::Store, types: type_info::Table) -> BackendResult {
     var result: BackendResult = backend_empty();
-    if (!context::input_is_valid(semantic_input) || !ir::is_valid(ir, types)) {
+    if (!context::input_is_valid(semantic_input) || !ir_check::is_valid(ir, types)) {
         result.error = runtime::Error.invalid_argument;
         return result;
     }
@@ -2635,10 +366,10 @@ fn emit_assembly(
         return result;
     }
     result.frames = frame_result.plan;
-    var context: Context = {
+    var context: support::Context = {
         semantic_input = semantic_input, ir = ir, types = types, abi = result.abi, frames = result.frames,
-        text = asm_text::empty(), current_function = no_id(),
-        call_frame_depth = 0, error = runtime::Error.none,
+        text = asm_text::empty(), current_function = support::no_id(), call_frame_depth = 0,
+            error = runtime::Error.none,
     };
     if (!emit_module(&context)) {
         let error: runtime::Error =
@@ -2680,4 +411,3 @@ fn backend_release(result: BackendResult) -> runtime::Error {
     }
     return error;
 }
-

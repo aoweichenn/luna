@@ -13,7 +13,7 @@ implementation status is tracked in `roadmap.md`.
 | m1.2 qualifiers / attributes / static assertions | landed; 96/96 cases; verify fixed point |
 | built-ins package (bit ops, float helpers, overflow) | landed; 106/106 cases |
 | m1.3 kernel UAPI layout package | landed; 122/122 cases; verify fixed point |
-| Refactor R0-R2 (120-column reflow, table mappings, semantic split) | landed; same gates |
+| Refactor R0-R4 (formatting, module graph, service/pass decoupling) | landed; every `.la` below 1,000 lines |
 | C23 disposition review | landed in `syntax-plan.md`; m1.2-m1.10 sequenced |
 | `anchor/` | promoted to the m1.1 stage-fixed toolchain (0.2 done) |
 | Negative tests | `FAIL <diagnostic-kind>` harness landed (0.3 done) |
@@ -107,8 +107,12 @@ is parked in m1.7 until a real C-library consumer appears.
 
 ## Deferred (explicitly)
 
-- Further splitting of parser.la/codegen.la: both are under the
-  soft ceiling after R0; revisit only if they regrow.
+- Further pass splitting: R4 separated parser state/grammar stages; semantic
+  lookup, construction, interpretation and policy services; IR construction
+  from verification; code-generation value/call dispatch; assembler operand,
+  encoding and source layers; and ELF format/reader/writer services. Every
+  implementation is below 1,000 lines; split again only at a real extension
+  boundary rather than to satisfy a line-count target.
 - Global variables initialized with function addresses: needs a data
   symbol relocation path (`.quad`-style); not required by any accepted
   example. Note the language currently has no module-scope variables at

@@ -2,9 +2,7 @@ module luna.std.bytes;
 
 import luna.std.memory as memory;
 
-enum BufferLimit: usize {
-    minimum_capacity = 64, maximum_size = 18446744073709551615,
-}
+const initial_capacity: usize = 64;
 
 fn result(buffer: Buffer, error: runtime::Error) -> BufferResult {
     return {
@@ -68,14 +66,15 @@ fn reserve(buffer: Buffer, minimum_capacity: usize) -> BufferResult {
     }
 
     var new_capacity: usize = buffer.capacity;
-    if (new_capacity < BufferLimit.minimum_capacity as usize) {
-        new_capacity = BufferLimit.minimum_capacity as usize;
+    if (new_capacity < initial_capacity) {
+        new_capacity = initial_capacity;
     }
     while (new_capacity < minimum_capacity) {
-        if (new_capacity > (BufferLimit.maximum_size as usize) / 2) {
+        var doubled: usize = 0;
+        if (@mul_overflow(new_capacity, 2, &doubled)) {
             new_capacity = minimum_capacity;
         } else {
-            new_capacity *= 2;
+            new_capacity = doubled;
         }
     }
 
@@ -96,11 +95,12 @@ fn push(buffer: Buffer, value: u8) -> BufferResult {
     if (!is_valid(buffer)) {
         return result(buffer, runtime::Error.invalid_argument);
     }
-    if (buffer.length == BufferLimit.maximum_size as usize) {
+    var required: usize = 0;
+    if (@add_overflow(buffer.length, 1, &required)) {
         return result(buffer, runtime::Error.out_of_memory);
     }
 
-    let reserved: BufferResult = reserve(buffer, buffer.length + 1);
+    let reserved: BufferResult = reserve(buffer, required);
     if (reserved.error != runtime::Error.none) {
         return reserved;
     }
@@ -120,18 +120,19 @@ fn append(buffer: Buffer, data: *const u8, length: usize) -> BufferResult {
     if (data == null) {
         return result(buffer, runtime::Error.bad_address);
     }
-    if (length > (BufferLimit.maximum_size as usize) - buffer.length) {
+    var new_length: usize = 0;
+    if (@add_overflow(buffer.length, length, &new_length)) {
         return result(buffer, runtime::Error.out_of_memory);
     }
 
-    let source_address: usize = data as usize;
-    let buffer_address: usize = buffer.data as usize;
+    let source_address: *const u8 = data;
+    let buffer_address: *const u8 = buffer.data as *const u8;
     var aliases_buffer: bool = false;
     var source_offset: usize = 0;
     if (buffer.capacity != 0 && source_address >= buffer_address) {
         source_offset = source_address - buffer_address;
         if (source_offset < buffer.capacity) {
-            if (source_offset >= buffer.length || length > buffer.length - source_offset) {
+            if (source_offset > buffer.length || length > buffer.length - source_offset) {
                 return result(buffer, runtime::Error.invalid_argument);
             }
             aliases_buffer = true;
@@ -139,7 +140,7 @@ fn append(buffer: Buffer, data: *const u8, length: usize) -> BufferResult {
     }
 
     let old_length: usize = buffer.length;
-    let reserved: BufferResult = reserve(buffer, old_length + length);
+    let reserved: BufferResult = reserve(buffer, new_length);
     if (reserved.error != runtime::Error.none) {
         return reserved;
     }
@@ -149,7 +150,7 @@ fn append(buffer: Buffer, data: *const u8, length: usize) -> BufferResult {
     if (move_error != runtime::Error.none) {
         return result(updated, move_error);
     }
-    updated.length = old_length + length;
+    updated.length = new_length;
     return result(updated, runtime::Error.none);
 }
 
@@ -181,4 +182,3 @@ fn equal(buffer: Buffer, data: *const u8, length: usize) -> bool {
     }
     return memory::equal(buffer.data as *const u8, data, length);
 }
-

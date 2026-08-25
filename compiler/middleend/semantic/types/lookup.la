@@ -1,0 +1,67 @@
+module luna.bootstrap.middleend.semantic.types.lookup;
+
+import luna.bootstrap.middleend.type as type_info;
+
+fn find_field(context: *context::Context, type_id: usize, unit_index: usize, name_token: usize) -> usize {
+    let record: type_info::Record = context::type_record(context, type_id);
+    if (record.field_count == 0) {
+        return context::no_id();
+    }
+    let fields: *const type_info::Field = context->types.fields.data as
+            *const type_info::Field;
+    var index: usize = 0;
+    while (index < record.field_count) {
+        let field_id: usize = record.first_field + index;
+        if (context::tokens_equal(
+                context, unit_index, name_token, fields[field_id].declaration_unit, fields[field_id].name_token)) {
+            return field_id;
+        }
+        index += 1;
+    }
+    return context::no_id();
+}
+
+fn lookup_promoted_field(
+    context: *context::Context, type_id: usize, unit_index: usize, name_token: usize, base_offset: usize,
+    result: *types::FieldLookup) -> void {
+    let record: type_info::Record = context::type_record(context, type_id);
+    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    var index: usize = 0;
+    while (index < record.field_count && result->status != types::FieldStatus.ambiguous) {
+        let field: type_info::Field = fields[record.first_field + index];
+        if (types::field_is_anonymous(context, field)) {
+            let direct: usize = find_field(context, field.type_id, unit_index, name_token);
+            if (direct != context::no_id()) {
+                if (result->status == types::FieldStatus.found) {
+                    result->status = types::FieldStatus.ambiguous;
+                } else {
+                    result->status = types::FieldStatus.found;
+                    result->field_id = direct;
+                    result->offset_bytes = base_offset + field.offset_bytes + fields[direct].offset_bytes;
+                }
+            } else {
+                lookup_promoted_field(
+                    context, field.type_id, unit_index, name_token, base_offset + field.offset_bytes, result);
+            }
+        }
+        index += 1;
+    }
+}
+
+fn lookup_field(context: *context::Context, type_id: usize, unit_index: usize,
+    name_token: usize) -> types::FieldLookup {
+    let none: usize = context::no_id();
+    let direct: usize = find_field(context, type_id, unit_index, name_token);
+    if (direct != none) {
+        let fields: *const type_info::Field = context->types.fields.data as
+                *const type_info::Field;
+        return {
+            status = types::FieldStatus.found, field_id = direct, offset_bytes = fields[direct].offset_bytes,
+        };
+    }
+    var result: types::FieldLookup = {
+        status = types::FieldStatus.missing, field_id = none, offset_bytes = 0,
+    };
+    lookup_promoted_field(context, type_id, unit_index, name_token, 0, &result);
+    return result;
+}

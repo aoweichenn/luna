@@ -1,400 +1,197 @@
 module luna.bootstrap.middleend.semantic.stmt;
 
+import luna.bootstrap.middleend.semantic.context.builder as builder;
 
-fn lower_variable(
-    context: *context::Context,
-    node_id: usize,
-    node: parser::SyntaxNode
-) -> bool {
+import luna.bootstrap.middleend.semantic.context.lookup as names;
+
+import luna.bootstrap.frontend.lexer as lexer;
+import luna.bootstrap.frontend.syntax as syntax;
+import luna.bootstrap.middleend.ir as ir;
+import luna.bootstrap.middleend.semantic.attributes as attributes;
+import luna.bootstrap.middleend.semantic.consteval as consteval;
+import luna.bootstrap.middleend.semantic.consteval.engine as const_engine;
+import luna.bootstrap.middleend.semantic.consteval.model as const_model;
+import luna.bootstrap.middleend.semantic.expr as expr;
+import luna.bootstrap.middleend.semantic.expr.access as access;
+import luna.bootstrap.middleend.semantic.expr.base as base;
+import luna.bootstrap.middleend.semantic.expr.numeric as numeric;
+import luna.bootstrap.middleend.semantic.expr.operators as operators;
+import luna.bootstrap.middleend.semantic.functions as functions;
+import luna.bootstrap.middleend.semantic.functions.ir as function_ir;
+import luna.bootstrap.middleend.semantic.stmt.labels as labels;
+import luna.bootstrap.middleend.semantic.types as types;
+import luna.bootstrap.middleend.type as type_info;
+import luna.runtime as runtime;
+import luna.std.bytes as bytes;
+
+fn lower_variable(context: *context::Context, node_id: usize, node: syntax::SyntaxNode) -> bool {
     let none: usize = context::no_id();
-    let inferred: bool =
-        (node.flags &
-            (parser::SyntaxFlag.inferred_type as usize)) != 0;
+    let inferred: bool = (node.flags & (syntax::SyntaxFlag.inferred_type as usize)) != 0;
     if (node.child_count !=
         (inferred ? 1 : 2) + attributes::count_attribute_children(
-            context,
-            context->current_unit,
-            node
-        )) {
+            context, context->current_unit, node)) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    let duplicate: usize =
-        context::local_in_current_scope(
-            context,
-            context->current_unit,
-            node.token_index
-        );
+    let duplicate: usize = builder::local_in_current_scope(context, context->current_unit, node.token_index);
     if (duplicate != none) {
-        let locals: *const context::Local =
-            context->locals.data as
+        let locals: *const context::Local = context->locals.data as
                 *const context::Local;
         context::add_diagnostic(
-            context,
-            context::DiagnosticKind.duplicate_local,
-            context->current_unit,
-            node.span,
+            context, context::DiagnosticKind.duplicate_local, context->current_unit, node.span,
             locals[duplicate].unit_index,
-            context::node(
-                context,
-                locals[duplicate].unit_index,
-                locals[duplicate].declaration_node
-            ).span,
-            duplicate
-        );
+            context::node(context, locals[duplicate].unit_index, locals[duplicate].declaration_node).span, duplicate);
         return false;
     }
     var type_id: usize = none;
-    var initializer: context::Expression =
-        expr::invalid_expression();
+    var initializer: context::Expression = base::invalid_expression();
     if (inferred) {
-        let inferred_node: parser::SyntaxNode =
-            context::node(
-                context,
-                context->current_unit,
-                node.first_child
-            );
-        if (inferred_node.kind ==
-                parser::SyntaxKind.zero_initializer ||
-            inferred_node.kind ==
-                parser::SyntaxKind.aggregate_initializer ||
-            inferred_node.kind ==
-                parser::SyntaxKind.null_expression) {
+        let inferred_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+        if (inferred_node.kind == syntax::SyntaxKind.zero_initializer || inferred_node.kind ==
+                syntax::SyntaxKind.aggregate_initializer || inferred_node.kind == syntax::SyntaxKind.null_expression) {
             // These forms are context-directed and have no standalone type.
             context::add_diagnostic(
-                context,
-                context::DiagnosticKind.invalid_initializer,
-                context->current_unit,
-                inferred_node.span,
-                none,
-                context::empty_span(),
-                none
-            );
+                context, context::DiagnosticKind.invalid_initializer, context->current_unit, inferred_node.span, none,
+                context::empty_span(), none);
             return false;
         }
-        initializer =
-            expr::lower_expression(
-                context,
-                node.first_child,
-                none
-            );
+        initializer = expr::lower_expression(context, node.first_child, none);
         if (!initializer.valid || initializer.type_id == none) {
             return false;
         }
         type_id = initializer.type_id;
     } else {
-        let declared_type: parser::SyntaxNode =
-            context::node(
-                context,
-                context->current_unit,
-                node.first_child
-            );
-        if (declared_type.kind ==
-                parser::SyntaxKind.type_builtin &&
+        let declared_type: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+        if (declared_type.kind == syntax::SyntaxKind.type_builtin &&
             context::token(
-                context,
-                context->current_unit,
-                declared_type.token_index
-            ).kind == lexer::TokenKind.keyword_va_list) {
+                context, context->current_unit, declared_type.token_index).kind == lexer::TokenKind.keyword_va_list) {
             // A va_list mounts only as a local var inside a variadic
             // function; every other position (parameters, fields, return
             // types, aliases, pointers to it, ...) is rejected with
             // invalid_va_list at type resolution.
-            if ((node.flags &
-                    (parser::SyntaxFlag.mutable_binding as usize)) == 0 ||
-                !context::current_function_is_variadic(
-                    context
-                )) {
+            if ((node.flags & (syntax::SyntaxFlag.mutable_binding as usize)) == 0 ||
+                !builder::current_function_is_variadic(
+                    context)) {
                 context::add_diagnostic(
-                    context,
-                    context::DiagnosticKind.invalid_va_list,
-                    context->current_unit,
-                    node.span,
-                    none,
-                    context::empty_span(),
-                    0
-                );
+                    context, context::DiagnosticKind.invalid_va_list, context->current_unit, node.span, none,
+                    context::empty_span(), 0);
                 return false;
             }
             type_id = type_info::BuiltinType.va_list_type as usize;
         } else {
-            type_id =
-                types::resolve_type_node(
-                    context,
-                    context->current_unit,
-                    node.first_child
-                );
+            type_id = types::resolve_type_node(context, context->current_unit, node.first_child);
         }
         if (type_id == none) {
             return false;
         }
     }
-    let type_record: type_info::Record =
-        context::type_record(context, type_id);
-    if (type_record.kind == type_info::Kind.type_void ||
-        (type_record.flags &
-            ((type_info::Flag.header as usize) |
+    let type_record: type_info::Record = context::type_record(context, type_id);
+    if (type_record.kind == type_info::Kind.type_void || (type_record.flags & ((type_info::Flag.header as usize) |
                 (type_info::Flag.flexible as usize))) != 0) {
         context::add_diagnostic(
-            context,
-            context::DiagnosticKind.incomplete_type,
-            context->current_unit,
-            node.span,
-            none,
-            context::empty_span(),
-            type_id
-        );
+            context, context::DiagnosticKind.incomplete_type, context->current_unit, node.span, none,
+            context::empty_span(), type_id);
         return false;
     }
     if (!inferred) {
-        let type_node: parser::SyntaxNode =
-            context::node(
-                context,
-                context->current_unit,
-                node.first_child
-            );
-        let initializer_node: parser::SyntaxNode =
-            context::node(
-                context,
-                context->current_unit,
-                type_node.next_sibling
-            );
-        if (type_info::is_memory(type_record.kind) &&
-            initializer_node.kind !=
-                parser::SyntaxKind.zero_initializer &&
-            initializer_node.kind !=
-                parser::SyntaxKind.aggregate_initializer &&
-            initializer_node.kind !=
-                parser::SyntaxKind.name_expression &&
-            initializer_node.kind !=
-                parser::SyntaxKind.member_expression &&
-            initializer_node.kind !=
-                parser::SyntaxKind.index_expression &&
-            initializer_node.kind !=
-                parser::SyntaxKind.call_expression &&
-            initializer_node.kind !=
-                parser::SyntaxKind.intrinsic_expression &&
-            initializer_node.kind !=
-                parser::SyntaxKind.conditional_expression &&
-            initializer_node.kind !=
-                parser::SyntaxKind.parenthesized_expression) {
+        let type_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+        let initializer_node: syntax::SyntaxNode =
+            context::node(context, context->current_unit, type_node.next_sibling);
+        if (type_info::is_memory(type_record.kind) && initializer_node.kind != syntax::SyntaxKind.zero_initializer &&
+            initializer_node.kind != syntax::SyntaxKind.aggregate_initializer && initializer_node.kind !=
+                syntax::SyntaxKind.name_expression && initializer_node.kind != syntax::SyntaxKind.member_expression &&
+            initializer_node.kind != syntax::SyntaxKind.index_expression && initializer_node.kind !=
+                syntax::SyntaxKind.call_expression && initializer_node.kind !=
+                syntax::SyntaxKind.intrinsic_expression && initializer_node.kind !=
+                syntax::SyntaxKind.conditional_expression && initializer_node.kind !=
+                syntax::SyntaxKind.parenthesized_expression) {
             context::add_diagnostic(
-                context,
-                context::DiagnosticKind.invalid_initializer,
-                context->current_unit,
-                initializer_node.span,
-                none,
-                context::empty_span(),
-                type_id
-            );
+                context, context::DiagnosticKind.invalid_initializer, context->current_unit, initializer_node.span,
+                none, context::empty_span(), type_id);
             return false;
         }
-        initializer =
-            expr::lower_expression(
-                context,
-                type_node.next_sibling,
-                type_id
-            );
-        if (!initializer.valid ||
-            initializer.type_id != type_id) {
+        initializer = expr::lower_expression(context, type_node.next_sibling, type_id);
+        if (!initializer.valid || initializer.type_id != type_id) {
             context::add_diagnostic(
-                context,
-                context::DiagnosticKind.type_mismatch,
-                context->current_unit,
-                node.span,
-                none,
-                context::empty_span(),
-                type_id
-            );
+                context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span, none,
+                context::empty_span(), type_id);
             return false;
         }
     }
-    let mutable_binding: bool =
-        (node.flags &
-            (parser::SyntaxFlag.mutable_binding as usize)) != 0;
-    let volatile_binding: bool =
-        (node.flags &
-            (parser::SyntaxFlag.volatile_ as usize)) != 0;
-    let alignment: consteval::Alignment =
-        consteval::declaration_alignment(
-            context,
-            context->current_unit,
-            node_id
-        );
+    let mutable_binding: bool = (node.flags & (syntax::SyntaxFlag.mutable_binding as usize)) != 0;
+    let volatile_binding: bool = (node.flags & (syntax::SyntaxFlag.volatile_ as usize)) != 0;
+    let alignment: const_model::Alignment = consteval::declaration_alignment(context, context->current_unit, node_id);
     if (!alignment.valid) {
         return false;
     }
     let slot_id: usize = ir::add_slot(
-        &context->ir,
-        context::current_ir_function(context),
-        type_id,
-        mutable_binding,
-        volatile_binding,
-        alignment.alignment
-    );
-    let address: usize = context::address_of_slot(
-        context,
-        node,
-        slot_id,
-        type_id,
-        false,
-        volatile_binding
-    );
-    if (!context::store_to_address(
-            context,
-            node,
-            address,
-            type_id,
-            initializer
-        )) {
+        &context->ir, builder::current_ir_function(context), type_id, mutable_binding, volatile_binding,
+        alignment.alignment);
+    let address: usize = builder::address_of_slot(context, node, slot_id, type_id, false, volatile_binding);
+    if (!builder::store_to_address(
+            context, node, address, type_id, initializer)) {
         return false;
     }
-    return context::append_local(
-        context,
-        {
-            function_id = context->current_function,
-            type_id = type_id,
-            slot_id = slot_id,
-            unit_index = context->current_unit,
-            declaration_node = node_id,
-            name_token = node.token_index,
-            scope_depth = context->scope_depth,
-            mutable_binding = mutable_binding,
-            volatile_binding = volatile_binding,
-            constant_binding = false,
-            integer_value = 0,
-        }
-    ) != none;
+    return builder::append_local(
+        context, {
+            function_id = context->current_function, type_id = type_id, slot_id = slot_id,
+            unit_index = context->current_unit, declaration_node = node_id, name_token = node.token_index,
+            scope_depth = context->scope_depth, mutable_binding = mutable_binding, volatile_binding = volatile_binding,
+            constant_binding = false, integer_value = 0,
+        }) != none;
 }
 
-fn lower_constant(
-    context: *context::Context,
-    node_id: usize,
-    node: parser::SyntaxNode
-) -> bool {
+fn lower_constant(context: *context::Context, node_id: usize, node: syntax::SyntaxNode) -> bool {
     let none: usize = context::no_id();
     if (node.child_count !=
         2 + attributes::count_attribute_children(
-            context,
-            context->current_unit,
-            node
-        )) {
+            context, context->current_unit, node)) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    let duplicate: usize =
-        context::local_in_current_scope(
-            context,
-            context->current_unit,
-            node.token_index
-        );
+    let duplicate: usize = builder::local_in_current_scope(context, context->current_unit, node.token_index);
     if (duplicate != none) {
-        let locals: *const context::Local =
-            context->locals.data as *const context::Local;
+        let locals: *const context::Local = context->locals.data as *const context::Local;
         context::add_diagnostic(
-            context,
-            context::DiagnosticKind.duplicate_local,
-            context->current_unit,
-            node.span,
+            context, context::DiagnosticKind.duplicate_local, context->current_unit, node.span,
             locals[duplicate].unit_index,
-            context::node(
-                context,
-                locals[duplicate].unit_index,
-                locals[duplicate].declaration_node
-            ).span,
-            duplicate
-        );
+            context::node(context, locals[duplicate].unit_index, locals[duplicate].declaration_node).span, duplicate);
         return false;
     }
-    let type_id: usize = types::resolve_type_node(
-        context,
-        context->current_unit,
-        node.first_child
-    );
+    let type_id: usize = types::resolve_type_node(context, context->current_unit, node.first_child);
     if (type_id == none) {
         return false;
     }
-    let type_record: type_info::Record =
-        context::type_record(context, type_id);
-    if (!type_info::is_integer(type_record.kind) &&
-        type_record.kind != type_info::Kind.boolean) {
+    let type_record: type_info::Record = context::type_record(context, type_id);
+    if (!type_info::is_integer(type_record.kind) && type_record.kind != type_info::Kind.boolean) {
         context::add_diagnostic(
-            context,
-            context::DiagnosticKind.type_mismatch,
-            context->current_unit,
-            context::node(
-                context,
-                context->current_unit,
-                node.first_child
-            ).span,
-            none,
-            context::empty_span(),
-            type_id
-        );
+            context, context::DiagnosticKind.type_mismatch, context->current_unit,
+            context::node(context, context->current_unit, node.first_child).span, none, context::empty_span(), type_id);
         return false;
     }
-    let initializer_id: usize = context::node(
-        context,
-        context->current_unit,
-        node.first_child
-    ).next_sibling;
-    let value: consteval::Value =
-        consteval::expression(
-            context,
-            context->current_unit,
-            initializer_id
-        );
+    let initializer_id: usize = context::node(context, context->current_unit, node.first_child).next_sibling;
+    let value: const_model::Value = const_engine::expression(context, context->current_unit, initializer_id);
     if (!value.is_constant || value.error) {
         context::add_diagnostic(
-            context,
-            context::DiagnosticKind
-                .non_constant_expression,
-            context->current_unit,
-            context::node(
-                context,
-                context->current_unit,
-                initializer_id
-            ).span,
-            none,
-            context::empty_span(),
-            node_id
-        );
+            context, context::DiagnosticKind.non_constant_expression, context->current_unit,
+            context::node(context, context->current_unit, initializer_id).span, none, context::empty_span(), node_id);
         return false;
     }
-    if (!consteval::const_value_conforms(
-            context,
-            context->current_unit,
-            context::node(
-                context,
-                context->current_unit,
-                initializer_id
-            ).span,
-            type_id,
-            value
-        )) {
+    if (!const_engine::const_value_conforms(
+            context, context->current_unit, context::node(context, context->current_unit, initializer_id).span,
+            type_id, value)) {
         return false;
     }
-    return context::append_local(
-        context,
-        {
-            function_id = context->current_function,
-            type_id = type_id,
-            slot_id = none,
-            unit_index = context->current_unit,
-            declaration_node = node_id,
-            name_token = node.token_index,
-            scope_depth = context->scope_depth,
-            mutable_binding = false,
-            volatile_binding = false,
-            constant_binding = true,
-            integer_value = value.value,
-        }
-    ) != none;
+    return builder::append_local(
+        context, {
+            function_id = context->current_function, type_id = type_id, slot_id = none,
+            unit_index = context->current_unit, declaration_node = node_id, name_token = node.token_index,
+            scope_depth = context->scope_depth, mutable_binding = false, volatile_binding = false,
+            constant_binding = true, integer_value = value.value,
+        }) != none;
 }
 
-fn assignment_operation(
-    operation: lexer::TokenKind
-) -> lexer::TokenKind {
+fn assignment_operation(operation: lexer::TokenKind) -> lexer::TokenKind {
     if (operation == lexer::TokenKind.plus_equal) {
         return lexer::TokenKind.plus;
     }
@@ -428,375 +225,167 @@ fn assignment_operation(
     return lexer::TokenKind.invalid;
 }
 
-fn lower_assignment(
-    context: *context::Context,
-    node: parser::SyntaxNode
-) -> bool {
+fn lower_assignment(context: *context::Context, node: syntax::SyntaxNode) -> bool {
     if (node.child_count != 2) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    let target_node: parser::SyntaxNode =
-        context::node(
-            context,
-            context->current_unit,
-            node.first_child
-        );
-    let target: context::Expression =
-        expr::lower_expression(
-            context,
-            node.first_child,
-            context::no_id()
-        );
-    if (!target.valid || !target.lvalue ||
-        !target.mutable_lvalue) {
+    let target_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let target: context::Expression = expr::lower_expression(context, node.first_child, context::no_id());
+    if (!target.valid || !target.lvalue || !target.mutable_lvalue) {
         context::add_diagnostic(
-            context,
-            target.lvalue ?
-                context::DiagnosticKind
-                    .immutable_assignment :
-                context::DiagnosticKind.invalid_lvalue,
-            context->current_unit,
-            target_node.span,
-            context::no_id(),
-            context::empty_span(),
-            target.type_id
-        );
+            context, target.lvalue ? context::DiagnosticKind.immutable_assignment :
+                context::DiagnosticKind.invalid_lvalue, context->current_unit, target_node.span, context::no_id(),
+            context::empty_span(), target.type_id);
         return false;
     }
-    let target_record: type_info::Record =
-        context::type_record(
-            context,
-            target.type_id
-        );
-    if ((target_record.flags &
-            ((type_info::Flag.header as usize) |
-                (type_info::Flag.flexible as usize))) != 0) {
+    let target_record: type_info::Record = context::type_record(context, target.type_id);
+    if ((target_record.flags & ((type_info::Flag.header as usize) | (type_info::Flag.flexible as usize))) != 0) {
         context::add_diagnostic(
-            context,
-            context::DiagnosticKind.incomplete_type,
-            context->current_unit,
-            target_node.span,
-            context::no_id(),
-            context::empty_span(),
-            target.type_id
-        );
+            context, context::DiagnosticKind.incomplete_type, context->current_unit, target_node.span, context::no_id(),
+            context::empty_span(), target.type_id);
         return false;
     }
-    let assignment: lexer::TokenKind =
-        context::token(
-            context,
-            context->current_unit,
-            node.token_index
-        ).kind;
-    let compound_operation: lexer::TokenKind =
-        assignment != lexer::TokenKind.equal ?
-            assignment_operation(assignment) :
+    let assignment: lexer::TokenKind = context::token(context, context->current_unit, node.token_index).kind;
+    let compound_operation: lexer::TokenKind = assignment != lexer::TokenKind.equal ? assignment_operation(assignment) :
             lexer::TokenKind.invalid;
-    let pointer_additive: bool =
-        compound_operation == lexer::TokenKind.plus ||
+    let pointer_additive: bool = compound_operation == lexer::TokenKind.plus ||
         compound_operation == lexer::TokenKind.minus;
-    let value_expected: usize =
-        pointer_additive &&
-        context::type_record(
-            context,
-            target.type_id
-        ).kind == type_info::Kind.pointer ?
-            type_info::BuiltinType.unsigned_size as usize :
-            target.type_id;
-    let value: context::Expression =
-        expr::lower_expression(
-            context,
-            target_node.next_sibling,
-            value_expected
-        );
+    let value_expected: usize = pointer_additive &&
+        context::type_record(context, target.type_id).kind == type_info::Kind.pointer ?
+            type_info::BuiltinType.unsigned_size as usize : target.type_id;
+    let value: context::Expression = expr::lower_expression(context, target_node.next_sibling, value_expected);
     if (!value.valid || value.type_id != value_expected) {
         context::add_diagnostic(
-            context,
-            context::DiagnosticKind.type_mismatch,
-            context->current_unit,
-            node.span,
-            context::no_id(),
-            context::empty_span(),
-            target.type_id
-        );
+            context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span, context::no_id(),
+            context::empty_span(), target.type_id);
         return false;
     }
     var stored: context::Expression = value;
     if (assignment != lexer::TokenKind.equal) {
-        let type_record: type_info::Record =
-            context::type_record(
-                context,
-                target.type_id
-            );
-        if (type_record.kind == type_info::Kind.pointer &&
-            pointer_additive) {
-            if (!expr::pointer_arithmetic_is_allowed(
-                    context,
-                    target.type_id
-                )) {
+        let type_record: type_info::Record = context::type_record(context, target.type_id);
+        if (type_record.kind == type_info::Kind.pointer && pointer_additive) {
+            if (!operators::pointer_arithmetic_is_allowed(
+                    context, target.type_id)) {
                 context::add_diagnostic(
-                    context,
-                    context::DiagnosticKind
-                        .invalid_operator,
-                    context->current_unit,
-                    node.span,
-                    context::no_id(),
-                    context::empty_span(),
-                    target.type_id
-                );
+                    context, context::DiagnosticKind.invalid_operator, context->current_unit, node.span,
+                    context::no_id(), context::empty_span(), target.type_id);
                 return false;
             }
             var count_value: usize = value.value_id;
-            if (compound_operation ==
-                lexer::TokenKind.minus) {
-                count_value =
-                    expr::emit_negated_usize(
-                        context,
-                        node,
-                        value.value_id
-                    );
+            if (compound_operation == lexer::TokenKind.minus) {
+                count_value = operators::emit_negated_usize(context, node, value.value_id);
             }
             let result_value: usize =
-                expr::emit_pointer_offset(
-                    context,
-                    node,
-                    target.value_id,
-                    target.type_id,
-                    count_value
-                );
+                operators::emit_pointer_offset(context, node, target.value_id, target.type_id, count_value);
             stored.type_id = target.type_id;
             stored.address_id = context::no_id();
             stored.lvalue = false;
             stored.mutable_lvalue = false;
             stored.volatile_lvalue = false;
             stored.value_id = result_value;
-            stored.valid =
-                result_value != context::no_id();
+            stored.valid = result_value != context::no_id();
         } else {
-        var opcode: ir::Opcode =
-            ir::Opcode.invalid;
-        if (type_info::is_integer(type_record.kind) &&
-            (expr::binary_is_arithmetic(compound_operation) ||
-                expr::binary_is_bitwise(compound_operation))) {
+        var opcode: ir::Opcode = ir::Opcode.invalid;
+        if (type_info::is_integer(type_record.kind) && (operators::binary_is_arithmetic(compound_operation) ||
+                operators::binary_is_bitwise(compound_operation))) {
             opcode = ir::Opcode.binary_integer;
-        } else if (type_info::is_float(type_record.kind) &&
-            expr::binary_is_arithmetic(compound_operation) &&
+        } else if (type_info::is_float(type_record.kind) && operators::binary_is_arithmetic(compound_operation) &&
             compound_operation != lexer::TokenKind.percent) {
             opcode = ir::Opcode.binary_float;
         }
         if (opcode == ir::Opcode.invalid) {
             context::add_diagnostic(
-                context,
-                context::DiagnosticKind.invalid_operator,
-                context->current_unit,
-                node.span,
-                context::no_id(),
-                context::empty_span(),
-                target.type_id
-            );
+                context, context::DiagnosticKind.invalid_operator, context->current_unit, node.span, context::no_id(),
+                context::empty_span(), target.type_id);
             return false;
         }
-        var instruction: ir::Instruction =
-            context::instruction(opcode, node);
+        var instruction: ir::Instruction = builder::instruction(opcode, node);
         instruction.operation = compound_operation;
         instruction.left = target.value_id;
         instruction.right = value.value_id;
-        let result_value: usize =
-            context::emit_value(
-                context,
-                instruction,
-                target.type_id
-            );
+        let result_value: usize = builder::emit_value(context, instruction, target.type_id);
         stored.value_id = result_value;
-        stored.valid =
-            result_value != context::no_id();
+        stored.valid = result_value != context::no_id();
         }
     }
-    if (target.bitfield_segment !=
-        context::no_id()) {
-        return expr::store_bitfield(
-            context,
-            node,
-            target.address_id,
-            target.bitfield_segment,
-            stored
-        );
+    if (target.bitfield_segment != context::no_id()) {
+        return access::store_bitfield(context, node, target.address_id, target.bitfield_segment, stored);
     }
-    return context::store_to_address(
-        context,
-        node,
-        target.address_id,
-        target.type_id,
-        stored
-    );
+    return builder::store_to_address(context, node, target.address_id, target.type_id, stored);
 }
 
-fn lower_if(
-    context: *context::Context,
-    node: parser::SyntaxNode
-) -> bool {
+fn lower_if(context: *context::Context, node: syntax::SyntaxNode) -> bool {
     let none: usize = context::no_id();
     if (node.child_count < 2 || node.child_count > 3) {
         return false;
     }
-    let condition_node: parser::SyntaxNode =
-        context::node(
-            context,
-            context->current_unit,
-            node.first_child
-        );
+    let condition_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
     let condition: context::Expression =
-        expr::lower_expression(
-            context,
-            node.first_child,
-            type_info::BuiltinType.boolean as usize
-        );
-    if (!condition.valid ||
-        condition.type_id !=
-            type_info::BuiltinType.boolean as usize) {
+        expr::lower_expression(context, node.first_child, type_info::BuiltinType.boolean as usize);
+    if (!condition.valid || condition.type_id != type_info::BuiltinType.boolean as usize) {
         context::add_diagnostic(
-            context,
-            context::DiagnosticKind.invalid_condition,
-            context->current_unit,
-            condition_node.span,
-            none,
-            context::empty_span(),
-            condition.type_id
-        );
+            context, context::DiagnosticKind.invalid_condition, context->current_unit, condition_node.span, none,
+            context::empty_span(), condition.type_id);
         return false;
     }
-    let then_block: usize =
-        context::add_current_block(context);
-    let else_block: usize =
-        context::add_current_block(context);
-    let merge_block: usize =
-        context::add_current_block(context);
-    context::emit_branch(
-        context,
-        node,
-        condition.value_id,
-        then_block,
-        else_block
-    );
+    let then_block: usize = builder::add_current_block(context);
+    let else_block: usize = builder::add_current_block(context);
+    let merge_block: usize = builder::add_current_block(context);
+    builder::emit_branch(context, node, condition.value_id, then_block, else_block);
     context->current_block = then_block;
-    lower_block(
-        context,
-        condition_node.next_sibling
-    );
-    if (!context::block_is_terminated(
-            context,
-            context->current_block
-        )) {
-        context::emit_jump(
-            context,
-            node,
-            merge_block
-        );
+    lower_block(context, condition_node.next_sibling);
+    if (!builder::block_is_terminated(
+            context, context->current_block)) {
+        builder::emit_jump(context, node, merge_block);
     }
     context->current_block = else_block;
     if (node.child_count == 3) {
-        let then_node: parser::SyntaxNode =
-            context::node(
-                context,
-                context->current_unit,
-                condition_node.next_sibling
-            );
-        let else_node: parser::SyntaxNode =
-            context::node(
-                context,
-                context->current_unit,
-                then_node.next_sibling
-            );
-        if (else_node.kind == parser::SyntaxKind.if_statement) {
+        let then_node: syntax::SyntaxNode = context::node(context, context->current_unit, condition_node.next_sibling);
+        let else_node: syntax::SyntaxNode = context::node(context, context->current_unit, then_node.next_sibling);
+        if (else_node.kind == syntax::SyntaxKind.if_statement) {
             lower_if(context, else_node);
         } else {
-            lower_block(
-                context,
-                then_node.next_sibling
-            );
+            lower_block(context, then_node.next_sibling);
         }
     }
-    if (!context::block_is_terminated(
-            context,
-            context->current_block
-        )) {
-        context::emit_jump(
-            context,
-            node,
-            merge_block
-        );
+    if (!builder::block_is_terminated(
+            context, context->current_block)) {
+        builder::emit_jump(context, node, merge_block);
     }
     context->current_block = merge_block;
     return true;
 }
 
-fn lower_while(
-    context: *context::Context,
-    node: parser::SyntaxNode
-) -> bool {
+fn lower_while(context: *context::Context, node: syntax::SyntaxNode) -> bool {
     if (node.child_count != 2) {
         return false;
     }
-    let condition_block: usize =
-        context::add_current_block(context);
-    let body_block: usize =
-        context::add_current_block(context);
-    let exit_block: usize =
-        context::add_current_block(context);
-    context::emit_jump(
-        context,
-        node,
-        condition_block
-    );
+    let condition_block: usize = builder::add_current_block(context);
+    let body_block: usize = builder::add_current_block(context);
+    let exit_block: usize = builder::add_current_block(context);
+    builder::emit_jump(context, node, condition_block);
     context->current_block = condition_block;
-    let condition_node: parser::SyntaxNode =
-        context::node(
-            context,
-            context->current_unit,
-            node.first_child
-        );
+    let condition_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
     let condition: context::Expression =
-        expr::lower_expression(
-            context,
-            node.first_child,
-            type_info::BuiltinType.boolean as usize
-        );
-    if (!condition.valid ||
-        condition.type_id !=
-            type_info::BuiltinType.boolean as usize) {
+        expr::lower_expression(context, node.first_child, type_info::BuiltinType.boolean as usize);
+    if (!condition.valid || condition.type_id != type_info::BuiltinType.boolean as usize) {
         return false;
     }
-    context::emit_branch(
-        context,
-        node,
-        condition.value_id,
-        body_block,
-        exit_block
-    );
+    builder::emit_branch(context, node, condition.value_id, body_block, exit_block);
     let saved_break: usize = context->break_block;
     let saved_continue: usize = context->continue_block;
     context->break_block = exit_block;
     context->continue_block = condition_block;
-    let pushed_label: bool =
-        push_loop_label(context);
+    let pushed_label: bool = labels::push_loop_label(context);
     context->current_block = body_block;
-    lower_block(
-        context,
-        condition_node.next_sibling
-    );
-    if (!context::block_is_terminated(
-            context,
-            context->current_block
-        )) {
-        context::emit_jump(
-            context,
-            node,
-            condition_block
-        );
+    lower_block(context, condition_node.next_sibling);
+    if (!builder::block_is_terminated(
+            context, context->current_block)) {
+        builder::emit_jump(context, node, condition_block);
     }
     if (pushed_label) {
-        pop_loop_label(context);
+        labels::pop_loop_label(context);
     }
     context->break_block = saved_break;
     context->continue_block = saved_continue;
@@ -804,68 +393,35 @@ fn lower_while(
     return true;
 }
 
-fn lower_do(
-    context: *context::Context,
-    node: parser::SyntaxNode
-) -> bool {
+fn lower_do(context: *context::Context, node: syntax::SyntaxNode) -> bool {
     if (node.child_count != 2) {
         return false;
     }
-    let body_node: parser::SyntaxNode =
-        context::node(
-            context,
-            context->current_unit,
-            node.first_child
-        );
-    let body_block: usize =
-        context::add_current_block(context);
-    let condition_block: usize =
-        context::add_current_block(context);
-    let exit_block: usize =
-        context::add_current_block(context);
-    context::emit_jump(context, node, body_block);
+    let body_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let body_block: usize = builder::add_current_block(context);
+    let condition_block: usize = builder::add_current_block(context);
+    let exit_block: usize = builder::add_current_block(context);
+    builder::emit_jump(context, node, body_block);
     let saved_break: usize = context->break_block;
     let saved_continue: usize = context->continue_block;
     context->break_block = exit_block;
     context->continue_block = condition_block;
-    let pushed_label: bool =
-        push_loop_label(context);
+    let pushed_label: bool = labels::push_loop_label(context);
     context->current_block = body_block;
-    lower_block(
-        context,
-        node.first_child
-    );
-    if (!context::block_is_terminated(
-            context,
-            context->current_block
-        )) {
-        context::emit_jump(
-            context,
-            node,
-            condition_block
-        );
+    lower_block(context, node.first_child);
+    if (!builder::block_is_terminated(
+            context, context->current_block)) {
+        builder::emit_jump(context, node, condition_block);
     }
     context->current_block = condition_block;
     let condition: context::Expression =
-        expr::lower_expression(
-            context,
-            body_node.next_sibling,
-            type_info::BuiltinType.boolean as usize
-        );
-    if (!condition.valid ||
-        condition.type_id !=
-            type_info::BuiltinType.boolean as usize) {
+        expr::lower_expression(context, body_node.next_sibling, type_info::BuiltinType.boolean as usize);
+    if (!condition.valid || condition.type_id != type_info::BuiltinType.boolean as usize) {
         return false;
     }
-    context::emit_branch(
-        context,
-        node,
-        condition.value_id,
-        body_block,
-        exit_block
-    );
+    builder::emit_branch(context, node, condition.value_id, body_block, exit_block);
     if (pushed_label) {
-        pop_loop_label(context);
+        labels::pop_loop_label(context);
     }
     context->break_block = saved_break;
     context->continue_block = saved_continue;
@@ -873,41 +429,26 @@ fn lower_do(
     return true;
 }
 
-fn lower_loop(
-    context: *context::Context,
-    node: parser::SyntaxNode
-) -> bool {
+fn lower_loop(context: *context::Context, node: syntax::SyntaxNode) -> bool {
     if (node.child_count != 1) {
         return false;
     }
-    let body_block: usize =
-        context::add_current_block(context);
-    let exit_block: usize =
-        context::add_current_block(context);
-    context::emit_jump(context, node, body_block);
+    let body_block: usize = builder::add_current_block(context);
+    let exit_block: usize = builder::add_current_block(context);
+    builder::emit_jump(context, node, body_block);
     let saved_break: usize = context->break_block;
     let saved_continue: usize = context->continue_block;
     context->break_block = exit_block;
     context->continue_block = body_block;
-    let pushed_label: bool =
-        push_loop_label(context);
+    let pushed_label: bool = labels::push_loop_label(context);
     context->current_block = body_block;
-    lower_block(
-        context,
-        node.first_child
-    );
-    if (!context::block_is_terminated(
-            context,
-            context->current_block
-        )) {
-        context::emit_jump(
-            context,
-            node,
-            body_block
-        );
+    lower_block(context, node.first_child);
+    if (!builder::block_is_terminated(
+            context, context->current_block)) {
+        builder::emit_jump(context, node, body_block);
     }
     if (pushed_label) {
-        pop_loop_label(context);
+        labels::pop_loop_label(context);
     }
     context->break_block = saved_break;
     context->continue_block = saved_continue;
@@ -915,360 +456,166 @@ fn lower_loop(
     return true;
 }
 
-fn lower_for_clause(
-    context: *context::Context,
-    wrapper_id: usize
-) -> bool {
-    let wrapper: parser::SyntaxNode =
-        context::node(
-            context,
-            context->current_unit,
-            wrapper_id
-        );
+fn lower_for_clause(context: *context::Context, wrapper_id: usize) -> bool {
+    let wrapper: syntax::SyntaxNode = context::node(context, context->current_unit, wrapper_id);
     if (wrapper.child_count == 0) {
         return true;
     }
     if (wrapper.child_count != 1) {
         return false;
     }
-    let child: parser::SyntaxNode =
-        context::node(
-            context,
-            context->current_unit,
-            wrapper.first_child
-        );
-    if (child.kind ==
-        parser::SyntaxKind.variable_declaration) {
-        return lower_variable(
-            context,
-            wrapper.first_child,
-            child
-        );
+    let child: syntax::SyntaxNode = context::node(context, context->current_unit, wrapper.first_child);
+    if (child.kind == syntax::SyntaxKind.variable_declaration) {
+        return lower_variable(context, wrapper.first_child, child);
     }
-    if (child.kind ==
-        parser::SyntaxKind.assignment_statement) {
-        return lower_assignment(
-            context,
-            child
-        );
+    if (child.kind == syntax::SyntaxKind.assignment_statement) {
+        return lower_assignment(context, child);
     }
-    if (child.kind ==
-            parser::SyntaxKind.expression_statement &&
-        child.child_count == 1) {
-        return expr::lower_expression(
-            context,
-            child.first_child,
-            context::no_id()
-        ).valid;
+    if (child.kind == syntax::SyntaxKind.expression_statement && child.child_count == 1) {
+        return expr::lower_expression(context, child.first_child, context::no_id()).valid;
     }
     return false;
 }
 
-fn lower_for(
-    context: *context::Context,
-    node: parser::SyntaxNode
-) -> bool {
+fn lower_for(context: *context::Context, node: syntax::SyntaxNode) -> bool {
     if (node.child_count != 4) {
         return false;
     }
-    let local_start: usize =
-        context::enter_scope(context);
+    let local_start: usize = builder::enter_scope(context);
     if (local_start == context::no_id()) {
         return false;
     }
-    let initializer: parser::SyntaxNode =
-        context::node(
-            context,
-            context->current_unit,
-            node.first_child
-        );
-    let condition_wrapper: parser::SyntaxNode =
-        context::node(
-            context,
-            context->current_unit,
-            initializer.next_sibling
-        );
-    let update_wrapper: parser::SyntaxNode =
-        context::node(
-            context,
-            context->current_unit,
-            condition_wrapper.next_sibling
-        );
-    lower_for_clause(
-        context,
-        node.first_child
-    );
-    let condition_block: usize =
-        context::add_current_block(context);
-    let body_block: usize =
-        context::add_current_block(context);
-    let update_block: usize =
-        context::add_current_block(context);
-    let exit_block: usize =
-        context::add_current_block(context);
-    context::emit_jump(
-        context,
-        node,
-        condition_block
-    );
+    let initializer: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let condition_wrapper: syntax::SyntaxNode = context::node(context, context->current_unit, initializer.next_sibling);
+    let update_wrapper: syntax::SyntaxNode =
+        context::node(context, context->current_unit, condition_wrapper.next_sibling);
+    lower_for_clause(context, node.first_child);
+    let condition_block: usize = builder::add_current_block(context);
+    let body_block: usize = builder::add_current_block(context);
+    let update_block: usize = builder::add_current_block(context);
+    let exit_block: usize = builder::add_current_block(context);
+    builder::emit_jump(context, node, condition_block);
     context->current_block = condition_block;
     if (condition_wrapper.child_count == 0) {
-        context::emit_jump(
-            context,
-            node,
-            body_block
-        );
+        builder::emit_jump(context, node, body_block);
     } else {
         let condition: context::Expression =
-            expr::lower_expression(
-                context,
-                condition_wrapper.first_child,
-                type_info::BuiltinType.boolean as usize
-            );
-        if (!condition.valid ||
-            condition.type_id !=
-                type_info::BuiltinType.boolean as usize) {
-            context::leave_scope(
-                context,
-                local_start
-            );
+            expr::lower_expression(context, condition_wrapper.first_child, type_info::BuiltinType.boolean as usize);
+        if (!condition.valid || condition.type_id != type_info::BuiltinType.boolean as usize) {
+            builder::leave_scope(context, local_start);
             return false;
         }
-        context::emit_branch(
-            context,
-            node,
-            condition.value_id,
-            body_block,
-            exit_block
-        );
+        builder::emit_branch(context, node, condition.value_id, body_block, exit_block);
     }
     let saved_break: usize = context->break_block;
     let saved_continue: usize = context->continue_block;
     context->break_block = exit_block;
     context->continue_block = update_block;
-    let pushed_label: bool =
-        push_loop_label(context);
+    let pushed_label: bool = labels::push_loop_label(context);
     context->current_block = body_block;
-    lower_block(
-        context,
-        update_wrapper.next_sibling
-    );
-    if (!context::block_is_terminated(
-            context,
-            context->current_block
-        )) {
-        context::emit_jump(
-            context,
-            node,
-            update_block
-        );
+    lower_block(context, update_wrapper.next_sibling);
+    if (!builder::block_is_terminated(
+            context, context->current_block)) {
+        builder::emit_jump(context, node, update_block);
     }
     context->current_block = update_block;
-    lower_for_clause(
-        context,
-        condition_wrapper.next_sibling
-    );
-    if (!context::block_is_terminated(
-            context,
-            context->current_block
-        )) {
-        context::emit_jump(
-            context,
-            node,
-            condition_block
-        );
+    lower_for_clause(context, condition_wrapper.next_sibling);
+    if (!builder::block_is_terminated(
+            context, context->current_block)) {
+        builder::emit_jump(context, node, condition_block);
     }
     if (pushed_label) {
-        pop_loop_label(context);
+        labels::pop_loop_label(context);
     }
     context->break_block = saved_break;
     context->continue_block = saved_continue;
     context->current_block = exit_block;
-    context::leave_scope(context, local_start);
+    builder::leave_scope(context, local_start);
     return true;
 }
 
-fn switch_label(
-    context: *context::Context,
-    node_id: usize,
-    control_type: usize
-) -> context::Expression {
-    let node: parser::SyntaxNode =
-        context::node(
-            context,
-            context->current_unit,
-            node_id
-        );
-    let control_record: type_info::Record =
-        context::type_record(
-            context,
-            control_type
-        );
-    if (control_record.kind ==
-        type_info::Kind.enumeration) {
-        let result: context::Expression =
-            expr::lower_enum_member(context, node);
+fn switch_label(context: *context::Context, node_id: usize, control_type: usize) -> context::Expression {
+    let node: syntax::SyntaxNode = context::node(context, context->current_unit, node_id);
+    let control_record: type_info::Record = context::type_record(context, control_type);
+    if (control_record.kind == type_info::Kind.enumeration) {
+        let result: context::Expression = access::lower_enum_member(context, node);
         if (result.type_id == control_type) {
             return result;
         }
-        return expr::invalid_expression();
+        return base::invalid_expression();
     }
-    if (node.kind ==
-        parser::SyntaxKind.integer_expression) {
-        return expr::lower_integer_literal(
-            context,
-            node,
-            control_type
-        );
+    if (node.kind == syntax::SyntaxKind.integer_expression) {
+        return numeric::lower_integer_literal(context, node, control_type);
     }
-    if (node.kind == parser::SyntaxKind.name_expression) {
-        return expr::lower_const_name(context, node);
+    if (node.kind == syntax::SyntaxKind.name_expression) {
+        return access::lower_const_name(context, node);
     }
-    if (node.kind ==
-        parser::SyntaxKind.unary_expression) {
-        return expr::lower_unary(
-            context,
-            node,
-            control_type
-        );
+    if (node.kind == syntax::SyntaxKind.unary_expression) {
+        return expr::lower_unary(context, node, control_type);
     }
-    return expr::invalid_expression();
+    return base::invalid_expression();
 }
 
-fn lower_switch(
-    context: *context::Context,
-    node: parser::SyntaxNode
-) -> bool {
+fn lower_switch(context: *context::Context, node: syntax::SyntaxNode) -> bool {
     let none: usize = context::no_id();
     if (node.child_count < 2) {
         return false;
     }
-    let expression_node: parser::SyntaxNode =
-        context::node(
-            context,
-            context->current_unit,
-            node.first_child
-        );
-    let control: context::Expression =
-        expr::lower_expression(
-            context,
-            node.first_child,
-            none
-        );
+    let expression_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let control: context::Expression = expr::lower_expression(context, node.first_child, none);
     if (!control.valid) {
         return false;
     }
-    let control_record: type_info::Record =
-        context::type_record(
-            context,
-            control.type_id
-        );
-    if (!type_info::is_integer(control_record.kind) &&
-        control_record.kind != type_info::Kind.enumeration) {
+    let control_record: type_info::Record = context::type_record(context, control.type_id);
+    if (!type_info::is_integer(control_record.kind) && control_record.kind != type_info::Kind.enumeration) {
         context::add_diagnostic(
-            context,
-            context::DiagnosticKind.invalid_switch,
-            context->current_unit,
-            node.span,
-            none,
-            context::empty_span(),
-            control.type_id
-        );
+            context, context::DiagnosticKind.invalid_switch, context->current_unit, node.span, none,
+            context::empty_span(), control.type_id);
         return false;
     }
-    var arm_blocks: bytes::Buffer =
-        bytes::empty();
+    var arm_blocks: bytes::Buffer = bytes::empty();
     var arm_node: usize = expression_node.next_sibling;
     var default_block: usize = none;
-    while (arm_node != none &&
-        context->error == runtime::Error.none) {
-        let arm: parser::SyntaxNode =
-            context::node(
-                context,
-                context->current_unit,
-                arm_node
-            );
-        let block_id: usize =
-            context::add_current_block(context);
+    while (arm_node != none && context->error == runtime::Error.none) {
+        let arm: syntax::SyntaxNode = context::node(context, context->current_unit, arm_node);
+        let block_id: usize = builder::add_current_block(context);
         let appended: bytes::BufferResult =
-            bytes::append(
-                arm_blocks,
-                (&block_id) as *const usize as *const u8,
-                sizeof(usize)
-            );
+            bytes::append(arm_blocks, (&block_id) as *const usize as *const u8, sizeof(usize));
         arm_blocks = appended.buffer;
         context->error = appended.error;
-        if ((arm.flags &
-                (parser::SyntaxFlag.default_arm as usize)) != 0) {
+        if ((arm.flags & (syntax::SyntaxFlag.default_arm as usize)) != 0) {
             if (default_block != none) {
                 context::add_diagnostic(
-                    context,
-                    context::DiagnosticKind
-                        .duplicate_default,
-                    context->current_unit,
-                    arm.span,
-                    none,
-                    context::empty_span(),
-                    0
-                );
+                    context, context::DiagnosticKind.duplicate_default, context->current_unit, arm.span, none,
+                    context::empty_span(), 0);
             }
             default_block = block_id;
         }
         arm_node = arm.next_sibling;
     }
-    var seen_values: bytes::Buffer =
-        bytes::empty();
-    let blocks: *const usize =
-        arm_blocks.data as *const usize;
+    var seen_values: bytes::Buffer = bytes::empty();
+    let blocks: *const usize = arm_blocks.data as *const usize;
     arm_node = expression_node.next_sibling;
     var arm_index: usize = 0;
-    while (arm_node != none &&
-        context->error == runtime::Error.none) {
-        let arm: parser::SyntaxNode =
-            context::node(
-                context,
-                context->current_unit,
-                arm_node
-            );
-        let is_default: bool =
-            (arm.flags &
-                (parser::SyntaxFlag.default_arm as usize)) != 0;
+    while (arm_node != none && context->error == runtime::Error.none) {
+        let arm: syntax::SyntaxNode = context::node(context, context->current_unit, arm_node);
+        let is_default: bool = (arm.flags & (syntax::SyntaxFlag.default_arm as usize)) != 0;
         var child: usize = arm.first_child;
-        let label_count: usize =
-            is_default ? 0 : arm.child_count - 1;
+        let label_count: usize = is_default ? 0 : arm.child_count - 1;
         var label_index: usize = 0;
         while (label_index < label_count) {
-            let label: context::Expression =
-                switch_label(
-                    context,
-                    child,
-                    control.type_id
-                );
-            if (!label.valid ||
-                label.type_id != control.type_id) {
+            let label: context::Expression = switch_label(context, child, control.type_id);
+            if (!label.valid || label.type_id != control.type_id) {
                 context::add_diagnostic(
-                    context,
-                    context::DiagnosticKind
-                        .invalid_switch,
-                    context->current_unit,
-                    context::node(
-                        context,
-                        context->current_unit,
-                        child
-                    ).span,
-                    none,
-                    context::empty_span(),
-                    control.type_id
-                );
+                    context, context::DiagnosticKind.invalid_switch, context->current_unit,
+                    context::node(context, context->current_unit, child).span,
+                    none, context::empty_span(), control.type_id);
             } else {
-                let values: *const u64 =
-                    seen_values.data as *const u64;
+                let values: *const u64 = seen_values.data as *const u64;
                 var duplicate: bool = false;
                 var value_index: usize = 0;
-                while (value_index <
-                    seen_values.length / sizeof(u64)) {
-                    if (values[value_index] ==
-                        label.constant_value) {
+                while (value_index < seen_values.length / sizeof(u64)) {
+                    if (values[value_index] == label.constant_value) {
                         duplicate = true;
                         break;
                     }
@@ -1276,712 +623,100 @@ fn lower_switch(
                 }
                 if (duplicate) {
                     context::add_diagnostic(
-                        context,
-                        context::DiagnosticKind
-                            .duplicate_case,
-                        context->current_unit,
-                        context::node(
-                            context,
-                            context->current_unit,
-                            child
-                        ).span,
-                        none,
-                        context::empty_span(),
-                        value_index
-                    );
+                        context, context::DiagnosticKind.duplicate_case, context->current_unit,
+                        context::node(context, context->current_unit, child).span,
+                        none, context::empty_span(), value_index);
                 }
                 let appended: bytes::BufferResult =
-                    bytes::append(
-                        seen_values,
-                        (&label.constant_value) as
-                            *const u64 as *const u8,
-                        sizeof(u64)
-                    );
+                    bytes::append(seen_values, (&label.constant_value) as *const u64 as *const u8, sizeof(u64));
                 seen_values = appended.buffer;
                 context->error = appended.error;
-                var comparison: ir::Instruction =
-                    context::instruction(
-                        ir::Opcode.compare,
-                        arm
-                    );
-                comparison.operation =
-                    lexer::TokenKind.equal_equal;
+                var comparison: ir::Instruction = builder::instruction(ir::Opcode.compare, arm);
+                comparison.operation = lexer::TokenKind.equal_equal;
                 comparison.left = control.value_id;
                 comparison.right = label.value_id;
                 let comparison_value: usize =
-                    context::emit_value(
-                        context,
-                        comparison,
-                        type_info::BuiltinType.boolean as usize
-                    );
-                let next_test: usize =
-                    context::add_current_block(
-                        context
-                    );
-                context::emit_branch(
-                    context,
-                    arm,
-                    comparison_value,
-                    blocks[arm_index],
-                    next_test
-                );
+                    builder::emit_value(context, comparison, type_info::BuiltinType.boolean as usize);
+                let next_test: usize = builder::add_current_block(context);
+                builder::emit_branch(context, arm, comparison_value, blocks[arm_index], next_test);
                 context->current_block = next_test;
             }
-            child = context::node(
-                context,
-                context->current_unit,
-                child
-            ).next_sibling;
+            child = context::node(context, context->current_unit, child).next_sibling;
             label_index += 1;
         }
         arm_node = arm.next_sibling;
         arm_index += 1;
     }
-    let exit_block: usize =
-        context::add_current_block(context);
-    context::emit_jump(
-        context,
-        node,
-        default_block != none ? default_block : exit_block
-    );
+    let exit_block: usize = builder::add_current_block(context);
+    builder::emit_jump(context, node, default_block != none ? default_block : exit_block);
     let saved_break: usize = context->break_block;
     context->break_block = exit_block;
     arm_node = expression_node.next_sibling;
     arm_index = 0;
     while (arm_node != none) {
-        let arm: parser::SyntaxNode =
-            context::node(
-                context,
-                context->current_unit,
-                arm_node
-            );
+        let arm: syntax::SyntaxNode = context::node(context, context->current_unit, arm_node);
         context->current_block = blocks[arm_index];
-        lower_block(
-            context,
-            arm.last_child
-        );
-        if (!context::block_is_terminated(
-                context,
-                context->current_block
-            )) {
-            context::emit_jump(
-                context,
-                arm,
-                exit_block
-            );
+        lower_block(context, arm.last_child);
+        if (!builder::block_is_terminated(
+                context, context->current_block)) {
+            builder::emit_jump(context, arm, exit_block);
         }
         arm_node = arm.next_sibling;
         arm_index += 1;
     }
     context->break_block = saved_break;
     context->current_block = exit_block;
-    var release_error: runtime::Error =
-        bytes::release(arm_blocks);
-    release_error = context::release_error(
-        release_error,
-        bytes::release(seen_values)
-    );
+    var release_error: runtime::Error = bytes::release(arm_blocks);
+    release_error = context::release_error(release_error, bytes::release(seen_values));
     if (context->error == runtime::Error.none) {
         context->error = release_error;
     }
     return true;
 }
 
-fn lower_return(
-    context: *context::Context,
-    node: parser::SyntaxNode
-) -> bool {
-    let functions: *const context::Function =
-        context->functions.data as
+fn lower_return(context: *context::Context, node: syntax::SyntaxNode) -> bool {
+    let functions: *const context::Function = context->functions.data as
             *const context::Function;
-    let return_type: usize =
-        functions[context->current_function].return_type;
-    let return_record: type_info::Record =
-        context::type_record(
-            context,
-            return_type
-        );
-    if ((functions[context->current_function].flags &
-            (context::SymbolFlag.no_return as usize)) != 0) {
+    let return_type: usize = functions[context->current_function].return_type;
+    let return_record: type_info::Record = context::type_record(context, return_type);
+    if ((functions[context->current_function].flags & (context::SymbolFlag.no_return as usize)) != 0) {
         context::add_diagnostic(
-            context,
-            context::DiagnosticKind.noreturn_returns,
-            context->current_unit,
-            node.span,
-            context::no_id(),
-            context::empty_span(),
-            0
-        );
+            context, context::DiagnosticKind.noreturn_returns, context->current_unit, node.span, context::no_id(),
+            context::empty_span(), 0);
     }
     var instruction: ir::Instruction =
-        context::instruction(
-            return_record.kind == type_info::Kind.type_void ?
-                ir::Opcode.return_void :
-                ir::Opcode.return_value,
-            node
-        );
+        builder::instruction(
+            return_record.kind == type_info::Kind.type_void ? ir::Opcode.return_void : ir::Opcode.return_value, node);
     instruction.type_id = return_type;
-    if (return_record.kind ==
-        type_info::Kind.type_void) {
+    if (return_record.kind == type_info::Kind.type_void) {
         if (node.child_count != 0) {
             context::add_diagnostic(
-                context,
-                context::DiagnosticKind.return_type,
-                context->current_unit,
-                node.span,
-                context::no_id(),
-                context::empty_span(),
-                return_type
-            );
+                context, context::DiagnosticKind.return_type, context->current_unit, node.span, context::no_id(),
+                context::empty_span(), return_type);
             return false;
         }
     } else {
         if (node.child_count != 1) {
             context::add_diagnostic(
-                context,
-                context::DiagnosticKind.return_type,
-                context->current_unit,
-                node.span,
-                context::no_id(),
-                context::empty_span(),
-                return_type
-            );
+                context, context::DiagnosticKind.return_type, context->current_unit, node.span, context::no_id(),
+                context::empty_span(), return_type);
             return false;
         }
-        let value: context::Expression =
-            expr::lower_expression(
-                context,
-                node.first_child,
-                return_type
-            );
+        let value: context::Expression = expr::lower_expression(context, node.first_child, return_type);
         if (!value.valid || value.type_id != return_type) {
             context::add_diagnostic(
-                context,
-                context::DiagnosticKind.return_type,
-                context->current_unit,
-                node.span,
-                context::no_id(),
-                context::empty_span(),
-                return_type
-            );
+                context, context::DiagnosticKind.return_type, context->current_unit, node.span, context::no_id(),
+                context::empty_span(), return_type);
             return false;
         }
-        instruction.left =
-            type_info::is_memory(return_record.kind) ?
-                value.address_id : value.value_id;
+        instruction.left = type_info::is_memory(return_record.kind) ? value.address_id : value.value_id;
     }
-    context::emit_void(context, instruction);
-    context->current_block =
-        context::add_current_block(context);
+    builder::emit_void(context, instruction);
+    context->current_block = builder::add_current_block(context);
     return true;
 }
 
-fn find_label(
-    context: *context::Context,
-    name_token: usize
-) -> usize {
-    let labels: *const context::Label =
-        context->labels.data as *const context::Label;
-    var index: usize = 0;
-    while (index < context->label_count) {
-        if (context::tokens_equal(
-                context,
-                context->current_unit,
-                name_token,
-                context->current_unit,
-                labels[index].name_token
-            )) {
-            return index;
-        }
-        index += 1;
-    }
-    return context::no_id();
-}
-
-fn append_label(
-    context: *context::Context,
-    label: context::Label
-) -> usize {
-    let result: usize = context->label_count;
-    if (!context::append_record(
-            context,
-            &context->labels,
-            (&label) as *const context::Label as *const u8,
-            sizeof(context::Label)
-        )) {
-        return context::no_id();
-    }
-    context->label_count += 1;
-    return result;
-}
-
-// Appends the declaration-node identity of every live local of the current
-// function to destination and returns the index of the first identity.
-fn snapshot_locals(
-    context: *context::Context,
-    destination: *bytes::Buffer
-) -> usize {
-    let first: usize = destination->length / sizeof(usize);
-    let locals: *const context::Local =
-        context->locals.data as *const context::Local;
-    var index: usize = 0;
-    while (index < context->local_count &&
-        context->error == runtime::Error.none) {
-        let identity: usize = locals[index].declaration_node;
-        let appended: bytes::BufferResult =
-            bytes::append(
-                *destination,
-                (&identity) as *const usize as *const u8,
-                sizeof(usize)
-            );
-        *destination = appended.buffer;
-        context->error = appended.error;
-        index += 1;
-    }
-    return first;
-}
-
-// The label's live-local set must be a subset of the locals live right now
-// (a backward goto may not land inside the extent of an initialization it
-// jumps over).
-fn label_subset_of_current(
-    context: *context::Context,
-    label: context::Label
-) -> bool {
-    let identities: *const usize =
-        context->label_locals.data as *const usize;
-    let locals: *const context::Local =
-        context->locals.data as *const context::Local;
-    var index: usize = 0;
-    while (index < label.local_count) {
-        let identity: usize = identities[label.first_local + index];
-        var found: bool = false;
-        var local_index: usize = 0;
-        while (local_index < context->local_count) {
-            if (locals[local_index].declaration_node == identity) {
-                found = true;
-                break;
-            }
-            local_index += 1;
-        }
-        if (!found) {
-            return false;
-        }
-        index += 1;
-    }
-    return true;
-}
-
-// Same subset rule for a forward goto, whose live-local set was snapshotted
-// into goto_locals when the jump was lowered.
-fn label_subset_of_goto(
-    context: *context::Context,
-    label: context::Label,
-    pending: context::PendingGoto
-) -> bool {
-    let identities: *const usize =
-        context->label_locals.data as *const usize;
-    let live: *const usize = context->goto_locals.data as *const usize;
-    var index: usize = 0;
-    while (index < label.local_count) {
-        let identity: usize = identities[label.first_local + index];
-        var found: bool = false;
-        var local_index: usize = 0;
-        while (local_index < pending.local_count) {
-            if (live[pending.first_local + local_index] == identity) {
-                found = true;
-                break;
-            }
-            local_index += 1;
-        }
-        if (!found) {
-            return false;
-        }
-        index += 1;
-    }
-    return true;
-}
-
-// Pushes the label carried by pending_loop_label (set when a labeled
-// statement wraps a loop) onto the loop-label stack; returns whether an
-// entry was pushed so the caller can pop it when the loop is done.
-fn push_loop_label(
-    context: *context::Context
-) -> bool {
-    if (context->pending_loop_label == context::no_id()) {
-        return false;
-    }
-    let entry: context::LoopLabel = {
-        name_token = context->pending_loop_label,
-        break_block = context->break_block,
-        continue_block = context->continue_block,
-    };
-    context->pending_loop_label = context::no_id();
-    if (!context::append_record(
-            context,
-            &context->loop_labels,
-            (&entry) as *const context::LoopLabel as *const u8,
-            sizeof(context::LoopLabel)
-        )) {
-        return false;
-    }
-    context->loop_label_count += 1;
-    return true;
-}
-
-fn pop_loop_label(
-    context: *context::Context
-) -> bool {
-    if (context->loop_label_count == 0) {
-        context->error = runtime::Error.invalid_argument;
-        return false;
-    }
-    let truncated: bytes::BufferResult =
-        bytes::truncate(
-            context->loop_labels,
-            (context->loop_label_count - 1) *
-                sizeof(context::LoopLabel)
-        );
-    context->loop_labels = truncated.buffer;
-    context->error = truncated.error;
-    context->loop_label_count -= 1;
-    return context->error == runtime::Error.none;
-}
-
-fn lower_labeled_control(
-    context: *context::Context,
-    node: parser::SyntaxNode,
-    is_break: bool
-) -> bool {
-    let none: usize = context::no_id();
-    let name_node: parser::SyntaxNode =
-        context::node(
-            context,
-            context->current_unit,
-            node.first_child
-        );
-    let entries: *const context::LoopLabel =
-        context->loop_labels.data as *const context::LoopLabel;
-    var index: usize = context->loop_label_count;
-    while (index != 0) {
-        index -= 1;
-        if (context::tokens_equal(
-                context,
-                context->current_unit,
-                name_node.token_index,
-                context->current_unit,
-                entries[index].name_token
-            )) {
-            context::emit_jump(
-                context,
-                node,
-                is_break ?
-                    entries[index].break_block :
-                    entries[index].continue_block
-            );
-            context->current_block =
-                context::add_current_block(context);
-            return context->error == runtime::Error.none;
-        }
-    }
-    context::add_diagnostic(
-        context,
-        find_label(context, name_node.token_index) !=
-            none ?
-            context::DiagnosticKind.non_loop_label :
-            context::DiagnosticKind.unknown_label,
-        context->current_unit,
-        name_node.span,
-        none,
-        context::empty_span(),
-        0
-    );
-    return false;
-}
-
-fn lower_labeled(
-    context: *context::Context,
-    node: parser::SyntaxNode
-) -> bool {
-    let none: usize = context::no_id();
-    if (node.child_count != 1) {
-        context->error = runtime::Error.invalid_argument;
-        return false;
-    }
-    let statement: parser::SyntaxNode =
-        context::node(
-            context,
-            context->current_unit,
-            node.first_child
-        );
-    let is_loop: bool =
-        statement.kind == parser::SyntaxKind.while_statement ||
-        statement.kind == parser::SyntaxKind.do_statement ||
-        statement.kind == parser::SyntaxKind.for_statement ||
-        statement.kind == parser::SyntaxKind.loop_statement;
-    var label_index: usize =
-        find_label(context, node.token_index);
-    if (label_index != none) {
-        let labels: *context::Label =
-            context->labels.data as *context::Label;
-        if (labels[label_index].defined) {
-            context::add_diagnostic(
-                context,
-                context::DiagnosticKind.duplicate_label,
-                context->current_unit,
-                node.span,
-                context->current_unit,
-                labels[label_index].span,
-                label_index
-            );
-            return false;
-        }
-        labels[label_index].defined = true;
-        labels[label_index].is_loop = is_loop;
-        labels[label_index].span = node.span;
-    } else {
-        let block: usize = context::add_current_block(context);
-        if (block == none) {
-            return false;
-        }
-        label_index = append_label(
-            context,
-            {
-                name_token = node.token_index,
-                span = node.span,
-                block = block,
-                first_local = 0,
-                local_count = 0,
-                is_loop = is_loop,
-                defined = true,
-            }
-        );
-        if (label_index == none) {
-            return false;
-        }
-    }
-    let labels: *context::Label =
-        context->labels.data as *context::Label;
-    let first_local: usize =
-        snapshot_locals(
-            context,
-            &context->label_locals
-        );
-    if (context->error != runtime::Error.none) {
-        return false;
-    }
-    labels[label_index].first_local = first_local;
-    labels[label_index].local_count = context->local_count;
-    let label: context::Label = labels[label_index];
-    let pendings: *context::PendingGoto =
-        context->pending_gotos.data as *context::PendingGoto;
-    var pending_index: usize = 0;
-    while (pending_index < context->pending_goto_count) {
-        if (!pendings[pending_index].resolved &&
-            context::tokens_equal(
-                context,
-                context->current_unit,
-                pendings[pending_index].label_token,
-                context->current_unit,
-                label.name_token
-            )) {
-            if (!label_subset_of_goto(
-                    context,
-                    label,
-                    pendings[pending_index]
-                )) {
-                context::add_diagnostic(
-                    context,
-                    context::DiagnosticKind.invalid_goto,
-                    context->current_unit,
-                    pendings[pending_index].span,
-                    context->current_unit,
-                    label.span,
-                    label_index
-                );
-            }
-            pendings[pending_index].resolved = true;
-        }
-        pending_index += 1;
-    }
-    if (!context::block_is_terminated(
-            context,
-            context->current_block
-        )) {
-        context::emit_jump(context, node, label.block);
-    }
-    context->current_block = label.block;
-    if (is_loop) {
-        context->pending_loop_label = node.token_index;
-    }
-    let result: bool =
-        lower_statement(context, node.first_child);
-    context->pending_loop_label = none;
-    return result;
-}
-
-fn lower_goto(
-    context: *context::Context,
-    node: parser::SyntaxNode
-) -> bool {
-    let none: usize = context::no_id();
-    if (node.child_count != 1) {
-        context->error = runtime::Error.invalid_argument;
-        return false;
-    }
-    let name_node: parser::SyntaxNode =
-        context::node(
-            context,
-            context->current_unit,
-            node.first_child
-        );
-    var label_index: usize =
-        find_label(context, name_node.token_index);
-    if (label_index != none) {
-        let labels: *const context::Label =
-            context->labels.data as *const context::Label;
-        if (labels[label_index].defined) {
-            if (!label_subset_of_current(
-                    context,
-                    labels[label_index]
-                )) {
-                context::add_diagnostic(
-                    context,
-                    context::DiagnosticKind.invalid_goto,
-                    context->current_unit,
-                    name_node.span,
-                    context->current_unit,
-                    labels[label_index].span,
-                    label_index
-                );
-                return false;
-            }
-            context::emit_jump(
-                context,
-                node,
-                labels[label_index].block
-            );
-            context->current_block =
-                context::add_current_block(context);
-            return context->error == runtime::Error.none;
-        }
-    }
-    var block: usize = none;
-    if (label_index == none) {
-        block = context::add_current_block(context);
-        if (block == none) {
-            return false;
-        }
-        label_index = append_label(
-            context,
-            {
-                name_token = name_node.token_index,
-                span = name_node.span,
-                block = block,
-                first_local = 0,
-                local_count = 0,
-                is_loop = false,
-                defined = false,
-            }
-        );
-        if (label_index == none) {
-            return false;
-        }
-    } else {
-        let labels: *const context::Label =
-            context->labels.data as *const context::Label;
-        block = labels[label_index].block;
-    }
-    let first_local: usize =
-        snapshot_locals(context, &context->goto_locals);
-    if (context->error != runtime::Error.none) {
-        return false;
-    }
-    let pending: context::PendingGoto = {
-        label_token = name_node.token_index,
-        span = name_node.span,
-        first_local = first_local,
-        local_count = context->local_count,
-        resolved = false,
-    };
-    if (!context::append_record(
-            context,
-            &context->pending_gotos,
-            (&pending) as *const context::PendingGoto as *const u8,
-            sizeof(context::PendingGoto)
-        )) {
-        return false;
-    }
-    context->pending_goto_count += 1;
-    context::emit_jump(context, node, block);
-    context->current_block = context::add_current_block(context);
-    return context->error == runtime::Error.none;
-}
-
-fn validate_labels(
-    context: *context::Context
-) -> bool {
-    let none: usize = context::no_id();
-    let labels: *const context::Label =
-        context->labels.data as *const context::Label;
-    var index: usize = 0;
-    while (index < context->label_count) {
-        if (!labels[index].defined) {
-            context::add_diagnostic(
-                context,
-                context::DiagnosticKind.unknown_label,
-                context->current_unit,
-                labels[index].span,
-                none,
-                context::empty_span(),
-                index
-            );
-        }
-        index += 1;
-    }
-    return context->error == runtime::Error.none;
-}
-
-fn clear_label_state(
-    context: *context::Context
-) -> bool {
-    var error: runtime::Error = runtime::Error.none;
-    let cleared_labels: bytes::BufferResult =
-        bytes::clear(context->labels);
-    context->labels = cleared_labels.buffer;
-    error = context::release_error(error, cleared_labels.error);
-    let cleared_label_locals: bytes::BufferResult =
-        bytes::clear(context->label_locals);
-    context->label_locals = cleared_label_locals.buffer;
-    error =
-        context::release_error(error, cleared_label_locals.error);
-    let cleared_gotos: bytes::BufferResult =
-        bytes::clear(context->pending_gotos);
-    context->pending_gotos = cleared_gotos.buffer;
-    error = context::release_error(error, cleared_gotos.error);
-    let cleared_goto_locals: bytes::BufferResult =
-        bytes::clear(context->goto_locals);
-    context->goto_locals = cleared_goto_locals.buffer;
-    error =
-        context::release_error(error, cleared_goto_locals.error);
-    let cleared_loops: bytes::BufferResult =
-        bytes::clear(context->loop_labels);
-    context->loop_labels = cleared_loops.buffer;
-    error = context::release_error(error, cleared_loops.error);
-    context->label_count = 0;
-    context->pending_goto_count = 0;
-    context->loop_label_count = 0;
-    context->pending_loop_label = context::no_id();
-    if (context->error == runtime::Error.none) {
-        context->error = error;
-    }
-    return context->error == runtime::Error.none;
-}
-
-fn lower_va_start(
-    context: *context::Context,
-    node: parser::SyntaxNode
-) -> bool {
+fn lower_va_start(context: *context::Context, node: syntax::SyntaxNode) -> bool {
     let none: usize = context::no_id();
     if (node.child_count != 1) {
         context->error = runtime::Error.invalid_argument;
@@ -1990,478 +725,242 @@ fn lower_va_start(
     // va_start initializes a local va_list against the variadic function's
     // register save area; outside a variadic function there is nothing to
     // bind it to.
-    if (!context::current_function_is_variadic(context)) {
+    if (!builder::current_function_is_variadic(context)) {
         context::add_diagnostic(
-            context,
-            context::DiagnosticKind.invalid_va_list,
-            context->current_unit,
-            node.span,
-            none,
-            context::empty_span(),
-            0
-        );
+            context, context::DiagnosticKind.invalid_va_list, context->current_unit, node.span, none,
+            context::empty_span(), 0);
         return false;
     }
-    let list: context::Expression =
-        expr::lower_expression(
-            context,
-            node.first_child,
-            none
-        );
+    let list: context::Expression = expr::lower_expression(context, node.first_child, none);
     if (!list.valid) {
         return false;
     }
-    if (!list.lvalue || !list.mutable_lvalue ||
-        list.type_id != (type_info::BuiltinType.va_list_type as usize)) {
+    if (!list.lvalue || !list.mutable_lvalue || list.type_id != (type_info::BuiltinType.va_list_type as usize)) {
         context::add_diagnostic(
-            context,
-            context::DiagnosticKind.invalid_va_list,
-            context->current_unit,
-            node.span,
-            none,
-            context::empty_span(),
-            0
-        );
+            context, context::DiagnosticKind.invalid_va_list, context->current_unit, node.span, none,
+            context::empty_span(), 0);
         return false;
     }
-    var instruction: ir::Instruction =
-        context::instruction(
-            ir::Opcode.va_list_start,
-            node
-        );
+    var instruction: ir::Instruction = builder::instruction(ir::Opcode.va_list_start, node);
     instruction.left = list.address_id;
-    return context::emit_void(
-        context,
-        instruction
-    ) != none;
+    return builder::emit_void(context, instruction) != none;
 }
 
-fn lower_statement(
-    context: *context::Context,
-    node_id: usize
-) -> bool {
-    let node: parser::SyntaxNode =
-        context::node(
-            context,
-            context->current_unit,
-            node_id
-        );
-    if (node.kind ==
-        parser::SyntaxKind.variable_declaration) {
-        return lower_variable(
-            context,
-            node_id,
-            node
-        );
+fn lower_statement(context: *context::Context, node_id: usize) -> bool {
+    let node: syntax::SyntaxNode = context::node(context, context->current_unit, node_id);
+    if (node.kind == syntax::SyntaxKind.variable_declaration) {
+        return lower_variable(context, node_id, node);
     }
-    if (node.kind == parser::SyntaxKind.const_declaration) {
-        return lower_constant(
-            context,
-            node_id,
-            node
-        );
+    if (node.kind == syntax::SyntaxKind.const_declaration) {
+        return lower_constant(context, node_id, node);
     }
-    if (node.kind ==
-        parser::SyntaxKind.assignment_statement) {
-        return lower_assignment(
-            context,
-            node
-        );
+    if (node.kind == syntax::SyntaxKind.assignment_statement) {
+        return lower_assignment(context, node);
     }
-    if (node.kind ==
-        parser::SyntaxKind.expression_statement) {
-        return node.child_count == 1 &&
-            expr::lower_expression(
-                context,
-                node.first_child,
-                context::no_id()
-            ).valid;
+    if (node.kind == syntax::SyntaxKind.expression_statement) {
+        return node.child_count == 1 && expr::lower_expression(context, node.first_child, context::no_id()).valid;
     }
-    if (node.kind == parser::SyntaxKind.block_statement) {
-        return lower_block(
-            context,
-            node_id
-        );
+    if (node.kind == syntax::SyntaxKind.block_statement) {
+        return lower_block(context, node_id);
     }
-    if (node.kind == parser::SyntaxKind.if_statement) {
+    if (node.kind == syntax::SyntaxKind.if_statement) {
         return lower_if(context, node);
     }
-    if (node.kind == parser::SyntaxKind.while_statement) {
+    if (node.kind == syntax::SyntaxKind.while_statement) {
         return lower_while(context, node);
     }
-    if (node.kind == parser::SyntaxKind.do_statement) {
+    if (node.kind == syntax::SyntaxKind.do_statement) {
         return lower_do(context, node);
     }
-    if (node.kind == parser::SyntaxKind.for_statement) {
+    if (node.kind == syntax::SyntaxKind.for_statement) {
         return lower_for(context, node);
     }
-    if (node.kind == parser::SyntaxKind.loop_statement) {
+    if (node.kind == syntax::SyntaxKind.loop_statement) {
         return lower_loop(context, node);
     }
-    if (node.kind == parser::SyntaxKind.switch_statement) {
+    if (node.kind == syntax::SyntaxKind.switch_statement) {
         return lower_switch(context, node);
     }
-    if (node.kind == parser::SyntaxKind.break_statement) {
+    if (node.kind == syntax::SyntaxKind.break_statement) {
         if (node.child_count == 1) {
-            return lower_labeled_control(
-                context,
-                node,
-                true
-            );
+            return labels::lower_labeled_control(context, node, true);
         }
-        if (context->break_block ==
-            context::no_id()) {
+        if (context->break_block == context::no_id()) {
             context::add_diagnostic(
-                context,
-                context::DiagnosticKind
-                    .break_outside_control,
-                context->current_unit,
-                node.span,
-                context::no_id(),
-                context::empty_span(),
-                0
-            );
+                context, context::DiagnosticKind.break_outside_control, context->current_unit, node.span,
+                context::no_id(), context::empty_span(), 0);
             return false;
         }
-        context::emit_jump(
-            context,
-            node,
-            context->break_block
-        );
-        context->current_block =
-            context::add_current_block(context);
+        builder::emit_jump(context, node, context->break_block);
+        context->current_block = builder::add_current_block(context);
         return true;
     }
-    if (node.kind ==
-        parser::SyntaxKind.continue_statement) {
+    if (node.kind == syntax::SyntaxKind.continue_statement) {
         if (node.child_count == 1) {
-            return lower_labeled_control(
-                context,
-                node,
-                false
-            );
+            return labels::lower_labeled_control(context, node, false);
         }
-        if (context->continue_block ==
-            context::no_id()) {
+        if (context->continue_block == context::no_id()) {
             context::add_diagnostic(
-                context,
-                context::DiagnosticKind
-                    .continue_outside_loop,
-                context->current_unit,
-                node.span,
-                context::no_id(),
-                context::empty_span(),
-                0
-            );
+                context, context::DiagnosticKind.continue_outside_loop, context->current_unit, node.span,
+                context::no_id(), context::empty_span(), 0);
             return false;
         }
-        context::emit_jump(
-            context,
-            node,
-            context->continue_block
-        );
-        context->current_block =
-            context::add_current_block(context);
+        builder::emit_jump(context, node, context->continue_block);
+        context->current_block = builder::add_current_block(context);
         return true;
     }
-    if (node.kind == parser::SyntaxKind.return_statement) {
+    if (node.kind == syntax::SyntaxKind.return_statement) {
         return lower_return(context, node);
     }
-    if (node.kind == parser::SyntaxKind.labeled_statement) {
-        return lower_labeled(context, node);
+    if (node.kind == syntax::SyntaxKind.labeled_statement) {
+        return labels::lower_labeled(context, node, lower_statement);
     }
-    if (node.kind == parser::SyntaxKind.goto_statement) {
-        return lower_goto(context, node);
+    if (node.kind == syntax::SyntaxKind.goto_statement) {
+        return labels::lower_goto(context, node);
     }
-    if (node.kind == parser::SyntaxKind.assert_statement) {
-        return consteval::check_assert(
-            context,
-            context->current_unit,
-            node_id
-        );
+    if (node.kind == syntax::SyntaxKind.assert_statement) {
+        return consteval::check_assert(context, context->current_unit, node_id);
     }
-    if (node.kind == parser::SyntaxKind.va_start_statement) {
-        return lower_va_start(
-            context,
-            node
-        );
+    if (node.kind == syntax::SyntaxKind.va_start_statement) {
+        return lower_va_start(context, node);
     }
     context::add_diagnostic(
-        context,
-        context::DiagnosticKind.internal_invariant,
-        context->current_unit,
-        node.span,
-        context::no_id(),
-        context::empty_span(),
-        node.kind as usize
-    );
+        context, context::DiagnosticKind.internal_invariant, context->current_unit, node.span, context::no_id(),
+        context::empty_span(), node.kind as usize);
     return false;
 }
 
-fn lower_block(
-    context: *context::Context,
-    node_id: usize
-) -> bool {
-    let node: parser::SyntaxNode =
-        context::node(
-            context,
-            context->current_unit,
-            node_id
-        );
-    if (node.kind != parser::SyntaxKind.block_statement) {
+fn lower_block(context: *context::Context, node_id: usize) -> bool {
+    let node: syntax::SyntaxNode = context::node(context, context->current_unit, node_id);
+    if (node.kind != syntax::SyntaxKind.block_statement) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    let local_start: usize =
-        context::enter_scope(context);
+    let local_start: usize = builder::enter_scope(context);
     if (local_start == context::no_id()) {
         return false;
     }
     var child: usize = node.first_child;
-    while (child != context::no_id() &&
-        context->error == runtime::Error.none) {
+    while (child != context::no_id() && context->error == runtime::Error.none) {
         lower_statement(context, child);
-        child = context::node(
-            context,
-            context->current_unit,
-            child
-        ).next_sibling;
+        child = context::node(context, context->current_unit, child).next_sibling;
     }
-    context::leave_scope(context, local_start);
+    builder::leave_scope(context, local_start);
     return context->error == runtime::Error.none;
 }
 
-fn function_body(
-    context: *context::Context,
-    function: context::Function
-) -> usize {
-    if (function.implementation_unit ==
-        context::no_id()) {
+fn function_body(context: *context::Context, function: context::Function) -> usize {
+    if (function.implementation_unit == context::no_id()) {
         return context::no_id();
     }
-    let declaration: parser::SyntaxNode =
-        context::node(
-            context,
-            function.implementation_unit,
-            function.implementation_node
-        );
+    let declaration: syntax::SyntaxNode =
+        context::node(context, function.implementation_unit, function.implementation_node);
     var parameter_count: usize = 0;
     var return_node: usize = context::no_id();
     var body_node: usize = context::no_id();
     functions::function_parts(
-        context,
-        function.implementation_unit,
-        declaration,
-        &parameter_count,
-        &return_node,
-        &body_node
-    );
+        context, function.implementation_unit, declaration, &parameter_count, &return_node, &body_node);
     return body_node;
 }
 
-fn add_parameter_locals(
-    context: *context::Context,
-    function_id: usize
-) -> bool {
-    let functions: *const context::Function =
-        context->functions.data as
+fn add_parameter_locals(context: *context::Context, function_id: usize) -> bool {
+    let functions: *const context::Function = context->functions.data as
             *const context::Function;
-    let function: context::Function =
-        functions[function_id];
-    let declaration: parser::SyntaxNode =
-        context::node(
-            context,
-            function.implementation_unit,
-            function.implementation_node
-        );
-    let ir_functions: *const ir::Function =
-        context->ir.functions.data as
+    let function: context::Function = functions[function_id];
+    let declaration: syntax::SyntaxNode =
+        context::node(context, function.implementation_unit, function.implementation_node);
+    let ir_functions: *const ir::Function = context->ir.functions.data as
             *const ir::Function;
-    let ir_function: ir::Function =
-        ir_functions[function.ir_function];
-    let ir_parameters: *const ir::Parameter =
-        context->ir.parameters.data as
+    let ir_function: ir::Function = ir_functions[function.ir_function];
+    let ir_parameters: *const ir::Parameter = context->ir.parameters.data as
             *const ir::Parameter;
-    let semantic_parameters:
-        *const context::Parameter =
-        context->parameters.data as
+    let semantic_parameters: *const context::Parameter = context->parameters.data as
             *const context::Parameter;
     var child: usize = declaration.first_child;
     var index: usize = 0;
     while (index < function.parameter_count) {
-        let parameter_node: parser::SyntaxNode =
-            context::node(
-                context,
-                function.implementation_unit,
-                child
-            );
-        let parameter: context::Parameter =
-            semantic_parameters[
-                function.first_parameter + index
-            ];
-        let ir_parameter: ir::Parameter =
-            ir_parameters[
-                ir_function.first_parameter + index
-            ];
-        context::append_local(
-            context,
-            {
-                function_id = function_id,
-                type_id = parameter.type_id,
-                slot_id = ir_parameter.slot_id,
-                unit_index = function.implementation_unit,
-                declaration_node = child,
-                name_token = parameter_node.token_index,
-                scope_depth = 0,
-                mutable_binding = false,
-                volatile_binding = false,
-                constant_binding = false,
-                integer_value = 0,
-            }
-        );
+        let parameter_node: syntax::SyntaxNode = context::node(context, function.implementation_unit, child);
+        let parameter: context::Parameter = semantic_parameters[ function.first_parameter + index];
+        let ir_parameter: ir::Parameter = ir_parameters[ ir_function.first_parameter + index];
+        builder::append_local(
+            context, {
+                function_id = function_id, type_id = parameter.type_id, slot_id = ir_parameter.slot_id,
+                unit_index = function.implementation_unit, declaration_node = child,
+                name_token = parameter_node.token_index, scope_depth = 0, mutable_binding = false,
+                volatile_binding = false, constant_binding = false, integer_value = 0,
+            });
         child = parameter_node.next_sibling;
         index += 1;
     }
     return context->error == runtime::Error.none;
 }
 
-fn lower_function(
-    context: *context::Context,
-    function_id: usize
-) -> bool {
-    let functions: *const context::Function =
-        context->functions.data as
+fn lower_function(context: *context::Context, function_id: usize) -> bool {
+    let functions: *const context::Function = context->functions.data as
             *const context::Function;
-    let function: context::Function =
-        functions[function_id];
-    let body_node: usize =
-        function_body(context, function);
+    let function: context::Function = functions[function_id];
+    let body_node: usize = function_body(context, function);
     if (body_node == context::no_id()) {
         return true;
     }
     // An asm fn body is raw assembly text spliced into the emitted
     // assembly by the backend; it lowers to no IR blocks at all (the
     // semantic pass already validated that it holds only string literals).
-    if ((function.flags &
-            (context::SymbolFlag.asm_function as usize)) != 0) {
+    if ((function.flags & (context::SymbolFlag.asm_function as usize)) != 0) {
         return context->error == runtime::Error.none;
     }
     context->current_function = function_id;
     context->current_unit = function.implementation_unit;
     context->scope_depth = 0;
     context->local_count = 0;
-    let cleared: bytes::BufferResult =
-        bytes::clear(context->locals);
+    let cleared: bytes::BufferResult = bytes::clear(context->locals);
     context->locals = cleared.buffer;
     context->error = cleared.error;
-    clear_label_state(context);
+    labels::clear_label_state(context);
     context->break_block = context::no_id();
     context->continue_block = context::no_id();
-    context->current_block =
-        context::add_current_block(context);
-    add_parameter_locals(
-        context,
-        function_id
-    );
+    context->current_block = builder::add_current_block(context);
+    add_parameter_locals(context, function_id);
     lower_block(context, body_node);
-    validate_labels(context);
-    let return_record: type_info::Record =
-        context::type_record(
-            context,
-            function.return_type
-        );
-    let ir_functions: *const ir::Function =
-        context->ir.functions.data as
+    labels::validate_labels(context);
+    let return_record: type_info::Record = context::type_record(context, function.return_type);
+    let ir_functions: *const ir::Function = context->ir.functions.data as
             *const ir::Function;
     let reachable: bool =
-        context::block_is_reachable(
-            context,
-            ir_functions[function.ir_function],
-            context->current_block
-        );
-    if (!context::block_is_terminated(
-            context,
-            context->current_block
-        ) && reachable) {
-        if ((function.flags &
-                (context::SymbolFlag.no_return as usize)) != 0) {
+        builder::block_is_reachable(context, ir_functions[function.ir_function], context->current_block);
+    if (!builder::block_is_terminated(
+            context, context->current_block) && reachable) {
+        if ((function.flags & (context::SymbolFlag.no_return as usize)) != 0) {
             context::add_diagnostic(
-                context,
-                context::DiagnosticKind.noreturn_returns,
-                context->current_unit,
-                context::node(
-                    context,
-                    context->current_unit,
-                    body_node
-                ).span,
-                context::no_id(),
-                context::empty_span(),
-                0
-            );
-        } else if (return_record.kind ==
-            type_info::Kind.type_void) {
-            let body: parser::SyntaxNode =
-                context::node(
-                    context,
-                    context->current_unit,
-                    body_node
-                );
-            var instruction: ir::Instruction =
-                context::instruction(
-                    ir::Opcode.return_void,
-                    body
-                );
+                context, context::DiagnosticKind.noreturn_returns, context->current_unit,
+                context::node(context, context->current_unit, body_node).span,
+                context::no_id(), context::empty_span(), 0);
+        } else if (return_record.kind == type_info::Kind.type_void) {
+            let body: syntax::SyntaxNode = context::node(context, context->current_unit, body_node);
+            var instruction: ir::Instruction = builder::instruction(ir::Opcode.return_void, body);
             instruction.type_id = function.return_type;
-            context::emit_void(
-                context,
-                instruction
-            );
+            builder::emit_void(context, instruction);
         } else {
             context::add_diagnostic(
-                context,
-                context::DiagnosticKind.missing_return,
-                context->current_unit,
-                context::node(
-                    context,
-                    context->current_unit,
-                    body_node
-                ).span,
-                context::no_id(),
-                context::empty_span(),
-                function.return_type
-            );
+                context, context::DiagnosticKind.missing_return, context->current_unit,
+                context::node(context, context->current_unit, body_node).span,
+                context::no_id(), context::empty_span(), function.return_type);
         }
     }
-    context::terminate_unreachable_blocks(
-        context,
-        ir_functions[function.ir_function],
-        context::node(
-            context,
-            context->current_unit,
-            body_node
-        )
-    );
+    builder::terminate_unreachable_blocks(
+        context, ir_functions[function.ir_function], context::node(context, context->current_unit, body_node));
     return context->error == runtime::Error.none;
 }
 
-fn lower_functions(
-    context: *context::Context
-) -> bool {
-    let order: bytes::Buffer =
-        functions::function_order(context);
-    let ordered: *const usize =
-        order.data as *const usize;
+fn lower_functions(context: *context::Context) -> bool {
+    let order: bytes::Buffer = function_ir::function_order(context);
+    let ordered: *const usize = order.data as *const usize;
     var order_index: usize = 0;
-    while (order_index < context->function_count &&
-        context->error == runtime::Error.none) {
-        lower_function(
-            context,
-            ordered[order_index]
-        );
+    while (order_index < context->function_count && context->error == runtime::Error.none) {
+        lower_function(context, ordered[order_index]);
         order_index += 1;
     }
-    let release_error: runtime::Error =
-        bytes::release(order);
+    let release_error: runtime::Error = bytes::release(order);
     if (context->error == runtime::Error.none) {
         context->error = release_error;
     }

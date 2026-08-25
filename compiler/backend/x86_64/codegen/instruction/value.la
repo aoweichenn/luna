@@ -1,0 +1,708 @@
+module luna.bootstrap.backend.x86_64.codegen.instruction.value;
+
+import luna.bootstrap.backend.x86_64.frame as frame;
+import luna.bootstrap.frontend.lexer as lexer;
+import luna.bootstrap.middleend.type as type_info;
+import luna.runtime as runtime;
+
+fn emit_constant(context: *support::Context, instruction: ir::Instruction) -> bool {
+    let record: *const type_info::Record = support::type(context, instruction.type_id);
+    if (record == null) {
+        return false;
+    }
+    if (instruction.opcode == ir::Opcode.constant_null) {
+        return support::literal(context, "    xorq %rax, %rax\n") && support::store_rax(context, instruction.result,
+            record);
+    }
+    if (instruction.opcode == ir::Opcode.constant_boolean || instruction.opcode == ir::Opcode.constant_integer) {
+        let width: usize = support::bit_width(record);
+        if (width <= 32) {
+            if (!support::literal(context, "    movl $0x") || !support::hex(context, instruction.immediate & 4294967295,
+                8) ||
+                !support::literal(
+                    context, ", %eax\n")) {
+                return false;
+            }
+        } else if (!support::literal(context, "    movabsq $0x") || !support::hex(context, instruction.immediate, 16) ||
+            !support::literal(
+                context, ", %rax\n")) {
+            return false;
+        }
+        return support::store_rax(context, instruction.result, record);
+    }
+    if (instruction.opcode == ir::Opcode.constant_float) {
+        if (record->kind == type_info::Kind.float_32) {
+            let value: f32 = instruction.floating as f32;
+            let bits: u32 = *((&value) as *const f32 as *const u32);
+            return support::literal(context, "    movl $0x") && support::hex(context, bits as u64, 8) &&
+                support::literal(context, ", %eax\n    movl %eax, ") && support::append_value(context,
+                    instruction.result) && support::literal(context, "\n");
+        }
+        let bits: u64 = *((&instruction.floating) as *const f64 as *const u64);
+        return support::literal(context, "    movabsq $0x") && support::hex(context, bits, 16) &&
+            support::literal(context, ", %rax\n    movq %rax, ") && support::append_value(context,
+                instruction.result) && support::literal(context, "\n");
+    }
+    return support::fail(context, runtime::Error.invalid_argument);
+}
+
+fn emit_address(context: *support::Context, instruction: ir::Instruction) -> bool {
+    if (instruction.opcode == ir::Opcode.address_of_slot) {
+        return support::literal(context, "    leaq ") && support::append_slot(context, instruction.auxiliary) &&
+            support::literal(context, ", %rax\n") && support::store_rax(context, instruction.result,
+                support::type(context, instruction.type_id));
+    }
+    if (instruction.opcode == ir::Opcode.global_address) {
+        return support::literal(context, "    leaq ") && support::append_global_label(context, instruction.auxiliary) &&
+            support::literal(context, "(%rip), %rax\n") &&
+            support::store_rax(context, instruction.result, support::type(context, instruction.type_id));
+    }
+    if (instruction.opcode == ir::Opcode.function_address) {
+        return support::literal(context, "    leaq ") && support::append_function_symbol(context,
+            instruction.auxiliary) && support::literal(context, "(%rip), %rax\n") &&
+            support::store_rax(context, instruction.result, support::type(context, instruction.type_id));
+    }
+    if (instruction.opcode == ir::Opcode.member_address) {
+        if (!support::load_rax(context, instruction.left, support::type(context, instruction.type_id)) ||
+            !support::literal(context, "    addq $") || !support::append_usize(context, instruction.auxiliary) ||
+            !support::literal(
+                context, ", %rax\n")) {
+            return false;
+        }
+        return support::store_rax(context, instruction.result, support::type(context, instruction.type_id));
+    }
+    if (instruction.opcode == ir::Opcode.pointer_offset) {
+        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+        let left_record: *const type_info::Record = support::type(context, values[instruction.left].type_id);
+        let index_record: *const type_info::Record = support::type(context, values[instruction.right].type_id);
+        if (left_record == null || index_record == null || (left_record->kind != type_info::Kind.pointer &&
+                left_record->kind != type_info::Kind.array) || instruction.auxiliary == 0 ||
+            !support::load_rax(context, instruction.left, left_record) ||
+            !support::load_rcx(
+                context, instruction.right, index_record)) {
+            return false;
+        }
+        if (!support::literal(context, "    movabsq $0x") || !support::hex(context, instruction.auxiliary as u64, 16) ||
+            !support::literal(
+                context, ", %rdx\n    imulq %rdx, %rcx\n    addq %rcx, %rax\n")) {
+            return false;
+        }
+        return support::store_rax(context, instruction.result, support::type(context, instruction.type_id));
+    }
+    return support::fail(context, runtime::Error.invalid_argument);
+}
+
+fn emit_zero(context: *support::Context, instruction: ir::Instruction) -> bool {
+    let slot: frame::Storage = support::storage(context, frame::StorageKind.slot, instruction.auxiliary);
+    if (context->error != runtime::Error.none) {
+        return false;
+    }
+    return support::literal(context, "    leaq ") && support::append_stack(context, slot) &&
+        support::literal(context, ", %rdi\n    xorl %eax, %eax\n    movq $") && support::append_usize(context,
+            slot.size_bytes) && support::literal(context, ", %rcx\n    rep stosb\n");
+}
+
+fn emit_memory_copy(context: *support::Context, instruction: ir::Instruction, instruction_id: usize) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let pointer_record: *const type_info::Record = support::type(context, values[instruction.left].type_id);
+    if (pointer_record == null || !support::load_integer(context, instruction.left, pointer_record, "%edi", "%rdi",
+        false) || !support::load_integer(context, instruction.right, pointer_record, "%esi", "%rsi", false) ||
+        !support::literal(context, "    movabsq $0x") || !support::hex(context, instruction.auxiliary as u64, 16) ||
+        !support::literal(context, ", %rcx\n    cmpq %rsi, %rdi\n    jbe ") ||
+        !support::instruction_label(context, instruction_id, "copy_forward") ||
+        !support::literal(context, "\n    leaq (%rsi,%rcx), %rax\n    cmpq %rax, %rdi\n    jae ") ||
+        !support::instruction_label(context, instruction_id, "copy_forward") ||
+        !support::literal(context, "\n    testq %rcx, %rcx\n    je ") ||
+        !support::instruction_label(context, instruction_id, "copy_done") ||
+        !support::literal(
+            context,
+            "\n    leaq -1(%rsi,%rcx), %rsi\n    leaq -1(%rdi,%rcx), %rdi\n    std\n    rep movsb\n    cld\n    jmp "
+        ) || !support::instruction_label(context, instruction_id, "copy_done") || !support::literal(context, "\n") ||
+        !support::instruction_label(context, instruction_id, "copy_forward") ||
+        !support::literal(context, ":\n    cld\n    rep movsb\n") || !support::instruction_label(context,
+            instruction_id, "copy_done") || !support::literal(context, ":\n")) {
+        return false;
+    }
+    return true;
+}
+
+fn indirect_load_mnemonic(record: *const type_info::Record) -> *const u8 {
+    if (record == null) {
+        return null;
+    }
+    if (record->kind == type_info::Kind.float_32) {
+        return "movss";
+    }
+    if (record->kind == type_info::Kind.float_64) {
+        return "movsd";
+    }
+    let width: usize = support::bit_width(record);
+    if (width == 8) {
+        return "movzbl";
+    }
+    if (width == 16) {
+        return "movzwl";
+    }
+    if (width == 32) {
+        return "movl";
+    }
+    return width == 64 ? "movq" : null;
+}
+
+fn emit_load_indirect(context: *support::Context, instruction: ir::Instruction) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let pointer_record: *const type_info::Record = support::type(context, values[instruction.left].type_id);
+    let record: *const type_info::Record = support::type(context, instruction.type_id);
+    let mnemonic: *const u8 = indirect_load_mnemonic(record);
+    if (pointer_record == null || record == null || mnemonic == null ||
+        !support::load_rax(
+            context, instruction.left, pointer_record)) {
+        return false;
+    }
+    if (type_info::is_float(record->kind)) {
+        return support::literal(context, "    ") && support::literal(context, mnemonic) && support::literal(context,
+            " (%rax), %xmm0\n") && support::store_xmm(context, instruction.result, record, "%xmm0");
+    }
+    if (!support::literal(context, "    ") || !support::literal(context, mnemonic) || !support::literal(context,
+        " (%rax), ") ||
+        !support::literal(
+            context, support::bit_width(record) <= 32 ? "%eax\n" : "%rax\n")) {
+        return false;
+    }
+    if (record->kind == type_info::Kind.boolean &&
+        !support::literal(
+            context, "    testl %eax, %eax\n    setne %al\n    movzbl %al, %eax\n")) {
+        return false;
+    }
+    return support::store_rax(context, instruction.result, record);
+}
+
+fn emit_store_indirect(context: *support::Context, instruction: ir::Instruction) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let pointer_record: *const type_info::Record = support::type(context, values[instruction.left].type_id);
+    let record: *const type_info::Record = support::type(context, instruction.type_id);
+    if (pointer_record == null || record == null ||
+        !support::load_rax(
+            context, instruction.left, pointer_record)) {
+        return false;
+    }
+    if (type_info::is_float(record->kind)) {
+        return support::load_xmm(context, instruction.right, record, "%xmm0") && support::literal(context, "    ") &&
+            support::literal(context, support::float_move(record)) && support::literal(context, " %xmm0, (%rax)\n");
+    }
+    if (!support::load_rcx(
+            context, instruction.right, record)) {
+        return false;
+    }
+    let width: usize = support::bit_width(record);
+    return support::literal(
+            context, width == 8 ? "    movb %cl, (%rax)\n" : width == 16 ? "    movw %cx, (%rax)\n" :
+            width == 32 ? "    movl %ecx, (%rax)\n" : "    movq %rcx, (%rax)\n");
+}
+
+fn emit_slot_access(context: *support::Context, instruction: ir::Instruction) -> bool {
+    let record: *const type_info::Record = support::type(context, instruction.type_id);
+    if (record == null) {
+        return false;
+    }
+    if (instruction.opcode == ir::Opcode.load) {
+        if (type_info::is_float(record->kind)) {
+            return support::literal(context, "    ") && support::literal(context, support::float_move(record)) &&
+                support::literal(context, " ") &&
+                support::append_slot(context, instruction.auxiliary) && support::literal(context, ", %xmm0\n") &&
+                support::store_xmm(context, instruction.result, record, "%xmm0");
+        }
+        let width: usize = support::bit_width(record);
+        if (!support::literal(context, width <= 32 ? "    movl " : "    movq ") ||
+            !support::append_slot(context, instruction.auxiliary) ||
+            !support::literal(
+                context, width <= 32 ? ", %eax\n" : ", %rax\n")) {
+            return false;
+        }
+        if (record->kind == type_info::Kind.boolean &&
+            !support::literal(
+                context, "    testl %eax, %eax\n    setne %al\n    movzbl %al, %eax\n")) {
+            return false;
+        }
+        return support::store_rax(context, instruction.result, record);
+    }
+    if (instruction.opcode == ir::Opcode.store) {
+        if (type_info::is_float(record->kind)) {
+            return support::load_xmm(context, instruction.left, record, "%xmm0") && support::literal(context, "    ") &&
+                support::literal(context, support::float_move(record)) && support::literal(context, " %xmm0, ") &&
+                support::append_slot(context, instruction.auxiliary) && support::literal(context, "\n");
+        }
+        let width: usize = support::bit_width(record);
+        return support::load_rax(context, instruction.left, record) &&
+            support::literal(context, width <= 32 ? "    movl %eax, " : "    movq %rax, ") &&
+            support::append_slot(context, instruction.auxiliary) && support::literal(context, "\n");
+    }
+    return support::fail(context, runtime::Error.invalid_argument);
+}
+
+fn emit_check(context: *support::Context, instruction: ir::Instruction, instruction_id: usize) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let left_record: *const type_info::Record = support::type(context, values[instruction.left].type_id);
+    if (left_record == null ||
+        !support::load_rax(
+            context, instruction.left, left_record)) {
+        return false;
+    }
+    if (instruction.opcode == ir::Opcode.null_check) {
+        return support::literal(context, "    testq %rax, %rax\n    jne ") &&
+            support::instruction_label(context, instruction_id, "check_ok") && support::literal(context,
+                "\n    ud2\n") &&
+            support::instruction_label(context, instruction_id, "check_ok") && support::literal(context, ":\n");
+    }
+    let right_record: *const type_info::Record = support::type(context, values[instruction.right].type_id);
+    return right_record != null && support::load_rcx(context, instruction.right, right_record) &&
+        support::literal(context, "    cmpq %rcx, %rax\n    jb ") && support::instruction_label(context, instruction_id,
+            "check_ok") &&
+        support::literal(context, "\n    ud2\n") && support::instruction_label(context, instruction_id, "check_ok") &&
+        support::literal(context, ":\n");
+}
+
+fn emit_unary(context: *support::Context, instruction: ir::Instruction) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let record: *const type_info::Record = support::type(context, values[instruction.left].type_id);
+    if (record == null) {
+        return false;
+    }
+    if (instruction.opcode == ir::Opcode.boolean_not) {
+        return support::load_rax(context, instruction.left, record) &&
+            support::literal(context, "    testl %eax, %eax\n    sete %al\n    movzbl %al, %eax\n") &&
+            support::store_rax(context, instruction.result, support::type(context, instruction.type_id));
+    }
+    if (instruction.opcode == ir::Opcode.unary_float) {
+        let width: usize = support::bit_width(record);
+        return support::load_rax(context, instruction.left, record) &&
+            support::literal(
+                context, width == 32 ? "    xorl $0x80000000, %eax\n" :
+                    "    movabsq $0x8000000000000000, %rcx\n    xorq %rcx, %rax\n") &&
+            support::store_rax(context, instruction.result, record);
+    }
+    let width: usize = support::bit_width(record);
+    let mnemonic: *const u8 = instruction.operation == lexer::TokenKind.minus ? (width <= 32 ? "    negl %eax\n" :
+                "    negq %rax\n") : (width <= 32 ? "    notl %eax\n" : "    notq %rax\n");
+    return support::load_rax(context, instruction.left, record) && support::literal(context, mnemonic) &&
+        support::store_rax(context, instruction.result, record);
+}
+
+fn binary_mnemonic(operation: lexer::TokenKind, width: usize) -> *const u8 {
+    if (operation == lexer::TokenKind.plus) {
+        return width <= 32 ? "addl" : "addq";
+    }
+    if (operation == lexer::TokenKind.minus) {
+        return width <= 32 ? "subl" : "subq";
+    }
+    if (operation == lexer::TokenKind.star) {
+        return width <= 32 ? "imull" : "imulq";
+    }
+    if (operation == lexer::TokenKind.ampersand) {
+        return width <= 32 ? "andl" : "andq";
+    }
+    if (operation == lexer::TokenKind.pipe) {
+        return width <= 32 ? "orl" : "orq";
+    }
+    if (operation == lexer::TokenKind.caret) {
+        return width <= 32 ? "xorl" : "xorq";
+    }
+    return null;
+}
+
+fn emit_division(
+    context: *support::Context, instruction: ir::Instruction, record: *const type_info::Record,
+        instruction_id: usize) -> bool {
+    let width: usize = support::bit_width(record);
+    let signed_value: bool = support::is_signed(context, record);
+    if (width < 32 && signed_value) {
+        if (!support::load_integer(context, instruction.left, record, "%eax", "%rax", true) ||
+            !support::load_integer(context, instruction.right, record, "%ecx", "%rcx", true) ||
+            !support::literal(context, width == 8 ? "    cmpl $-128, %eax\n" : "    cmpl $-32768, %eax\n") ||
+            !support::literal(context, "    jne ") || !support::instruction_label(context, instruction_id,
+                "division_safe") || !support::literal(context, "\n    cmpl $-1, %ecx\n    jne ") ||
+            !support::instruction_label(context, instruction_id, "division_safe") ||
+            !support::literal(context, "\n    xorl %edx, %edx\n    xorl %ecx, %ecx\n    divl %ecx\n") ||
+            !support::instruction_label(context, instruction_id, "division_safe") ||
+            !support::literal(
+                context, ":\n    cltd\n    idivl %ecx\n")) {
+            return false;
+        }
+    } else {
+        if (!support::load_rax(context, instruction.left, record) ||
+            !support::load_rcx(
+                context, instruction.right, record)) {
+            return false;
+        }
+        if (width <= 32) {
+            if (!support::literal(
+                    context, signed_value ? "    cltd\n    idivl %ecx\n" : "    xorl %edx, %edx\n    divl %ecx\n")) {
+                return false;
+            }
+        } else if (!support::literal(
+                context, signed_value ? "    cqto\n    idivq %rcx\n" : "    xorq %rdx, %rdx\n    divq %rcx\n")) {
+            return false;
+        }
+    }
+    if (instruction.operation == lexer::TokenKind.percent &&
+        !support::literal(
+            context, width <= 32 ? "    movl %edx, %eax\n" : "    movq %rdx, %rax\n")) {
+        return false;
+    }
+    return support::store_rax(context, instruction.result, record);
+}
+
+fn emit_binary_integer(context: *support::Context, instruction: ir::Instruction, instruction_id: usize) -> bool {
+    let record: *const type_info::Record = support::type(context, instruction.type_id);
+    if (record == null) {
+        return false;
+    }
+    let width: usize = support::bit_width(record);
+    if (instruction.operation == lexer::TokenKind.slash || instruction.operation == lexer::TokenKind.percent) {
+        return emit_division(context, instruction, record, instruction_id);
+    }
+    if (instruction.operation == lexer::TokenKind.shift_left || instruction.operation == lexer::TokenKind.shift_right) {
+        let signed_narrow_right: bool = instruction.operation == lexer::TokenKind.shift_right &&
+            support::is_signed(context, record) && width < 32;
+        if (!(signed_narrow_right ? support::load_integer(context, instruction.left, record, "%eax", "%rax", true) :
+                support::load_rax(
+                    context, instruction.left, record)) ||
+            !support::load_rcx(
+                context, instruction.right, record)) {
+            return false;
+        }
+        if (width < 32 && (!support::literal(context, "    andl $") || !support::append_usize(context, width - 1) ||
+            !support::literal(
+                context, ", %ecx\n"))) {
+            return false;
+        }
+        let mnemonic: *const u8 = instruction.operation == lexer::TokenKind.shift_left ?
+                (width <= 32 ? "    shll %cl, %eax\n" : "    shlq %cl, %rax\n") : (support::is_signed(context, record) ?
+                    (width <= 32 ? "    sarl %cl, %eax\n" : "    sarq %cl, %rax\n") : (width <= 32 ?
+                        "    shrl %cl, %eax\n" : "    shrq %cl, %rax\n"));
+        return support::literal(context, mnemonic) && support::store_rax(context, instruction.result, record);
+    }
+    let mnemonic: *const u8 = binary_mnemonic(instruction.operation, width);
+    if (mnemonic == null || !support::load_rax(context, instruction.left, record) ||
+        !support::load_rcx(context, instruction.right, record) || !support::literal(context, "    ") ||
+            !support::literal(context, mnemonic) || !support::literal(context, " ") ||
+        !support::literal(
+            context, width <= 32 ? "%ecx, %eax\n" : "%rcx, %rax\n")) {
+        return false;
+    }
+    return support::store_rax(context, instruction.result, record);
+}
+
+fn emit_binary_float(context: *support::Context, instruction: ir::Instruction) -> bool {
+    let record: *const type_info::Record = support::type(context, instruction.type_id);
+    if (record == null ||
+        !support::load_xmm(
+            context, instruction.left, record, "%xmm0")) {
+        return false;
+    }
+    var mnemonic: *const u8 = null;
+    if (instruction.opcode == ir::Opcode.float_min) {
+        mnemonic = record->kind == type_info::Kind.float_32 ? "minss" : "minsd";
+    } else if (instruction.opcode == ir::Opcode.float_max) {
+        mnemonic = record->kind == type_info::Kind.float_32 ? "maxss" : "maxsd";
+    } else if (instruction.operation == lexer::TokenKind.plus) {
+        mnemonic = record->kind == type_info::Kind.float_32 ? "addss" : "addsd";
+    } else if (instruction.operation == lexer::TokenKind.minus) {
+        mnemonic = record->kind == type_info::Kind.float_32 ? "subss" : "subsd";
+    } else if (instruction.operation == lexer::TokenKind.star) {
+        mnemonic = record->kind == type_info::Kind.float_32 ? "mulss" : "mulsd";
+    } else if (instruction.operation == lexer::TokenKind.slash) {
+        mnemonic = record->kind == type_info::Kind.float_32 ? "divss" : "divsd";
+    }
+    if (mnemonic == null || !support::literal(context, "    ") || !support::literal(context, mnemonic) ||
+        !support::literal(context, " ") || !support::append_value(context, instruction.right) ||
+        !support::literal(
+            context, ", %xmm0\n")) {
+        return false;
+    }
+    return support::store_xmm(context, instruction.result, record, "%xmm0");
+}
+
+fn emit_float_sqrt(context: *support::Context, instruction: ir::Instruction) -> bool {
+    let record: *const type_info::Record = support::type(context, instruction.type_id);
+    return record != null && support::load_xmm(context, instruction.left, record, "%xmm0") &&
+        support::literal(
+            context, record->kind == type_info::Kind.float_32 ? "    sqrtss %xmm0, %xmm0\n" :
+                "    sqrtsd %xmm0, %xmm0\n") && support::store_xmm(context, instruction.result, record, "%xmm0");
+}
+
+// Reads the flags left by the immediately preceding 64-bit add/sub/imul (auxiliary != 0 selects the signed
+// overflow flag, otherwise the carry flag). Every emission between that arithmetic and this setcc is a mov,
+// which does not modify flags.
+fn emit_overflow_flag(context: *support::Context, instruction: ir::Instruction) -> bool {
+    let record: *const type_info::Record = support::type(context, instruction.type_id);
+    if (record == null) {
+        return false;
+    }
+    return support::literal(context, instruction.auxiliary != 0 ? "    seto %al\n" : "    setc %al\n") &&
+        support::literal(context, "    movzbl %al, %eax\n") && support::store_rax(context, instruction.result, record);
+}
+
+fn condition(operation: lexer::TokenKind, signed_value: bool) -> *const u8 {
+    if (operation == lexer::TokenKind.equal_equal) {
+        return "sete";
+    }
+    if (operation == lexer::TokenKind.bang_equal) {
+        return "setne";
+    }
+    if (operation == lexer::TokenKind.less) {
+        return signed_value ? "setl" : "setb";
+    }
+    if (operation == lexer::TokenKind.less_equal) {
+        return signed_value ? "setle" : "setbe";
+    }
+    if (operation == lexer::TokenKind.greater) {
+        return signed_value ? "setg" : "seta";
+    }
+    if (operation == lexer::TokenKind.greater_equal) {
+        return signed_value ? "setge" : "setae";
+    }
+    return null;
+}
+
+fn emit_compare_float(context: *support::Context, instruction: ir::Instruction,
+    record: *const type_info::Record) -> bool {
+    if (!support::load_xmm(context, instruction.left, record, "%xmm0") ||
+        !support::literal(context, record->kind == type_info::Kind.float_32 ? "    ucomiss " : "    ucomisd ") ||
+        !support::append_value(context, instruction.right) ||
+        !support::literal(
+            context, ", %xmm0\n")) {
+        return false;
+    }
+    var sequence: *const u8 = null;
+    if (instruction.operation == lexer::TokenKind.equal_equal) {
+        sequence = "    sete %al\n    setnp %cl\n    andb %cl, %al\n";
+    } else if (instruction.operation == lexer::TokenKind.bang_equal) {
+        sequence = "    setne %al\n    setp %cl\n    orb %cl, %al\n";
+    } else if (instruction.operation == lexer::TokenKind.less) {
+        sequence = "    setb %al\n    setnp %cl\n    andb %cl, %al\n";
+    } else if (instruction.operation == lexer::TokenKind.less_equal) {
+        sequence = "    setbe %al\n    setnp %cl\n    andb %cl, %al\n";
+    } else if (instruction.operation == lexer::TokenKind.greater) {
+        sequence = "    seta %al\n";
+    } else if (instruction.operation == lexer::TokenKind.greater_equal) {
+        sequence = "    setae %al\n";
+    }
+    return sequence != null && support::literal(context, sequence) && support::literal(context,
+        "    movzbl %al, %eax\n") &&
+        support::store_rax(context, instruction.result, support::type(context, instruction.type_id));
+}
+
+fn emit_compare(context: *support::Context, instruction: ir::Instruction) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let record: *const type_info::Record = support::type(context, values[instruction.left].type_id);
+    if (record == null) {
+        return false;
+    }
+    if (type_info::is_float(record->kind)) {
+        return emit_compare_float(context, instruction, record);
+    }
+    let condition: *const u8 = condition(instruction.operation, support::is_signed(context, record));
+    let width: usize = support::bit_width(record);
+    if (condition == null) {
+        return support::fail(context, runtime::Error.invalid_argument);
+    }
+    if (support::is_signed(context, record) && width < 32) {
+        if (!support::load_integer(context, instruction.left, record, "%eax", "%rax", true) ||
+            !support::load_integer(context, instruction.right, record, "%ecx", "%rcx", true) ||
+            !support::literal(
+                context, "    cmpl %ecx, %eax\n")) {
+            return false;
+        }
+    } else if (!support::load_rax(context, instruction.left, record) || !support::load_rcx(context, instruction.right,
+        record) ||
+        !support::literal(
+            context, width <= 32 ? "    cmpl %ecx, %eax\n" : "    cmpq %rcx, %rax\n")) {
+        return false;
+    }
+    return support::literal(context, "    ") && support::literal(context, condition) &&
+        support::literal(context, " %al\n    movzbl %al, %eax\n") &&
+        support::store_rax(context, instruction.result, support::type(context, instruction.type_id));
+}
+
+fn float_power_bits(record: *const type_info::Record, exponent: usize, negative: bool) -> u64 {
+    if (record->kind == type_info::Kind.float_32) {
+        let sign: u64 = negative ? 2147483648 : 0;
+        return sign | ((exponent as u64 + 127) << 23);
+    }
+    let sign: u64 = negative ? 9223372036854775808 : 0;
+    return sign | ((exponent as u64 + 1023) << 52);
+}
+
+fn float_maximum_bits(record: *const type_info::Record, integer_width: usize) -> u64 {
+    let precision: usize = record->kind == type_info::Kind.float_32 ? 24 : 53;
+    let fraction_width: usize = record->kind == type_info::Kind.float_32 ? 23 : 52;
+    let bias: usize = record->kind == type_info::Kind.float_32 ? 127 : 1023;
+    let fraction: u64 = ((1 as u64 << ((integer_width - 1) as u64)) - 1) << ((precision - integer_width) as u64);
+    return (((integer_width - 1 + bias) as u64) << (fraction_width as u64)) | fraction;
+}
+
+fn emit_float_bits_xmm1(context: *support::Context, record: *const type_info::Record, bits: u64) -> bool {
+    if (record->kind == type_info::Kind.float_32) {
+        return support::literal(context, "    movl $0x") && support::hex(context, bits & 4294967295, 8) &&
+            support::literal(context, ", %eax\n    movd %eax, %xmm1\n");
+    }
+    return support::literal(context, "    movabsq $0x") && support::hex(context, bits, 16) &&
+        support::literal(context, ", %rax\n    movq %rax, %xmm1\n");
+}
+
+fn emit_integer_conversion(
+    context: *support::Context, instruction: ir::Instruction, source: *const type_info::Record,
+    target: *const type_info::Record) -> bool {
+    let source_width: usize = support::bit_width(source);
+    let target_width: usize = support::bit_width(target);
+    let signed_source: bool = support::is_signed(context, source);
+    // A signed source widens by sign extension at any wider target width,
+    // not only 64-bit targets: value homes are zero-masked, so a plain movl
+    // would turn a negative i8/i16 into a large positive i32.
+    if (signed_source && source_width < 64 && target_width > source_width) {
+        if (!support::load_signed_rax(
+                context, instruction.left, source)) {
+            return false;
+        }
+    } else if (!support::load_rax(
+            context, instruction.left, source)) {
+        return false;
+    }
+    return support::store_rax(context, instruction.result, target);
+}
+
+fn emit_integer_to_float(
+    context: *support::Context, instruction: ir::Instruction, source: *const type_info::Record,
+    target: *const type_info::Record, instruction_id: usize) -> bool {
+    let source_width: usize = support::bit_width(source);
+    let signed_source: bool = support::is_signed(context, source);
+    let convert: *const u8 = target->kind == type_info::Kind.float_32 ? "    cvtsi2ssq %rax, %xmm0\n" :
+            "    cvtsi2sdq %rax, %xmm0\n";
+    let add: *const u8 = target->kind == type_info::Kind.float_32 ? "    addss %xmm0, %xmm0\n" :
+            "    addsd %xmm0, %xmm0\n";
+    if (signed_source && source_width < 64) {
+        if (!support::load_signed_rax(
+                context, instruction.left, source)) {
+            return false;
+        }
+    } else if (!support::load_rax(
+            context, instruction.left, source)) {
+        return false;
+    }
+    if (signed_source || source_width < 64) {
+        if (!support::literal(
+                context, convert)) {
+            return false;
+        }
+    } else if (!support::literal(context, "    testq %rax, %rax\n    js ") ||
+        !support::instruction_label(context, instruction_id, "uitofp_large") ||
+        !support::literal(context, "\n") || !support::literal(context, convert) || !support::literal(context,
+            "    jmp ") ||
+        !support::instruction_label(context, instruction_id, "uitofp_done") || !support::literal(context, "\n") ||
+        !support::instruction_label(context, instruction_id, "uitofp_large") || !support::literal(context,
+            ":\n    movq %rax, %rdx\n    shrq $1, %rax\n    andl $1, %edx\n    orq %rdx, %rax\n") ||
+        !support::literal(context, convert) || !support::literal(context, add) ||
+        !support::instruction_label(context, instruction_id, "uitofp_done") || !support::literal(context, ":\n")) {
+        return false;
+    }
+    return support::store_xmm(context, instruction.result, target, "%xmm0");
+}
+
+fn emit_float_range_check(
+    context: *support::Context, instruction: ir::Instruction, source: *const type_info::Record,
+    target: *const type_info::Record, instruction_id: usize) -> bool {
+    let target_width: usize = support::bit_width(target);
+    let signed_target: bool = support::is_signed(context, target);
+    let bound_exponent: usize = signed_target ? target_width - 1 : target_width;
+    let maximum_width: usize = signed_target ? target_width - 1 : target_width;
+    let precision: usize = source->kind == type_info::Kind.float_32 ? 24 : 53;
+    let exact_maximum: bool = maximum_width <= precision;
+    let lower_bits: u64 = signed_target ? float_power_bits(source, bound_exponent, true) : 0;
+    let upper_bits: u64 = exact_maximum ? float_maximum_bits(source, maximum_width) :
+        float_power_bits(source, bound_exponent, false);
+    let compare: *const u8 = source->kind == type_info::Kind.float_32 ? "    ucomiss %xmm1, %xmm0\n" :
+            "    ucomisd %xmm1, %xmm0\n";
+    return emit_float_bits_xmm1(context, source, lower_bits) &&
+        support::literal(context, compare) && support::literal(context, "    jb ") &&
+        support::instruction_label(context, instruction_id, "fptoi_trap") && support::literal(context, "\n") &&
+        emit_float_bits_xmm1(context, source, upper_bits) && support::literal(context, compare) &&
+        support::literal(context, exact_maximum ? "    ja " : "    jae ") &&
+        support::instruction_label(context, instruction_id, "fptoi_trap") && support::literal(context, "\n");
+}
+
+fn emit_float_to_integer(
+    context: *support::Context, instruction: ir::Instruction, source: *const type_info::Record,
+    target: *const type_info::Record, instruction_id: usize) -> bool {
+    if (!support::load_xmm(context, instruction.left, source, "%xmm0") ||
+        !emit_float_range_check(
+            context, instruction, source, target, instruction_id)) {
+        return false;
+    }
+    let target_width: usize = support::bit_width(target);
+    let signed_target: bool = support::is_signed(context, target);
+    let convert_32: *const u8 = source->kind == type_info::Kind.float_32 ? "    cvttss2si %xmm0, %eax\n" :
+            "    cvttsd2si %xmm0, %eax\n";
+    let convert_64: *const u8 = source->kind == type_info::Kind.float_32 ? "    cvttss2siq %xmm0, %rax\n" :
+            "    cvttsd2siq %xmm0, %rax\n";
+    if (signed_target) {
+        if (!support::literal(
+                context, target_width == 64 ? convert_64 : convert_32)) {
+            return false;
+        }
+    } else if (target_width < 64) {
+        if (!support::literal(
+                context, convert_64)) {
+            return false;
+        }
+    } else {
+        let split_bits: u64 = float_power_bits(source, 63, false);
+        if (!emit_float_bits_xmm1(context, source, split_bits) ||
+            !support::literal(
+                context, source->kind == type_info::Kind.float_32 ? "    ucomiss %xmm1, %xmm0\n" :
+                    "    ucomisd %xmm1, %xmm0\n") || !support::literal(context, "    jb ") ||
+            !support::instruction_label(context, instruction_id, "fptoi_low") ||
+            !support::literal(
+                context, source->kind == type_info::Kind.float_32 ? "\n    subss %xmm1, %xmm0\n" :
+                    "\n    subsd %xmm1, %xmm0\n") || !support::literal(context, convert_64) ||
+            !support::literal(context, "    movabsq $0x8000000000000000, %rdx\n    orq %rdx, %rax\n    jmp ") ||
+            !support::instruction_label(context, instruction_id, "fptoi_converted") || !support::literal(context,
+                "\n") ||
+            !support::instruction_label(context, instruction_id, "fptoi_low") || !support::literal(context, ":\n") ||
+            !support::literal(context, convert_64) || !support::instruction_label(context, instruction_id,
+                "fptoi_converted") || !support::literal(context, ":\n")) {
+            return false;
+        }
+    }
+    if (!support::store_rax(context, instruction.result, target) || !support::literal(context, "    jmp ") ||
+        !support::instruction_label(context, instruction_id, "fptoi_done") || !support::literal(context, "\n") ||
+        !support::instruction_label(context, instruction_id, "fptoi_trap") || !support::literal(context,
+            ":\n    ud2\n") ||
+        !support::instruction_label(context, instruction_id, "fptoi_done") || !support::literal(context, ":\n")) {
+        return false;
+    }
+    return true;
+}
+
+fn emit_convert(context: *support::Context, instruction: ir::Instruction, instruction_id: usize) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let source: *const type_info::Record = support::type(context, values[instruction.left].type_id);
+    let target: *const type_info::Record = support::type(context, instruction.type_id);
+    if (source == null || target == null) {
+        return false;
+    }
+    if (type_info::is_float(source->kind) && type_info::is_float(target->kind)) {
+        return support::load_xmm(context, instruction.left, source, "%xmm0") &&
+            support::literal(
+                context, source->kind == type_info::Kind.float_32 ? "    cvtss2sd %xmm0, %xmm0\n" :
+                    "    cvtsd2ss %xmm0, %xmm0\n") && support::store_xmm(context, instruction.result, target, "%xmm0");
+    }
+    if (type_info::is_float(target->kind)) {
+        return emit_integer_to_float(context, instruction, source, target, instruction_id);
+    }
+    if (type_info::is_float(source->kind)) {
+        return emit_float_to_integer(context, instruction, source, target, instruction_id);
+    }
+    return emit_integer_conversion(context, instruction, source, target);
+}
+

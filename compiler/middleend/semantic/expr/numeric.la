@@ -1,0 +1,785 @@
+module luna.bootstrap.middleend.semantic.expr.numeric;
+
+import luna.bootstrap.middleend.semantic.context.builder as builder;
+
+import luna.bootstrap.frontend.lexer as lexer;
+import luna.bootstrap.middleend.ir as ir;
+import luna.bootstrap.middleend.semantic.expr.base as base;
+import luna.bootstrap.middleend.type as type_info;
+import luna.std.ascii as ascii;
+
+fn type_for_integer_literal(context: *context::Context, expected_type: usize) -> usize {
+    if (expected_type < context->types.type_count) {
+        let record: type_info::Record = context::type_record(context, expected_type);
+        if (type_info::is_integer(record.kind)) {
+            return expected_type;
+        }
+    }
+    return type_info::BuiltinType.signed_32 as usize;
+}
+
+fn lower_integer_literal(
+    context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> context::Expression {
+    var value: u64 = 0;
+    let type_id: usize = type_for_integer_literal(context, expected_type);
+    let kind: type_info::Kind = context::type_record(context, type_id).kind;
+    if (!context::parse_unsigned(context, context->current_unit, node.token_index, &value) ||
+        !context::integer_fits_type(
+            kind, value, false)) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.integer_overflow, context->current_unit, node.span, context::no_id(),
+            context::empty_span(), type_id);
+        return base::invalid_expression();
+    }
+    return builder::emit_integer_constant(
+        context, node, type_id, builder::mask_integer(value, type_info::bit_width(kind)));
+}
+
+fn lower_character_literal(
+    context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> context::Expression {
+    var value: u64 = 0;
+    if (!context::decode_character(
+            context, context->current_unit, node.token_index, &value)) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_character, context->current_unit, node.span, context::no_id(),
+            context::empty_span(), 0);
+        return base::invalid_expression();
+    }
+    let type_id: usize = type_for_integer_literal(context, expected_type);
+    let kind: type_info::Kind = context::type_record(context, type_id).kind;
+    if (!context::integer_fits_type(
+            kind, value, false)) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.integer_overflow, context->current_unit, node.span, context::no_id(),
+            context::empty_span(), type_id);
+        return base::invalid_expression();
+    }
+    return builder::emit_integer_constant(
+        context, node, type_id, builder::mask_integer(value, type_info::bit_width(kind)));
+}
+
+fn lower_negative_integer_literal(
+    context: *context::Context, unary_node: syntax::SyntaxNode, literal_node: syntax::SyntaxNode, expected_type: usize
+) -> context::Expression {
+    var magnitude: u64 = 0;
+    let type_id: usize = type_for_integer_literal(context, expected_type);
+    let kind: type_info::Kind = context::type_record(context, type_id).kind;
+    if (!context::parse_unsigned(context, context->current_unit, literal_node.token_index, &magnitude) ||
+        !context::integer_fits_type(
+            kind, magnitude, true)) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.integer_overflow, context->current_unit, unary_node.span, context::no_id(),
+            context::empty_span(), type_id);
+        return base::invalid_expression();
+    }
+    return builder::emit_integer_constant(
+        context, unary_node, type_id, builder::mask_integer(0 - magnitude, type_info::bit_width(kind)));
+}
+
+fn big_set(value: *context::BigUnsigned, small: u64) -> bool {
+    if (value == null) {
+        return false;
+    }
+    value->count = small == 0 ? 0 : 1;
+    value->limbs[0] = small;
+    return true;
+}
+
+fn big_copy(destination: *context::BigUnsigned, source: *const context::BigUnsigned) -> bool {
+    if (destination == null || source == null || source->count > context::Limit.maximum_floating_limbs as usize) {
+        return false;
+    }
+    destination->count = source->count;
+    var index: usize = 0;
+    while (index < source->count) {
+        destination->limbs[index] = source->limbs[index];
+        index += 1;
+    }
+    return true;
+}
+
+fn big_multiply_small(value: *context::BigUnsigned, factor: u64) -> bool {
+    if (value == null || factor > 10 || value->count > context::Limit.maximum_floating_limbs as usize) {
+        return false;
+    }
+    if (factor == 0) {
+        value->count = 0;
+        return true;
+    }
+    let half_mask: u64 = 4294967295;
+    var carry: u64 = 0;
+    var index: usize = 0;
+    while (index < value->count) {
+        let limb: u64 = value->limbs[index];
+        let lower_product: u64 = (limb & half_mask) * factor + carry;
+        let upper_product: u64 = (limb >> 32) * factor + (lower_product >> 32);
+        value->limbs[index] = (upper_product << 32) | (lower_product & half_mask);
+        carry = upper_product >> 32;
+        index += 1;
+    }
+    if (carry != 0) {
+        if (value->count >= context::Limit.maximum_floating_limbs as usize) {
+            return false;
+        }
+        value->limbs[value->count] = carry;
+        value->count += 1;
+    }
+    return true;
+}
+
+fn big_add_small(value: *context::BigUnsigned, small: u64) -> bool {
+    if (value == null || small > 9 || value->count > context::Limit.maximum_floating_limbs as usize) {
+        return false;
+    }
+    var carry: u64 = small;
+    var index: usize = 0;
+    while (carry != 0 && index < value->count) {
+        let original: u64 = value->limbs[index];
+        let sum: u64 = original + carry;
+        value->limbs[index] = sum;
+        carry = sum < original ? 1 : 0;
+        index += 1;
+    }
+    if (carry != 0) {
+        if (value->count >= context::Limit.maximum_floating_limbs as usize) {
+            return false;
+        }
+        value->limbs[value->count] = carry;
+        value->count += 1;
+    }
+    return true;
+}
+
+fn big_add(value: *context::BigUnsigned, added: *const context::BigUnsigned) -> bool {
+    if (value == null || added == null || value->count > context::Limit.maximum_floating_limbs as usize ||
+        added->count > context::Limit.maximum_floating_limbs as usize) {
+        return false;
+    }
+    let maximum_count: usize = value->count > added->count ? value->count : added->count;
+    var carry: u64 = 0;
+    var index: usize = 0;
+    while (index < maximum_count) {
+        let left: u64 = index < value->count ? value->limbs[index] : 0;
+        let right: u64 = index < added->count ? added->limbs[index] : 0;
+        let partial: u64 = left + right;
+        let partial_overflow: bool = partial < left;
+        let sum: u64 = partial + carry;
+        let carry_overflow: bool = sum < partial;
+        value->limbs[index] = sum;
+        carry = partial_overflow || carry_overflow ? 1 : 0;
+        index += 1;
+    }
+    value->count = maximum_count;
+    if (carry != 0) {
+        if (value->count >= context::Limit.maximum_floating_limbs as usize) {
+            return false;
+        }
+        value->limbs[value->count] = carry;
+        value->count += 1;
+    }
+    return true;
+}
+
+fn big_shift_left_one(value: *context::BigUnsigned) -> bool {
+    if (value == null || value->count > context::Limit.maximum_floating_limbs as usize) {
+        return false;
+    }
+    var carry: u64 = 0;
+    var index: usize = 0;
+    while (index < value->count) {
+        let limb: u64 = value->limbs[index];
+        value->limbs[index] = (limb << 1) | carry;
+        carry = limb >> 63;
+        index += 1;
+    }
+    if (carry != 0) {
+        if (value->count >= context::Limit.maximum_floating_limbs as usize) {
+            return false;
+        }
+        value->limbs[value->count] = carry;
+        value->count += 1;
+    }
+    return true;
+}
+
+fn big_multiply_u64(source: *const context::BigUnsigned, multiplier: u64, result: *context::BigUnsigned) -> bool {
+    if (source == null || result == null || !big_set(result, 0)) {
+        return false;
+    }
+    if (multiplier == 0 || source->count == 0) {
+        return true;
+    }
+    var addend: context::BigUnsigned = {};
+    if (!big_copy(&addend, source)) {
+        return false;
+    }
+    var remaining: u64 = multiplier;
+    while (remaining != 0) {
+        if ((remaining & 1) != 0 &&
+            !big_add(
+                result, (&addend) as
+                    *const context::BigUnsigned)) {
+            return false;
+        }
+        remaining >>= 1;
+        if (remaining != 0 && !big_shift_left_one(&addend)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn big_bit_length(value: *const context::BigUnsigned) -> usize {
+    if (value == null || value->count == 0 || value->count > context::Limit.maximum_floating_limbs as usize) {
+        return 0;
+    }
+    var highest: u64 = value->limbs[value->count - 1];
+    var highest_bits: usize = 0;
+    while (highest != 0) {
+        highest >>= 1;
+        highest_bits += 1;
+    }
+    return (value->count - 1) * 64 + highest_bits;
+}
+
+fn big_bit(value: *const context::BigUnsigned, bit_index: usize) -> bool {
+    if (value == null || bit_index / 64 >= value->count) {
+        return false;
+    }
+    return ((value->limbs[bit_index / 64] >> ((bit_index % 64) as u64)) & 1) != 0;
+}
+
+fn big_compare_scaled(
+    left: *const context::BigUnsigned, left_exponent: isize, right: *const context::BigUnsigned, right_exponent: isize
+) -> i32 {
+    let left_length: usize = big_bit_length(left);
+    let right_length: usize = big_bit_length(right);
+    if (left_length == 0 || right_length == 0) {
+        if (left_length == right_length) {
+            return 0;
+        }
+        return left_length == 0 ? -1 : 1;
+    }
+    let left_top: isize = (left_length - 1) as isize + left_exponent;
+    let right_top: isize = (right_length - 1) as isize + right_exponent;
+    if (left_top != right_top) {
+        return left_top < right_top ? -1 : 1;
+    }
+    let minimum_position: isize = left_exponent < right_exponent ? left_exponent : right_exponent;
+    var position: isize = left_top;
+    while (position >= minimum_position) {
+        var left_bit: bool = false;
+        if (position >= left_exponent) {
+            left_bit = big_bit(left, (position - left_exponent) as usize);
+        }
+        var right_bit: bool = false;
+        if (position >= right_exponent) {
+            right_bit = big_bit(right, (position - right_exponent) as usize);
+        }
+        if (left_bit != right_bit) {
+            return left_bit ? 1 : -1;
+        }
+        if (position == minimum_position) {
+            break;
+        }
+        position -= 1;
+    }
+    return 0;
+}
+
+fn signed_add(
+    left: *const context::SignedMagnitude, right: *const context::SignedMagnitude, limit: usize,
+    result: *context::SignedMagnitude) -> bool {
+    if (left == null || right == null || result == null || left->magnitude > limit || right->magnitude > limit) {
+        return false;
+    }
+    if (left->magnitude == 0) {
+        *result = {
+            magnitude = right->magnitude, negative = right->magnitude != 0 && right->negative,
+        };
+        return true;
+    }
+    if (right->magnitude == 0) {
+        *result = *left;
+        return true;
+    }
+    if (left->negative == right->negative) {
+        let magnitude: usize = left->magnitude > limit - right->magnitude ? limit : left->magnitude + right->magnitude;
+        *result = {
+            magnitude = magnitude, negative = left->negative,
+        };
+        return true;
+    }
+    if (left->magnitude >= right->magnitude) {
+        let magnitude: usize = left->magnitude - right->magnitude;
+        *result = {
+            magnitude = magnitude, negative = magnitude != 0 && left->negative,
+        };
+        return true;
+    }
+    *result = {
+        magnitude = right->magnitude - left->magnitude, negative = right->negative,
+    };
+    return true;
+}
+
+fn float_components(bits: u64, single: bool, significand: *u64, binary_exponent: *isize) -> bool {
+    if (significand == null || binary_exponent == null) {
+        return false;
+    }
+    if (single) {
+        let fraction: u64 = bits & 8388607;
+        let exponent_field: u64 = (bits >> 23) & 255;
+        *significand = exponent_field == 0 ? fraction : 8388608 + fraction;
+        *binary_exponent = exponent_field == 0 ? -149 : exponent_field as isize - 150;
+        return true;
+    }
+    let fraction: u64 = bits & 4503599627370495;
+    let exponent_field: u64 = (bits >> 52) & 2047;
+    *significand = exponent_field == 0 ? fraction : 4503599627370496 + fraction;
+    *binary_exponent = exponent_field == 0 ? -1074 : exponent_field as isize - 1075;
+    return true;
+}
+
+fn compare_decimal_dyadic(
+    decimal: *const context::DecimalFloating, significand: u64, binary_exponent: isize, result: *i32) -> bool {
+    var candidate: context::BigUnsigned = {};
+    if (decimal == null || result == null) {
+        return false;
+    }
+    var comparison: i32 = 0;
+    if (decimal->decimal_exponent >= 0) {
+        if (!big_set(
+                &candidate, significand)) {
+            return false;
+        }
+        comparison = big_compare_scaled(
+            &decimal->coefficient, decimal->decimal_exponent, (&candidate) as
+                *const context::BigUnsigned, binary_exponent);
+    } else {
+        if (!big_multiply_u64(
+                &decimal->five_power, significand, &candidate)) {
+            return false;
+        }
+        comparison = big_compare_scaled(
+            &decimal->coefficient, 0, (&candidate) as
+                *const context::BigUnsigned, binary_exponent - decimal->decimal_exponent);
+    }
+    if (comparison == 0 && decimal->truncated_nonzero) {
+        comparison = 1;
+    }
+    *result = comparison;
+    return true;
+}
+
+fn compare_decimal_float(decimal: *const context::DecimalFloating, bits: u64, single: bool, result: *i32) -> bool {
+    var significand: u64 = 0;
+    var binary_exponent: isize = 0;
+    if (!float_components(
+            bits, single, &significand, &binary_exponent)) {
+        return false;
+    }
+    return compare_decimal_dyadic(decimal, significand, binary_exponent, result);
+}
+
+fn prepare_decimal_floating(
+    context: *context::Context, node: syntax::SyntaxNode, single: bool, decimal: *context::DecimalFloating, zero: *bool
+) -> bool {
+    let unit: *const context::Unit = context::input_unit(context, context->current_unit);
+    let token: lexer::Token = context::token(context, context->current_unit, node.token_index);
+    if (decimal == null || zero == null || token.kind != lexer::TokenKind.floating) {
+        return false;
+    }
+    let maximum: usize = context::no_id();
+    var exponent_limit: usize = maximum;
+    if (token.span.length <= maximum - (context::Limit.floating_exponent_margin as usize)) {
+        exponent_limit = token.span.length + (context::Limit.floating_exponent_margin as usize);
+    }
+    var coefficient: context::BigUnsigned = {};
+    var significant_digits: usize = 0;
+    var kept_digits: usize = 0;
+    var fractional_digits: usize = 0;
+    var exponent_magnitude: usize = 0;
+    var exponent_negative: bool = false;
+    var truncated_nonzero: bool = false;
+    var seen_nonzero: bool = false;
+    var after_decimal: bool = false;
+    var in_exponent: bool = false;
+    var index: usize = 0;
+    while (index < token.span.length) {
+        let byte: u8 = unit->source.data[token.span.offset + index];
+        if (byte == '_') {
+            index += 1;
+            continue;
+        }
+        if (byte == '.') {
+            after_decimal = true;
+            index += 1;
+            continue;
+        }
+        if (byte == 'e' || byte == 'E') {
+            in_exponent = true;
+            index += 1;
+            if (index < token.span.length) {
+                let sign: u8 = unit->source.data[token.span.offset + index];
+                if (sign == '+' || sign == '-') {
+                    exponent_negative = sign == '-';
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if (!ascii::is_decimal_digit(byte)) {
+            return false;
+        }
+        let digit: usize = (byte - '0') as usize;
+        if (in_exponent) {
+            if (exponent_magnitude > (exponent_limit - digit) / 10) {
+                exponent_magnitude = exponent_limit;
+            } else {
+                exponent_magnitude = exponent_magnitude * 10 + digit;
+            }
+            index += 1;
+            continue;
+        }
+        if (after_decimal) {
+            if (fractional_digits == maximum) {
+                return false;
+            }
+            fractional_digits += 1;
+        }
+        if (!seen_nonzero && digit == 0) {
+            index += 1;
+            continue;
+        }
+        seen_nonzero = true;
+        if (significant_digits == maximum) {
+            return false;
+        }
+        significant_digits += 1;
+        if (kept_digits < context::Limit.maximum_floating_digits as usize) {
+            if (!big_multiply_small(&coefficient, 10) ||
+                !big_add_small(
+                    &coefficient, digit as u64)) {
+                return false;
+            }
+            kept_digits += 1;
+        } else if (digit != 0) {
+            truncated_nonzero = true;
+        }
+        index += 1;
+    }
+    if (!seen_nonzero) {
+        *zero = true;
+        return true;
+    }
+    if (fractional_digits == maximum) {
+        return false;
+    }
+    let fractional_with_unit: usize = fractional_digits + 1;
+    let digit_adjustment: context::SignedMagnitude = significant_digits >= fractional_with_unit ? {
+                magnitude = significant_digits - fractional_with_unit, negative = false,
+            } : {
+                magnitude = fractional_with_unit - significant_digits, negative = true,
+            };
+    let explicit_exponent: context::SignedMagnitude = {
+        magnitude = exponent_magnitude, negative = exponent_magnitude != 0 && exponent_negative,
+    };
+    var adjusted: context::SignedMagnitude = {};
+    if (!signed_add(
+            (&explicit_exponent) as
+                *const context::SignedMagnitude, (&digit_adjustment) as
+                *const context::SignedMagnitude, exponent_limit, &adjusted)) {
+        return false;
+    }
+    let maximum_adjusted: usize = single ? 38 : 308;
+    let minimum_adjusted_magnitude: usize = single ? 46 : 324;
+    if (!adjusted.negative && adjusted.magnitude > maximum_adjusted) {
+        return false;
+    }
+    if (adjusted.negative && adjusted.magnitude > minimum_adjusted_magnitude) {
+        *zero = true;
+        return true;
+    }
+    let adjusted_exponent: isize = adjusted.negative ? 0 - adjusted.magnitude as isize : adjusted.magnitude as isize;
+    decimal->coefficient = coefficient;
+    decimal->decimal_exponent = adjusted_exponent - kept_digits as isize + 1;
+    decimal->truncated_nonzero = truncated_nonzero;
+    big_set(&decimal->five_power, 1);
+    if (decimal->decimal_exponent >= 0) {
+        var power: isize = decimal->decimal_exponent;
+        while (power > 0) {
+            if (!big_multiply_small(
+                    &decimal->coefficient, 5)) {
+                return false;
+            }
+            power -= 1;
+        }
+    } else {
+        var power: isize = 0 - decimal->decimal_exponent;
+        while (power > 0) {
+            if (!big_multiply_small(
+                    &decimal->five_power, 5)) {
+                return false;
+            }
+            power -= 1;
+        }
+    }
+    *zero = false;
+    return true;
+}
+
+// Rounds `mantissa` (a binary fraction numerator) to the quantum implied by
+// `shift`: kept = mantissa / 2^shift, ties to even, with `sticky` recording
+// any value already lost below the mantissa's least significant bit.
+fn round_hex_mantissa(mantissa: u64, shift: i64, sticky: bool) -> u64 {
+    if (shift <= 0) {
+        return mantissa << (((0 as i64) - shift) as u64);
+    }
+    if (shift > 64) {
+        return 0;
+    }
+    let amount: u64 = shift as u64;
+    var kept: u64 = 0;
+    var round_bit: u64 = 0;
+    var below: bool = false;
+    if (amount == 64) {
+        round_bit = mantissa >> 63;
+        below = (mantissa & 9223372036854775807) != 0;
+    } else {
+        kept = mantissa >> amount;
+        round_bit = (mantissa >> (amount - 1)) & 1;
+        if (amount >= 2) {
+            below = (mantissa & (((1 as u64) << (amount - 1)) - 1)) != 0;
+        }
+    }
+    if (round_bit == 1 && (sticky || below || (kept & 1) == 1)) {
+        kept += 1;
+    }
+    return kept;
+}
+
+// Hexadecimal floating literals are exact binary fractions by construction,
+// so parsing accumulates the mantissa into a 64-bit significand (extra bits
+// fold into a sticky flag) and rounds directly at the target precision with
+// no decimal round-trip.
+fn parse_hex_floating_bits(context: *context::Context, node: syntax::SyntaxNode, single: bool, bits: *u64) -> bool {
+    let unit: *const context::Unit = context::input_unit(context, context->current_unit);
+    let token: lexer::Token = context::token(context, context->current_unit, node.token_index);
+    if (bits == null || token.span.length < 4) {
+        return false;
+    }
+    var mantissa: u64 = 0;
+    var exponent: i64 = 0;
+    var exponent_value: i64 = 0;
+    var exponent_negative: bool = false;
+    var sticky: bool = false;
+    var after_dot: bool = false;
+    var in_exponent: bool = false;
+    var index: usize = 2;
+    while (index < token.span.length) {
+        let byte: u8 = unit->source.data[token.span.offset + index];
+        if (byte == '_') {
+            index += 1;
+            continue;
+        }
+        if (byte == '.' && !in_exponent) {
+            after_dot = true;
+            index += 1;
+            continue;
+        }
+        if ((byte == 'p' || byte == 'P') && !in_exponent) {
+            in_exponent = true;
+            index += 1;
+            if (index < token.span.length) {
+                let sign: u8 = unit->source.data[token.span.offset + index];
+                if (sign == '+' || sign == '-') {
+                    exponent_negative = sign == '-';
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if (in_exponent) {
+            if (!ascii::is_decimal_digit(byte)) {
+                return false;
+            }
+            if (exponent_value <= 100000) {
+                exponent_value = exponent_value * 10 + (byte - '0') as i64;
+            }
+            index += 1;
+            continue;
+        }
+        let digit: usize = ascii::hex_value(byte);
+        if (digit >= 16) {
+            return false;
+        }
+        if (mantissa == 0 && digit == 0) {
+            if (after_dot) {
+                exponent -= 4;
+            }
+            index += 1;
+            continue;
+        }
+        if (mantissa > (18446744073709551615 - 15) / 16) {
+            if (digit != 0) {
+                sticky = true;
+            }
+            if (!after_dot) {
+                exponent += 4;
+            }
+            index += 1;
+            continue;
+        }
+        mantissa = mantissa * 16 + digit as u64;
+        if (after_dot) {
+            exponent -= 4;
+        }
+        index += 1;
+    }
+    if (exponent_negative) {
+        exponent_value = (0 as i64) - exponent_value;
+    }
+    exponent += exponent_value;
+    if (mantissa == 0) {
+        *bits = 0;
+        return true;
+    }
+    var top: usize = 63;
+    while (top > 0 && (mantissa >> (top as u64)) == 0) {
+        top -= 1;
+    }
+    let precision: i64 = single ? 24 : 53;
+    let exponent_maximum: i64 = single ? 127 : 1023;
+    let exponent_minimum: i64 = single ? 0 - 126 : 0 - 1022;
+    let bias: i64 = single ? 127 : 1023;
+    var value_exponent: i64 = exponent + top as i64;
+    if (value_exponent > exponent_maximum) {
+        return false;
+    }
+    var kept: u64 = 0;
+    if (value_exponent >= exponent_minimum) {
+        kept = round_hex_mantissa(mantissa, top as i64 - (precision - 1), sticky);
+        if ((kept >> (precision as u64)) != 0) {
+            kept = kept >> 1;
+            value_exponent += 1;
+            if (value_exponent > exponent_maximum) {
+                return false;
+            }
+        }
+        *bits = ((value_exponent + bias) as u64 << ((precision - 1) as u64)) |
+            (kept & (((1 as u64) << ((precision - 1) as u64)) - 1));
+        return true;
+    }
+    kept = round_hex_mantissa(mantissa, exponent_minimum - (precision - 1) - exponent, sticky);
+    *bits = kept;
+    return true;
+}
+
+fn parse_floating_bits(context: *context::Context, node: syntax::SyntaxNode, single: bool, bits: *u64) -> bool {
+    if (bits == null) {
+        return false;
+    }
+    let unit: *const context::Unit = context::input_unit(context, context->current_unit);
+    let token: lexer::Token = context::token(context, context->current_unit, node.token_index);
+    if (token.span.length >= 2 && unit->source.data[token.span.offset] == '0' &&
+        (unit->source.data[token.span.offset + 1] == 'x' || unit->source.data[token.span.offset + 1] == 'X')) {
+        return parse_hex_floating_bits(context, node, single, bits);
+    }
+    var decimal: context::DecimalFloating = {};
+    var zero: bool = false;
+    if (!prepare_decimal_floating(
+            context, node, single, &decimal, &zero)) {
+        return false;
+    }
+    if (zero) {
+        *bits = 0;
+        return true;
+    }
+    let maximum_bits: u64 = single ? 2139095039 : 9218868437227405311;
+    var lower: u64 = 0;
+    var upper: u64 = maximum_bits;
+    while (lower < upper) {
+        let middle: u64 = lower + (upper - lower) / 2 + 1;
+        var comparison: i32 = 0;
+        if (!compare_decimal_float(
+                (&decimal) as
+                    *const context::DecimalFloating, middle, single, &comparison)) {
+            return false;
+        }
+        if (comparison >= 0) {
+            lower = middle;
+        } else {
+            upper = middle - 1;
+        }
+    }
+    var lower_significand: u64 = 0;
+    var lower_exponent: isize = 0;
+    if (!float_components(
+            lower, single, &lower_significand, &lower_exponent)) {
+        return false;
+    }
+    let midpoint_significand: u64 = lower_significand * 2 + 1;
+    var midpoint_comparison: i32 = 0;
+    if (!compare_decimal_dyadic(
+            (&decimal) as
+                *const context::DecimalFloating, midpoint_significand, lower_exponent - 1, &midpoint_comparison)) {
+        return false;
+    }
+    if (lower == maximum_bits) {
+        if (midpoint_comparison >= 0) {
+            return false;
+        }
+        *bits = lower;
+        return true;
+    }
+    if (midpoint_comparison < 0 || (midpoint_comparison == 0 && (lower & 1) == 0)) {
+        *bits = lower;
+    } else {
+        *bits = lower + 1;
+    }
+    return true;
+}
+
+fn parse_floating(context: *context::Context, node: syntax::SyntaxNode, single: bool, value: *f64) -> bool {
+    var bits: u64 = 0;
+    if (value == null ||
+        !parse_floating_bits(
+            context, node, single, &bits)) {
+        return false;
+    }
+    if (single) {
+        let single_bits: u32 = bits as u32;
+        *value = (*((&single_bits) as *const u32 as *const f32))
+                as f64;
+    } else {
+        *value = *((&bits) as *const u64 as *const f64);
+    }
+    return true;
+}
+
+fn lower_floating_literal(
+    context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> context::Expression {
+    var type_id: usize = type_info::BuiltinType.float_64 as usize;
+    if (expected_type == type_info::BuiltinType.float_32 as usize || expected_type ==
+        type_info::BuiltinType.float_64 as usize) {
+        type_id = expected_type;
+    }
+    var value: f64 = 0.0;
+    let single: bool = type_id == type_info::BuiltinType.float_32 as usize;
+    if (!parse_floating(
+            context, node, single, &value)) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.floating_overflow, context->current_unit, node.span, context::no_id(),
+            context::empty_span(), type_id);
+        return base::invalid_expression();
+    }
+    var instruction: ir::Instruction = builder::instruction(ir::Opcode.constant_float, node);
+    instruction.floating = value;
+    let value_id: usize = builder::emit_value(context, instruction, type_id);
+    return {
+        type_id = type_id, value_id = value_id, address_id = context::no_id(), constant_value = 0, has_constant = false,
+        lvalue = false, mutable_lvalue = false, volatile_lvalue = false, valid = value_id != context::no_id(),
+        bitfield_segment = context::no_id(),
+    };
+}

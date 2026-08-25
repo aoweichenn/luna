@@ -118,8 +118,7 @@ fn diagnostic_buffer_is_valid(buffer: DiagnosticBuffer) -> bool {
     return buffer.count == buffer.storage.length / sizeof(Diagnostic);
 }
 
-fn diagnostic_buffer_add(
-    buffer: DiagnosticBuffer, diagnostic: Diagnostic) -> DiagnosticBufferResult {
+fn diagnostic_buffer_add(buffer: DiagnosticBuffer, diagnostic: Diagnostic) -> DiagnosticBufferResult {
     if (!diagnostic_buffer_is_valid(buffer)) {
         return {
             buffer = buffer, error = runtime::Error.invalid_argument,
@@ -187,7 +186,7 @@ fn lexer_advance(state: *LexerState) -> u8 {
     }
     let byte: u8 = state->source.data[state->offset];
     state->offset += 1;
-    if (byte == 10) {
+    if (byte == '\n') {
         state->line += 1;
         state->column = 1;
     } else {
@@ -204,23 +203,20 @@ fn lexer_match(state: *LexerState, expected: u8) -> bool {
     return true;
 }
 
-fn lexer_span(
-    state: *LexerState, start_offset: usize, start_line: usize, start_column: usize) -> SourceSpan {
+fn lexer_span(state: *LexerState, start_offset: usize, start_line: usize, start_column: usize) -> SourceSpan {
     return {
         offset = start_offset, length = state->offset - start_offset, line = start_line, column = start_column,
     };
 }
 
-fn lexer_add_diagnostic(
-    state: *LexerState, kind: DiagnosticKind, span: SourceSpan, detail: usize) -> bool {
+fn lexer_add_diagnostic(state: *LexerState, kind: DiagnosticKind, span: SourceSpan, detail: usize) -> bool {
     if (state->error != runtime::Error.none) {
         return false;
     }
     let added: DiagnosticBufferResult =
         diagnostic_buffer_add(
             state->diagnostics, {
-                kind = kind, span = span, expected = TokenKind.invalid, found = TokenKind.invalid,
-                detail = detail,
+                kind = kind, span = span, expected = TokenKind.invalid, found = TokenKind.invalid, detail = detail,
             });
     state->diagnostics = added.buffer;
     state->error = added.error;
@@ -228,16 +224,13 @@ fn lexer_add_diagnostic(
 }
 
 fn lexer_add_token(
-    state: *LexerState, kind: TokenKind, start_offset: usize, start_line: usize, start_column: usize
-) -> bool {
+    state: *LexerState, kind: TokenKind, start_offset: usize, start_line: usize, start_column: usize) -> bool {
     if (state->error != runtime::Error.none) {
         return false;
     }
     let span: SourceSpan = lexer_span(state, start_offset, start_line, start_column);
-    let token_kind: TokenKind = span.length > LexerLimit.maximum_token_length as usize ?
-            TokenKind.invalid : kind;
-    let added: TokenBufferResult =
-        token_buffer_add(state->tokens, { kind = token_kind, span = span, });
+    let token_kind: TokenKind = span.length > LexerLimit.maximum_token_length as usize ? TokenKind.invalid : kind;
+    let added: TokenBufferResult = token_buffer_add(state->tokens, { kind = token_kind, span = span, });
     state->tokens = added.buffer;
     state->error = added.error;
     if (added.error != runtime::Error.none) {
@@ -251,31 +244,28 @@ fn lexer_add_token(
 }
 
 fn is_ascii_letter(byte: u8) -> bool {
-    return (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122);
+    return (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z');
 }
 
 fn is_decimal_digit(byte: u8) -> bool {
-    return byte >= 48 && byte <= 57;
+    return byte >= '0' && byte <= '9';
 }
 
 fn is_hex_digit(byte: u8) -> bool {
-    return is_decimal_digit(byte) || (byte >= 65 && byte <= 70) || (byte >= 97 && byte <= 102);
+    return is_decimal_digit(byte) || (byte >= 'A' && byte <= 'F') || (byte >= 'a' && byte <= 'f');
 }
 
 fn digit_matches_base(byte: u8, base: usize) -> bool {
     if (base == 2) {
-        return byte == 48 || byte == 49;
+        return byte == '0' || byte == '1';
     }
     if (base == 8) {
-        return byte >= 48 && byte <= 55;
+        return byte >= '0' && byte <= '7';
     }
     if (base == 10) {
         return is_decimal_digit(byte);
     }
-    if (base == 16) {
-        return is_hex_digit(byte);
-    }
-    return false;
+    return base == 16 && is_hex_digit(byte);
 }
 
 fn lexer_text_equals(
@@ -293,9 +283,7 @@ fn lexer_text_equals(
     return true;
 }
 
-fn lexer_identifier_kind(
-    state: *LexerState, start: usize, length: usize
-) -> TokenKind {
+fn lexer_identifier_kind(state: *LexerState, start: usize, length: usize) -> TokenKind {
     var keywords: [51]LexerKeyword = {};
     keywords[0] = {text = "as", length = 2, kind = TokenKind.keyword_as};
     keywords[1] = {text = "do", length = 2, kind = TokenKind.keyword_do};
@@ -351,8 +339,7 @@ fn lexer_identifier_kind(
     var index: usize = 0;
     while (index < 51) {
         let entry: LexerKeyword = keywords[index];
-        if (lexer_text_equals(state, start, length,
-                entry.text, entry.length)) {
+        if (lexer_text_equals(state, start, length, entry.text, entry.length)) {
             return entry.kind;
         }
         index += 1;
@@ -363,17 +350,17 @@ fn lexer_identifier_kind(
 fn lexer_skip_trivia(state: *LexerState) -> void {
     while (!lexer_at_end(state) && state->error == runtime::Error.none) {
         let byte: u8 = lexer_peek(state);
-        if (byte == 32 || byte == 9 || byte == 13 || byte == 10) {
+        if (byte == ' ' || byte == '\t' || byte == '\r' || byte == '\n') {
             lexer_advance(state);
             continue;
         }
-        if (byte == 47 && lexer_peek_next(state) == 47) {
-            while (!lexer_at_end(state) && lexer_peek(state) != 10) {
+        if (byte == '/' && lexer_peek_next(state) == '/') {
+            while (!lexer_at_end(state) && lexer_peek(state) != '\n') {
                 lexer_advance(state);
             }
             continue;
         }
-        if (byte != 47 || lexer_peek_next(state) != 42) {
+        if (byte != '/' || lexer_peek_next(state) != '*') {
             return;
         }
 
@@ -382,8 +369,7 @@ fn lexer_skip_trivia(state: *LexerState) -> void {
         let start_column: usize = state->column;
         lexer_advance(state);
         lexer_advance(state);
-        while (!lexer_at_end(state) && !(lexer_peek(state) == 42 &&
-                lexer_peek_next(state) == 47)) {
+        while (!lexer_at_end(state) && !(lexer_peek(state) == '*' && lexer_peek_next(state) == '/')) {
             lexer_advance(state);
         }
         if (lexer_at_end(state)) {
@@ -397,10 +383,8 @@ fn lexer_skip_trivia(state: *LexerState) -> void {
     }
 }
 
-fn lexer_scan_identifier(
-    state: *LexerState, start_offset: usize, start_line: usize, start_column: usize) -> bool {
-    while (is_ascii_letter(lexer_peek(state)) ||
-        is_decimal_digit(lexer_peek(state)) || lexer_peek(state) == 95) {
+fn lexer_scan_identifier(state: *LexerState, start_offset: usize, start_line: usize, start_column: usize) -> bool {
+    while (is_ascii_letter(lexer_peek(state)) || is_decimal_digit(lexer_peek(state)) || lexer_peek(state) == '_') {
         lexer_advance(state);
     }
     return lexer_add_token(
@@ -408,73 +392,68 @@ fn lexer_scan_identifier(
         start_offset, start_line, start_column);
 }
 
-fn lexer_scan_number(
-    state: *LexerState, start_offset: usize, start_line: usize, start_column: usize) -> bool {
+fn lexer_scan_number(state: *LexerState, start_offset: usize, start_line: usize, start_column: usize) -> bool {
     var base: usize = 10;
     var is_floating: bool = false;
-    if (state->source.data[start_offset] == 48 && (lexer_peek(state) == 98 ||
-            lexer_peek(state) == 66)) {
+    if (state->source.data[start_offset] == '0' && (lexer_peek(state) == 'b' || lexer_peek(state) == 'B')) {
         base = 2;
         lexer_advance(state);
-    } else if (state->source.data[start_offset] == 48 && (lexer_peek(state) == 111 ||
-            lexer_peek(state) == 79)) {
+    } else if (state->source.data[start_offset] == '0' && (lexer_peek(state) == 'o' || lexer_peek(state) == 'O')) {
         base = 8;
         lexer_advance(state);
-    } else if (state->source.data[start_offset] == 48 && (lexer_peek(state) == 120 ||
-            lexer_peek(state) == 88)) {
+    } else if (state->source.data[start_offset] == '0' && (lexer_peek(state) == 'x' || lexer_peek(state) == 'X')) {
         base = 16;
         lexer_advance(state);
     }
 
     while (digit_matches_base(
-            lexer_peek(state), base) || lexer_peek(state) == 95) {
+            lexer_peek(state), base) || lexer_peek(state) == '_') {
         lexer_advance(state);
     }
-    if (base == 10 && lexer_peek(state) == 46 &&
+    if (base == 10 && lexer_peek(state) == '.' &&
         is_decimal_digit(
             lexer_peek_next(state))) {
         is_floating = true;
         lexer_advance(state);
         while (is_decimal_digit(
-                lexer_peek(state)) || lexer_peek(state) == 95) {
+                lexer_peek(state)) || lexer_peek(state) == '_') {
             lexer_advance(state);
         }
     }
-    if (base == 16 && lexer_peek(state) == 46 &&
+    if (base == 16 && lexer_peek(state) == '.' &&
         is_hex_digit(
             lexer_peek_next(state))) {
         is_floating = true;
         lexer_advance(state);
         while (is_hex_digit(
-                lexer_peek(state)) || lexer_peek(state) == 95) {
+                lexer_peek(state)) || lexer_peek(state) == '_') {
             lexer_advance(state);
         }
     }
-    if (base == 16 && (lexer_peek(state) == 112 || lexer_peek(state) == 80)) {
+    if (base == 16 && (lexer_peek(state) == 'p' || lexer_peek(state) == 'P')) {
         is_floating = true;
         lexer_advance(state);
-        if (lexer_peek(state) == 43 || lexer_peek(state) == 45) {
+        if (lexer_peek(state) == '+' || lexer_peek(state) == '-') {
             lexer_advance(state);
         }
         while (is_decimal_digit(
-                lexer_peek(state)) || lexer_peek(state) == 95) {
+                lexer_peek(state)) || lexer_peek(state) == '_') {
             lexer_advance(state);
         }
     }
-    if (base == 10 && (lexer_peek(state) == 101 || lexer_peek(state) == 69)) {
+    if (base == 10 && (lexer_peek(state) == 'e' || lexer_peek(state) == 'E')) {
         is_floating = true;
         lexer_advance(state);
-        if (lexer_peek(state) == 43 || lexer_peek(state) == 45) {
+        if (lexer_peek(state) == '+' || lexer_peek(state) == '-') {
             lexer_advance(state);
         }
         while (is_decimal_digit(
-                lexer_peek(state)) || lexer_peek(state) == 95) {
+                lexer_peek(state)) || lexer_peek(state) == '_') {
             lexer_advance(state);
         }
     }
     return lexer_add_token(
-        state, is_floating ? TokenKind.floating : TokenKind.integer, start_offset, start_line,
-        start_column);
+        state, is_floating ? TokenKind.floating : TokenKind.integer, start_offset, start_line, start_column);
 }
 
 fn lexer_scan_quoted(
@@ -487,11 +466,11 @@ fn lexer_scan_quoted(
             terminated = true;
             break;
         }
-        if (byte == 92 && !lexer_at_end(state)) {
+        if (byte == '\\' && !lexer_at_end(state)) {
             lexer_advance(state);
             continue;
         }
-        if (byte == 10) {
+        if (byte == '\n') {
             break;
         }
     }
@@ -533,18 +512,18 @@ fn lexer_scan_token(state: *LexerState) -> bool {
     }
 
     let byte: u8 = lexer_advance(state);
-    if (byte == 117 && state->offset + 2 < state->source.length && state->source.data[state->offset + 2] == 34 &&
-        ((state->source.data[state->offset] == 49 && state->source.data[state->offset + 1] == 54) ||
-            (state->source.data[state->offset] == 51 && state->source.data[state->offset + 1] == 50))) {
-        let wide_kind: TokenKind = state->source.data[state->offset] == 49 ? TokenKind.string_u16 :
+    if (byte == 'u' && state->offset + 2 < state->source.length && state->source.data[state->offset + 2] == '"' &&
+        ((state->source.data[state->offset] == '1' && state->source.data[state->offset + 1] == '6') ||
+            (state->source.data[state->offset] == '3' && state->source.data[state->offset + 1] == '2'))) {
+        let wide_kind: TokenKind = state->source.data[state->offset] == '1' ? TokenKind.string_u16 :
             TokenKind.string_u32;
         lexer_advance(state);
         lexer_advance(state);
         lexer_advance(state);
         return lexer_scan_quoted(
-            state, 34, wide_kind, DiagnosticKind.unterminated_string, start_offset, start_line, start_column);
+            state, '"', wide_kind, DiagnosticKind.unterminated_string, start_offset, start_line, start_column);
     }
-    if (is_ascii_letter(byte) || byte == 95) {
+    if (is_ascii_letter(byte) || byte == '_') {
         return lexer_scan_identifier(state, start_offset, start_line, start_column);
     }
     if (is_decimal_digit(byte)) {
@@ -575,8 +554,8 @@ fn lexer_scan_token(state: *LexerState) -> bool {
         kind = TokenKind.comma;
     }
     case 46 {
-        if (lexer_match(state, 46)) {
-            kind = lexer_match(state, 46) ? TokenKind.dot_dot_dot : TokenKind.invalid;
+        if (lexer_match(state, '.')) {
+            kind = lexer_match(state, '.') ? TokenKind.dot_dot_dot : TokenKind.invalid;
         } else {
             kind = TokenKind.dot;
         }
@@ -585,7 +564,7 @@ fn lexer_scan_token(state: *LexerState) -> bool {
         kind = TokenKind.semicolon;
     }
     case 58 {
-        kind = lexer_match(state, 58) ? TokenKind.colon_colon : TokenKind.colon;
+        kind = lexer_match(state, ':') ? TokenKind.colon_colon : TokenKind.colon;
     }
     case 63 {
         kind = TokenKind.question;
@@ -597,71 +576,68 @@ fn lexer_scan_token(state: *LexerState) -> bool {
         kind = TokenKind.tilde;
     }
     case 43 {
-        kind = lexer_match(state, 61) ? TokenKind.plus_equal : TokenKind.plus;
+        kind = lexer_match(state, '=') ? TokenKind.plus_equal : TokenKind.plus;
     }
     case 45 {
-        if (lexer_match(state, 62)) {
+        if (lexer_match(state, '>')) {
             kind = TokenKind.arrow;
         } else {
-            kind = lexer_match(state, 61) ? TokenKind.minus_equal : TokenKind.minus;
+            kind = lexer_match(state, '=') ? TokenKind.minus_equal : TokenKind.minus;
         }
     }
     case 42 {
-        kind = lexer_match(state, 61) ? TokenKind.star_equal : TokenKind.star;
+        kind = lexer_match(state, '=') ? TokenKind.star_equal : TokenKind.star;
     }
     case 47 {
-        kind = lexer_match(state, 61) ? TokenKind.slash_equal : TokenKind.slash;
+        kind = lexer_match(state, '=') ? TokenKind.slash_equal : TokenKind.slash;
     }
     case 37 {
-        kind = lexer_match(state, 61) ? TokenKind.percent_equal : TokenKind.percent;
+        kind = lexer_match(state, '=') ? TokenKind.percent_equal : TokenKind.percent;
     }
     case 38 {
-        if (lexer_match(state, 38)) {
+        if (lexer_match(state, '&')) {
             kind = TokenKind.logical_and;
         } else {
-            kind = lexer_match(state, 61) ? TokenKind.ampersand_equal : TokenKind.ampersand;
+            kind = lexer_match(state, '=') ? TokenKind.ampersand_equal : TokenKind.ampersand;
         }
     }
     case 124 {
-        if (lexer_match(state, 124)) {
+        if (lexer_match(state, '|')) {
             kind = TokenKind.logical_or;
         } else {
-            kind = lexer_match(state, 61) ? TokenKind.pipe_equal : TokenKind.pipe;
+            kind = lexer_match(state, '=') ? TokenKind.pipe_equal : TokenKind.pipe;
         }
     }
     case 94 {
-        kind = lexer_match(state, 61) ? TokenKind.caret_equal : TokenKind.caret;
+        kind = lexer_match(state, '=') ? TokenKind.caret_equal : TokenKind.caret;
     }
     case 33 {
-        kind = lexer_match(state, 61) ? TokenKind.bang_equal : TokenKind.bang;
+        kind = lexer_match(state, '=') ? TokenKind.bang_equal : TokenKind.bang;
     }
     case 61 {
-        kind = lexer_match(state, 61) ? TokenKind.equal_equal : TokenKind.equal;
+        kind = lexer_match(state, '=') ? TokenKind.equal_equal : TokenKind.equal;
     }
     case 60 {
-        if (lexer_match(state, 60)) {
-            kind = lexer_match(state, 61) ? TokenKind.shift_left_equal :
-                TokenKind.shift_left;
+        if (lexer_match(state, '<')) {
+            kind = lexer_match(state, '=') ? TokenKind.shift_left_equal : TokenKind.shift_left;
         } else {
-            kind = lexer_match(state, 61) ? TokenKind.less_equal : TokenKind.less;
+            kind = lexer_match(state, '=') ? TokenKind.less_equal : TokenKind.less;
         }
     }
     case 62 {
-        if (lexer_match(state, 62)) {
-            kind = lexer_match(state, 61) ? TokenKind.shift_right_equal :
-                TokenKind.shift_right;
+        if (lexer_match(state, '>')) {
+            kind = lexer_match(state, '=') ? TokenKind.shift_right_equal : TokenKind.shift_right;
         } else {
-            kind = lexer_match(state, 61) ? TokenKind.greater_equal : TokenKind.greater;
+            kind = lexer_match(state, '=') ? TokenKind.greater_equal : TokenKind.greater;
         }
     }
     case 34 {
         return lexer_scan_quoted(
-            state, 34, TokenKind.string, DiagnosticKind.unterminated_string, start_offset, start_line,
-            start_column);
+            state, '"', TokenKind.string, DiagnosticKind.unterminated_string, start_offset, start_line, start_column);
     }
     case 39 {
         return lexer_scan_quoted(
-            state, 39, TokenKind.character, DiagnosticKind.unterminated_character, start_offset,
+            state, '\x27', TokenKind.character, DiagnosticKind.unterminated_character, start_offset,
             start_line, start_column);
     }
     default {
@@ -674,8 +650,7 @@ fn lexer_scan_token(state: *LexerState) -> bool {
     }
     if (kind == TokenKind.invalid) {
         return lexer_add_diagnostic(
-            state, DiagnosticKind.unexpected_character,
-            lexer_span(state, start_offset, start_line, start_column), 0);
+            state, DiagnosticKind.unexpected_character, lexer_span(state, start_offset, start_line, start_column), 0);
     }
     return true;
 }
@@ -732,4 +707,3 @@ fn lex_result_release(result: LexResult) -> runtime::Error {
     }
     return diagnostic_error;
 }
-

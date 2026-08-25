@@ -1,0 +1,653 @@
+module luna.bootstrap.middleend.ir.verify;
+
+import luna.bootstrap.frontend.lexer as lexer;
+import luna.runtime as runtime;
+
+fn range_is_valid(first: usize, count: usize, total: usize) -> bool {
+    if (count == 0) {
+        return first == model::no_id();
+    }
+    return first < total && count <= total - first;
+}
+
+fn value_operand_is_valid(
+    values: *const model::Value, value_count: usize, value_id: usize, function_id: usize,
+        instruction_id: usize) -> bool {
+    return value_id < value_count && values[value_id].function_id == function_id &&
+        values[value_id].definition != model::no_id() && values[value_id].definition < instruction_id;
+}
+
+fn instruction_operands_are_valid(
+    instruction: model::Instruction, instruction_id: usize, function_id: usize, ir: model::Store,
+        values: *const model::Value) -> bool {
+    let none: usize = model::no_id();
+    let unary: bool = instruction.opcode == model::Opcode.store ||
+        instruction.opcode == model::Opcode.load_indirect || instruction.opcode == model::Opcode.null_check ||
+        instruction.opcode == model::Opcode.unary_integer || instruction.opcode == model::Opcode.unary_float ||
+        instruction.opcode == model::Opcode.boolean_not || instruction.opcode == model::Opcode.convert ||
+        instruction.opcode == model::Opcode.return_value || instruction.opcode == model::Opcode.call_indirect ||
+        instruction.opcode == model::Opcode.branch || instruction.opcode == model::Opcode.float_sqrt ||
+        instruction.opcode == model::Opcode.va_list_start || instruction.opcode == model::Opcode.va_list_arg;
+    let binary: bool = instruction.opcode == model::Opcode.memory_copy ||
+        instruction.opcode == model::Opcode.store_indirect ||
+        instruction.opcode == model::Opcode.bounds_check || instruction.opcode == model::Opcode.pointer_offset ||
+        instruction.opcode == model::Opcode.binary_integer ||
+        instruction.opcode == model::Opcode.binary_float || instruction.opcode == model::Opcode.compare ||
+        instruction.opcode == model::Opcode.float_min || instruction.opcode == model::Opcode.float_max;
+    if ((unary || binary) &&
+        !value_operand_is_valid(
+            values, ir.value_count, instruction.left, function_id, instruction_id)) {
+        return false;
+    }
+    if (binary &&
+        !value_operand_is_valid(
+            values, ir.value_count, instruction.right, function_id, instruction_id)) {
+        return false;
+    }
+    if (instruction.opcode == model::Opcode.call) {
+        return instruction.auxiliary < ir.function_count;
+    }
+    if (instruction.opcode == model::Opcode.address_of_slot || instruction.opcode == model::Opcode.zero_slot ||
+        instruction.opcode == model::Opcode.load || instruction.opcode == model::Opcode.store) {
+        return instruction.auxiliary < ir.slot_count;
+    }
+    if (instruction.opcode == model::Opcode.global_address) {
+        return instruction.auxiliary < ir.global_count;
+    }
+    if (instruction.opcode == model::Opcode.jump) {
+        return instruction.auxiliary < ir.block_count && (ir.blocks.data as *const model::Block)[
+                instruction.auxiliary].function_id == function_id;
+    }
+    if (instruction.opcode == model::Opcode.branch) {
+        return instruction.auxiliary < ir.block_count && instruction.third < ir.block_count &&
+            (ir.blocks.data as *const model::Block)[ instruction.auxiliary].function_id == function_id &&
+            (ir.blocks.data as *const model::Block)[ instruction.third].function_id == function_id;
+    }
+    if (instruction.opcode == model::Opcode.return_void) {
+        return instruction.left == none;
+    }
+    return true;
+}
+
+fn carrier_matches_type(types: type_info::Table, carrier_type: usize, source_type: usize) -> bool {
+    if (carrier_type == source_type) {
+        return true;
+    }
+    if (carrier_type >= types.type_count || source_type >= types.type_count) {
+        return false;
+    }
+    let records: *const type_info::Record = types.types.data as *const type_info::Record;
+    return type_info::is_memory(records[source_type].kind) && records[carrier_type].kind ==
+            type_info::Kind.pointer && records[carrier_type].element_type == source_type;
+}
+
+fn type_can_be_value(types: type_info::Table, type_id: usize) -> bool {
+    if (type_id >= types.type_count) {
+        return false;
+    }
+    let records: *const type_info::Record = types.types.data as *const type_info::Record;
+    return records[type_id].kind != type_info::Kind.invalid && records[type_id].kind != type_info::Kind.type_void;
+}
+
+fn instruction_expects_result(instruction: model::Instruction, functions: *const model::Function,
+    types: type_info::Table) -> bool {
+    if (instruction.opcode == model::Opcode.call) {
+        let records: *const type_info::Record = types.types.data as *const type_info::Record;
+        return records[ functions[instruction.auxiliary].return_type].kind != type_info::Kind.type_void;
+    }
+    if (instruction.opcode == model::Opcode.call_indirect) {
+        let records: *const type_info::Record = types.types.data as *const type_info::Record;
+        return records[instruction.type_id].kind != type_info::Kind.type_void;
+    }
+    if (instruction.opcode == model::Opcode.function_address) {
+        return true;
+    }
+    return instruction.opcode == model::Opcode.constant_integer || instruction.opcode == model::Opcode.constant_float ||
+        instruction.opcode == model::Opcode.constant_boolean || instruction.opcode == model::Opcode.constant_null ||
+        instruction.opcode == model::Opcode.address_of_slot || instruction.opcode == model::Opcode.member_address ||
+        instruction.opcode == model::Opcode.global_address || instruction.opcode == model::Opcode.load ||
+        instruction.opcode == model::Opcode.load_indirect || instruction.opcode == model::Opcode.pointer_offset ||
+        instruction.opcode == model::Opcode.unary_integer || instruction.opcode == model::Opcode.unary_float ||
+        instruction.opcode == model::Opcode.boolean_not || instruction.opcode == model::Opcode.convert ||
+        instruction.opcode == model::Opcode.binary_integer ||
+        instruction.opcode == model::Opcode.binary_float || instruction.opcode == model::Opcode.compare ||
+        instruction.opcode == model::Opcode.float_sqrt || instruction.opcode == model::Opcode.float_min ||
+        instruction.opcode == model::Opcode.float_max || instruction.opcode == model::Opcode.overflow_flag ||
+        instruction.opcode == model::Opcode.va_list_arg;
+}
+
+fn member_address_offset_is_valid(
+    types: type_info::Table, owner_type: usize, offset: usize, element_type: usize, depth: usize) -> bool {
+    if (depth > (model::Limit.maximum_type_depth as usize)) {
+        return false;
+    }
+    let records: *const type_info::Record = types.types.data as *const type_info::Record;
+    let fields: *const type_info::Field = types.fields.data as *const type_info::Field;
+    let owner: type_info::Record = records[owner_type];
+    var index: usize = 0;
+    while (index < owner.field_count) {
+        let field: type_info::Field = fields[owner.first_field + index];
+        if (field.offset_bytes == offset && field.type_id == element_type) {
+            return true;
+        }
+        let field_record: type_info::Record = records[field.type_id];
+        // A flexible array member is addressed as a pointer to its element
+        // type at the member offset.
+        if ((field_record.flags & (type_info::Flag.flexible as usize)) != 0 && field.offset_bytes == offset &&
+            field_record.element_type == element_type) {
+            return true;
+        }
+        // A promoted member of an anonymous record field is addressed through
+        // the enclosing record at the accumulated offset.
+        if ((field_record.kind == type_info::Kind.structure || field_record.kind == type_info::Kind.record_union) &&
+            offset >= field.offset_bytes && offset - field.offset_bytes < field_record.size_bytes &&
+            member_address_offset_is_valid(
+                types, field.type_id, offset - field.offset_bytes, element_type, depth + 1)) {
+            return true;
+        }
+        index += 1;
+    }
+    return false;
+}
+
+fn member_address_is_valid(instruction: model::Instruction, types: type_info::Table,
+    values: *const model::Value) -> bool {
+    let records: *const type_info::Record = types.types.data as *const type_info::Record;
+    let source_pointer: type_info::Record = records[values[instruction.left].type_id];
+    let result_pointer: type_info::Record = records[instruction.type_id];
+    if (result_pointer.kind != type_info::Kind.pointer) {
+        return false;
+    }
+    var owner_type: usize = values[instruction.left].type_id;
+    var source_read_only: bool = true;
+    if (source_pointer.kind == type_info::Kind.pointer) {
+        owner_type = source_pointer.element_type;
+        source_read_only = (source_pointer.flags & (type_info::Flag.read_only as usize)) != 0;
+    } else if (!type_info::is_memory(
+            source_pointer.kind)) {
+        return false;
+    }
+    let owner: type_info::Record = records[owner_type];
+    if (!type_info::is_memory(owner.kind)) {
+        return false;
+    }
+    if (!member_address_offset_is_valid(
+            types, owner_type, instruction.auxiliary, result_pointer.element_type, 0)) {
+        return false;
+    }
+    let result_read_only: bool = (result_pointer.flags & (type_info::Flag.read_only as usize)) != 0;
+    return !source_read_only || result_read_only;
+}
+
+fn instruction_types_are_valid(
+    instruction: model::Instruction, function_id: usize, types: type_info::Table, values: *const model::Value,
+    functions: *const model::Function, slots: *const model::Slot) -> bool {
+    let none: usize = model::no_id();
+    let records: *const type_info::Record = types.types.data as *const type_info::Record;
+    let expects_result: bool = instruction_expects_result(instruction, functions, types);
+    let requires_type: bool = expects_result || instruction.opcode == model::Opcode.zero_slot ||
+        instruction.opcode == model::Opcode.memory_copy || instruction.opcode == model::Opcode.store ||
+        instruction.opcode == model::Opcode.store_indirect || instruction.opcode == model::Opcode.call ||
+        instruction.opcode == model::Opcode.call_indirect || instruction.opcode == model::Opcode.return_value ||
+        instruction.opcode == model::Opcode.return_void;
+    if (expects_result != (instruction.result != none) || (requires_type && instruction.type_id == none) ||
+        (expects_result &&
+            !type_can_be_value(
+                types, instruction.type_id))) {
+        return false;
+    }
+
+    if (instruction.opcode == model::Opcode.constant_integer) {
+        return type_info::is_integer(records[instruction.type_id].kind) ||
+            records[instruction.type_id].kind == type_info::Kind.enumeration;
+    }
+    if (instruction.opcode == model::Opcode.constant_float) {
+        return type_info::is_float(records[instruction.type_id].kind);
+    }
+    if (instruction.opcode == model::Opcode.constant_boolean) {
+        return instruction.type_id == type_info::BuiltinType.boolean as usize && instruction.immediate <= 1;
+    }
+    if (instruction.opcode == model::Opcode.constant_null) {
+        return records[instruction.type_id].kind == type_info::Kind.pointer || records[instruction.type_id].kind ==
+                type_info::Kind.function_pointer;
+    }
+    if (instruction.opcode == model::Opcode.address_of_slot) {
+        return slots[instruction.auxiliary].function_id == function_id && records[instruction.type_id].kind ==
+                type_info::Kind.pointer && records[instruction.type_id].element_type ==
+                slots[instruction.auxiliary].type_id;
+    }
+    if (instruction.opcode == model::Opcode.member_address) {
+        return member_address_is_valid(instruction, types, values);
+    }
+    if (instruction.opcode == model::Opcode.global_address) {
+        let result_pointer: type_info::Record = records[instruction.type_id];
+        if (result_pointer.kind != type_info::Kind.pointer ||
+            (result_pointer.flags & (type_info::Flag.read_only as usize)) == 0) {
+            return false;
+        }
+        var element_type: usize = result_pointer.element_type;
+        if (records[element_type].kind == type_info::Kind.array) {
+            // @embed addresses a whole byte-array global rather than a scalar string element.
+            element_type = records[element_type].element_type;
+        }
+        return element_type == type_info::BuiltinType.unsigned_8 as usize ||
+            element_type == type_info::BuiltinType.unsigned_16 as usize ||
+            element_type == type_info::BuiltinType.unsigned_32 as usize;
+    }
+    if (instruction.opcode == model::Opcode.zero_slot) {
+        return slots[instruction.auxiliary].function_id == function_id && slots[instruction.auxiliary].type_id ==
+                instruction.type_id && type_info::is_memory(records[instruction.type_id].kind);
+    }
+    if (instruction.opcode == model::Opcode.load) {
+        return slots[instruction.auxiliary].function_id == function_id && slots[instruction.auxiliary].type_id ==
+                instruction.type_id && type_info::is_scalar(records[instruction.type_id].kind);
+    }
+    if (instruction.opcode == model::Opcode.store) {
+        return slots[instruction.auxiliary].function_id == function_id && slots[instruction.auxiliary].type_id ==
+                values[instruction.left].type_id && instruction.type_id == values[instruction.left].type_id &&
+            type_info::is_scalar(records[instruction.type_id].kind);
+    }
+    if (instruction.opcode == model::Opcode.load_indirect) {
+        let pointer: type_info::Record = records[values[instruction.left].type_id];
+        return pointer.kind == type_info::Kind.pointer && pointer.element_type == instruction.type_id &&
+            type_info::is_scalar(records[instruction.type_id].kind);
+    }
+    if (instruction.opcode == model::Opcode.store_indirect || instruction.opcode == model::Opcode.memory_copy) {
+        let destination: type_info::Record = records[values[instruction.left].type_id];
+        if (destination.kind != type_info::Kind.pointer || destination.element_type != instruction.type_id ||
+            (destination.flags & (type_info::Flag.read_only as usize)) != 0 ||
+            !carrier_matches_type(types, values[instruction.right].type_id, instruction.type_id) ||
+            instruction.auxiliary != records[instruction.type_id].size_bytes) {
+            return false;
+        }
+        return instruction.opcode == model::Opcode.memory_copy ? type_info::is_memory(records[instruction.type_id].kind)
+            : type_info::is_scalar(records[instruction.type_id].kind);
+    }
+    if (instruction.opcode == model::Opcode.null_check) {
+        let checked: type_info::Kind = records[values[instruction.left].type_id].kind;
+        return checked == type_info::Kind.pointer || checked == type_info::Kind.function_pointer;
+    }
+    if (instruction.opcode == model::Opcode.bounds_check) {
+        return values[instruction.left].type_id == type_info::BuiltinType.unsigned_size as usize &&
+            values[instruction.right].type_id == type_info::BuiltinType.unsigned_size as usize;
+    }
+    if (instruction.opcode == model::Opcode.pointer_offset) {
+        let source: type_info::Record = records[values[instruction.left].type_id];
+        let result: type_info::Record = records[instruction.type_id];
+        let temporary_array: bool = source.kind == type_info::Kind.array;
+        var element_matches: bool = source.element_type == result.element_type;
+        if (source.kind == type_info::Kind.pointer && records[source.element_type].kind == type_info::Kind.array) {
+            element_matches = records[source.element_type].element_type == result.element_type;
+        }
+        let qualifier_matches: bool = temporary_array ? (result.flags & (type_info::Flag.read_only as usize)) != 0 :
+                source.flags == result.flags;
+        return (source.kind == type_info::Kind.pointer || temporary_array) &&
+            result.kind == type_info::Kind.pointer && element_matches && qualifier_matches &&
+            values[instruction.right].type_id == type_info::BuiltinType.unsigned_size as usize &&
+                instruction.auxiliary == records[result.element_type].size_bytes;
+    }
+    if (instruction.opcode == model::Opcode.unary_integer) {
+        return values[instruction.left].type_id == instruction.type_id &&
+            type_info::is_integer(records[instruction.type_id].kind);
+    }
+    if (instruction.opcode == model::Opcode.unary_float) {
+        return values[instruction.left].type_id == instruction.type_id &&
+            type_info::is_float(records[instruction.type_id].kind);
+    }
+    if (instruction.opcode == model::Opcode.float_sqrt) {
+        return values[instruction.left].type_id == instruction.type_id &&
+            type_info::is_float(records[instruction.type_id].kind);
+    }
+    if (instruction.opcode == model::Opcode.boolean_not) {
+        return values[instruction.left].type_id == type_info::BuiltinType.boolean as usize && instruction.type_id ==
+                type_info::BuiltinType.boolean as usize;
+    }
+    if (instruction.opcode == model::Opcode.convert) {
+        return instruction.auxiliary < types.type_count && values[instruction.left].type_id == instruction.auxiliary &&
+            type_info::is_scalar(records[instruction.auxiliary].kind) &&
+            type_info::is_scalar(records[instruction.type_id].kind);
+    }
+    if (instruction.opcode == model::Opcode.binary_integer || instruction.opcode == model::Opcode.binary_float) {
+        let integer_operation: bool = instruction.opcode == model::Opcode.binary_integer;
+        return values[instruction.left].type_id == instruction.type_id && values[instruction.right].type_id ==
+                instruction.type_id && (integer_operation ? type_info::is_integer(records[instruction.type_id].kind) :
+                type_info::is_float(
+                    records[instruction.type_id].kind));
+    }
+    if (instruction.opcode == model::Opcode.float_min || instruction.opcode == model::Opcode.float_max) {
+        return values[instruction.left].type_id == instruction.type_id && values[instruction.right].type_id ==
+                instruction.type_id && type_info::is_float(records[instruction.type_id].kind);
+    }
+    if (instruction.opcode == model::Opcode.overflow_flag) {
+        return instruction.type_id == type_info::BuiltinType.boolean as usize;
+    }
+    if (instruction.opcode == model::Opcode.compare) {
+        return instruction.type_id == type_info::BuiltinType.boolean as usize && values[instruction.left].type_id ==
+                values[instruction.right].type_id &&
+            type_info::is_scalar(records[ values[instruction.left].type_id].kind);
+    }
+    if (instruction.opcode == model::Opcode.call) {
+        return instruction.type_id == functions[instruction.auxiliary].return_type;
+    }
+    if (instruction.opcode == model::Opcode.call_indirect) {
+        if (instruction.left >= model::no_id()) {
+            return false;
+        }
+        let callee: type_info::Record = records[values[instruction.left].type_id];
+        return callee.kind == type_info::Kind.function_pointer && callee.element_type == instruction.type_id;
+    }
+    if (instruction.opcode == model::Opcode.function_address) {
+        return records[instruction.type_id].kind == type_info::Kind.function_pointer;
+    }
+    if (instruction.opcode == model::Opcode.va_list_start || instruction.opcode == model::Opcode.va_list_arg) {
+        // Both walk a caller-owned va_list through a mutable pointer to it;
+        // va_arg additionally yields a scalar at the requested width.
+        let pointer: type_info::Record = records[values[instruction.left].type_id];
+        if (pointer.kind != type_info::Kind.pointer || pointer.element_type >= types.type_count ||
+            records[pointer.element_type].kind != type_info::Kind.va_list_type ||
+            (pointer.flags & (type_info::Flag.read_only as usize)) != 0) {
+            return false;
+        }
+        return instruction.opcode == model::Opcode.va_list_start ? instruction.type_id == none :
+            type_info::is_scalar(records[instruction.type_id].kind);
+    }
+    if (instruction.opcode == model::Opcode.branch) {
+        return instruction.type_id == none && values[instruction.left].type_id ==
+            type_info::BuiltinType.boolean as usize;
+    }
+    if (instruction.opcode == model::Opcode.jump) {
+        return instruction.type_id == none;
+    }
+    if (instruction.opcode == model::Opcode.return_value) {
+        return instruction.type_id == functions[function_id].return_type &&
+            carrier_matches_type(types, values[instruction.left].type_id, instruction.type_id);
+    }
+    if (instruction.opcode == model::Opcode.return_void) {
+        return instruction.type_id == functions[function_id].return_type && records[instruction.type_id].kind ==
+                type_info::Kind.type_void;
+    }
+    return instruction.type_id == none;
+}
+
+fn is_valid(ir: model::Store, types: type_info::Table) -> bool {
+    let none: usize = model::no_id();
+    if (ir.error != runtime::Error.none || !model::storage_is_valid(ir) ||
+        !type_info::table_is_valid(types, true) || (ir.entry_function != none &&
+            ir.entry_function >= ir.function_count)) {
+        return false;
+    }
+    let globals: *const model::Global = ir.globals.data as *const model::Global;
+    let functions: *const model::Function = ir.functions.data as *const model::Function;
+    let parameters: *const model::Parameter = ir.parameters.data as *const model::Parameter;
+    let slots: *const model::Slot = ir.slots.data as *const model::Slot;
+    let values: *const model::Value = ir.values.data as *const model::Value;
+    let blocks: *const model::Block = ir.blocks.data as *const model::Block;
+    let instructions: *const model::Instruction = ir.instructions.data as *const model::Instruction;
+    let arguments: *const model::Argument = ir.arguments.data as *const model::Argument;
+    let type_records: *const type_info::Record = types.types.data as *const type_info::Record;
+
+    var index: usize = 0;
+    var expected_global_offset: usize = 0;
+    while (index < ir.global_count) {
+        let global: model::Global = globals[index];
+        if (global.byte_count == 0 || global.byte_offset != expected_global_offset ||
+            global.byte_offset > ir.global_bytes.length || global.byte_count >
+                ir.global_bytes.length - global.byte_offset || global.alignment_bytes == 0 ||
+            global.alignment_bytes > 8 || (global.alignment_bytes & (global.alignment_bytes - 1)) != 0) {
+            return false;
+        }
+        expected_global_offset += global.byte_count;
+        index += 1;
+    }
+    if (expected_global_offset != ir.global_bytes.length) {
+        return false;
+    }
+
+    var counted_parameters: usize = 0;
+    var counted_slots: usize = 0;
+    var counted_blocks: usize = 0;
+    var counted_values: usize = 0;
+    index = 0;
+    while (index < ir.function_count) {
+        let function: model::Function = functions[index];
+        if (function.declaration_unit == none || function.declaration_node == none || function.name_token == none ||
+            (function.linkage as usize) > (model::Linkage.external_c as usize) ||
+            function.return_type >= types.type_count || type_records[function.return_type].kind ==
+                type_info::Kind.invalid ||
+            !range_is_valid(function.first_parameter, function.parameter_count, ir.parameter_count) ||
+            !range_is_valid(function.first_block, function.block_count, ir.block_count) ||
+            !range_is_valid(function.first_value, function.value_count, ir.value_count) ||
+            (function.has_body && function.block_count == 0 && function.asm_body_node == none) ||
+            (!function.has_body && (function.block_count != 0 ||
+                    function.value_count != 0 || function.slot_count != function.parameter_count))) {
+            return false;
+        }
+        counted_parameters += function.parameter_count;
+        counted_slots += function.slot_count;
+        counted_blocks += function.block_count;
+        counted_values += function.value_count;
+        var item: usize = 0;
+        while (item < function.parameter_count) {
+            let parameter: model::Parameter = parameters[function.first_parameter + item];
+            if (parameter.function_id != index || parameter.type_id >= types.type_count ||
+                !type_can_be_value(types, parameter.type_id) ||
+                parameter.slot_id >= ir.slot_count || slots[parameter.slot_id].function_id != index ||
+                slots[parameter.slot_id].type_id != parameter.type_id || parameter.name_token == none) {
+                return false;
+            }
+            item += 1;
+        }
+        var owned_slot_count: usize = 0;
+        var first_owned_slot: usize = none;
+        item = 0;
+        while (item < ir.slot_count) {
+            if (slots[item].function_id == index) {
+                if (owned_slot_count == 0) {
+                    first_owned_slot = item;
+                }
+                owned_slot_count += 1;
+            }
+            item += 1;
+        }
+        if (owned_slot_count != function.slot_count || first_owned_slot != function.first_slot) {
+            return false;
+        }
+        item = 0;
+        while (item < function.value_count) {
+            let value: model::Value = values[function.first_value + item];
+            if (value.function_id != index || value.block_id >= ir.block_count ||
+                !type_can_be_value(types, value.type_id) || value.definition >= ir.instruction_count) {
+                return false;
+            }
+            item += 1;
+        }
+        index += 1;
+    }
+    if (counted_parameters != ir.parameter_count || counted_slots != ir.slot_count ||
+        counted_blocks != ir.block_count || counted_values != ir.value_count) {
+        return false;
+    }
+    if (ir.entry_function != none) {
+        let entry: model::Function = functions[ir.entry_function];
+        if (!entry.has_body || entry.linkage != model::Linkage.internal ||
+                entry.return_type != type_info::BuiltinType.signed_32 as usize ||
+                (entry.parameter_count != 0 && entry.parameter_count != 2)) {
+            return false;
+        }
+        if (entry.parameter_count == 2) {
+            let argument_count: model::Parameter = parameters[entry.first_parameter];
+            let argument_vector: model::Parameter = parameters[entry.first_parameter + 1];
+            let outer: type_info::Record = type_records[argument_vector.type_id];
+            if (argument_count.type_id != type_info::BuiltinType.unsigned_size as usize ||
+                outer.kind != type_info::Kind.pointer || (outer.flags & (type_info::Flag.read_only as usize)) != 0) {
+                return false;
+            }
+            let inner: type_info::Record = type_records[outer.element_type];
+            if (inner.kind != type_info::Kind.pointer || (inner.flags &
+                    (type_info::Flag.read_only as usize)) == 0 || inner.element_type !=
+                    type_info::BuiltinType.unsigned_8 as usize) {
+                return false;
+            }
+        }
+    }
+
+    index = 0;
+    while (index < ir.slot_count) {
+        if (slots[index].function_id >= ir.function_count || !type_can_be_value(types, slots[index].type_id) ||
+            slots[index].alignment_bytes > (model::Limit.maximum_slot_alignment as usize) ||
+            (slots[index].alignment_bytes & (slots[index].alignment_bytes - 1)) != 0) {
+            return false;
+        }
+        index += 1;
+    }
+
+    index = 0;
+    var counted_instructions: usize = 0;
+    while (index < ir.block_count) {
+        let block: model::Block = blocks[index];
+        if (block.function_id >= ir.function_count || (block.instruction_count == 0 &&
+                (block.first_instruction != none || block.last_instruction != none || block.terminated)) ||
+            (block.instruction_count != 0 && (block.first_instruction >= ir.instruction_count ||
+                    block.last_instruction >= ir.instruction_count || !block.terminated))) {
+            return false;
+        }
+        counted_instructions += block.instruction_count;
+        var instruction_id: usize = block.first_instruction;
+        var visited: usize = 0;
+        var previous: usize = none;
+        while (visited < block.instruction_count) {
+            if (instruction_id >= ir.instruction_count || instructions[instruction_id].block_id != index) {
+                return false;
+            }
+            if (model::opcode_is_terminator(
+                    instructions[instruction_id].opcode) && visited + 1 != block.instruction_count) {
+                return false;
+            }
+            previous = instruction_id;
+            instruction_id = instructions[instruction_id].next_instruction;
+            visited += 1;
+        }
+        if (block.instruction_count != 0 && (previous != block.last_instruction || instruction_id != none ||
+                !model::opcode_is_terminator(
+                    instructions[block.last_instruction].opcode))) {
+            return false;
+        }
+        index += 1;
+    }
+    if (counted_instructions != ir.instruction_count) {
+        return false;
+    }
+
+    index = 0;
+    while (index < ir.block_count) {
+        var expected_predecessors: usize = 0;
+        var instruction_index: usize = 0;
+        while (instruction_index < ir.instruction_count) {
+            let candidate: model::Instruction = instructions[instruction_index];
+            if (candidate.opcode == model::Opcode.jump && candidate.auxiliary == index) {
+                expected_predecessors += 1;
+            }
+            if (candidate.opcode == model::Opcode.branch && candidate.auxiliary == index) {
+                expected_predecessors += 1;
+            }
+            if (candidate.opcode == model::Opcode.branch && candidate.third == index) {
+                expected_predecessors += 1;
+            }
+            instruction_index += 1;
+        }
+        if (blocks[index].predecessor_count != expected_predecessors) {
+            return false;
+        }
+        index += 1;
+    }
+
+    index = 0;
+    while (index < ir.instruction_count) {
+        let instruction: model::Instruction = instructions[index];
+        if ((instruction.opcode as usize) > (model::Opcode.va_list_arg as usize) ||
+            instruction.opcode == model::Opcode.invalid || instruction.block_id >= ir.block_count ||
+            instruction.span.line == 0 || instruction.span.column == 0 || (instruction.type_id != none &&
+                instruction.type_id >= types.type_count) || (instruction.result != none &&
+                (instruction.result >= ir.value_count || values[instruction.result].definition != index ||
+                    values[instruction.result].block_id != instruction.block_id || values[instruction.result].type_id !=
+                        instruction.type_id)) ||
+            !instruction_operands_are_valid(instruction, index, blocks[instruction.block_id].function_id, ir, values) ||
+            !instruction_types_are_valid(
+                instruction, blocks[instruction.block_id].function_id, types, values, functions, slots)) {
+            return false;
+        }
+        if (instruction.opcode == model::Opcode.call || instruction.opcode == model::Opcode.call_indirect) {
+            var call_parameter_count: usize = 0;
+            var call_variadic: bool = false;
+            if (instruction.opcode == model::Opcode.call) {
+                call_parameter_count = functions[instruction.auxiliary].parameter_count;
+                call_variadic = functions[instruction.auxiliary].variadic;
+            } else {
+                let callee_records: *const
+                    type_info::Record = types.types.data as
+                        *const type_info::Record;
+                let callee: type_info::Record = callee_records[ values[instruction.left].type_id];
+                call_parameter_count = callee.field_count;
+            }
+            var call_argument_count: usize = 0;
+            var argument_index: usize = 0;
+            while (argument_index < ir.argument_count) {
+                let argument: model::Argument = arguments[argument_index];
+                if (argument.instruction_id == index) {
+                    if (argument.value_id >= ir.value_count ||
+                        values[argument.value_id].function_id != blocks[ instruction.block_id].function_id ||
+                        values[argument.value_id].definition >= index) {
+                        return false;
+                    }
+                    // Variadic extras carry no declared parameter type; the
+                    // call site classifies them at their own width instead.
+                    if (call_argument_count >= call_parameter_count) {
+                        if (!call_variadic) {
+                            return false;
+                        }
+                    } else {
+                        var parameter_type: usize = model::no_id();
+                        if (instruction.opcode == model::Opcode.call) {
+                            let parameters: *const
+                                model::Parameter = ir.parameters.data as
+                                    *const model::Parameter;
+                            parameter_type = parameters[ functions[instruction.auxiliary].first_parameter +
+                                        call_argument_count].type_id;
+                        } else {
+                            let fields: *const type_info::Field = types.fields.data as
+                                    *const type_info::Field;
+                            let records: *const
+                                type_info::Record = types.types.data as
+                                    *const type_info::Record;
+                            let callee: type_info::Record = records[ values[instruction.left].type_id];
+                            parameter_type = fields[ callee.first_field + call_argument_count].type_id;
+                        }
+                        if (!carrier_matches_type(
+                                types, values[argument.value_id].type_id, parameter_type)) {
+                            return false;
+                        }
+                    }
+                    call_argument_count += 1;
+                }
+                argument_index += 1;
+            }
+            if (call_variadic ? call_argument_count < call_parameter_count : call_argument_count !=
+                    call_parameter_count) {
+                return false;
+            }
+        }
+        index += 1;
+    }
+
+    index = 0;
+    while (index < ir.argument_count) {
+        let argument: model::Argument = arguments[index];
+        if (argument.instruction_id >= ir.instruction_count || argument.value_id >= ir.value_count ||
+            (instructions[argument.instruction_id].opcode != model::Opcode.call &&
+                instructions[argument.instruction_id].opcode != model::Opcode.call_indirect)) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}

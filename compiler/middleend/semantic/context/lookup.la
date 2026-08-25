@@ -1,0 +1,379 @@
+module luna.bootstrap.middleend.semantic.context.lookup;
+
+import luna.runtime as runtime;
+
+fn append_record(context: *context::Context, destination: *bytes::Buffer, data: *const u8, length: usize) -> bool {
+    if (context->error != runtime::Error.none || destination == null || data == null || length == 0) {
+        return false;
+    }
+    let appended: bytes::BufferResult = bytes::append(*destination, data, length);
+    *destination = appended.buffer;
+    context->error = appended.error;
+    return appended.error == runtime::Error.none;
+}
+
+fn append_unit_info(context: *context::Context, info: context::UnitInfo) -> bool {
+    if (!append_record(
+            context, &context->units, (&info) as
+                *const context::UnitInfo as *const u8, sizeof(context::UnitInfo))) {
+        return false;
+    }
+    context->unit_count += 1;
+    return true;
+}
+
+fn append_module(context: *context::Context, module_record: context::Module) -> usize {
+    let result: usize = context->module_count;
+    if (!append_record(
+            context, &context->modules, (&module_record) as
+                *const context::Module as *const u8, sizeof(context::Module))) {
+        return context::no_id();
+    }
+    context->module_count += 1;
+    return result;
+}
+
+fn find_module_by_name(context: *context::Context, unit_index: usize, name_node: usize) -> usize {
+    let modules: *const context::Module = context->modules.data as
+            *const context::Module;
+    var index: usize = 0;
+    while (index < context->module_count) {
+        if (context::module_names_equal(
+                context, unit_index, name_node, modules[index].name_unit, modules[index].name_node)) {
+            return index;
+        }
+        index += 1;
+    }
+    return context::no_id();
+}
+
+fn program_module_node(context: *context::Context, unit_index: usize) -> usize {
+    let unit: *const context::Unit = context::input_unit(context, unit_index);
+    let root: syntax::SyntaxNode = context::node(context, unit_index, unit->tree.root);
+    if (root.kind != syntax::SyntaxKind.program || root.child_count == 0) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    let module_declaration: syntax::SyntaxNode = context::node(context, unit_index, root.first_child);
+    if (module_declaration.kind != syntax::SyntaxKind.module_declaration) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    return root.first_child;
+}
+
+fn append_import(context: *context::Context, record: context::Import) -> usize {
+    let result: usize = context->import_count;
+    if (!append_record(
+            context, &context->imports, (&record) as
+                *const context::Import as *const u8, sizeof(context::Import))) {
+        return context::no_id();
+    }
+    context->import_count += 1;
+    return result;
+}
+
+fn append_symbol(context: *context::Context, symbol: context::Symbol) -> usize {
+    let result: usize = context->symbol_count;
+    if (!append_record(
+            context, &context->symbols, (&symbol) as
+                *const context::Symbol as *const u8, sizeof(context::Symbol))) {
+        return context::no_id();
+    }
+    context->symbol_count += 1;
+    return result;
+}
+
+fn find_local_symbol(
+    context: *context::Context, module_id: usize, unit_index: usize, name_token: usize, kind: context::SymbolKind,
+        interface_scope: bool) -> usize {
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    var index: usize = 0;
+    while (index < context->symbol_count) {
+        let symbol: context::Symbol = symbols[index];
+        if (symbol.module_id == module_id && symbol.kind == kind && (!interface_scope ||
+            (symbol.flags & (context::SymbolFlag.interface_declaration as usize)) != 0) &&
+            context::tokens_equal(
+                context, unit_index, name_token, symbol.declaration_unit, symbol.name_token)) {
+            return index;
+        }
+        index += 1;
+    }
+    return context::no_id();
+}
+
+fn find_any_local_symbol(context: *context::Context, module_id: usize, unit_index: usize, name_token: usize) -> usize {
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    var index: usize = 0;
+    while (index < context->symbol_count) {
+        let symbol: context::Symbol = symbols[index];
+        if (symbol.module_id == module_id && symbol.kind != context::SymbolKind.enum_member &&
+            context::tokens_equal(
+                context, unit_index, name_token, symbol.declaration_unit, symbol.name_token)) {
+            return index;
+        }
+        index += 1;
+    }
+    return context::no_id();
+}
+
+fn unit_module(context: *context::Context, unit_index: usize) -> usize {
+    if (unit_index >= context->unit_count) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    let units: *const context::UnitInfo = context->units.data as
+            *const context::UnitInfo;
+    return units[unit_index].module_id;
+}
+
+fn unit_is_interface(context: *context::Context, unit_index: usize) -> bool {
+    if (unit_index >= context->unit_count) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let units: *const context::UnitInfo = context->units.data as
+            *const context::UnitInfo;
+    return units[unit_index].interface_unit != 0;
+}
+
+// Flat visibility contributed by one import: only a selective import binds
+// flat names, namely the ones listed in its selective_import_names
+// container. Plain and aliased imports bind only their qualifier (`c::` or
+// `<alias>::`) and contribute no flat names. Emits no diagnostics.
+fn import_binds_name(context: *context::Context, import_record: context::Import, unit_index: usize,
+    name_token: usize) -> bool {
+    let none: usize = context::no_id();
+    if (import_record.alias_token != none) {
+        return false;
+    }
+    if (import_record.selective_node == none) {
+        return false;
+    }
+    var child: usize = context::node(context, import_record.source_unit, import_record.selective_node).first_child;
+    while (child != none) {
+        let name_node: syntax::SyntaxNode = context::node(context, import_record.source_unit, child);
+        if (context::tokens_equal(
+                context, unit_index, name_token, import_record.source_unit, name_node.token_index)) {
+            return true;
+        }
+        child = name_node.next_sibling;
+    }
+    return false;
+}
+
+fn import_binds_symbol(context: *context::Context, import_record: context::Import, symbol: context::Symbol) -> bool {
+    return import_binds_name(context, import_record, symbol.declaration_unit, symbol.name_token);
+}
+
+fn find_imported_symbol(context: *context::Context, unit_index: usize, name_token: usize,
+    kind: context::SymbolKind) -> usize {
+    let none: usize = context::no_id();
+    let module_id: usize = unit_module(context, unit_index);
+    let interface_scope: bool = unit_is_interface(context, unit_index);
+    let modules: *const context::Module = context->modules.data as
+            *const context::Module;
+    let imports: *const context::Import = context->imports.data as
+            *const context::Import;
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    var found: usize = none;
+    var import_index: usize = 0;
+    while (import_index < modules[module_id].import_count) {
+        let import_record: context::Import = imports[modules[module_id].first_import + import_index];
+        // Plain and aliased imports bind only their qualifier (`c::` /
+        // `<alias>::`) and contribute no flat names; a selective import
+        // binds only its listed names flat.
+        if ((!interface_scope || import_record.interface_import) &&
+            import_binds_name(
+                context, import_record, unit_index, name_token)) {
+            var symbol_index: usize = 0;
+            while (symbol_index < context->symbol_count) {
+                let symbol: context::Symbol = symbols[symbol_index];
+                if (symbol.module_id == import_record.target_module && symbol.kind == kind && (symbol.flags &
+                        (context::SymbolFlag.exported as usize)) != 0 &&
+                    context::tokens_equal(
+                        context, unit_index, name_token, symbol.declaration_unit, symbol.name_token)) {
+                    if (found != none && found != symbol_index) {
+                        context::add_diagnostic(
+                            context, context::DiagnosticKind.ambiguous_import, unit_index,
+                            context::token(context, unit_index, name_token).span, symbols[found].declaration_unit,
+                            context::token(context, symbols[found].declaration_unit, symbols[found].name_token).span,
+                            symbol_index);
+                        return none;
+                    }
+                    found = symbol_index;
+                }
+                symbol_index += 1;
+            }
+        }
+        import_index += 1;
+    }
+    return found;
+}
+
+fn lookup_symbol(context: *context::Context, unit_index: usize, name_token: usize, kind: context::SymbolKind) -> usize {
+    let module_id: usize = unit_module(context, unit_index);
+    let local: usize = find_local_symbol(
+        context, module_id, unit_index, name_token, kind, unit_is_interface(context, unit_index));
+    if (local != context::no_id()) {
+        return local;
+    }
+    return find_imported_symbol(context, unit_index, name_token, kind);
+}
+
+// Resolves a `qual::` qualifier against the unit's direct imports, using the
+// same visibility rule as flat imports (an interface unit sees only imports
+// written in the interface). A qualifier matches an import's alias, or — for
+// a plain import — the last segment of the target module's name. Returns the
+// target module, or no-id when nothing matches or when two or more distinct
+// modules match (then *ambiguous is set). Emits no diagnostics.
+fn find_qualifier_target(context: *context::Context, unit_index: usize, qualifier_token: usize,
+    ambiguous: *bool) -> usize {
+    let none: usize = context::no_id();
+    if (ambiguous == null) {
+        context->error = runtime::Error.invalid_argument;
+        return none;
+    }
+    *ambiguous = false;
+    let module_id: usize = unit_module(context, unit_index);
+    let interface_scope: bool = unit_is_interface(context, unit_index);
+    let modules: *const context::Module = context->modules.data as
+            *const context::Module;
+    let imports: *const context::Import = context->imports.data as
+            *const context::Import;
+    var found: usize = none;
+    var import_index: usize = 0;
+    while (import_index < modules[module_id].import_count) {
+        let import_record: context::Import = imports[modules[module_id].first_import + import_index];
+        if (!interface_scope || import_record.interface_import) {
+            var matches: bool = false;
+            if (import_record.alias_token != none) {
+                matches = context::tokens_equal(
+                    context, unit_index, qualifier_token, import_record.source_unit, import_record.alias_token);
+            } else {
+                let name_node: syntax::SyntaxNode =
+                    context::node(
+                        context, modules[import_record.target_module].name_unit,
+                        modules[import_record.target_module].name_node);
+                if (name_node.child_count != 0) {
+                    let last_segment: syntax::SyntaxNode =
+                        context::node(context, modules[import_record.target_module].name_unit, name_node.last_child);
+                    matches = context::tokens_equal(
+                        context, unit_index, qualifier_token, modules[import_record.target_module].name_unit,
+                        last_segment.token_index);
+                }
+            }
+            if (matches) {
+                if (found != none && found != import_record.target_module) {
+                    *ambiguous = true;
+                    return none;
+                }
+                found = import_record.target_module;
+            }
+        }
+        import_index += 1;
+    }
+    return found;
+}
+
+// Diagnosing wrapper around find_qualifier_target: // reports unknown_module_qualifier or ambiguous_module_qualifier.
+fn resolve_module_qualifier(
+    context: *context::Context, unit_index: usize, qualifier_token: usize, qualifier_span: lexer::SourceSpan) -> usize {
+    var ambiguous: bool = false;
+    let target: usize = find_qualifier_target(context, unit_index, qualifier_token, &ambiguous);
+    if (target == context::no_id()) {
+        context::add_diagnostic(
+            context, ambiguous ? context::DiagnosticKind.ambiguous_module_qualifier :
+                context::DiagnosticKind.unknown_module_qualifier,
+            unit_index, qualifier_span, context::no_id(), context::empty_span(), qualifier_token);
+    }
+    return target;
+}
+
+// Finds the exported symbol of `kind` named `name_token` inside `module_id`,
+// without considering any imports. Emits no diagnostics.
+fn find_module_symbol(
+    context: *context::Context, unit_index: usize, module_id: usize, name_token: usize,
+        kind: context::SymbolKind) -> usize {
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    var index: usize = 0;
+    while (index < context->symbol_count) {
+        let symbol: context::Symbol = symbols[index];
+        if (symbol.module_id == module_id && symbol.kind == kind && (symbol.flags & (context::SymbolFlag
+                    .exported as usize)) != 0 &&
+            context::tokens_equal(
+                context, unit_index, name_token, symbol.declaration_unit, symbol.name_token)) {
+            return index;
+        }
+        index += 1;
+    }
+    return context::no_id();
+}
+
+// Node-aware lookup: an unqualified name_expression delegates to
+// lookup_symbol; a qualified `qual::name` context::node(qualifier
+// segments carried as children) resolves the qualifier against the unit's
+// direct imports and searches only that module's exports. Exactly one
+// qualifier segment is supported; longer chains are rejected with
+// invalid_qualified_path. Diagnostics (unknown/ambiguous qualifier, unknown
+// qualified name, invalid path) are emitted only when `diagnose` is set, so
+// speculative callers can probe quietly and report once.
+fn lookup_qualified_symbol(
+    context: *context::Context, unit_index: usize, path: syntax::SyntaxNode, kind: context::SymbolKind,
+        diagnose: bool) -> usize {
+    let none: usize = context::no_id();
+    if (path.child_count == 0) {
+        return lookup_symbol(context, unit_index, path.token_index, kind);
+    }
+    if (path.child_count > 1) {
+        if (diagnose) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.invalid_qualified_path, unit_index, path.span, none,
+                    context::empty_span(), path.token_index);
+        }
+        return none;
+    }
+    let qualifier: syntax::SyntaxNode = context::node(context, unit_index, path.first_child);
+    var ambiguous: bool = false;
+    let target: usize = find_qualifier_target(context, unit_index, qualifier.token_index, &ambiguous);
+    if (target == none) {
+        if (diagnose) {
+            context::add_diagnostic(
+                context, ambiguous ? context::DiagnosticKind.ambiguous_module_qualifier : context::DiagnosticKind
+                        .unknown_module_qualifier, unit_index, qualifier.span, none, context::empty_span(),
+                            qualifier.token_index);
+        }
+        return none;
+    }
+    let symbol_id: usize = find_module_symbol(context, unit_index, target, path.token_index, kind);
+    if (symbol_id == none && diagnose) {
+        let modules: *const context::Module = context->modules.data as
+                *const context::Module;
+        context::add_diagnostic(
+            context, context::DiagnosticKind.unknown_qualified_name, unit_index, path.span, modules[target].name_unit,
+            context::node(context, modules[target].name_unit, modules[target].name_node).span, path.token_index);
+    }
+    return symbol_id;
+}
+
+fn first_declaration(context: *context::Context, unit_index: usize) -> usize {
+    let none: usize = context::no_id();
+    if (unit_index == none) {
+        return none;
+    }
+    let unit: *const context::Unit = context::input_unit(context, unit_index);
+    let root: syntax::SyntaxNode = context::node(context, unit_index, unit->tree.root);
+    var child: usize = root.first_child;
+    while (child != none) {
+        let node: syntax::SyntaxNode = context::node(context, unit_index, child);
+        if (node.kind != syntax::SyntaxKind.module_declaration && node.kind != syntax::SyntaxKind.import_declaration) {
+            return child;
+        }
+        child = node.next_sibling;
+    }
+    return none;
+}

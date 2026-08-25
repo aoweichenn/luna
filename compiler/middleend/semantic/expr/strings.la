@@ -1,0 +1,381 @@
+module luna.bootstrap.middleend.semantic.expr.strings;
+
+import luna.bootstrap.middleend.semantic.context.builder as builder;
+
+import luna.bootstrap.frontend.lexer as lexer;
+import luna.bootstrap.middleend.ir as ir;
+import luna.bootstrap.middleend.semantic.expr.base as base;
+import luna.bootstrap.middleend.type as type_info;
+import luna.runtime as runtime;
+import luna.std.ascii as ascii;
+import luna.std.bytes as bytes;
+import luna.std.io as io;
+import luna.std.path as path;
+import luna.std.text as text;
+
+fn decode_hex(byte: u8) -> usize {
+    return ascii::hex_value(byte);
+}
+
+fn string_token_width(kind: lexer::TokenKind) -> usize {
+    if (kind == lexer::TokenKind.string_u16) {
+        return 2;
+    }
+    if (kind == lexer::TokenKind.string_u32) {
+        return 4;
+    }
+    return 1;
+}
+
+fn push_code_unit(context: *context::Context, decoded: *bytes::Buffer, value: usize, width: usize) -> bool {
+    var shift: usize = 0;
+    while (shift < width * 8 && context->error == runtime::Error.none) {
+        let pushed: bytes::BufferResult = bytes::push(*decoded, ((value >> shift) & 255) as u8);
+        *decoded = pushed.buffer;
+        context->error = pushed.error;
+        shift += 8;
+    }
+    return context->error == runtime::Error.none;
+}
+
+// Appends one code point to a decoded string buffer, encoded as UTF-8,
+// UTF-16 (surrogate pairs above 0xFFFF) or UTF-32 per the unit width.
+fn push_code_point(context: *context::Context, decoded: *bytes::Buffer, code_point: usize, width: usize) -> bool {
+    if (width == 4) {
+        return push_code_unit(context, decoded, code_point, 4);
+    }
+    if (width == 2) {
+        if (code_point < 65536) {
+            return push_code_unit(context, decoded, code_point, 2);
+        }
+        let reduced: usize = code_point - 65536;
+        return push_code_unit(context, decoded, 55296 + (reduced >> 10), 2) &&
+            push_code_unit(context, decoded, 56320 + (reduced & 1023), 2);
+    }
+    if (code_point < 128) {
+        return push_code_unit(context, decoded, code_point, 1);
+    }
+    if (code_point < 2048) {
+        return push_code_unit(context, decoded, 192 + (code_point >> 6), 1) &&
+            push_code_unit(context, decoded, 128 + (code_point & 63), 1);
+    }
+    if (code_point < 65536) {
+        return push_code_unit(context, decoded, 224 + (code_point >> 12), 1) &&
+            push_code_unit(context, decoded, 128 + ((code_point >> 6) & 63), 1) &&
+            push_code_unit(context, decoded, 128 + (code_point & 63), 1);
+    }
+    return push_code_unit(context, decoded, 240 + (code_point >> 18), 1) &&
+        push_code_unit(context, decoded, 128 + ((code_point >> 12) & 63), 1) &&
+        push_code_unit(context, decoded, 128 + ((code_point >> 6) & 63), 1) &&
+        push_code_unit(context, decoded, 128 + (code_point & 63), 1);
+}
+
+// Parses the braced hexadecimal code point of a \u{...} escape.
+// escape_index points at the 'u' inside the token span; on success value
+// receives the code point and last the index of the closing brace.
+fn decode_unicode_escape(
+    unit: *const context::Unit, token: lexer::Token, escape_index: usize, value: *usize, last: *usize) -> bool {
+    if (value == null || last == null || escape_index + 2 >= token.span.length || unit->source.data[
+            token.span.offset + escape_index + 1] != '{') {
+        return false;
+    }
+    var code_point: usize = 0;
+    var digits: usize = 0;
+    var index: usize = escape_index + 2;
+    while (index + 1 < token.span.length) {
+        let digit: usize = decode_hex(unit->source.data[token.span.offset + index]);
+        if (digit >= 16 || digits >= 6) {
+            break;
+        }
+        code_point = code_point * 16 + digit;
+        digits += 1;
+        index += 1;
+    }
+    if (digits == 0 || unit->source.data[token.span.offset + index] != '}') {
+        return false;
+    }
+    if (code_point > 1114111 || (code_point >= 55296 && code_point <= 57343)) {
+        return false;
+    }
+    *value = code_point;
+    *last = index;
+    return true;
+}
+
+// Decodes one string literal token (width prefix and quotes included in
+// the span) into code units of the literal's width. Raw non-ASCII source
+// bytes pass through in u8 literals; u16/u32 literals UTF-8-decode them
+// and re-encode (the lexer already validated the source as UTF-8).
+fn decode_string_token(
+    context: *context::Context, unit: *const context::Unit, token: lexer::Token, width: usize, decoded: *bytes::Buffer
+) -> bool {
+    var index: usize = width == 1 ? 1 : 4;
+    while (index + 1 < token.span.length && context->error == runtime::Error.none) {
+        var byte: u8 = unit->source.data[token.span.offset + index];
+        if (byte != '\\' && byte < 128) {
+            if (!push_code_unit(
+                    context, decoded, byte as usize, width)) {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+        if (byte >= 128) {
+            if (width == 1) {
+                if (!push_code_unit(
+                        context, decoded, byte as usize, 1)) {
+                    return false;
+                }
+                index += 1;
+                continue;
+            }
+            var code_point: usize = (byte & 31) as usize;
+            var continuation: usize = 1;
+            if (byte >= 240) {
+                code_point = (byte & 7) as usize;
+                continuation = 3;
+            } else if (byte >= 224) {
+                code_point = (byte & 15) as usize;
+                continuation = 2;
+            }
+            var count: usize = 0;
+            while (count < continuation && index + 2 < token.span.length) {
+                index += 1;
+                code_point = (code_point << 6) + (unit->source.data[ token.span.offset + index] & 63) as usize;
+                count += 1;
+            }
+            if (!push_code_point(
+                    context, decoded, code_point, width)) {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+        index += 1;
+        byte = unit->source.data[token.span.offset + index];
+        if (byte == 'x') {
+            let high: usize = decode_hex(unit->source.data[ token.span.offset + index + 1]);
+            let low: usize = decode_hex(unit->source.data[ token.span.offset + index + 2]);
+            if (!push_code_unit(
+                    context, decoded, high * 16 + low, width)) {
+                return false;
+            }
+            index += 3;
+            continue;
+        }
+        if (byte == 'u') {
+            var escape_point: usize = 0;
+            var last: usize = 0;
+            if (!decode_unicode_escape(unit, token, index, &escape_point, &last) ||
+                !push_code_point(
+                    context, decoded, escape_point, width)) {
+                return false;
+            }
+            index = last + 1;
+            continue;
+        }
+        if (byte == 'n') {
+            byte = '\n';
+        } else if (byte == 'r') {
+            byte = '\r';
+        } else if (byte == 't') {
+            byte = '\t';
+        } else if (byte == '0') {
+            byte = 0;
+        }
+        if (!push_code_unit(
+                context, decoded, byte as usize, width)) {
+            return false;
+        }
+        index += 1;
+    }
+    return context->error == runtime::Error.none;
+}
+
+// Decodes a string literal node (its own token plus adjacent concatenated parts) into raw code units
+// of the literal's width, without any terminator. Shared by string literal lowering and @embed.
+fn decode_string_literal(
+    context: *context::Context, node: syntax::SyntaxNode, width: usize, decoded: *bytes::Buffer) -> bool {
+    let unit: *const context::Unit = context::input_unit(context, context->current_unit);
+    let token: lexer::Token = context::token(context, context->current_unit, node.token_index);
+    var valid: bool = decode_string_token(context, unit, token, width, decoded);
+    var child: usize = node.first_child;
+    while (valid && child != context::no_id() && context->error == runtime::Error.none) {
+        let part: syntax::SyntaxNode = context::node(context, context->current_unit, child);
+        let part_token: lexer::Token = context::token(context, context->current_unit, part.token_index);
+        if (part.kind != syntax::SyntaxKind.string_expression || part_token.kind != token.kind) {
+            valid = false;
+            break;
+        }
+        valid = decode_string_token(context, unit, part_token, width, decoded);
+        child = part.next_sibling;
+    }
+    return valid && context->error == runtime::Error.none;
+}
+
+fn lower_string_literal(context: *context::Context, node: syntax::SyntaxNode) -> context::Expression {
+    let token: lexer::Token = context::token(context, context->current_unit, node.token_index);
+    let width: usize = string_token_width(token.kind);
+    var decoded: bytes::Buffer = bytes::empty();
+    let valid: bool = decode_string_literal(context, node, width, &decoded);
+    if (!valid) {
+        let discard_error: runtime::Error = bytes::release(decoded);
+        if (context->error == runtime::Error.none) {
+            context->error = discard_error;
+            context::add_diagnostic(
+                context, context::DiagnosticKind.invalid_string, context->current_unit, node.span, context::no_id(),
+                context::empty_span(), 0);
+        }
+        return base::invalid_expression();
+    }
+    if (context->error == runtime::Error.none) {
+        push_code_unit(context, &decoded, 0, width);
+    }
+    let global_id: usize = context->error == runtime::Error.none ?
+        ir::add_global(&context->ir, decoded.data as *const u8, decoded.length, width, true) : context::no_id();
+    let release_error: runtime::Error = bytes::release(decoded);
+    if (context->error == runtime::Error.none) {
+        context->error = release_error;
+    }
+    if (global_id == context::no_id()) {
+        if (context->error == runtime::Error.none) {
+            context->error = context->ir.error;
+        }
+        return base::invalid_expression();
+    }
+    var element_type: usize = type_info::BuiltinType.unsigned_8 as usize;
+    if (width == 2) {
+        element_type = type_info::BuiltinType.unsigned_16 as usize;
+    }
+    if (width == 4) {
+        element_type = type_info::BuiltinType.unsigned_32 as usize;
+    }
+    let pointer: type_info::IdResult = type_info::table_pointer(&context->types, element_type, true, false);
+    context->error = pointer.error;
+    var instruction: ir::Instruction = builder::instruction(ir::Opcode.global_address, node);
+    instruction.auxiliary = global_id;
+    let value_id: usize = builder::emit_value(context, instruction, pointer.type_id);
+    return {
+        type_id = pointer.type_id, value_id = value_id, address_id = context::no_id(), constant_value = 0,
+        has_constant = false, lvalue = false, mutable_lvalue = false, volatile_lvalue = false,
+        valid = value_id != context::no_id(), bitfield_segment = context::no_id(),
+    };
+}
+
+enum EmbedLimit: usize {
+    maximum_bytes = 16777216,
+}
+
+// @embed("path") reads the named file fresh on every compilation (the build is always from scratch,
+// so there is no incremental tracking and no stale-embed hazard; embedded files live in the source
+// tree like sources) and yields a read-only [N]u8 memory lvalue at a global holding the file's N
+// bytes. A relative path resolves against the directory of the referencing unit; a leading '/' is
+// used as-is. A non-u8-string argument, an undecodable path, a missing or unreadable file, an empty
+// file (arrays are positive-length) and a file over the cap all fail with invalid_embed.
+fn lower_embed(context: *context::Context, node: syntax::SyntaxNode) -> context::Expression {
+    let none: usize = context::no_id();
+    let argument: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let token: lexer::Token = context::token(context, context->current_unit, argument.token_index);
+    var decoded: bytes::Buffer = bytes::empty();
+    var path_bytes: bytes::Buffer = bytes::empty();
+    var file: bytes::Buffer = bytes::empty();
+    var path: path::Path = {
+        storage = bytes::empty(), length = 0,
+    };
+    var has_path: bool = false;
+    var valid: bool = argument.kind == syntax::SyntaxKind.string_expression && string_token_width(token.kind) == 1;
+    if (valid) {
+        valid = decode_string_literal(context, argument, 1, &decoded);
+    }
+    if (valid && context->error == runtime::Error.none) {
+        var step: bytes::BufferResult = {
+            buffer = path_bytes, error = runtime::Error.none,
+        };
+        if (decoded.length == 0 || decoded.data[0] != '/') {
+            let unit_path: text::View = context::unit_path(context, context->current_unit);
+            var directory: usize = unit_path.length;
+            while (directory != 0 && unit_path.data[directory - 1] != '/') {
+                directory -= 1;
+            }
+            if (directory != 0) {
+                step = bytes::append(path_bytes, unit_path.data, directory);
+                path_bytes = step.buffer;
+            }
+        }
+        if (step.error == runtime::Error.none) {
+            step = bytes::append(path_bytes, decoded.data as *const u8, decoded.length);
+            path_bytes = step.buffer;
+        }
+        context->error = step.error;
+    }
+    if (valid && context->error == runtime::Error.none) {
+        let text: text::ViewResult = text::view(path_bytes.data as *const u8, path_bytes.length);
+        context->error = text.error;
+        if (text.error == runtime::Error.none) {
+            let resolved: path::PathResult = path::from_text(text.view);
+            if (resolved.error == runtime::Error.none) {
+                path = resolved.path;
+                has_path = true;
+            } else {
+                valid = false;
+            }
+        }
+    }
+    if (valid && context->error == runtime::Error.none) {
+        // The limited read also enforces the cap: a longer file is reported as a read error.
+        let read: bytes::BufferResult = io::read_file_limited(path, EmbedLimit.maximum_bytes as usize);
+        file = read.buffer;
+        valid = read.error == runtime::Error.none && read.buffer.length != 0;
+    }
+    var array_type: usize = none;
+    var global_id: usize = none;
+    if (valid && context->error == runtime::Error.none) {
+        let array: type_info::IdResult = type_info::table_array(
+            &context->types, type_info::BuiltinType.unsigned_8 as usize, file.length);
+        context->error = array.error;
+        array_type = array.type_id;
+    }
+    if (valid && context->error == runtime::Error.none) {
+        global_id = ir::add_global(&context->ir, file.data as *const u8, file.length, 1, true);
+        if (global_id == none) {
+            context->error = context->ir.error;
+        }
+    }
+    var release_error: runtime::Error = bytes::release(decoded);
+    let path_bytes_error: runtime::Error = bytes::release(path_bytes);
+    if (release_error == runtime::Error.none) {
+        release_error = path_bytes_error;
+    }
+    let file_error: runtime::Error = bytes::release(file);
+    if (release_error == runtime::Error.none) {
+        release_error = file_error;
+    }
+    if (has_path) {
+        let path_error: runtime::Error = path::release(path);
+        if (release_error == runtime::Error.none) {
+            release_error = path_error;
+        }
+    }
+    if (context->error == runtime::Error.none) {
+        context->error = release_error;
+    }
+    if (global_id == none || context->error != runtime::Error.none) {
+        if (!valid && context->error == runtime::Error.none) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.invalid_embed, context->current_unit, node.span, none,
+                context::empty_span(), 0);
+        }
+        return base::invalid_expression();
+    }
+    let pointer: type_info::IdResult = type_info::table_pointer(&context->types, array_type, true, false);
+    context->error = pointer.error;
+    var instruction: ir::Instruction = builder::instruction(ir::Opcode.global_address, node);
+    instruction.auxiliary = global_id;
+    let address_id: usize = builder::emit_value(context, instruction, pointer.type_id);
+    return {
+        type_id = array_type, value_id = none, address_id = address_id, constant_value = 0, has_constant = false,
+        lvalue = true, mutable_lvalue = false, volatile_lvalue = false, valid = address_id != none,
+        bitfield_segment = none,
+    };
+}
+

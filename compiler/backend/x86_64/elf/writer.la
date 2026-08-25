@@ -1,0 +1,688 @@
+module luna.bootstrap.backend.x86_64.elf.writer;
+
+import luna.bootstrap.backend.x86_64.elf.format as format;
+import luna.runtime as runtime;
+import luna.std.binary as binary;
+
+// Writes the in-memory object model out as a standard ELF64 ET_REL so host
+// toolchains (gcc/ld) can link Luna code into C programs. The emitted layout
+// stays inside the subset the reader above accepts, so luna-as --emit elf
+// output round-trips through luna-link: section 0 is SHT_NULL, each non-empty
+// region becomes one allocated PROGBITS section (.text/.rodata/.data) or the
+// NOBITS .bss, a single SHT_SYMTAB carries locals before globals with
+// sh_info marking the first global, and each relocated region gets one
+// explicit-addend SHT_RELA section linked to the symtab. An empty
+// .note.GNU-stack keeps host linkers from assuming an executable stack. All
+// padding is zero-filled, so the output is byte deterministic.
+
+enum SectionSource: usize {
+    none = 0, text = 1, rodata = 2, data = 3, symtab = 4, strtab = 5, shstrtab = 6,
+    rela_text = 7, rela_rodata = 8, rela_data = 9,
+}
+
+struct OutputSection {
+    name: usize;
+    kind: usize;
+    flags: usize;
+    offset: usize;
+    size: usize;
+    link: usize;
+    info: usize;
+    alignment: usize;
+    entry_size: usize;
+    source: usize;
+}
+
+struct SavePlan {
+    text_section: usize;
+    rodata_section: usize;
+    data_section: usize;
+    bss_section: usize;
+    symtab_section: usize;
+    strtab_section: usize;
+    shstrtab_section: usize;
+    rela_text_section: usize;
+    rela_rodata_section: usize;
+    rela_data_section: usize;
+    note_section: usize;
+    section_count: usize;
+    first_global: usize;
+    section_offset: usize;
+}
+
+struct Writer {
+    sections: bytes::Buffer;
+    shstrtab: bytes::Buffer;
+    strtab: bytes::Buffer;
+    symtab: bytes::Buffer;
+    symbol_map: bytes::Buffer;
+    rela_text: bytes::Buffer;
+    rela_rodata: bytes::Buffer;
+    rela_data: bytes::Buffer;
+    error: runtime::Error;
+}
+
+fn save_fail(writer: *Writer, error: runtime::Error) -> bool {
+    if (writer != null && writer->error == runtime::Error.none) {
+        writer->error = error;
+    }
+    return false;
+}
+
+fn save_release(writer: *Writer) -> runtime::Error {
+    var error: runtime::Error = bytes::release(writer->rela_data);
+    let rela_rodata_error: runtime::Error = bytes::release(writer->rela_rodata);
+    let rela_text_error: runtime::Error = bytes::release(writer->rela_text);
+    let map_error: runtime::Error = bytes::release(writer->symbol_map);
+    let symtab_error: runtime::Error = bytes::release(writer->symtab);
+    let strtab_error: runtime::Error = bytes::release(writer->strtab);
+    let shstrtab_error: runtime::Error = bytes::release(writer->shstrtab);
+    let sections_error: runtime::Error = bytes::release(writer->sections);
+    if (error == runtime::Error.none) {
+        error = rela_rodata_error;
+    }
+    if (error == runtime::Error.none) {
+        error = rela_text_error;
+    }
+    if (error == runtime::Error.none) {
+        error = map_error;
+    }
+    if (error == runtime::Error.none) {
+        error = symtab_error;
+    }
+    if (error == runtime::Error.none) {
+        error = strtab_error;
+    }
+    if (error == runtime::Error.none) {
+        error = shstrtab_error;
+    }
+    if (error == runtime::Error.none) {
+        error = sections_error;
+    }
+    return error;
+}
+
+fn emit_u8(output: *bytes::Buffer, value: u8) -> bool {
+    return binary::append_u8(output, value);
+}
+
+fn emit_u16(output: *bytes::Buffer, value: u16) -> bool {
+    return binary::append_u16(output, value);
+}
+
+fn emit_u32(output: *bytes::Buffer, value: u32) -> bool {
+    return binary::append_u32(output, value);
+}
+
+fn emit_u64(output: *bytes::Buffer, value: u64) -> bool {
+    return binary::append_u64(output, value);
+}
+
+fn emit_bytes(output: *bytes::Buffer, data: *const u8, length: usize) -> bool {
+    if (output == null) {
+        return false;
+    }
+    let appended: bytes::BufferResult = bytes::append(*output, data, length);
+    *output = appended.buffer;
+    return appended.error == runtime::Error.none;
+}
+
+fn save_section_count(writer: *Writer) -> usize {
+    if (writer == null || !bytes::is_valid(writer->sections)) {
+        return 0;
+    }
+    return writer->sections.length / sizeof(OutputSection);
+}
+
+fn save_section_at(writer: *Writer, index: usize) -> *OutputSection {
+    if (writer == null || index >= save_section_count(writer)) {
+        return null;
+    }
+    let sections: *OutputSection = writer->sections.data as *OutputSection;
+    return &sections[index];
+}
+
+fn save_add_section(
+    writer: *Writer, name: usize, kind: usize, flags: usize, size: usize, link: usize, info: usize,
+    alignment: usize, entry_size: usize, source: usize) -> bool {
+    let section: OutputSection = {
+        name = name, kind = kind, flags = flags, offset = 0, size = size, link = link, info = info,
+        alignment = alignment, entry_size = entry_size, source = source,
+    };
+    let appended: bytes::BufferResult = bytes::append(
+        writer->sections, (&section) as *const OutputSection as *const u8, sizeof(OutputSection));
+    writer->sections = appended.buffer;
+    if (appended.error != runtime::Error.none) {
+        return save_fail(writer, appended.error);
+    }
+    return true;
+}
+
+fn save_section_name(writer: *Writer, name: *const u8, length: usize, offset: *usize) -> bool {
+    if (offset == null) {
+        return save_fail(writer, runtime::Error.invalid_argument);
+    }
+    *offset = writer->shstrtab.length;
+    if (!emit_bytes(&writer->shstrtab, name, length) || !emit_u8(&writer->shstrtab, 0)) {
+        return save_fail(writer, runtime::Error.out_of_memory);
+    }
+    return true;
+}
+
+fn save_plan(writer: *Writer, object: object::Object, plan: *SavePlan) -> bool {
+    if (plan == null) {
+        return save_fail(writer, runtime::Error.invalid_argument);
+    }
+    var has_text: bool = object.text.length != 0;
+    var has_rodata: bool = object.rodata.length != 0;
+    var has_data: bool = object.data.length != 0;
+    var has_bss: bool = object.bss_size != 0;
+    var local_count: usize = 0;
+    var text_relocations: usize = 0;
+    var rodata_relocations: usize = 0;
+    var data_relocations: usize = 0;
+    // A region with a defined symbol needs its section even when empty, or
+    // the symbol would have no valid st_shndx.
+    var index: usize = 0;
+    let symbol_total: usize = object::symbol_count(object);
+    while (index < symbol_total) {
+        let result: object::SymbolResult = object::get_symbol(object, index);
+        if (result.error != runtime::Error.none) {
+            return save_fail(writer, result.error);
+        }
+        let symbol: object::Symbol = result.symbol;
+        if (symbol.defined) {
+            if (symbol.section == object::Section.text) {
+                has_text = true;
+            } else if (symbol.section == object::Section.rodata) {
+                has_rodata = true;
+            } else if (symbol.section == object::Section.data) {
+                has_data = true;
+            } else if (symbol.section == object::Section.bss) {
+                has_bss = true;
+            }
+            if (!symbol.global) {
+                local_count += 1;
+            }
+        }
+        index += 1;
+    }
+    index = 0;
+    let relocation_total: usize = object::relocation_count(object);
+    while (index < relocation_total) {
+        let result: object::RelocationResult = object::get_relocation(object, index);
+        if (result.error != runtime::Error.none) {
+            return save_fail(writer, result.error);
+        }
+        if (result.relocation.section == object::Section.text) {
+            text_relocations += 1;
+        } else if (result.relocation.section == object::Section.rodata) {
+            rodata_relocations += 1;
+        } else if (result.relocation.section == object::Section.data) {
+            data_relocations += 1;
+        } else {
+            // Valid objects never relocate inside bss or the undefined
+            // section; reject defensively.
+            return save_fail(writer, runtime::Error.invalid_argument);
+        }
+        index += 1;
+    }
+    var next: usize = 1;
+    plan->text_section = 0;
+    plan->rodata_section = 0;
+    plan->data_section = 0;
+    plan->bss_section = 0;
+    plan->rela_text_section = 0;
+    plan->rela_rodata_section = 0;
+    plan->rela_data_section = 0;
+    if (has_text) {
+        plan->text_section = next;
+        next += 1;
+    }
+    if (has_rodata) {
+        plan->rodata_section = next;
+        next += 1;
+    }
+    if (has_data) {
+        plan->data_section = next;
+        next += 1;
+    }
+    if (has_bss) {
+        plan->bss_section = next;
+        next += 1;
+    }
+    plan->symtab_section = next;
+    next += 1;
+    plan->strtab_section = next;
+    next += 1;
+    plan->shstrtab_section = next;
+    next += 1;
+    if (text_relocations != 0) {
+        plan->rela_text_section = next;
+        next += 1;
+    }
+    if (rodata_relocations != 0) {
+        plan->rela_rodata_section = next;
+        next += 1;
+    }
+    if (data_relocations != 0) {
+        plan->rela_data_section = next;
+        next += 1;
+    }
+    plan->note_section = next;
+    next += 1;
+    plan->section_count = next;
+    plan->first_global = local_count + 1;
+    plan->section_offset = 0;
+    return true;
+}
+
+fn save_symbol_shndx(plan: *SavePlan, symbol: object::Symbol) -> usize {
+    if (!symbol.defined) {
+        return 0;
+    }
+    if (symbol.section == object::Section.text) {
+        return plan->text_section;
+    }
+    if (symbol.section == object::Section.rodata) {
+        return plan->rodata_section;
+    }
+    if (symbol.section == object::Section.data) {
+        return plan->data_section;
+    }
+    if (symbol.section == object::Section.bss) {
+        return plan->bss_section;
+    }
+    return 0;
+}
+
+fn save_symbol_entry(
+    writer: *Writer, object: object::Object, plan: *SavePlan, symbol: object::Symbol,
+    model_index: usize, symtab_index: usize) -> bool {
+    let shndx: usize = save_symbol_shndx(plan, symbol);
+    if (symbol.defined && shndx == 0) {
+        return save_fail(writer, runtime::Error.invalid_argument);
+    }
+    let name_offset: usize = writer->strtab.length;
+    if (!emit_bytes(&writer->strtab, &object.names.data[symbol.name_offset] as *const u8, symbol.name_length) ||
+        !emit_u8(&writer->strtab, 0)) {
+        return save_fail(writer, runtime::Error.out_of_memory);
+    }
+    // Undefined model symbols are always global or external; both emit as
+    // STB_GLOBAL SHN_UNDEF, the only undefined shape the reader accepts.
+    var bind: usize = format::SymbolBind.global as usize;
+    if (symbol.defined && !symbol.global) {
+        bind = format::SymbolBind.local as usize;
+    }
+    var symbol_type: usize = format::SymbolType.notype as usize;
+    if (symbol.kind == object::SymbolKind.function) {
+        symbol_type = format::SymbolType.function as usize;
+    } else if (symbol.kind == object::SymbolKind.object) {
+        symbol_type = format::SymbolType.object as usize;
+    }
+    let info: usize = (bind << 4) | symbol_type;
+    if (!emit_u32(&writer->symtab, (name_offset as u32)) ||
+        !emit_u8(&writer->symtab, (info as u8)) || !emit_u8(&writer->symtab, 0) ||
+        !emit_u16(&writer->symtab, (shndx as u16)) || !emit_u64(&writer->symtab, (symbol.value as u64)) ||
+        !emit_u64(&writer->symtab, (symbol.size as u64))) {
+        return save_fail(writer, runtime::Error.out_of_memory);
+    }
+    let map: *usize = writer->symbol_map.data as *usize;
+    let slot: *usize = &map[model_index];
+    *slot = symtab_index;
+    return true;
+}
+
+fn save_symbols(writer: *Writer, object: object::Object, plan: *SavePlan) -> bool {
+    // Symbol 0 is the mandatory all-zero entry; the string table leads with a
+    // NUL byte so st_name 0 means "no name".
+    if (!format::pad_to(&writer->symtab, format::Limit.symbol_size as usize) || !emit_u8(&writer->strtab, 0)) {
+        return save_fail(writer, runtime::Error.out_of_memory);
+    }
+    let symbol_total: usize = object::symbol_count(object);
+    var index: usize = 0;
+    while (index < symbol_total) {
+        var slot: usize = 0;
+        let appended: bytes::BufferResult = bytes::append(
+            writer->symbol_map, (&slot) as *const usize as *const u8, sizeof(usize));
+        writer->symbol_map = appended.buffer;
+        if (appended.error != runtime::Error.none) {
+            return save_fail(writer, appended.error);
+        }
+        index += 1;
+    }
+    // Locals first, then globals, preserving model order within each class;
+    // GNU ld requires the local block ahead of sh_info.
+    var symtab_index: usize = 1;
+    var pass: usize = 0;
+    while (pass < 2) {
+        let global_pass: bool = pass != 0;
+        index = 0;
+        while (index < symbol_total) {
+            let result: object::SymbolResult = object::get_symbol(object, index);
+            if (result.error != runtime::Error.none) {
+                return save_fail(writer, result.error);
+            }
+            let local: bool = result.symbol.defined && !result.symbol.global;
+            if (local != global_pass) {
+                if (!save_symbol_entry(writer, object, plan, result.symbol, index, symtab_index)) {
+                    return false;
+                }
+                symtab_index += 1;
+            }
+            index += 1;
+        }
+        pass += 1;
+    }
+    return true;
+}
+
+fn save_relocations(writer: *Writer, object: object::Object) -> bool {
+    let map: *const usize = writer->symbol_map.data as *const usize;
+    let relocation_total: usize = object::relocation_count(object);
+    var index: usize = 0;
+    while (index < relocation_total) {
+        let result: object::RelocationResult = object::get_relocation(object, index);
+        if (result.error != runtime::Error.none) {
+            return save_fail(writer, result.error);
+        }
+        let relocation: object::Relocation = result.relocation;
+        var relocation_type: usize = 0;
+        if (relocation.kind == object::RelocationKind.absolute64) {
+            relocation_type = format::RelocationType.absolute64 as usize;
+        } else if (relocation.kind == object::RelocationKind.pc32) {
+            relocation_type = format::RelocationType.pc32 as usize;
+        } else if (relocation.kind == object::RelocationKind.plt32) {
+            relocation_type = format::RelocationType.plt32 as usize;
+        } else if (relocation.kind == object::RelocationKind.absolute32) {
+            relocation_type = format::RelocationType.absolute32 as usize;
+        } else if (relocation.kind == object::RelocationKind.signed32) {
+            relocation_type = format::RelocationType.signed32 as usize;
+        } else {
+            return save_fail(writer, runtime::Error.invalid_argument);
+        }
+        var target: *bytes::Buffer = null;
+        if (relocation.section == object::Section.text) {
+            target = &writer->rela_text;
+        } else if (relocation.section == object::Section.rodata) {
+            target = &writer->rela_rodata;
+        } else if (relocation.section == object::Section.data) {
+            target = &writer->rela_data;
+        } else {
+            return save_fail(writer, runtime::Error.invalid_argument);
+        }
+        let info: u64 = ((map[relocation.symbol_index] as u64) << 32) | (relocation_type as u64);
+        if (!emit_u64(target, relocation.offset as u64) || !emit_u64(target, info) ||
+            !emit_u64(target, relocation.addend as u64)) {
+            return save_fail(writer, runtime::Error.out_of_memory);
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn save_sections(writer: *Writer, object: object::Object, plan: *SavePlan) -> bool {
+    if (!emit_u8(&writer->shstrtab, 0) ||
+        !save_add_section(
+            writer, 0, format::SectionType.none as usize, 0, 0, 0, 0, 0, 0, SectionSource.none as usize)) {
+        return save_fail(writer, runtime::Error.out_of_memory);
+    }
+    var name: usize = 0;
+    if (plan->text_section != 0) {
+        if (!save_section_name(writer, ".text", 5, &name) ||
+            !save_add_section(
+                writer, name, format::SectionType.progbits as usize,
+                (format::SectionFlag.alloc as usize) | (format::SectionFlag.execute as usize), object.text.length, 0, 0,
+                object.text_alignment, 0, SectionSource.text as usize)) {
+            return false;
+        }
+    }
+    if (plan->rodata_section != 0) {
+        if (!save_section_name(writer, ".rodata", 7, &name) ||
+            !save_add_section(
+                writer, name, format::SectionType.progbits as usize, format::SectionFlag.alloc as usize,
+                object.rodata.length, 0, 0, object.rodata_alignment, 0, SectionSource.rodata as usize)) {
+            return false;
+        }
+    }
+    if (plan->data_section != 0) {
+        if (!save_section_name(writer, ".data", 5, &name) ||
+            !save_add_section(
+                writer, name, format::SectionType.progbits as usize,
+                (format::SectionFlag.alloc as usize) | (format::SectionFlag.write as usize), object.data.length, 0, 0,
+                object.data_alignment, 0, SectionSource.data as usize)) {
+            return false;
+        }
+    }
+    if (plan->bss_section != 0) {
+        if (!save_section_name(writer, ".bss", 4, &name) ||
+            !save_add_section(
+                writer, name, format::SectionType.nobits as usize,
+                (format::SectionFlag.alloc as usize) | (format::SectionFlag.write as usize), object.bss_size, 0, 0,
+                object.bss_alignment, 0, SectionSource.none as usize)) {
+            return false;
+        }
+    }
+    if (!save_section_name(writer, ".symtab", 7, &name) ||
+        !save_add_section(
+            writer, name, format::SectionType.symtab as usize, 0, writer->symtab.length, plan->strtab_section,
+            plan->first_global, 8, format::Limit.symbol_size as usize, SectionSource.symtab as usize)) {
+        return false;
+    }
+    if (!save_section_name(writer, ".strtab", 7, &name) ||
+        !save_add_section(
+            writer, name, format::SectionType.strtab as usize, 0, writer->strtab.length, 0, 0, 1, 0,
+            SectionSource.strtab as usize)) {
+        return false;
+    }
+    if (!save_section_name(writer, ".shstrtab", 9, &name) ||
+        !save_add_section(
+            writer, name, format::SectionType.strtab as usize, 0, 0, 0, 0, 1, 0, SectionSource.shstrtab as usize)) {
+        return false;
+    }
+    if (plan->rela_text_section != 0) {
+        if (!save_section_name(writer, ".rela.text", 10, &name) ||
+            !save_add_section(
+                writer, name, format::SectionType.rela as usize, 0, writer->rela_text.length,
+                plan->symtab_section, plan->text_section, 8, format::Limit.relocation_size as usize,
+                SectionSource.rela_text as usize)) {
+            return false;
+        }
+    }
+    if (plan->rela_rodata_section != 0) {
+        if (!save_section_name(writer, ".rela.rodata", 12, &name) ||
+            !save_add_section(
+                writer, name, format::SectionType.rela as usize, 0, writer->rela_rodata.length,
+                plan->symtab_section, plan->rodata_section, 8, format::Limit.relocation_size as usize,
+                SectionSource.rela_rodata as usize)) {
+            return false;
+        }
+    }
+    if (plan->rela_data_section != 0) {
+        if (!save_section_name(writer, ".rela.data", 10, &name) ||
+            !save_add_section(
+                writer, name, format::SectionType.rela as usize, 0, writer->rela_data.length,
+                plan->symtab_section, plan->data_section, 8, format::Limit.relocation_size as usize,
+                SectionSource.rela_data as usize)) {
+            return false;
+        }
+    }
+    // An empty non-allocated .note.GNU-stack: the reader drops it, and host
+    // linkers read it as "no executable stack required".
+    if (!save_section_name(writer, ".note.GNU-stack", 15, &name) ||
+        !save_add_section(
+            writer, name, format::SectionType.progbits as usize, 0, 0, 0, 0, 1, 0, SectionSource.none as usize)) {
+        return false;
+    }
+    let shstrtab_record: *OutputSection = save_section_at(writer, plan->shstrtab_section);
+    if (shstrtab_record == null) {
+        return save_fail(writer, runtime::Error.invalid_argument);
+    }
+    shstrtab_record->size = writer->shstrtab.length;
+    return true;
+}
+
+fn save_layout(writer: *Writer, plan: *SavePlan) -> bool {
+    var cursor: usize = format::Limit.header_size as usize;
+    var index: usize = 1;
+    let count: usize = save_section_count(writer);
+    while (index < count) {
+        let section: *OutputSection = save_section_at(writer, index);
+        if (section == null) {
+            return save_fail(writer, runtime::Error.invalid_argument);
+        }
+        var alignment: usize = section->alignment;
+        if (alignment == 0) {
+            alignment = 1;
+        }
+        var placed: usize = 0;
+        if (!format::align(cursor, alignment, &placed)) {
+            return save_fail(writer, runtime::Error.out_of_memory);
+        }
+        section->offset = placed;
+        section->alignment = alignment;
+        if (section->kind != (format::SectionType.nobits as usize)) {
+            if (section->size > (18446744073709551615 as usize) - placed) {
+                return save_fail(writer, runtime::Error.out_of_memory);
+            }
+            cursor = placed + section->size;
+        }
+        index += 1;
+    }
+    var section_offset: usize = 0;
+    if (!format::align(cursor, 8, &section_offset)) {
+        return save_fail(writer, runtime::Error.out_of_memory);
+    }
+    plan->section_offset = section_offset;
+    return true;
+}
+
+fn save_source(writer: *Writer, object: object::Object, source: usize, content: *bytes::Buffer) -> bool {
+    if (content == null) {
+        return false;
+    }
+    if (source == (SectionSource.text as usize)) {
+        *content = object.text;
+    } else if (source == (SectionSource.rodata as usize)) {
+        *content = object.rodata;
+    } else if (source == (SectionSource.data as usize)) {
+        *content = object.data;
+    } else if (source == (SectionSource.symtab as usize)) {
+        *content = writer->symtab;
+    } else if (source == (SectionSource.strtab as usize)) {
+        *content = writer->strtab;
+    } else if (source == (SectionSource.shstrtab as usize)) {
+        *content = writer->shstrtab;
+    } else if (source == (SectionSource.rela_text as usize)) {
+        *content = writer->rela_text;
+    } else if (source == (SectionSource.rela_rodata as usize)) {
+        *content = writer->rela_rodata;
+    } else if (source == (SectionSource.rela_data as usize)) {
+        *content = writer->rela_data;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+fn save_emit(writer: *Writer, object: object::Object, plan: *SavePlan, output: *bytes::Buffer) -> bool {
+    if (!emit_u8(output, 127) || !emit_u8(output, 69) || !emit_u8(output, 76) || !emit_u8(output, 70) ||
+        !emit_u8(output, 2) || !emit_u8(output, 1) || !emit_u8(output, 1) || !emit_u8(output, 0) ||
+        !format::pad_to(output, 16) || !emit_u16(output, 1) || !emit_u16(output, 62) || !emit_u32(output, 1) ||
+        !emit_u64(output, 0) || !emit_u64(output, 0) || !emit_u64(output, plan->section_offset as u64) ||
+        !emit_u32(output, 0) || !emit_u16(output, (format::Limit.header_size as usize) as u16) || !emit_u16(output,
+            0) || !emit_u16(output, 0) || !emit_u16(output, (format::Limit.section_size as usize) as u16) ||
+        !emit_u16(output, plan->section_count as u16) || !emit_u16(output, plan->shstrtab_section as u16)) {
+        return save_fail(writer, runtime::Error.out_of_memory);
+    }
+    var index: usize = 1;
+    let count: usize = save_section_count(writer);
+    while (index < count) {
+        let section: *OutputSection = save_section_at(writer, index);
+        if (section == null) {
+            return save_fail(writer, runtime::Error.invalid_argument);
+        }
+        if (section->kind != (format::SectionType.nobits as usize)) {
+            if (!format::pad_to(output, section->offset)) {
+                return save_fail(writer, runtime::Error.out_of_memory);
+            }
+            if (section->size != 0) {
+                var content: bytes::Buffer = bytes::empty();
+                if (!save_source(writer, object, section->source, &content)) {
+                    return save_fail(writer, runtime::Error.invalid_argument);
+                }
+                if (!emit_bytes(output, content.data as *const u8, content.length)) {
+                    return save_fail(writer, runtime::Error.out_of_memory);
+                }
+            }
+        }
+        index += 1;
+    }
+    if (!format::pad_to(output, plan->section_offset)) {
+        return save_fail(writer, runtime::Error.out_of_memory);
+    }
+    index = 0;
+    while (index < count) {
+        let section: *OutputSection = save_section_at(writer, index);
+        if (section == null) {
+            return save_fail(writer, runtime::Error.invalid_argument);
+        }
+        if (!emit_u32(output, section->name as u32) || !emit_u32(output, section->kind as u32) ||
+            !emit_u64(output, section->flags as u64) || !emit_u64(output, 0) ||
+            !emit_u64(output, section->offset as u64) || !emit_u64(output, section->size as u64) ||
+            !emit_u32(output, section->link as u32) || !emit_u32(output, section->info as u32) ||
+            !emit_u64(output, section->alignment as u64) || !emit_u64(output, section->entry_size as u64)) {
+            return save_fail(writer, runtime::Error.out_of_memory);
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn save(object: object::Object) -> bytes::BufferResult {
+    var writer: Writer = {
+        sections = bytes::empty(), shstrtab = bytes::empty(), strtab = bytes::empty(),
+        symtab = bytes::empty(), symbol_map = bytes::empty(), rela_text = bytes::empty(),
+        rela_rodata = bytes::empty(), rela_data = bytes::empty(), error = runtime::Error.none,
+    };
+    var output: bytes::Buffer = bytes::empty();
+    if (!object::is_valid(object)) {
+        return {
+            buffer = output, error = runtime::Error.invalid_argument,
+        };
+    }
+    var plan: SavePlan = {
+        text_section = 0, rodata_section = 0, data_section = 0, bss_section = 0, symtab_section = 0,
+        strtab_section = 0, shstrtab_section = 0, rela_text_section = 0, rela_rodata_section = 0,
+        rela_data_section = 0, note_section = 0, section_count = 0, first_global = 0, section_offset = 0,
+    };
+    var success: bool = save_plan(&writer, object, &plan) && save_symbols(&writer, object, &plan) &&
+        save_relocations(&writer, object) && save_sections(&writer, object, &plan) && save_layout(&writer, &plan);
+    if (success) {
+        let total: usize = plan.section_offset + plan.section_count * (format::Limit.section_size as usize);
+        let reserved: bytes::BufferResult = bytes::with_capacity(total);
+        if (reserved.error != runtime::Error.none) {
+            success = save_fail(&writer, reserved.error);
+        } else {
+            output = reserved.buffer;
+            success = save_emit(&writer, object, &plan, &output);
+        }
+    }
+    let scratch_error: runtime::Error = save_release(&writer);
+    if (!success) {
+        bytes::release(output);
+        return {
+            buffer = bytes::empty(), error = writer.error == runtime::Error.none ?
+                runtime::Error.invalid_argument : writer.error,
+        };
+    }
+    if (scratch_error != runtime::Error.none) {
+        bytes::release(output);
+        return {
+            buffer = bytes::empty(), error = scratch_error,
+        };
+    }
+    return {
+        buffer = output, error = runtime::Error.none,
+    };
+}

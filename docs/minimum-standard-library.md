@@ -12,11 +12,14 @@ The source modules and their direct dependencies are:
 
 | Module | Responsibility | Direct dependencies |
 | --- | --- | --- |
+| `luna.std.ascii` | ASCII classification, digit decoding and hexadecimal rendering | none |
+| `luna.std.checked` | checked `usize` arithmetic, range validation and alignment | none |
 | `luna.std.memory` | owned byte allocations and byte operations | `luna.runtime` |
 | `luna.std.bytes` | growable owned byte buffers | `luna.runtime`, private `luna.std.memory` |
+| `luna.std.binary` | explicit little-endian integer reads, appends and stores | `luna.runtime`, `luna.std.bytes`, `luna.std.checked` |
 | `luna.std.text` | validated UTF-8 views and owned text | `luna.runtime`, `luna.std.bytes` |
 | `luna.std.path` | owned NUL-terminated filesystem paths | `luna.runtime`, `luna.std.bytes`, `luna.std.text` |
-| `luna.std.io` | complete writes, reads to EOF and file helpers | `luna.runtime`, `luna.std.bytes`, `luna.std.text`, `luna.std.path` |
+| `luna.std.io` | complete writes, reads to EOF and file helpers | `luna.runtime`, `luna.std.ascii`, `luna.std.bytes`, `luna.std.text`, `luna.std.path` |
 
 Build the complete target sysroot explicitly:
 
@@ -108,6 +111,27 @@ Append accepts a source range inside the buffer's current logical contents,
 including self-append that triggers reallocation. A source in spare capacity
 is rejected because those bytes are not initialized logical contents.
 Truncation and clear retain capacity and never allocate.
+
+## ASCII and checked arithmetic
+
+`luna.std.ascii` centralizes cold-path ASCII classification, base-2 through
+base-16 digit decoding and lowercase hexadecimal rendering. Byte-at-a-time hot
+loops such as the lexer and assembler keep equivalent module-local predicates:
+the correctness-first backend has no inliner, so a cross-module call per source
+byte would be a material bootstrap cost.
+
+`luna.std.checked` wraps the overflow-reporting integer intrinsics for shared
+`usize` addition and builds power-of-two alignment and bounded-range checks on
+that primitive. Hot byte-buffer growth paths invoke the intrinsics directly;
+the shared module owns the less frequent layout and binary-format operations.
+
+## Little-endian binary data
+
+`luna.std.binary` is the only shared implementation of bounded little-endian
+16-, 32- and 64-bit reads, buffer appends and in-place 32-/64-bit stores. The
+LUNAOBJ1 codec, ELF reader/writer, assembler fixups and static linker use this
+module instead of maintaining independent byte-shift loops. It operates on
+explicit byte ranges and does not serialize Luna structure representations.
 
 ## UTF-8 text
 

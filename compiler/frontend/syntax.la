@@ -1,0 +1,143 @@
+module luna.bootstrap.frontend.syntax;
+
+enum SyntaxLimit: usize {
+    maximum_size = 18446744073709551615, maximum_nodes = 262144,
+}
+
+fn syntax_no_index() -> usize {
+    return SyntaxLimit.maximum_size as usize;
+}
+
+fn parser_empty_span() -> lexer::SourceSpan {
+    return {
+        offset = 0, length = 0, line = 0, column = 0,
+    };
+}
+
+fn parser_invalid_node() -> SyntaxNode {
+    return {
+        kind = SyntaxKind.invalid, span = parser_empty_span(),
+        token_index = syntax_no_index(), parent = syntax_no_index(),
+        first_child = syntax_no_index(), last_child = syntax_no_index(),
+        next_sibling = syntax_no_index(), child_count = 0, flags = SyntaxFlag.none as usize,
+    };
+}
+
+fn syntax_tree_empty() -> SyntaxTree {
+    return {
+        storage = bytes::empty(), count = 0, token_count = 0, root = syntax_no_index(),
+    };
+}
+
+fn syntax_tree_storage_is_valid(tree: SyntaxTree) -> bool {
+    if (!bytes::is_valid(tree.storage) || tree.storage.length % sizeof(SyntaxNode) != 0 ||
+        tree.count > SyntaxLimit.maximum_nodes as usize) {
+        return false;
+    }
+    return tree.count == tree.storage.length / sizeof(SyntaxNode);
+}
+
+fn syntax_tree_is_valid(tree: SyntaxTree) -> bool {
+    if (!syntax_tree_storage_is_valid(tree)) {
+        return false;
+    }
+    let none: usize = syntax_no_index();
+    if (tree.count == 0) {
+        return tree.token_count == 0 && tree.root == none;
+    }
+    if (tree.token_count == 0 || tree.root >= tree.count) {
+        return false;
+    }
+
+    let nodes: *const SyntaxNode = tree.storage.data as *const SyntaxNode;
+    var node_index: usize = 0;
+    while (node_index < tree.count) {
+        let node: SyntaxNode = nodes[node_index];
+        if ((node.kind as usize) > (SyntaxKind.selective_import_names as usize) || node.flags > 524287 ||
+            node.span.line == 0 || node.span.column == 0 || node.span.length >
+                (SyntaxLimit.maximum_size as usize) - node.span.offset || (node.token_index != none &&
+                node.token_index >= tree.token_count)) {
+            return false;
+        }
+        if (node_index == tree.root) {
+            if (node.parent != none) {
+                return false;
+            }
+        } else if (node.parent >= tree.count) {
+            return false;
+        }
+        if (node.next_sibling != none && node.next_sibling >= tree.count) {
+            return false;
+        }
+        if (node.child_count == 0) {
+            if (node.first_child != none || node.last_child != none) {
+                return false;
+            }
+            node_index += 1;
+            continue;
+        }
+        if (node.child_count > tree.count || node.first_child >= tree.count || node.last_child >= tree.count) {
+            return false;
+        }
+
+        var child_index: usize = node.first_child;
+        var previous_child: usize = none;
+        var visited: usize = 0;
+        while (visited < node.child_count) {
+            if (child_index >= tree.count) {
+                return false;
+            }
+            if (nodes[child_index].parent != node_index) {
+                return false;
+            }
+            previous_child = child_index;
+            child_index = nodes[child_index].next_sibling;
+            visited += 1;
+        }
+        if (previous_child != node.last_child || child_index != none) {
+            return false;
+        }
+        node_index += 1;
+    }
+    if (nodes[tree.root].kind != SyntaxKind.program || nodes[tree.root].next_sibling != none) {
+        return false;
+    }
+
+    node_index = 0;
+    while (node_index < tree.count) {
+        var ancestor: usize = node_index;
+        var depth: usize = 0;
+        while (ancestor != tree.root && depth < tree.count) {
+            ancestor = nodes[ancestor].parent;
+            if (ancestor >= tree.count) {
+                return false;
+            }
+            depth += 1;
+        }
+        if (ancestor != tree.root) {
+            return false;
+        }
+        node_index += 1;
+    }
+    return true;
+}
+
+fn syntax_tree_get(tree: SyntaxTree, index: usize) -> SyntaxNodeResult {
+    if (!syntax_tree_storage_is_valid(tree) || index >= tree.count) {
+        return {
+            node = parser_invalid_node(), error = runtime::Error.invalid_argument,
+        };
+    }
+    let nodes: *const SyntaxNode = tree.storage.data as *const SyntaxNode;
+    return {
+        node = nodes[index], error = runtime::Error.none,
+    };
+}
+
+fn syntax_tree_release(tree: SyntaxTree) -> runtime::Error {
+    if (!syntax_tree_storage_is_valid(tree)) {
+        return runtime::Error.invalid_argument;
+    }
+    return bytes::release(tree.storage);
+}
+

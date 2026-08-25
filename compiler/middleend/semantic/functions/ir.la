@@ -1,0 +1,217 @@
+module luna.bootstrap.middleend.semantic.functions.ir;
+
+import luna.bootstrap.frontend.lexer as lexer;
+import luna.bootstrap.frontend.syntax as syntax;
+import luna.bootstrap.middleend.ir as ir;
+import luna.bootstrap.middleend.semantic.functions as functions;
+import luna.runtime as runtime;
+
+fn ir_function_record(context: *context::Context, function_id: usize) -> ir::Function {
+    let none: usize = context::no_id();
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    let function: context::Function = functions[function_id];
+    let symbol: context::Symbol = symbols[function.symbol_id];
+    let external: bool = (function.flags & (context::SymbolFlag.external as usize)) != 0;
+    let exported: bool = (function.flags & (context::SymbolFlag.exported as usize)) != 0;
+    var has_body: bool = false;
+    var asm_body_node: usize = none;
+    if (function.implementation_unit != none && !external) {
+        let implementation: syntax::SyntaxNode =
+            context::node(context, function.implementation_unit, function.implementation_node);
+        has_body = (implementation.flags & (syntax::SyntaxFlag.bodyless as usize)) == 0;
+        // An asm fn's body stays a syntax reference (unit + string node);
+        // the backend decodes and splices the string literals verbatim.
+        if (has_body && (function.flags & (context::SymbolFlag.asm_function as usize)) != 0) {
+            var ignored_count: usize = 0;
+            var ignored_return: usize = none;
+            functions::function_parts(
+                context, function.implementation_unit, implementation, &ignored_count, &ignored_return, &asm_body_node);
+        }
+    }
+    let export_name_token: usize = functions::function_export_name_token(context, function);
+    return {
+        declaration_unit = symbol.declaration_unit, declaration_node = symbol.declaration_node,
+        name_token = symbol.name_token, linkage = external ? ir::Linkage.external_c : (exported ?
+                ir::Linkage.module_export : ir::Linkage.internal), return_type = function.return_type,
+        first_parameter = none, parameter_count = 0, first_slot = none, slot_count = 0, first_block = none,
+        block_count = 0, first_value = none, value_count = 0, has_body = has_body, variadic = (function.flags &
+            (context::SymbolFlag.variadic as usize)) != 0, export_name_unit = export_name_token == none ?
+            none : function.implementation_unit, export_name_token = export_name_token,
+        asm_body_unit = asm_body_node == none ? none : function.implementation_unit, asm_body_node = asm_body_node,
+    };
+}
+
+fn text_is_before(
+    context: *context::Context, left_unit: usize, left_span: lexer::SourceSpan, right_unit: usize,
+    right_span: lexer::SourceSpan) -> bool {
+    let left: *const context::Unit = context::input_unit(context, left_unit);
+    let right: *const context::Unit = context::input_unit(context, right_unit);
+    if (left == null || right == null || left_span.offset > left->source.length || left_span.length >
+            left->source.length - left_span.offset || right_span.offset > right->source.length || right_span.length >
+            right->source.length - right_span.offset) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let shared_length: usize = left_span.length < right_span.length ? left_span.length : right_span.length;
+    var index: usize = 0;
+    while (index < shared_length) {
+        let left_byte: u8 = left->source.data[left_span.offset + index];
+        let right_byte: u8 = right->source.data[right_span.offset + index];
+        if (left_byte != right_byte) {
+            return left_byte < right_byte;
+        }
+        index += 1;
+    }
+    return left_span.length < right_span.length;
+}
+
+fn token_is_before(
+    context: *context::Context, left_unit: usize, left_token: usize, right_unit: usize, right_token: usize) -> bool {
+    return text_is_before(
+        context, left_unit, context::token(context, left_unit, left_token).span, right_unit,
+        context::token(context, right_unit, right_token).span);
+}
+
+fn module_name_is_before(context: *context::Context, left_module: usize, right_module: usize) -> bool {
+    let modules: *const context::Module = context->modules.data as
+            *const context::Module;
+    let left: context::Module = modules[left_module];
+    let right: context::Module = modules[right_module];
+    let left_name: syntax::SyntaxNode = context::node(context, left.name_unit, left.name_node);
+    let right_name: syntax::SyntaxNode = context::node(context, right.name_unit, right.name_node);
+    var left_child: usize = left_name.first_child;
+    var right_child: usize = right_name.first_child;
+    let shared_count: usize = left_name.child_count < right_name.child_count ?
+            left_name.child_count : right_name.child_count;
+    var index: usize = 0;
+    while (index < shared_count) {
+        let left_component: syntax::SyntaxNode = context::node(context, left.name_unit, left_child);
+        let right_component: syntax::SyntaxNode = context::node(context, right.name_unit, right_child);
+        if (!context::tokens_equal(
+                context, left.name_unit, left_component.token_index, right.name_unit, right_component.token_index)) {
+            return token_is_before(
+                context, left.name_unit, left_component.token_index, right.name_unit, right_component.token_index);
+        }
+        left_child = left_component.next_sibling;
+        right_child = right_component.next_sibling;
+        index += 1;
+    }
+    return left_name.child_count < right_name.child_count;
+}
+
+fn function_is_before(context: *context::Context, left_function: usize, right_function: usize) -> bool {
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    let left: context::Symbol = symbols[functions[left_function].symbol_id];
+    let right: context::Symbol = symbols[functions[right_function].symbol_id];
+    if (left.module_id != right.module_id) {
+        return module_name_is_before(context, left.module_id, right.module_id);
+    }
+    return token_is_before(context, left.declaration_unit, left.name_token, right.declaration_unit, right.name_token);
+}
+
+fn function_order_sift_down(context: *context::Context, ordered: *usize, start: usize, count: usize) -> bool {
+    if (ordered == null || start >= count) {
+        return false;
+    }
+    var root: usize = start;
+    while (root < count / 2 && context->error == runtime::Error.none) {
+        let left_child: usize = root * 2 + 1;
+        var selected: usize = root;
+        if (function_is_before(
+                context, ordered[selected], ordered[left_child])) {
+            selected = left_child;
+        }
+        let right_child: usize = left_child + 1;
+        if (right_child < count &&
+            function_is_before(
+                context, ordered[selected], ordered[right_child])) {
+            selected = right_child;
+        }
+        if (selected == root) {
+            return true;
+        }
+        let saved: usize = ordered[root];
+        ordered[root] = ordered[selected];
+        ordered[selected] = saved;
+        root = selected;
+    }
+    return context->error == runtime::Error.none;
+}
+
+fn function_order(context: *context::Context) -> bytes::Buffer {
+    var order: bytes::Buffer = bytes::empty();
+    var function_id: usize = 0;
+    while (function_id < context->function_count && context->error == runtime::Error.none) {
+        let appended: bytes::BufferResult =
+            bytes::append(order, (&function_id) as *const usize as *const u8, sizeof(usize));
+        order = appended.buffer;
+        context->error = appended.error;
+        function_id += 1;
+    }
+    let ordered: *usize = order.data as *usize;
+    var heap_index: usize = context->function_count / 2;
+    while (heap_index != 0 && context->error == runtime::Error.none) {
+        heap_index -= 1;
+        function_order_sift_down(context, ordered, heap_index, context->function_count);
+    }
+    var remaining: usize = context->function_count;
+    while (remaining > 1 && context->error == runtime::Error.none) {
+        remaining -= 1;
+        let saved: usize = ordered[0];
+        ordered[0] = ordered[remaining];
+        ordered[remaining] = saved;
+        function_order_sift_down(context, ordered, 0, remaining);
+    }
+    return order;
+}
+
+fn create_ir_functions(context: *context::Context) -> bool {
+    let none: usize = context::no_id();
+    let order: bytes::Buffer = function_order(context);
+    let ordered: *const usize = order.data as *const usize;
+    var order_index: usize = 0;
+    while (order_index < context->function_count && context->error == runtime::Error.none) {
+        let function_id: usize = ordered[order_index];
+        let ir_function: usize = ir::add_function(&context->ir, ir_function_record(context, function_id));
+        if (ir_function == none) {
+            context->error = context->ir.error;
+            break;
+        }
+        let functions: *context::Function = context->functions.data as
+                *context::Function;
+        functions[function_id].ir_function = ir_function;
+        order_index += 1;
+    }
+
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    let parameters: *const context::Parameter = context->parameters.data as
+            *const context::Parameter;
+    order_index = 0;
+    while (order_index < context->function_count && context->error == runtime::Error.none) {
+        let function_id: usize = ordered[order_index];
+        let function: context::Function = functions[function_id];
+        var index: usize = 0;
+        while (index < function.parameter_count) {
+            let parameter: context::Parameter = parameters[function.first_parameter + index];
+            if (ir::add_parameter(
+                    &context->ir, function.ir_function, parameter.type_id, parameter.name_token) == none) {
+                context->error = context->ir.error;
+                break;
+            }
+            index += 1;
+        }
+        order_index += 1;
+    }
+    let release_error: runtime::Error = bytes::release(order);
+    if (context->error == runtime::Error.none) {
+        context->error = release_error;
+    }
+    return context->error == runtime::Error.none;
+}

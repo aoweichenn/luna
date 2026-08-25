@@ -1,5 +1,9 @@
 module luna.bootstrap.backend.x86_64.abi;
 
+import luna.bootstrap.middleend.ir.verify as ir_check;
+
+import luna.std.checked as checked;
+
 enum Limit: usize {
     maximum_size = 18446744073709551615, general_register_count = 6, vector_register_count = 8, eightbyte_size = 8,
     stack_alignment = 16, maximum_register_eightbytes = 2, maximum_type_depth = 128, maximum_stack_size = 2147483647,
@@ -28,15 +32,11 @@ fn storage_is_valid(abi: Abi) -> bool {
 }
 
 fn align_up(value: usize, alignment: usize) -> usize {
-    if (alignment == 0 || (alignment & (alignment - 1)) != 0 || value > (Limit.maximum_size as usize) -
-                (alignment - 1)) {
-        return no_id();
-    }
-    return (value + alignment - 1) & ~(alignment - 1);
+    var result: usize = 0;
+    return checked::align_up(value, alignment, &result) ? result : no_id();
 }
 
-fn class_merge(
-    left: Class, right: Class) -> Class {
+fn class_merge(left: Class, right: Class) -> Class {
     if (left == right) {
         return left;
     }
@@ -104,8 +104,7 @@ fn merge_type(
     let record: type_info::Record = records[type_id];
     if (type_info::is_scalar(record.kind)) {
         return merge_leaf(
-            classification, base_offset, record.size_bytes, record.alignment_bytes,
-            scalar_class(record.kind));
+            classification, base_offset, record.size_bytes, record.alignment_bytes, scalar_class(record.kind));
     }
     if (record.kind == type_info::Kind.array) {
         let element: type_info::Record = records[record.element_type];
@@ -182,10 +181,7 @@ fn add_piece(abi: *Abi, piece: Piece) -> usize {
     if (abi == null || abi->error != runtime::Error.none) {
         return none;
     }
-    let appended: bytes::BufferResult =
-        append(
-            abi->pieces, (&piece) as *const Piece
-                as *const u8, sizeof(Piece));
+    let appended: bytes::BufferResult = append(abi->pieces, (&piece) as *const Piece as *const u8, sizeof(Piece));
     abi->pieces = appended.buffer;
     abi->error = appended.error;
     if (appended.error != runtime::Error.none) {
@@ -202,9 +198,7 @@ fn add_parameter(abi: *Abi, parameter: Parameter) -> usize {
         return none;
     }
     let appended: bytes::BufferResult =
-        append(
-            abi->parameters, (&parameter) as *const Parameter
-                as *const u8, sizeof(Parameter));
+        append(abi->parameters, (&parameter) as *const Parameter as *const u8, sizeof(Parameter));
     abi->parameters = appended.buffer;
     abi->error = appended.error;
     if (appended.error != runtime::Error.none) {
@@ -221,9 +215,7 @@ fn add_function(abi: *Abi, function: Function) -> usize {
         return none;
     }
     let appended: bytes::BufferResult =
-        append(
-            abi->functions, (&function) as *const Function
-                as *const u8, sizeof(Function));
+        append(abi->functions, (&function) as *const Function as *const u8, sizeof(Function));
     abi->functions = appended.buffer;
     abi->error = appended.error;
     if (appended.error != runtime::Error.none) {
@@ -234,8 +226,7 @@ fn add_function(abi: *Abi, function: Function) -> usize {
     return result;
 }
 
-fn piece_class(
-    classification: Classification, index: usize) -> Class {
+fn piece_class(classification: Classification, index: usize) -> Class {
     return index == 0 ? classification.first : classification.second;
 }
 
@@ -262,8 +253,7 @@ fn add_stack_area(
     return aligned_offset + aligned_size;
 }
 
-fn build_return(
-    abi: *Abi, function: *Function, types: type_info::Table) -> bool {
+fn build_return(abi: *Abi, function: *Function, types: type_info::Table) -> bool {
     let records: *const type_info::Record = types.types.data as *const type_info::Record;
     let record: type_info::Record = records[function->return_type];
     function->return_size_bytes = record.size_bytes;
@@ -306,19 +296,16 @@ fn build_return(
     return true;
 }
 
-fn build_scalar_parameter(
-    function: *Function, parameter: *Parameter, record: type_info::Record) -> bool {
+fn build_scalar_parameter(function: *Function, parameter: *Parameter, record: type_info::Record) -> bool {
     let abi_class: Class = scalar_class(record.kind);
     parameter->abi_class = abi_class;
-    if (abi_class == Class.integer && function->general_register_count <
-            Limit.general_register_count as usize) {
+    if (abi_class == Class.integer && function->general_register_count < Limit.general_register_count as usize) {
         parameter->location = LocationKind.general_register;
         parameter->register_index = function->general_register_count;
         function->general_register_count += 1;
         return true;
     }
-    if (abi_class == Class.sse && function->vector_register_count <
-            Limit.vector_register_count as usize) {
+    if (abi_class == Class.sse && function->vector_register_count < Limit.vector_register_count as usize) {
         parameter->location = LocationKind.vector_register;
         parameter->register_index = function->vector_register_count;
         function->vector_register_count += 1;
@@ -326,8 +313,7 @@ fn build_scalar_parameter(
     }
     var offset: usize = 0;
     var area_size: usize = 0;
-    let total: usize = add_stack_area(
-        function->stack_argument_size_bytes, 8, 8, &offset, &area_size);
+    let total: usize = add_stack_area(function->stack_argument_size_bytes, 8, 8, &offset, &area_size);
     if (total == no_id()) {
         return false;
     }
@@ -339,8 +325,7 @@ fn build_scalar_parameter(
 }
 
 fn build_aggregate_parameter(
-    abi: *Abi, function: *Function, parameter: *Parameter,
-    types: type_info::Table, record: type_info::Record) -> bool {
+    abi: *Abi, function: *Function, parameter: *Parameter, types: type_info::Table, record: type_info::Record) -> bool {
     let classification: Classification = classify(types, parameter->type_id);
     var required_general: usize = 0;
     var required_vector: usize = 0;
@@ -388,13 +373,11 @@ fn build_aggregate_parameter(
         } else {
             function->vector_register_count += 1;
         }
-        let location: LocationKind = is_integer ? LocationKind.general_register :
-                LocationKind.vector_register;
+        let location: LocationKind = is_integer ? LocationKind.general_register : LocationKind.vector_register;
         if (add_piece(
                 abi, {
                     abi_class = abi_class, location = location, register_index = register_index,
-                    value_offset_bytes = index * 8, size_bytes =
-                        piece_size(record.size_bytes, index),
+                    value_offset_bytes = index * 8, size_bytes = piece_size(record.size_bytes, index),
                 }) == no_id()) {
             return false;
         }
@@ -416,15 +399,14 @@ fn build_parameter(
         size_bytes = record.size_bytes, alignment_bytes = record.alignment_bytes, first_piece = none, piece_count = 0,
         aggregate = type_info::is_memory(record.kind),
     };
-    let built: bool = parameter.aggregate ?
-        build_aggregate_parameter(abi, function, &parameter, types, record) :
+    let built: bool = parameter.aggregate ? build_aggregate_parameter(abi, function, &parameter, types, record) :
         build_scalar_parameter(function, &parameter, record);
     return built && add_parameter(abi, parameter) != none;
 }
 
 fn analyze(ir: ir::Store, types: type_info::Table) -> Result {
     var abi: Abi = empty();
-    if (!ir::is_valid(ir, types)) {
+    if (!ir_check::is_valid(ir, types)) {
         return {
             abi = abi, error = runtime::Error.invalid_argument,
         };
@@ -459,9 +441,7 @@ fn analyze(ir: ir::Store, types: type_info::Table) -> Result {
             function.parameter_count += 1;
             index += 1;
         }
-        function.call_frame_size_bytes =
-            align_up(
-                function.stack_argument_size_bytes, Limit.stack_alignment as usize);
+        function.call_frame_size_bytes = align_up(function.stack_argument_size_bytes, Limit.stack_alignment as usize);
         if (function.call_frame_size_bytes == no_id() || function.call_frame_size_bytes >
                 Limit.maximum_stack_size as usize ||
             add_function(
@@ -511,8 +491,7 @@ fn analyze(ir: ir::Store, types: type_info::Table) -> Result {
             parameter_index += 1;
         }
         synthesized.call_frame_size_bytes =
-            align_up(
-                synthesized.stack_argument_size_bytes, Limit.stack_alignment as usize);
+            align_up(synthesized.stack_argument_size_bytes, Limit.stack_alignment as usize);
         if (abi.error == runtime::Error.none && (synthesized.call_frame_size_bytes == no_id() ||
                 synthesized.call_frame_size_bytes > Limit.maximum_stack_size
                         as usize ||
@@ -602,8 +581,7 @@ fn get_parameter(abi: Abi, parameter_id: usize) -> ParameterResult {
         };
     }
     return {
-        parameter = (abi.parameters.data as *const Parameter)[parameter_id],
-        error = runtime::Error.none,
+        parameter = (abi.parameters.data as *const Parameter)[parameter_id], error = runtime::Error.none,
     };
 }
 
@@ -633,4 +611,3 @@ fn release(abi: Abi) -> runtime::Error {
     }
     return error;
 }
-

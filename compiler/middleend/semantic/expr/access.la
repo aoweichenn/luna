@@ -1,0 +1,703 @@
+module luna.bootstrap.middleend.semantic.expr.access;
+
+import luna.bootstrap.middleend.semantic.types.lookup as type_lookup;
+
+import luna.bootstrap.middleend.semantic.context.builder as builder;
+
+import luna.bootstrap.middleend.semantic.context.lookup as names;
+
+import luna.bootstrap.frontend.lexer as lexer;
+import luna.bootstrap.middleend.ir as ir;
+import luna.bootstrap.middleend.semantic.expr.base as base;
+import luna.bootstrap.middleend.semantic.types as types;
+import luna.bootstrap.middleend.type as type_info;
+import luna.runtime as runtime;
+import luna.std.bytes as bytes;
+
+fn function_value(context: *context::Context, node: syntax::SyntaxNode, symbol_id: usize) -> context::Expression {
+    let none: usize = context::no_id();
+    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    let function: context::Function = functions[symbols[symbol_id].function_id];
+    var parameter_types: bytes::Buffer = bytes::empty();
+    var index: usize = 0;
+    while (index < function.parameter_count && context->error == runtime::Error.none) {
+        let parameters: *const context::Parameter = context->parameters.data as
+                *const context::Parameter;
+        let parameter_type: usize = parameters[function.first_parameter + index].type_id;
+        let appended: bytes::BufferResult =
+            bytes::append(parameter_types, (&parameter_type) as *const usize as *const u8, sizeof(usize));
+        parameter_types = appended.buffer;
+        context->error = appended.error;
+        index += 1;
+    }
+    if (context->error != runtime::Error.none) {
+        let release_error: runtime::Error = bytes::release(parameter_types);
+        if (context->error == runtime::Error.none) {
+            context->error = release_error;
+        }
+        return base::invalid_expression();
+    }
+    let parameters: *const usize = parameter_types.data as *const usize;
+    let pointer_type: usize =
+        context::function_pointer_type(context, function.return_type, parameters, function.parameter_count);
+    let release_error: runtime::Error = bytes::release(parameter_types);
+    if (context->error == runtime::Error.none) {
+        context->error = release_error;
+    }
+    if (pointer_type == none || function.ir_function == none) {
+        return base::invalid_expression();
+    }
+    var instruction: ir::Instruction = builder::instruction(ir::Opcode.function_address, node);
+    instruction.auxiliary = function.ir_function;
+    let value_id: usize = builder::emit_value(context, instruction, pointer_type);
+    return {
+        type_id = pointer_type, value_id = value_id, address_id = none, constant_value = 0, has_constant = false,
+        lvalue = false, mutable_lvalue = false, volatile_lvalue = false, valid = value_id != none,
+        bitfield_segment = context::no_id(),
+    };
+}
+
+// Emits the resolved value of a module-level constant symbol (flat or
+// qualified lookup), mirroring the literal lowering of a local constant.
+fn emit_symbol_constant(context: *context::Context, node: syntax::SyntaxNode, symbol_id: usize) -> context::Expression {
+    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let type_id: usize = symbols[symbol_id].type_id;
+    let value: u64 = symbols[symbol_id].integer_value;
+    if (type_id == (type_info::BuiltinType.boolean as usize)) {
+        return builder::emit_boolean_constant(context, node, value != 0);
+    }
+    let kind: type_info::Kind = context::type_record(context, type_id).kind;
+    return builder::emit_integer_constant(
+        context, node, type_id, builder::mask_integer(value, type_info::bit_width(kind)));
+}
+
+fn lower_const_name(context: *context::Context, node: syntax::SyntaxNode) -> context::Expression {
+    let none: usize = context::no_id();
+    if (node.child_count != 0) {
+        // Qualified `qual::name`: only a module-level constant of the named
+        // module applies; the lookup diagnoses failures itself.
+        let qualified_symbol: usize =
+            names::lookup_qualified_symbol(context, context->current_unit, node, context::SymbolKind.constant, true);
+        if (qualified_symbol == none) {
+            return base::invalid_expression();
+        }
+        return emit_symbol_constant(context, node, qualified_symbol);
+    }
+    var type_id: usize = none;
+    var value: u64 = 0;
+    let local_id: usize = builder::find_local(context, context->current_unit, node.token_index);
+    if (local_id != none) {
+        let locals: *const context::Local = context->locals.data as *const context::Local;
+        let local: context::Local = locals[local_id];
+        if (!local.constant_binding) {
+            return base::invalid_expression();
+        }
+        type_id = local.type_id;
+        value = local.integer_value;
+    } else {
+        let symbol_id: usize = names::lookup_symbol(
+            context, context->current_unit, node.token_index, context::SymbolKind.constant);
+        if (symbol_id == none) {
+            return base::invalid_expression();
+        }
+        let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+        type_id = symbols[symbol_id].type_id;
+        value = symbols[symbol_id].integer_value;
+    }
+    if (type_id == (type_info::BuiltinType.boolean as usize)) {
+        return builder::emit_boolean_constant(context, node, value != 0);
+    }
+    let kind: type_info::Kind = context::type_record(context, type_id).kind;
+    return builder::emit_integer_constant(
+        context, node, type_id, builder::mask_integer(value, type_info::bit_width(kind)));
+}
+
+// Lowers a qualified `qual::name` expression: constant first, then function,
+// probing quietly so a name found under either kind yields exactly one
+// result; only a total miss re-runs the diagnosing lookup to report the
+// qualifier or name failure once.
+fn lower_qualified_name(context: *context::Context, node: syntax::SyntaxNode) -> context::Expression {
+    let none: usize = context::no_id();
+    var symbol_id: usize =
+        names::lookup_qualified_symbol(context, context->current_unit, node, context::SymbolKind.constant, false);
+    if (symbol_id != none) {
+        return emit_symbol_constant(context, node, symbol_id);
+    }
+    symbol_id = names::lookup_qualified_symbol(
+        context, context->current_unit, node, context::SymbolKind.function, false);
+    if (symbol_id != none) {
+        return function_value(context, node, symbol_id);
+    }
+    names::lookup_qualified_symbol(context, context->current_unit, node, context::SymbolKind.constant, true);
+    return base::invalid_expression();
+}
+
+fn lower_name(context: *context::Context, node: syntax::SyntaxNode) -> context::Expression {
+    if (node.child_count != 0) {
+        return lower_qualified_name(context, node);
+    }
+    let const_name: context::Expression = lower_const_name(context, node);
+    if (const_name.valid) {
+        return const_name;
+    }
+    let local_id: usize = builder::find_local(context, context->current_unit, node.token_index);
+    if (local_id == context::no_id()) {
+        let function_symbol: usize =
+            names::lookup_symbol(context, context->current_unit, node.token_index, context::SymbolKind.function);
+        if (function_symbol != context::no_id()) {
+            return function_value(context, node, function_symbol);
+        }
+        context::add_diagnostic(
+            context, context::DiagnosticKind.unknown_name, context->current_unit, node.span, context::no_id(),
+            context::empty_span(), node.token_index);
+        return base::invalid_expression();
+    }
+    let locals: *const context::Local = context->locals.data as
+            *const context::Local;
+    let local: context::Local = locals[local_id];
+    let address_id: usize = builder::address_of_slot(
+        context, node, local.slot_id, local.type_id, !local.mutable_binding, local.volatile_binding);
+    let expression: context::Expression = {
+        type_id = local.type_id, value_id = context::no_id(), address_id = address_id, constant_value = 0,
+        has_constant = false, lvalue = true, mutable_lvalue = local.mutable_binding,
+        volatile_lvalue = local.volatile_binding, valid = address_id != context::no_id(),
+        bitfield_segment = context::no_id(),
+    };
+    return builder::load_lvalue(context, node, expression);
+}
+
+fn lower_enum_member(context: *context::Context, node: syntax::SyntaxNode) -> context::Expression {
+    if (node.child_count != 2) {
+        return base::invalid_expression();
+    }
+    let owner_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let member_node: syntax::SyntaxNode = context::node(context, context->current_unit, owner_node.next_sibling);
+    if (owner_node.kind != syntax::SyntaxKind.name_expression || member_node.kind !=
+            syntax::SyntaxKind.name_expression) {
+        return base::invalid_expression();
+    }
+    let type_symbol: usize =
+        names::lookup_qualified_symbol(
+            context, context->current_unit, owner_node, context::SymbolKind.named_type, false);
+    if (type_symbol == context::no_id()) {
+        return base::invalid_expression();
+    }
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    var type_id: usize = symbols[type_symbol].type_id;
+    let alias_record: type_info::Record = context::type_record(context, type_id);
+    if (alias_record.kind == type_info::Kind.alias &&
+        types::require_complete_type(
+            context, type_id)) {
+        type_id = context::type_record(context, type_id).element_type;
+    }
+    if (context::type_record(
+            context, type_id).kind != type_info::Kind.enumeration) {
+        return base::invalid_expression();
+    }
+    let member_symbol: usize =
+        types::find_enum_member(context, type_id, context->current_unit, member_node.token_index);
+    if (member_symbol == context::no_id()) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.unknown_field, context->current_unit, member_node.span, context::no_id(),
+            context::empty_span(), type_id);
+        return base::invalid_expression();
+    }
+    return builder::emit_integer_constant(context, node, type_id, symbols[member_symbol].integer_value);
+}
+
+fn emit_integer_binary(
+    context: *context::Context, node: syntax::SyntaxNode, operation: lexer::TokenKind, type_id: usize, left: usize,
+    right: usize) -> usize {
+    var instruction: ir::Instruction = builder::instruction(ir::Opcode.binary_integer, node);
+    instruction.operation = operation;
+    instruction.left = left;
+    instruction.right = right;
+    return builder::emit_value(context, instruction, type_id);
+}
+
+fn emit_integer_shift(
+    context: *context::Context, node: syntax::SyntaxNode, operation: lexer::TokenKind, type_id: usize, value: usize,
+    amount: usize) -> usize {
+    let count: context::Expression = builder::emit_integer_constant(context, node, type_id, amount as u64);
+    return emit_integer_binary(context, node, operation, type_id, value, count.value_id);
+}
+
+fn emit_integer_mask(
+    context: *context::Context, node: syntax::SyntaxNode, type_id: usize, value: usize, mask: u64) -> usize {
+    let mask_expression: context::Expression = builder::emit_integer_constant(context, node, type_id, mask);
+    return emit_integer_binary(context, node, lexer::TokenKind.ampersand, type_id, value, mask_expression.value_id);
+}
+
+fn bitfield_bit_mask(bits: usize) -> u64 {
+    return builder::mask_integer(0xFFFFFFFFFFFFFFFF, bits);
+}
+
+// (raw >> offset) & mask(width) for unsigned storage; signed storage shifts
+// the segment to the top of the word and arithmetic-shifts it back down so
+// the segment's own sign bit extends.
+fn emit_bitfield_extract(
+    context: *context::Context, node: syntax::SyntaxNode, type_id: usize, raw: usize, bit_offset: usize,
+    bit_width: usize) -> usize {
+    let record: type_info::Record = context::type_record(context, type_id);
+    let width: usize = type_info::bit_width(record.kind);
+    var value: usize = raw;
+    if (type_info::is_signed_integer(record.kind)) {
+        if (bit_offset + bit_width < width) {
+            value = emit_integer_shift(
+                context, node, lexer::TokenKind.shift_left, type_id, value, width - bit_offset - bit_width);
+        }
+        if (bit_width < width) {
+            value = emit_integer_shift(context, node, lexer::TokenKind.shift_right, type_id, value, width - bit_width);
+        }
+        return value;
+    }
+    if (bit_offset > 0) {
+        value = emit_integer_shift(context, node, lexer::TokenKind.shift_right, type_id, value, bit_offset);
+    }
+    if (bit_width < width) {
+        value = emit_integer_mask(context, node, type_id, value, bitfield_bit_mask(bit_width));
+    }
+    return value;
+}
+
+fn lower_bitfield_member(
+    context: *context::Context, node: syntax::SyntaxNode, owner_address: usize, segment_id: usize, mutable_lvalue: bool,
+    volatile_lvalue: bool) -> context::Expression {
+    let none: usize = context::no_id();
+    let segment: context::BitfieldSegment = builder::bitfield_segment(context, segment_id);
+    let field_id: usize = builder::bitfield_storage_field(context, segment);
+    if (field_id == none) {
+        return base::invalid_expression();
+    }
+    let fields: *const type_info::Field = context->types.fields.data as
+            *const type_info::Field;
+    let field: type_info::Field = fields[field_id];
+    let pointer: type_info::IdResult =
+        type_info::table_pointer(&context->types, field.type_id, !mutable_lvalue, volatile_lvalue);
+    context->error = pointer.error;
+    var instruction: ir::Instruction = builder::instruction(ir::Opcode.member_address, node);
+    instruction.left = owner_address;
+    instruction.auxiliary = field.offset_bytes;
+    let address_id: usize = builder::emit_value(context, instruction, pointer.type_id);
+    let loaded: context::Expression =
+        builder::load_lvalue(
+            context, node, {
+                type_id = field.type_id, value_id = none, address_id = address_id, constant_value = 0,
+                has_constant = false, lvalue = true, mutable_lvalue = mutable_lvalue, volatile_lvalue = volatile_lvalue,
+                valid = address_id != none, bitfield_segment = none,
+            });
+    if (!loaded.valid) {
+        return base::invalid_expression();
+    }
+    let extracted: usize =
+        emit_bitfield_extract(context, node, field.type_id, loaded.value_id, segment.bit_offset, segment.bit_width);
+    return {
+        type_id = field.type_id, value_id = extracted, address_id = address_id, constant_value = 0,
+        has_constant = false, lvalue = true, mutable_lvalue = mutable_lvalue, volatile_lvalue = volatile_lvalue,
+        valid = extracted != none, bitfield_segment = segment_id,
+    };
+}
+
+// Read-modify-write of the storage field: load the raw word, clear the
+// segment's bits, insert the new value masked to its width, store back.
+fn store_bitfield(
+    context: *context::Context, node: syntax::SyntaxNode, destination: usize, segment_id: usize,
+    value: context::Expression) -> bool {
+    let none: usize = context::no_id();
+    let segment: context::BitfieldSegment = builder::bitfield_segment(context, segment_id);
+    let field_id: usize = builder::bitfield_storage_field(context, segment);
+    if (!value.valid || field_id == none || destination == none) {
+        return false;
+    }
+    let fields: *const type_info::Field = context->types.fields.data as
+            *const type_info::Field;
+    let field: type_info::Field = fields[field_id];
+    if (value.type_id != field.type_id) {
+        return false;
+    }
+    let record: type_info::Record = context::type_record(context, field.type_id);
+    let width: usize = type_info::bit_width(record.kind);
+    var load_instruction: ir::Instruction = builder::instruction(ir::Opcode.load_indirect, node);
+    load_instruction.left = destination;
+    let raw: usize = builder::emit_value(context, load_instruction, field.type_id);
+    if (raw == none) {
+        return false;
+    }
+    var inserted: usize = value.value_id;
+    if (segment.bit_width < width) {
+        inserted = emit_integer_mask(context, node, field.type_id, inserted, bitfield_bit_mask(segment.bit_width));
+    }
+    if (segment.bit_offset > 0) {
+        inserted = emit_integer_shift(
+            context, node, lexer::TokenKind.shift_left, field.type_id, inserted, segment.bit_offset);
+    }
+    var combined: usize = inserted;
+    if (segment.bit_offset != 0 || segment.bit_width != width) {
+        let clear_mask: u64 = builder::mask_integer(
+            bitfield_bit_mask(width) ^
+                (bitfield_bit_mask(
+                    segment.bit_width) << (segment.bit_offset as u64)), width);
+        let cleared: usize = emit_integer_mask(context, node, field.type_id, raw, clear_mask);
+        combined = emit_integer_binary(context, node, lexer::TokenKind.pipe, field.type_id, cleared, inserted);
+    }
+    var store_instruction: ir::Instruction = builder::instruction(ir::Opcode.store_indirect, node);
+    store_instruction.left = destination;
+    store_instruction.right = combined;
+    store_instruction.type_id = field.type_id;
+    store_instruction.auxiliary = record.size_bytes;
+    return builder::emit_void(context, store_instruction) != none;
+}
+
+fn lower_member(context: *context::Context, node: syntax::SyntaxNode, lowerer: api::Lowerer) -> context::Expression {
+    let enum_member: context::Expression = lower_enum_member(context, node);
+    if (enum_member.valid) {
+        return enum_member;
+    }
+    if (node.child_count != 2) {
+        return base::invalid_expression();
+    }
+    let base_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let name_node: syntax::SyntaxNode = context::node(context, context->current_unit, base_node.next_sibling);
+    let operation: lexer::TokenKind = context::token(context, context->current_unit, node.token_index).kind;
+    let base: context::Expression = api::invoke(lowerer, context, node.first_child, context::no_id());
+    if (!base.valid) {
+        return base;
+    }
+    var owner_type: usize = base.type_id;
+    var owner_address: usize = base.address_id;
+    var mutable_lvalue: bool = base.mutable_lvalue;
+    var volatile_lvalue: bool = base.volatile_lvalue;
+    if (operation == lexer::TokenKind.arrow) {
+        let pointer_record: type_info::Record = context::type_record(context, base.type_id);
+        if (pointer_record.kind != type_info::Kind.pointer) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.invalid_member, context->current_unit, node.span, context::no_id(),
+                context::empty_span(), base.type_id);
+            return base::invalid_expression();
+        }
+        owner_type = pointer_record.element_type;
+        owner_address = base.value_id;
+        mutable_lvalue = (pointer_record.flags & (type_info::Flag.read_only as usize)) == 0;
+        volatile_lvalue = (pointer_record.flags & (type_info::Flag.volatile_pointee as usize)) != 0;
+        var check: ir::Instruction = builder::instruction(ir::Opcode.null_check, node);
+        check.left = owner_address;
+        builder::emit_void(context, check);
+    } else if (operation != lexer::TokenKind.dot || base.address_id == context::no_id()) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_member, context->current_unit, node.span, context::no_id(),
+            context::empty_span(), base.type_id);
+        return base::invalid_expression();
+    }
+    let owner_record: type_info::Record = context::type_record(context, owner_type);
+    if (owner_record.kind != type_info::Kind.structure && owner_record.kind != type_info::Kind.record_union) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_member, context->current_unit, node.span, context::no_id(),
+            context::empty_span(), owner_type);
+        return base::invalid_expression();
+    }
+    let lookup: types::FieldLookup =
+        type_lookup::lookup_field(context, owner_type, context->current_unit, name_node.token_index);
+    if (lookup.status == types::FieldStatus.ambiguous) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.ambiguous_field, context->current_unit, name_node.span, context::no_id(),
+            context::empty_span(), owner_type);
+        return base::invalid_expression();
+    }
+    if (lookup.status != types::FieldStatus.found) {
+        let segment_id: usize =
+            builder::lookup_bitfield_segment(context, owner_type, context->current_unit, name_node.token_index);
+        if (segment_id != context::no_id()) {
+            return lower_bitfield_member(context, node, owner_address, segment_id, mutable_lvalue, volatile_lvalue);
+        }
+        context::add_diagnostic(
+            context, context::DiagnosticKind.unknown_field, context->current_unit, name_node.span, context::no_id(),
+            context::empty_span(), owner_type);
+        return base::invalid_expression();
+    }
+    let fields: *const type_info::Field = context->types.fields.data as
+            *const type_info::Field;
+    let field: type_info::Field = fields[lookup.field_id];
+    let field_record: type_info::Record = context::type_record(context, field.type_id);
+    if (field_record.kind == type_info::Kind.array && (field_record.flags & (type_info::Flag.flexible as usize)) != 0) {
+        // A flexible member access yields *T at the member offset, not an
+        // array lvalue; it composes with raw-pointer indexing and arithmetic.
+        let element_pointer: type_info::IdResult =
+            type_info::table_pointer(&context->types, field_record.element_type, !mutable_lvalue, volatile_lvalue);
+        context->error = element_pointer.error;
+        var flexible_instruction: ir::Instruction = builder::instruction(ir::Opcode.member_address, node);
+        flexible_instruction.left = owner_address;
+        flexible_instruction.auxiliary = lookup.offset_bytes;
+        let flexible_address: usize = builder::emit_value(context, flexible_instruction, element_pointer.type_id);
+        return {
+            type_id = element_pointer.type_id, value_id = flexible_address, address_id = context::no_id(),
+            constant_value = 0, has_constant = false, lvalue = false, mutable_lvalue = false, volatile_lvalue = false,
+            valid = flexible_address != context::no_id(), bitfield_segment = context::no_id(),
+        };
+    }
+    let pointer: type_info::IdResult =
+        type_info::table_pointer(&context->types, field.type_id, !mutable_lvalue, volatile_lvalue);
+    context->error = pointer.error;
+    var instruction: ir::Instruction = builder::instruction(ir::Opcode.member_address, node);
+    instruction.left = owner_address;
+    instruction.auxiliary = lookup.offset_bytes;
+    let address_id: usize = builder::emit_value(context, instruction, pointer.type_id);
+    let result: context::Expression = {
+        type_id = field.type_id, value_id = context::no_id(), address_id = address_id, constant_value = 0,
+        has_constant = false, lvalue = true, mutable_lvalue = mutable_lvalue, volatile_lvalue = volatile_lvalue,
+        valid = address_id != context::no_id(), bitfield_segment = context::no_id(),
+    };
+    return builder::load_lvalue(context, node, result);
+}
+
+fn lower_index(context: *context::Context, node: syntax::SyntaxNode, lowerer: api::Lowerer) -> context::Expression {
+    if (node.child_count != 2) {
+        return base::invalid_expression();
+    }
+    let base_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let index_node: usize = base_node.next_sibling;
+    let base: context::Expression = api::invoke(lowerer, context, node.first_child, context::no_id());
+    let index: context::Expression = api::invoke(lowerer, context, index_node,
+        type_info::BuiltinType.unsigned_size as usize);
+    if (!base.valid || !index.valid || index.type_id != type_info::BuiltinType.unsigned_size as usize) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_index, context->current_unit, node.span, context::no_id(),
+            context::empty_span(), index.type_id);
+        return base::invalid_expression();
+    }
+    let base_record: type_info::Record = context::type_record(context, base.type_id);
+    var element_type: usize = context::no_id();
+    var base_address: usize = context::no_id();
+    var mutable_lvalue: bool = false;
+    var volatile_lvalue: bool = false;
+    if (base_record.kind == type_info::Kind.array && base.address_id != context::no_id()) {
+        element_type = base_record.element_type;
+        base_address = base.address_id;
+        mutable_lvalue = base.lvalue && base.mutable_lvalue;
+        volatile_lvalue = base.lvalue && base.volatile_lvalue;
+        let bound: context::Expression =
+            builder::emit_integer_constant(
+                context, node, type_info::BuiltinType.unsigned_size as usize, base_record.element_count as u64);
+        var check: ir::Instruction = builder::instruction(ir::Opcode.bounds_check, node);
+        check.left = index.value_id;
+        check.right = bound.value_id;
+        builder::emit_void(context, check);
+    } else if (base_record.kind == type_info::Kind.pointer) {
+        element_type = base_record.element_type;
+        base_address = base.value_id;
+        mutable_lvalue = (base_record.flags & (type_info::Flag.read_only as usize)) == 0;
+        volatile_lvalue = (base_record.flags & (type_info::Flag.volatile_pointee as usize)) != 0;
+        if (context::type_record(
+                context, element_type).kind == type_info::Kind.type_void) {
+            element_type = context::no_id();
+        } else {
+            var check: ir::Instruction = builder::instruction(ir::Opcode.null_check, node);
+            check.left = base_address;
+            builder::emit_void(context, check);
+        }
+    }
+    if (element_type == context::no_id()) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_index, context->current_unit, node.span, context::no_id(),
+            context::empty_span(), base.type_id);
+        return base::invalid_expression();
+    }
+    let element_record: type_info::Record = context::type_record(context, element_type);
+    let pointer: type_info::IdResult =
+        type_info::table_pointer(&context->types, element_type, !mutable_lvalue, volatile_lvalue);
+    context->error = pointer.error;
+    var offset: ir::Instruction = builder::instruction(ir::Opcode.pointer_offset, node);
+    offset.left = base_address;
+    offset.right = index.value_id;
+    offset.auxiliary = element_record.size_bytes;
+    let address_id: usize = builder::emit_value(context, offset, pointer.type_id);
+    let result: context::Expression = {
+        type_id = element_type, value_id = context::no_id(), address_id = address_id, constant_value = 0,
+        has_constant = false, lvalue = true, mutable_lvalue = mutable_lvalue, volatile_lvalue = volatile_lvalue,
+        valid = address_id != context::no_id(), bitfield_segment = context::no_id(),
+    };
+    return builder::load_lvalue(context, node, result);
+}
+
+fn lower_call(context: *context::Context, node: syntax::SyntaxNode, lowerer: api::Lowerer) -> context::Expression {
+    let none: usize = context::no_id();
+    if (node.child_count == 0) {
+        context->error = runtime::Error.invalid_argument;
+        return base::invalid_expression();
+    }
+    let callee_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    var direct_symbol: usize = none;
+    var callee_value: usize = none;
+    if (callee_node.kind == syntax::SyntaxKind.name_expression && callee_node.child_count != 0) {
+        // A qualified callee names a function of the qualifier's module;
+        // the lookup diagnoses unknown qualifiers and names itself.
+        direct_symbol =
+            names::lookup_qualified_symbol(
+                context, context->current_unit, callee_node, context::SymbolKind.function, true);
+        if (direct_symbol == none) {
+            return base::invalid_expression();
+        }
+    } else if (callee_node.kind == syntax::SyntaxKind.name_expression &&
+        builder::find_local(
+            context, context->current_unit, callee_node.token_index) == none) {
+        direct_symbol = names::lookup_symbol(
+            context, context->current_unit, callee_node.token_index, context::SymbolKind.function);
+    }
+    var return_type: usize = none;
+    var ir_callee: usize = none;
+    var parameter_count: usize = 0;
+    var first_parameter: usize = none;
+    var parameters_from_fields: bool = false;
+    var callee_no_return: bool = false;
+    var callee_variadic: bool = false;
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    if (direct_symbol != none) {
+        let function: context::Function = functions[symbols[direct_symbol].function_id];
+        return_type = function.return_type;
+        ir_callee = function.ir_function;
+        parameter_count = function.parameter_count;
+        first_parameter = function.first_parameter;
+        callee_no_return = (function.flags & (context::SymbolFlag.no_return as usize)) != 0;
+        callee_variadic = (function.flags & (context::SymbolFlag.variadic as usize)) != 0;
+    } else {
+        let callee: context::Expression = api::invoke(lowerer, context, node.first_child, none);
+        if (!callee.valid) {
+            return callee;
+        }
+        let callee_record: type_info::Record = context::type_record(context, callee.type_id);
+        if (callee_record.kind != type_info::Kind.function_pointer) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.invalid_call, context->current_unit, node.span, none,
+                context::empty_span(), callee.type_id);
+            return base::invalid_expression();
+        }
+        callee_value = callee.value_id;
+        return_type = callee_record.element_type;
+        parameter_count = callee_record.field_count;
+        first_parameter = callee_record.first_field;
+        parameters_from_fields = true;
+    }
+    let argument_total: usize = node.child_count - 1;
+    if ((!callee_variadic && argument_total != parameter_count) ||
+        (callee_variadic && argument_total < parameter_count)) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.argument_count, context->current_unit, node.span, direct_symbol != none ?
+                symbols[direct_symbol].declaration_unit : none, context::empty_span(), parameter_count);
+        return base::invalid_expression();
+    }
+    let parameters: *const context::Parameter = context->parameters.data as
+            *const context::Parameter;
+    let type_fields: *const type_info::Field = context->types.fields.data as
+            *const type_info::Field;
+    var argument_values: bytes::Buffer = bytes::empty();
+    var child: usize = callee_node.next_sibling;
+    var index: usize = 0;
+    while (index < argument_total && context->error == runtime::Error.none) {
+        let variadic_extra: bool = index >= parameter_count;
+        let parameter_type: usize = variadic_extra ? none : (parameters_from_fields ?
+                    type_fields[first_parameter + index].type_id : parameters[first_parameter + index].type_id);
+        let argument: context::Expression = api::invoke(lowerer, context, child, parameter_type);
+        if (variadic_extra) {
+            // Variadic extras pass at their declared width — no C default
+            // argument promotions — and must classify to a single register or
+            // stack slot, so aggregates are rejected.
+            var extra_scalar: bool = false;
+            if (argument.valid) {
+                let extra_record: type_info::Record = context::type_record(context, argument.type_id);
+                extra_scalar = type_info::is_scalar(extra_record.kind);
+            }
+            if (!extra_scalar) {
+                context::add_diagnostic(
+                    context, context::DiagnosticKind.invalid_call, context->current_unit,
+                    context::node(context, context->current_unit, child).span,
+                    none, context::empty_span(), argument.valid ? argument.type_id : none);
+            } else {
+                var extra_value: usize = argument.value_id;
+                let extra_appended: bytes::BufferResult =
+                    bytes::append(argument_values, (&extra_value) as *const usize as *const u8, sizeof(usize));
+                argument_values = extra_appended.buffer;
+                context->error = extra_appended.error;
+            }
+        } else if (!argument.valid || argument.type_id != parameter_type) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.type_mismatch, context->current_unit,
+                context::node(context, context->current_unit, child).span, none, context::empty_span(), parameter_type);
+        } else {
+            let argument_type: type_info::Record = context::type_record(context, argument.type_id);
+            var argument_value: usize = argument.value_id;
+            if (type_info::is_memory(argument_type.kind)) {
+                let snapshot_slot: usize = ir::add_slot(
+                    &context->ir, builder::current_ir_function(context), argument.type_id, true, false, 0);
+                let snapshot_address: usize =
+                    builder::address_of_slot(
+                        context, context::node(context, context->current_unit, child),
+                        snapshot_slot, argument.type_id, false, false);
+                if (snapshot_slot == none || snapshot_address == none ||
+                    !builder::store_to_address(
+                        context, context::node(context, context->current_unit, child),
+                        snapshot_address, argument.type_id, argument)) {
+                    context->error = runtime::Error.invalid_argument;
+                }
+                argument_value = snapshot_address;
+            }
+            let appended: bytes::BufferResult =
+                bytes::append(argument_values, (&argument_value) as *const usize as *const u8, sizeof(usize));
+            argument_values = appended.buffer;
+            context->error = appended.error;
+        }
+        child = context::node(context, context->current_unit, child).next_sibling;
+        index += 1;
+    }
+    var instruction: ir::Instruction =
+        builder::instruction(direct_symbol != none ? ir::Opcode.call : ir::Opcode.call_indirect, node);
+    if (direct_symbol != none) {
+        instruction.auxiliary = ir_callee;
+    } else {
+        var check: ir::Instruction = builder::instruction(ir::Opcode.null_check, node);
+        check.left = callee_value;
+        builder::emit_void(context, check);
+        instruction.left = callee_value;
+    }
+    let return_record: type_info::Record = context::type_record(context, return_type);
+    let has_result: bool = return_record.kind != type_info::Kind.type_void;
+    var result_value: usize = none;
+    var instruction_id: usize = none;
+    if (has_result) {
+        result_value = builder::emit_value(context, instruction, return_type);
+        if (result_value != none) {
+            let values: *const ir::Value = context->ir.values.data as
+                    *const ir::Value;
+            instruction_id = values[result_value].definition;
+        }
+    } else {
+        instruction.type_id = return_type;
+        instruction_id = builder::emit_void(context, instruction);
+    }
+    let arguments: *const usize = argument_values.data as *const usize;
+    index = 0;
+    while (index < argument_values.length / sizeof(usize)) {
+        ir::add_argument(&context->ir, instruction_id, arguments[index]);
+        index += 1;
+    }
+    let release_error: runtime::Error = bytes::release(argument_values);
+    if (context->error == runtime::Error.none) {
+        context->error = release_error;
+    }
+    if (callee_no_return && instruction_id != context::no_id()) {
+        var marker: ir::Instruction = builder::instruction(ir::Opcode.unreachable, node);
+        builder::emit_void(context, marker);
+        context->current_block = builder::add_current_block(context);
+    }
+    return {
+        type_id = return_type, value_id = type_info::is_memory(return_record.kind) ? none : result_value, address_id =
+            type_info::is_memory(return_record.kind) ? result_value : none, constant_value = 0, has_constant = false,
+        lvalue = false, mutable_lvalue = false, volatile_lvalue = false, valid = instruction_id != none,
+        bitfield_segment = context::no_id(),
+    };
+}
+

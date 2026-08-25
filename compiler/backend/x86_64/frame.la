@@ -1,5 +1,9 @@
 module luna.bootstrap.backend.x86_64.frame;
 
+import luna.bootstrap.middleend.ir.verify as ir_check;
+
+import luna.std.checked as checked;
+
 enum Limit: usize {
     maximum_size = 18446744073709551615, scalar_home_size = 8, scalar_home_alignment = 8, stack_alignment = 16,
     maximum_frame_size = 2147483647, register_save_area_size = 176, register_save_area_alignment = 16,
@@ -18,19 +22,14 @@ fn plan_empty()
 }
 
 fn plan_storage_is_valid(plan: Plan) -> bool {
-    return bytes::is_valid(plan.frames) && bytes::is_valid(plan.storage) &&
-        plan.frames.length % sizeof(Frame) == 0 &&
+    return bytes::is_valid(plan.frames) && bytes::is_valid(plan.storage) && plan.frames.length % sizeof(Frame) == 0 &&
         plan.storage.length % sizeof(Storage) == 0 && plan.frame_count ==
-            plan.frames.length / sizeof(Frame) && plan.storage_count ==
-            plan.storage.length / sizeof(Storage);
+            plan.frames.length / sizeof(Frame) && plan.storage_count == plan.storage.length / sizeof(Storage);
 }
 
 fn align_up(value: usize, alignment: usize) -> usize {
-    if (alignment == 0 || (alignment & (alignment - 1)) != 0 || value >
-            (Limit.maximum_size as usize) - (alignment - 1)) {
-        return no_id();
-    }
-    return (value + alignment - 1) & ~(alignment - 1);
+    var result: usize = 0;
+    return checked::align_up(value, alignment, &result) ? result : no_id();
 }
 
 fn append_storage(plan: *Plan, storage: Storage) -> bool {
@@ -38,9 +37,7 @@ fn append_storage(plan: *Plan, storage: Storage) -> bool {
         return false;
     }
     let appended: bytes::BufferResult =
-        bytes::append(
-            plan->storage, (&storage) as *const Storage
-                as *const u8, sizeof(Storage));
+        bytes::append(plan->storage, (&storage) as *const Storage as *const u8, sizeof(Storage));
     plan->storage = appended.buffer;
     plan->error = appended.error;
     if (appended.error == runtime::Error.none) {
@@ -55,9 +52,7 @@ fn append_frame(plan: *Plan, frame: Frame) -> bool {
         return false;
     }
     let appended: bytes::BufferResult =
-        bytes::append(
-            plan->frames, (&frame) as *const Frame
-                as *const u8, sizeof(Frame));
+        bytes::append(plan->frames, (&frame) as *const Frame as *const u8, sizeof(Frame));
     plan->frames = appended.buffer;
     plan->error = appended.error;
     if (appended.error == runtime::Error.none) {
@@ -70,11 +65,14 @@ fn append_frame(plan: *Plan, frame: Frame) -> bool {
 fn add_storage(
     plan: *Plan, frame: *Frame, function_id: usize, kind: StorageKind,
     source_id: usize, type_id: usize, size_bytes: usize, alignment_bytes: usize, current_offset: *usize) -> bool {
-    if (plan == null || frame == null || current_offset == null || size_bytes == 0 || alignment_bytes == 0 ||
-        *current_offset > (Limit.maximum_size as usize) - size_bytes) {
+    if (plan == null || frame == null || current_offset == null || size_bytes == 0 || alignment_bytes == 0) {
         return false;
     }
-    let offset: usize = align_up(*current_offset + size_bytes, alignment_bytes);
+    var end: usize = 0;
+    if (!checked::add(*current_offset, size_bytes, &end)) {
+        return false;
+    }
+    let offset: usize = align_up(end, alignment_bytes);
     if (offset == no_id()) {
         return false;
     }
@@ -102,8 +100,7 @@ fn add_slots(
         if (slot.function_id == function_id) {
             let record: type_info::Record = records[slot.type_id];
             let memory: bool = type_info::is_memory(record.kind);
-            let natural_alignment: usize = memory ? record.alignment_bytes : Limit
-                    .scalar_home_alignment as usize;
+            let natural_alignment: usize = memory ? record.alignment_bytes : Limit.scalar_home_alignment as usize;
             let alignment: usize = slot.alignment_bytes > natural_alignment ? slot.alignment_bytes : natural_alignment;
             if (!add_storage(
                     plan, frame, function_id, StorageKind.slot, slot_id, slot.type_id, memory ?
@@ -125,8 +122,7 @@ fn add_values(
         let value_id: usize = function.first_value + index;
         let values: *const ir::Value = ir.values.data as *const ir::Value;
         if (!add_storage(
-                plan, frame, function_id, StorageKind.value, value_id, values[value_id].type_id,
-                Limit.scalar_home_size
+                plan, frame, function_id, StorageKind.value, value_id, values[value_id].type_id, Limit.scalar_home_size
                     as usize, Limit.scalar_home_alignment
                     as usize, current_offset)) {
             return false;
@@ -161,10 +157,9 @@ fn add_call_results(
     return true;
 }
 
-fn plan_build(
-    ir: ir::Store, types: type_info::Table, abi: abi::Abi) -> PlanResult {
+fn plan_build(ir: ir::Store, types: type_info::Table, abi: abi::Abi) -> PlanResult {
     var plan: Plan = plan_empty();
-    if (!ir::is_valid(ir, types) || !abi::is_valid(abi, ir, types)) {
+    if (!ir_check::is_valid(ir, types) || !abi::is_valid(abi, ir, types)) {
         return {
             plan = plan, error = runtime::Error.invalid_argument,
         };
@@ -224,11 +219,8 @@ fn plan_build(
                 frame.dynamic_alignment = 0;
             }
         }
-        frame.frame_size_bytes =
-            align_up(offset, Limit.stack_alignment as usize);
-        if (frame.frame_size_bytes == no_id() || frame.frame_size_bytes >
-                Limit.maximum_frame_size
-                    as usize ||
+        frame.frame_size_bytes = align_up(offset, Limit.stack_alignment as usize);
+        if (frame.frame_size_bytes == no_id() || frame.frame_size_bytes > Limit.maximum_frame_size as usize ||
             !append_frame(
                 &plan, frame)) {
             if (plan.error == runtime::Error.none) {
@@ -257,8 +249,7 @@ fn plan_equal(left: Plan, right: Plan) -> bool {
         bytes::equal(left.storage, right.storage.data as *const u8, right.storage.length);
 }
 
-fn plan_is_valid(
-    plan: Plan, ir: ir::Store, types: type_info::Table, abi: abi::Abi) -> bool {
+fn plan_is_valid(plan: Plan, ir: ir::Store, types: type_info::Table, abi: abi::Abi) -> bool {
     if (plan.error != runtime::Error.none || !plan_storage_is_valid(plan)) {
         return false;
     }
@@ -296,11 +287,8 @@ fn get(plan: Plan, function_id: usize) -> Result {
     };
 }
 
-fn storage_find(
-    plan: Plan, function_id: usize, kind: StorageKind, source_id: usize
-) -> StorageResult {
-    if (!plan_storage_is_valid(plan) || function_id >= plan.frame_count ||
-        kind == StorageKind.invalid) {
+fn storage_find(plan: Plan, function_id: usize, kind: StorageKind, source_id: usize) -> StorageResult {
+    if (!plan_storage_is_valid(plan) || function_id >= plan.frame_count || kind == StorageKind.invalid) {
         return {
             storage = storage_invalid(), error = runtime::Error.invalid_argument,
         };
@@ -333,4 +321,3 @@ fn plan_release(plan: Plan) -> runtime::Error {
     }
     return error;
 }
-

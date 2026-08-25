@@ -1,5 +1,7 @@
 module luna.bootstrap.backend.x86_64.linker;
 
+import luna.std.binary as binary;
+import luna.std.checked as checked;
 import luna.std.text as text;
 
 enum Limit: usize {
@@ -61,64 +63,27 @@ fn fail(image: *Image, error: runtime::Error, input_index: usize) -> bool {
 }
 
 fn power_of_two(value: usize) -> bool {
-    return value != 0 && (value & (value - 1)) == 0;
+    return checked::is_power_of_two(value);
 }
 
 fn align(value: usize, alignment: usize, result: *usize) -> bool {
-    if (result == null || !power_of_two(alignment)) {
-        return false;
-    }
-    let mask: usize = alignment - 1;
-    if (value > 18446744073709551615 as usize - mask) {
-        return false;
-    }
-    *result = (value + mask) & ~mask;
-    return true;
+    return checked::align_up(value, alignment, result);
 }
 
 fn append_u8(output: *bytes::Buffer, value: u8) -> bool {
-    if (output == null) {
-        return false;
-    }
-    let appended: bytes::BufferResult = bytes::push(*output, value);
-    *output = appended.buffer;
-    return appended.error == runtime::Error.none;
+    return binary::append_u8(output, value);
 }
 
 fn append_u16(output: *bytes::Buffer, value: u16) -> bool {
-    var index: usize = 0;
-    while (index < 2) {
-        if (!append_u8(
-                output, ((value >> ((index * 8) as u16)) & 255) as u8)) {
-            return false;
-        }
-        index += 1;
-    }
-    return true;
+    return binary::append_u16(output, value);
 }
 
 fn append_u32(output: *bytes::Buffer, value: u32) -> bool {
-    var index: usize = 0;
-    while (index < 4) {
-        if (!append_u8(
-                output, ((value >> ((index * 8) as u32)) & 255) as u8)) {
-            return false;
-        }
-        index += 1;
-    }
-    return true;
+    return binary::append_u32(output, value);
 }
 
 fn append_u64(output: *bytes::Buffer, value: u64) -> bool {
-    var index: usize = 0;
-    while (index < 8) {
-        if (!append_u8(
-                output, ((value >> ((index * 8) as u64)) & 255) as u8)) {
-            return false;
-        }
-        index += 1;
-    }
-    return true;
+    return binary::append_u64(output, value);
 }
 
 fn append_bytes(output: *bytes::Buffer, data: *const u8, length: usize) -> bool {
@@ -142,8 +107,7 @@ fn append_padding(output: *bytes::Buffer, count: usize, fill: u8) -> bool {
 }
 
 fn pad_to(output: *bytes::Buffer, offset: usize) -> bool {
-    return output != null && output->length <= offset &&
-        append_padding(output, offset - output->length, 0);
+    return output != null && output->length <= offset && append_padding(output, offset - output->length, 0);
 }
 
 fn region_append(
@@ -151,8 +115,7 @@ fn region_append(
     input_index: usize, placement: *usize) -> bool {
     var aligned: usize = 0;
     if (destination == null || placement == null || !align(destination->length, alignment, &aligned) ||
-        aligned > Limit.maximum_output as usize || source.length >
-            (Limit.maximum_output as usize) - aligned ||
+        aligned > Limit.maximum_output as usize || source.length > (Limit.maximum_output as usize) - aligned ||
         !append_padding(destination, aligned - destination->length, fill) ||
         !append_bytes(
             destination, source.data as *const u8, source.length)) {
@@ -166,8 +129,7 @@ fn name_equal(left: text::View, right: text::View) -> bool {
     return text::equal(left, right);
 }
 
-fn find_global(
-    image: *const Image, name: text::View, result: *Global) -> bool {
+fn find_global(image: *const Image, name: text::View, result: *Global) -> bool {
     let globals: *const Global = image->globals.data as *const Global;
     let count: usize = image->globals.length / sizeof(Global);
     var index: usize = 0;
@@ -183,8 +145,7 @@ fn find_global(
     return false;
 }
 
-fn collect_globals(
-    image: *Image, objects: *const object::Object, object_count: usize) -> bool {
+fn collect_globals(image: *Image, objects: *const object::Object, object_count: usize) -> bool {
     var object_index: usize = 0;
     while (object_index < object_count) {
         image->input_index = object_index;
@@ -208,9 +169,7 @@ fn collect_globals(
                     name = name.view, object_index = object_index, symbol_index = symbol_index,
                 };
                 let appended: bytes::BufferResult =
-                    bytes::append(
-                        image->globals, (&global) as *const Global as *const u8,
-                        sizeof(Global));
+                    bytes::append(image->globals, (&global) as *const Global as *const u8, sizeof(Global));
                 image->globals = appended.buffer;
                 if (appended.error != runtime::Error.none) {
                     return fail(image, appended.error, object_index);
@@ -223,9 +182,7 @@ fn collect_globals(
     return true;
 }
 
-fn layout_regions(
-    image: *Image, objects: *const object::Object, object_count: usize,
-    placements: *Placement) -> bool {
+fn layout_regions(image: *Image, objects: *const object::Object, object_count: usize, placements: *Placement) -> bool {
     var object_index: usize = 0;
     while (object_index < object_count) {
         let object: object::Object = objects[object_index];
@@ -288,9 +245,7 @@ fn layout_image(image: *Image) -> bool {
     return true;
 }
 
-fn section_address(
-    image: *const Image, placement: Placement, section: object::Section, result: *usize
-) -> bool {
+fn section_address(image: *const Image, placement: Placement, section: object::Section, result: *usize) -> bool {
     if (result == null) {
         return false;
     }
@@ -321,8 +276,7 @@ fn symbol_address(
         return false;
     }
     var base_address: usize = 0;
-    if (!section_address(
-            image, placements[object_index], symbol_result.symbol.section, &base_address) ||
+    if (!section_address(image, placements[object_index], symbol_result.symbol.section, &base_address) ||
         symbol_result.symbol.value > 18446744073709551615 as usize - base_address) {
         return false;
     }
@@ -369,32 +323,15 @@ fn region(
 }
 
 fn store_u32(destination: *u8, value: u32) -> bool {
-    if (destination == null) {
-        return false;
-    }
-    var index: usize = 0;
-    while (index < 4) {
-        destination[index] = ((value >> ((index * 8) as u32)) & 255) as u8;
-        index += 1;
-    }
-    return true;
+    return binary::store_u32(destination, value);
 }
 
 fn store_u64(destination: *u8, value: u64) -> bool {
-    if (destination == null) {
-        return false;
-    }
-    var index: usize = 0;
-    while (index < 8) {
-        destination[index] = ((value >> ((index * 8) as u64)) & 255) as u8;
-        index += 1;
-    }
-    return true;
+    return binary::store_u64(destination, value);
 }
 
 fn apply_relocations(
-    image: *Image, objects: *const object::Object, object_count: usize,
-    placements: *const Placement) -> bool {
+    image: *Image, objects: *const object::Object, object_count: usize, placements: *const Placement) -> bool {
     var object_index: usize = 0;
     while (object_index < object_count) {
         image->input_index = object_index;
@@ -423,8 +360,7 @@ fn apply_relocations(
                 return fail(image, runtime::Error.invalid_argument, object_index);
             }
             let output_offset: usize = placement_offset + relocation.offset;
-            if (relocation.kind == object::RelocationKind.pc32 || relocation.kind ==
-                    object::RelocationKind.plt32) {
+            if (relocation.kind == object::RelocationKind.pc32 || relocation.kind == object::RelocationKind.plt32) {
                 if (symbol_address > 9223372036854775807 as usize || region_address >
                         9223372036854775807 as usize - output_offset) {
                     return fail(image, runtime::Error.invalid_argument, object_index);
@@ -476,19 +412,16 @@ fn apply_relocations(
     return true;
 }
 
-fn resolve_entry(
-    image: *Image, objects: *const object::Object, placements: *const Placement) -> bool {
+fn resolve_entry(image: *Image, objects: *const object::Object, placements: *const Placement) -> bool {
     let entry: text::ViewResult = text::view("_start", 6);
     var global: Global = {};
-    if (entry.error != runtime::Error.none ||
-        !find_global(image as *const Image, entry.view, &global) ||
+    if (entry.error != runtime::Error.none || !find_global(image as *const Image, entry.view, &global) ||
         !symbol_address(
             image as *const Image, objects, placements, global.object_index, global.symbol_index,
             &image->entry_address)) {
         return fail(image, runtime::Error.not_found, image->input_index);
     }
-    let symbol: object::SymbolResult =
-        object::get_symbol(objects[global.object_index], global.symbol_index);
+    let symbol: object::SymbolResult = object::get_symbol(objects[global.object_index], global.symbol_index);
     if (symbol.error != runtime::Error.none || symbol.symbol.section != object::Section.text ||
         symbol.symbol.kind != object::SymbolKind.function) {
         return fail(image, runtime::Error.invalid_argument, global.object_index);
@@ -496,19 +429,15 @@ fn resolve_entry(
     return true;
 }
 
-fn write_header(
-    output: *bytes::Buffer, image: *const Image, program_count: usize) -> bool {
+fn write_header(output: *bytes::Buffer, image: *const Image, program_count: usize) -> bool {
     return append_bytes(output, "\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00", 16) &&
         append_u16(output, (Elf.executable_type as usize) as u16) &&
         append_u16(output, (Elf.machine_x86_64 as usize) as u16) &&
         append_u32(output, 1) && append_u64(output, image->entry_address as u64) &&
-        append_u64(output, (Elf.header_size as usize) as u64) &&
-        append_u64(output, 0) && append_u32(output, 0) &&
+        append_u64(output, (Elf.header_size as usize) as u64) && append_u64(output, 0) && append_u32(output, 0) &&
         append_u16(output, (Elf.header_size as usize) as u16) &&
-        append_u16(output, (Elf.program_header_size as usize) as u16) &&
-        append_u16(output, program_count as u16) &&
-        append_u16(output, 0) && append_u16(output, 0) &&
-        append_u16(output, 0);
+        append_u16(output, (Elf.program_header_size as usize) as u16) && append_u16(output, program_count as u16) &&
+        append_u16(output, 0) && append_u16(output, 0) && append_u16(output, 0);
 }
 
 fn write_program(
@@ -516,8 +445,7 @@ fn write_program(
     return append_u32(output, (Elf.load_segment as usize) as u32) &&
         append_u32(output, flags) && append_u64(output, offset as u64) &&
         append_u64(output, address as u64) && append_u64(output, address as u64) &&
-        append_u64(output, file_size as u64) &&
-        append_u64(output, memory_size as u64) &&
+        append_u64(output, file_size as u64) && append_u64(output, memory_size as u64) &&
         append_u64(output, (Limit.page_size as usize) as u64);
 }
 
@@ -606,10 +534,8 @@ fn link(objects: *const object::Object, object_count: usize) -> Result {
         buffer = bytes::empty(), error = runtime::Error.invalid_argument,
     };
     if (collect_globals(&image, objects, object_count) &&
-        layout_regions(&image, objects, object_count, &placements[0]) &&
-        layout_image(&image) &&
-        apply_relocations(
-            &image, objects, object_count, &placements[0] as *const Placement) &&
+        layout_regions(&image, objects, object_count, &placements[0]) && layout_image(&image) &&
+        apply_relocations(&image, objects, object_count, &placements[0] as *const Placement) &&
         resolve_entry(
             &image, objects, &placements[0] as *const Placement)) {
         executable = serialize(&image as *const Image);
@@ -637,4 +563,3 @@ fn link(objects: *const object::Object, object_count: usize) -> Result {
         executable = executable.buffer, error = executable.error, input_index = image.input_index,
     };
 }
-

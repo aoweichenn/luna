@@ -30,14 +30,26 @@ Requires only Python 3 and an x86-64 Linux host (or `qemu-x86_64-static`
 via `--runner`):
 
 ```sh
+python3 tools/selfhost.py audit    # read-only anchor, module-graph and style checks
 python3 tools/selfhost.py verify   # anchor builds the toolchain twice,
                                    # every artifact must be byte-identical
 ```
+
+On a non-x86-64 development host, `--runner qemu-x86_64-static` prefixes both
+the toolchain binaries and generated test programs; `LUNA_TOOL_RUNNER` sets the
+same default. The optional C FFI cases require an x86-64-targeting C compiler
+(`LUNA_FFI_CC` may name a cross compiler) and are reported as skipped when one
+is unavailable. Release validation runs all FFI cases on an x86-64 host.
 
 `build` stops after producing `out/stage-next/bin/{lunac,luna-as,luna-link}`.
 `test` compiles, links and executes every case in `tests/cases/` through the
 freshly built tools and checks each program's exit status against
 `tests/expectations.txt` (negative values are fatal signals such as traps).
+
+The build graph has a single module registry. Interface order, implementation
+order and each driver's transitive link closure are derived from source imports,
+so the assembler and linker do not carry compiler-only objects. `audit` rejects
+unregistered modules, dependency cycles and duplicate imports before a build.
 
 Compile and run a program directly:
 
