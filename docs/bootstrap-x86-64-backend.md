@@ -1,5 +1,10 @@
 # Luna bootstrap x86-64 backend
 
+> **Historical m0 bootstrap record.** Artifact paths and `.lmi` commands in
+> this document describe the archived reconstruction. The current pure-Luna
+> backend emits assembly for `luna-as` and is built from the registered source
+> graph.
+
 The M4 bootstrap backend is a separately compiled Luna implementation whose
 semantic input is a verified `BootstrapTypedIr` and its verified type table.
 It borrows the immutable semantic-input source views only to recover module,

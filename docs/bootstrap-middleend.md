@@ -1,5 +1,10 @@
 # Luna bootstrap middle end
 
+> **Historical m0 bootstrap record.** Artifact paths and `.lmi` commands in
+> this document describe the archived reconstruction. Current interfaces and
+> implementations live under `compiler/include/` and `compiler/src/` and are
+> compiled from source by `tools/selfhost.py`.
+
 M4 now contains a separately compiled Luna implementation of name resolution,
 strong type checking, target layout and verified Typed IR construction. It
 consumes the indexed syntax-tree contract from the Luna bootstrap parser and

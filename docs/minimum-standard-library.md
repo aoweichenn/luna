@@ -1,5 +1,10 @@
 # Minimum standard library
 
+> **Historical m0 bootstrap record.** The API rationale remains useful, but
+> sysroot `.lmi` paths and hosted build commands below belong to the archived
+> reconstruction. Current library pairs live under `library/include/` and
+> `library/src/` and are built directly from source.
+
 The bootstrap standard library is implemented in Luna. It is a small
 correctness-first layer over `luna.runtime`; no standard-library module imports
 `luna.linux.syscall`, declares a libc function or relies on generated C code.

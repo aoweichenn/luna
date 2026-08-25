@@ -1,5 +1,10 @@
 # x86-64 machine IR
 
+> **Historical m0 contract.** The archived hosted reconstruction implemented
+> this standalone machine-IR pipeline. Current pure-Luna `lunac` lowers typed
+> IR directly to the closed assembly dialect and exposes no `--emit mir`,
+> liveness, allocation or rewrite mode.
+
 Luna's x86-64 machine IR is the verified target boundary between the
 target-neutral typed IR and x86-64 instruction emission:
 

@@ -1,5 +1,10 @@
 # Native ELF64 relocatable objects
 
+> **Historical m0 contract.** The `lunac --emit obj` path described here
+> belongs to the archived hosted reconstruction. Current pure-Luna `lunac`
+> emits assembly; `luna-as --emit elf` owns the supported ELF64 `ET_REL`
+> boundary.
+
 Luna emits x86-64 Linux relocatable objects without invoking LLVM, GNU
 binutils or a host C compiler. The command-line boundary is:
 

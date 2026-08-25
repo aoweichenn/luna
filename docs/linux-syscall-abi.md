@@ -1,5 +1,10 @@
 # Linux x86-64 system-call ABI
 
+> **Historical m0 bootstrap record.** The ABI rules remain applicable, but the
+> `.lmi` sysroot paths and linker-injected wrapper workflow below describe the
+> archived reconstruction. Current syscall wrappers are `asm fn` definitions
+> in `library/src/linux/syscall.la` and link as a normal module object.
+
 Luna's first self-hosting runtime boundary is a project-owned raw system-call
 layer. It invokes the Linux x86-64 `syscall` instruction directly and has no
 target libc, dynamic loader, `errno`, thread-local storage or host-assembler

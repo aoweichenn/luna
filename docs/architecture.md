@@ -71,7 +71,7 @@ cannot silently remove it from the fixed-point build.
 ## Pipeline
 
 ```text
-source units / validated .lmi metadata
+source units
     |
     v
 lexer -> parser -> syntax tree
@@ -86,50 +86,35 @@ lexer -> parser -> syntax tree
              typed Luna IR (CFG)
                     |
                     v
-          x86-64 machine lowering
+       x86-64 System V lowering
+       + deterministic frames
                     |
                     v
-       verified x86-64 machine IR
+          closed assembly dialect
                     |
                     v
-      verified System V ABI analysis
-                    |
-                    v
-         verified liveness analysis
-                    |
-                    v
-      verified register allocation
-                    |
-                    v
-    verified instruction rewrite
-                    |
-                    v
-          x86-64 instruction emission
-                    |
+                 luna-as
           +---------+---------+
           |                   |
           v                   v
- optional assembly     native instruction encoder
- review output                |
-                              v
-                  verified ELF64 relocatable object
-                              |
-                              v
-            project-owned static linker
-            + verified syscall ABI object
-                              |
-                              v
-                  verified static ELF64 executable
+      LUNAOBJ1           ELF64 ET_REL
+          |                   |
+          +---------+---------+
+                    |
+                    v
+                luna-link
+                    |
+                    v
+          static ELF64 executable
 ```
 
 Assembly is a closed output encoding of the x86-64 backend, not a user-facing
 intermediate language. During bootstrap, the Luna assembler consumes this
-dialect and emits a validated Luna bootstrap object. The Luna linker consumes
-those objects and emits the final static ELF64 image. Both reject forms or
-records outside their versioned contracts. See
-[the complete bootstrap toolchain contract](bootstrap-toolchain.md); the
-hosted path's native format is covered by
-[the ELF object contract](elf-object.md).
+dialect and emits either the validated `LUNAOBJ1` bootstrap format or a
+standard ELF64 relocatable object. The Luna linker consumes both supported
+object forms and emits the final static ELF64 image. Neither stage invokes a
+host assembler or linker. See
+[the complete bootstrap toolchain contract](bootstrap-toolchain.md).
 
 ## Frontend
 
@@ -137,14 +122,13 @@ Source locations are byte spans into immutable source files. Tokens and syntax
 nodes retain spans so every parser, type and IR error can point to the original
 text. The parser uses an arena and never owns isolated syntax nodes.
 
-M4 also provides separately compiled Luna lexer, parser, type, IR, semantic
-and x86-64 backend modules for the self-hosting path. They use owned typed byte buffers and
-stable indices, avoiding pointers into growable storage. Their structured
-diagnostics and verification run on the freestanding target and never call
-back into the hosted C23 frontend, middle end or code generator. The C23 arena
-AST and IR remain stage 0; the indexed Luna tree, verified Luna Typed IR,
-recomputed System V ABI plan and stack-homed x86-64 emission are the stage-1
-contracts. See the
+The separately compiled Luna lexer, parser, type, IR, semantic and x86-64
+backend modules use owned typed byte buffers and stable indices, avoiding
+pointers into growable storage. Their structured diagnostics and verification
+run in the freestanding toolchain and never call back into the archived hosted
+C23 frontend, middle end or code generator. The indexed Luna syntax tree,
+verified Luna typed IR and stack-homed x86-64 emission are the current
+contracts. Historical reconstruction details remain in the
 [bootstrap frontend contract](bootstrap-frontend.md) and
 [bootstrap middle-end contract](bootstrap-middleend.md), followed by the
 [bootstrap x86-64 backend contract](bootstrap-x86-64-backend.md) and the
@@ -175,21 +159,21 @@ layout-query instruction.
 
 Compilation is split into global and local phases:
 
-1. load source units and structurally validate every `.lmi`;
-2. parse source units and reconstruct metadata interface declarations;
-3. group interface and implementation units by exact module name;
-4. resolve imports and validate one rooted, reachable, acyclic graph;
-5. verify every metadata dependency content fingerprint;
-6. topologically lower dependencies into one shared semantic world;
-7. collect exported and module-private declarations;
-8. match source or metadata interfaces with implementation definitions;
-9. type-check function bodies;
-10. lower checked bodies to IR.
+1. load, lex and parse every source unit;
+2. group interface and implementation units by exact module name;
+3. collect direct imports and reject unknown, repeated and self imports;
+4. validate an acyclic module graph;
+5. validate attributes and collect named types;
+6. collect and resolve compile-time constants and type layouts;
+7. collect functions and match interface declarations to definitions;
+8. validate imported names and public type visibility;
+9. construct verified typed IR and lower checked function bodies;
+10. select the executable or library root and validate reachability.
 
 This order removes source-order dependencies and ordinary forward declarations.
-Source order on the command line is irrelevant. The module resolver identifies
-the unique implementation containing `main`, requires every supplied module
-to be reachable from it and lowers dependencies before importers. Interface
+For executables, the module resolver identifies the unique implementation
+containing `main` and requires every supplied module to be reachable from it.
+For libraries, the first input unit's module is the selected root. Interface
 imports enter both interface and implementation scope; implementation-only
 imports never enter interface scope. Only exported declarations enter an
 importer's scope, and visibility is never transitive.
@@ -209,32 +193,19 @@ the interface independently valid. Function matching uses canonical semantic
 types, so nested arrays, named-type identity and pointer read-only qualifiers
 cannot match accidentally by spelling or layout.
 
-Separate compilation uses deterministic little-endian `.lmi` files rather
-than serializing host memory or parser pointers. The fixed header contains a
-magic value, format major/minor version, language ABI version, payload byte
-count and a 64-bit content fingerprint. The payload contains the exact target
-triple, module name, direct imports, interface types, fields, enum values and
-function signatures. Recursive type encodings and all record/string/file
-sizes have explicit limits. The decoder rejects malformed flags and tags,
-invalid identifiers, truncation, trailing bytes, target mismatches and
-fingerprint failures before declarations reach semantic analysis.
+Separate compilation is source-interface based. Each library invocation
+receives the selected module's implementation and interface plus the reachable
+dependency interfaces. Imported implementations may be absent; their
+independently generated objects provide definitions at final link time. This
+source graph is the stage-1-and-later replacement for the archived stage-0
+`.lmi` path.
 
-Each encoded direct import includes the content fingerprint of its dependency.
-The module resolver requires metadata dependencies to match those
-fingerprints exactly. Separate code generation also requires the root
-module's own compiled metadata instead of its source interface. IR module
-imports and exports retain that interface identity, and x86-64 symbol mangling
-includes it so the static linker cannot silently combine objects compiled
-from different metadata. The fingerprint protects build consistency and
-accidental corruption; it is not a cryptographic authentication mechanism.
-The exact byte layout and compatibility rules are specified in the
-[module metadata format](module-metadata.md).
-
-`--compile-module` selects one non-executable root, forbids implementation
-source for its dependencies and produces IR without an entry function. A
-normal executable may mix source modules with metadata-only dependencies.
-Metadata-only functions become checked bodyless Luna declarations, while the
-selected module's implementation alone contributes definitions.
+The current compiler emits assembly in `--library` or `--executable` mode.
+Ordinary Luna symbols encode the canonical module name and function name, not
+a compiled-interface fingerprint. The fixed-point build prevents stale object
+combinations by rebuilding all module objects from the same registered source
+graph. The old `.lmi` byte layout remains documented only as an
+[m0 reconstruction artifact](module-metadata.md).
 
 ## Luna IR
 
@@ -296,12 +267,10 @@ predecessor counts and graph reachability. Backend emission never receives
 unchecked compiler-generated IR.
 
 Function linkage is explicit IR metadata. Internal and module-export
-functions own parameter slots, values and a CFG body. Module imports and
-external C functions own only a typed signature and must have no slots,
-values, call-argument storage or blocks. Module exports print as `export fn`;
-metadata imports print as qualified `import fn`; C symbols print as bodyless
-`extern fn`. No declaration may be the module entry point. Library IR has no
-entry function at all.
+definitions own parameter slots, values and a CFG body. Bodyless declarations
+from dependency source interfaces and external C functions own only a typed
+signature and have no body blocks. No declaration may be the module entry
+point. Library IR has no entry function at all.
 
 The Luna IR instruction set is target-neutral. Each module is parameterized by an
 explicit target data layout so `isize` and `usize` retain their exact IR types
@@ -321,7 +290,30 @@ snapshot slots, aggregate returns must address exact-layout return snapshots,
 and aggregate calls name an exact result slot; all three contracts are
 independently verified.
 
-## x86-64 machine IR
+## Current x86-64 backend
+
+The pure-Luna backend consumes verified typed IR directly. It computes System
+V parameter/result locations and deterministic stack-frame storage, then emits
+the closed assembly dialect accepted by `luna-as`. Correctness takes priority
+over optimization; there is no current standalone machine-IR, liveness or
+register-allocation command-line boundary.
+
+`luna-as` owns instruction parsing and encoding. Its default `LUNAOBJ1` output
+is the self-host bootstrap object format; `--emit elf` writes standard ELF64
+`ET_REL` for the supported freestanding FFI boundary. `luna-link` reads the
+supported object forms, resolves symbols and relocations, and writes a static
+x86-64 Linux executable without a hosted assembler, linker or libc.
+
+Ordinary Luna symbols encode module and function names. `extern fn` uses its C
+symbol verbatim, and `@export_name` deliberately exposes a Luna definition
+under a validated verbatim C symbol.
+
+## Archived m0 x86-64 machine IR
+
+The machine-IR, liveness, register-allocation, rewrite and native object-writer
+sections below record the hosted `m0` reconstruction pipeline. They are kept as
+design history and do not describe commands or data structures implemented by
+the current pure-Luna `lunac`.
 
 The target machine IR is an owned, target-specific boundary between typed Luna
 IR and assembly emission. Lowering resolves `isize` and `usize` to fixed
@@ -358,7 +350,7 @@ their machine stack slots. Optimization is deliberately absent. The complete
 representation and invariants are documented in
 [x86-64 machine IR](machine-ir.md).
 
-## x86-64 System V ABI analysis
+## Archived m0 x86-64 System V ABI analysis
 
 ABI analysis consumes verified machine IR and assigns every scalar parameter
 to one of the six general-purpose registers, eight vector registers or a
@@ -377,7 +369,7 @@ classification. `lunac --emit abi` exposes deterministic parameter locations
 and frame sizes. The full boundary is documented in
 [x86-64 System V ABI analysis](abi.md).
 
-## x86-64 liveness
+## Archived m0 x86-64 liveness
 
 The backend computes liveness over the verified machine def/use and CFG
 contracts before assembly emission. Each block owns `use`, `def`, `live-in`
@@ -392,7 +384,7 @@ same verified result deterministically. The analysis changes no instruction;
 its full contract is documented in
 [x86-64 liveness analysis](liveness.md).
 
-## x86-64 register allocation
+## Archived m0 x86-64 register allocation
 
 The first allocation stage builds one inclusive interval for every machine
 virtual register and applies deterministic linear scan independently to the
@@ -409,7 +401,7 @@ to the fixed-register rewrite stage. The full allocation contract is
 documented in
 [x86-64 register allocation](register-allocation.md).
 
-## x86-64 instruction rewrite
+## Archived m0 x86-64 instruction rewrite
 
 The rewrite stage combines verified machine IR, System V locations, liveness
 and allocation into an owned physical-storage plan. It records every ordered
@@ -424,7 +416,7 @@ used callee-saved registers in disjoint aligned frame slots. `lunac --emit
 rewrite` exposes the checked plan. The full contract is documented in
 [allocation-aware instruction rewrite](instruction-rewrite.md).
 
-## x86-64 backend
+## Archived m0 x86-64 backend
 
 The current machine-IR consumer is correctness-first:
 
@@ -524,50 +516,22 @@ diagnostics and are exercised at the exact limit and immediately above it.
 
 ## Testing
 
-The quality gate contains:
+The current pure-Luna quality gate contains:
 
-- GoogleTest unit tests for utilities, source handling, lexing, parsing,
-  semantic lowering, typed-IR and machine-IR invariants and x86-64 emission;
-- parser, type and module-error negative tests;
-- transitive module execution and IR snapshots, full source-order determinism,
-  interface self-containment, exact signature matching, import visibility,
-  graph validation and cross-source diagnostic-note tests;
-- deterministic metadata round trips, re-checksummed binary mutations,
-  corrupt/version/stale-dependency negatives and three-object separate-link
-  execution tests;
-- textual typed-IR, machine-IR, ABI, liveness, register-allocation and
-  instruction-rewrite snapshots;
-- native x86-64 encoding and ELF64 object verification, with LLVM MC retained
-  as an independent differential oracle;
-- project-owned static ELF64 linking, executable verification and malformed
-  object mutation tests, with LLD retained only as an oracle;
-- execution under `qemu-x86_64-static`;
-- deterministic generated-program differential tests;
-- executable matrices and boundary traps for every numeric scalar conversion
-  family;
-- executable conditional matrices for every scalar type and switch-boundary
-  matrices for every integer type;
-- exact-width memory matrices, null and bounds traps, read-only qualification
-  negatives and typed-memory IR mutation checks;
-- executable nested-aggregate, union-aliasing and scoped-enum cases, exact
-  layout-query assertions, named and nested initialization, padding-preserving
-  and deliberately overlapping copies, member-address and memory-copy IR
-  mutation checks and generated aggregate differential programs;
-- real C23-to-Luna static linking tests covering every scalar type, pointers,
-  aggregate layout through pointers, no-result calls, narrow signed promotion
-  independently classified integer/SSE register banks and scalar stack
-  arguments;
-- structured-control negative cases, IR snapshots and randomized differential
-  programs;
-- deterministic mutation tests and a coverage-guided libFuzzer target that
-  exercise machine lowering, ABI analysis, liveness, register allocation,
-  instruction rewriting, verification, printing and assembly emission;
-- an independent textual machine-IR parser and reference interpreter,
-  differential execution of all machine opcodes against assembled x86-64,
-  exact trap-signal comparison, deterministic generated instruction programs
-  and mandatory spill, parallel-move and fixed-register coverage;
-- UBSan runs for the host compiler and ASan runs on compatible native hosts;
-- warnings treated as errors.
+- `tools/selfhost.py audit`, which verifies anchor hashes, the registered
+  interface/implementation inventory, the derived import graph and source
+  rules without changing build outputs;
+- `tools/refmt.py --check`, which requires formatting stability and an
+  unchanged whitespace-insensitive token stream;
+- `tools/selfhost.py verify`, which rebuilds the complete toolchain with the
+  newly built tools and requires every assembly, object and executable to be
+  byte-identical;
+- `tools/selfhost.py test`, which compiles and runs the behavior corpus with
+  exact exit statuses and checks expected semantic failures by diagnostic kind;
+- FFI cases using checked-in ELF64 fixtures, Luna assembler ELF round trips and
+  optional x86-64 C compiler fixtures at the explicit interoperability
+  boundary.
 
-Generated x86-64 programs are freestanding in the first milestone, which makes
-cross-target execution deterministic and independent of a target sysroot.
+The production build never invokes a hosted compiler, assembler or linker.
+Generated programs are freestanding, making native and
+`qemu-x86_64-static` execution independent of a target libc or sysroot.

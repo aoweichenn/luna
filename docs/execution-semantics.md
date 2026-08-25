@@ -301,8 +301,9 @@ Interface type definitions are canonical definitions shared with the
 implementation. Repeating one in the implementation is a duplicate
 declaration. The interface type graph and function signatures are checked
 before implementation-private types enter scope, so an interface cannot
-silently depend on implementation details. Command-line source order has no
-semantic effect.
+silently depend on implementation details. Executable root selection is
+independent of command-line order because it follows the unique `main`;
+library mode deliberately selects the first input unit's module as its root.
 
 An interface import is visible while checking both the interface and its
 implementation. An implementation-only import is visible only in that
@@ -313,40 +314,35 @@ are rejected.
 
 The executable module is the unique implementation containing `main`. Every
 supplied module must be reachable from it through direct imports. Every
-imported module has either an interface/implementation source pair or a
-validated metadata interface, and the dependency graph must be acyclic.
-Dependencies are checked before importers in an order independent of
-command-line input order. Compatible declarations of one external C symbol
-share that symbol globally; incompatible signatures are rejected.
+imported module is supplied at least as a source interface; an implementation
+may also be present when compiling several reachable source modules together.
+The dependency graph must be acyclic. Compatible declarations of one external
+C symbol share that symbol globally; incompatible signatures are rejected.
 
 This contract is compile-time only and adds no run-time initialization or
-dispatch. A metadata interface contributes the same canonical public types and
-function signatures as source, but its Luna functions are bodyless IR imports.
-The final link resolves them against separately compiled module objects.
-Imported and exported Luna symbols include the defining interface's metadata
-fingerprint, making an object built from a different interface an unresolved
-symbol rather than a silently accepted ABI mismatch.
+dispatch. A dependency interface contributes canonical public types and
+bodyless function declarations. The final link resolves calls against the
+separately compiled module object.
 
 A separately compiled library has exactly one selected implementation root,
-has no `main` or `_start`, and accepts dependencies only as metadata. Metadata
-records its target, format and language ABI versions, complete interface and
-the content fingerprints of direct dependencies. A fingerprint mismatch,
-corrupt payload, unsupported version or target mismatch is a compile-time
-error before the metadata can affect type checking. Code generation requires
-the selected root's own compiled metadata, ensuring its exported object
-symbols use the same interface identity consumed by dependents.
+has no `main` or `_start`, and consumes dependency interfaces as source. Luna
+symbols are mangled from the defining module name and function name; the
+current pure-Luna pipeline carries no compiled-interface fingerprint. The
+self-host build prevents stale combinations by rebuilding every module object
+from one source graph rather than by link-time interface identity checks.
 
 ## Runtime boundary
 
-Generated programs enter through project-owned `_start` code and use no libc.
-The `luna.linux.syscall` module exposes raw zero-to-six-argument wrappers.
-`lunalink` supplies their verified implementation, which converts System V
-registers to the x86-64 Linux kernel ABI and executes `syscall` directly.
-Negative kernel error results are preserved without `errno` translation. The
-`luna.runtime` module converts them to the scoped `runtime::Error` representation
-and supplies named file and memory resources. Its read and write operations
-perform exactly one system call, expose short counts and do not hide
-`interrupted` or `would_block`.
+Generated executables enter through project-owned `_start` code and use no
+libc. The `luna.linux.syscall` module defines raw zero-to-six-argument `asm fn`
+wrappers in Luna source; its separately built object is linked like any other
+reachable library dependency. Those wrappers convert System V registers to the
+x86-64 Linux kernel ABI and execute `syscall` directly. Negative kernel error
+results are preserved without `errno` translation. The `luna.runtime` module
+converts them to the scoped `runtime::Error` representation and supplies named
+file and memory resources. Its read and write operations perform exactly one
+system call, expose short counts and do not hide `interrupted` or
+`would_block`.
 
 The `luna.std.memory`, `luna.std.bytes`, `luna.std.text`, `luna.std.path` and
 `luna.std.io` modules build allocation, buffering, UTF-8 validation, path

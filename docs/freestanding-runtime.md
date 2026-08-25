@@ -1,5 +1,10 @@
 # Freestanding runtime
 
+> **Historical m0 bootstrap record.** The runtime boundary remains
+> freestanding, but the `.lmi` sysroot paths and commands below describe the
+> archived reconstruction. Current sources live under `library/include/` and
+> `library/src/`.
+
 Luna's bootstrap runtime is implemented in Luna and depends only on the
 project-owned x86-64 Linux system-call ABI. It does not link target libc, a
 dynamic loader, a host assembler or generated C code.

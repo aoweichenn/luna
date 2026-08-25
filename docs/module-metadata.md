@@ -1,5 +1,12 @@
 # Luna compiled module metadata
 
+> **Historical m0 contract.** This file documents the C23 reconstruction
+> seed's `.lmi` version 1 format on the archived `m0` branch. The current pure
+> Luna compiler does not emit or consume `.lmi`; stage 1 and later compile
+> dependency interfaces directly from `.lh` source. This format must not be
+> treated as the current `lunac` CLI or as the design of a future binary module
+> interface.
+
 `.lmi` is Luna's target-specific compiled interface format. It is a
 deterministic binary contract, not a serialization of parser objects, semantic
 objects or host pointers. Version 1 uses little-endian integers regardless of

@@ -1,5 +1,10 @@
 # Project-owned ELF64 static linker
 
+> **Historical m0 contract.** This document records the hosted `lunalink`
+> reconstruction. The current freestanding driver is `luna-link`; its source
+> and current CLI are authoritative, and current Luna symbols carry module and
+> function names rather than `.lmi` fingerprints.
+
 `lunalink` turns x86-64 ELF64 relocatable objects into a static Linux
 executable without invoking LLD, GNU ld, an assembler or a host compiler:
 

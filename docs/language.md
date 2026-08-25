@@ -68,34 +68,28 @@ while still binding the `c::` qualifier. Importing two declarations with the
 same unqualified name is an error, and a local declaration cannot shadow an
 imported one. Combining `as` with `::{...}` is rejected.
 
-An executable compilation receives the root plus every transitive dependency,
-in any order. A dependency may be supplied as its interface/implementation
-source pair or as compiled `.lmi` interface metadata. Exactly one source
-implementation must contain `main`; it is the executable root. Every supplied
-module must be reachable from the root, and the import graph must be acyclic.
-Unknown, self, repeated and cyclic imports are rejected before type checking.
-A metadata-only dependency contributes declarations but no function bodies;
-its separately compiled object must be supplied to the final link.
+The self-hosted compiler consumes source units directly. An executable
+compilation contains exactly one implementation defining `main`; that module
+is the root. A library compilation takes the first input unit's module as its
+root and emits no `_start`. Every supplied module must be reachable from the
+root, and the import graph must be acyclic. Unknown, self, repeated and cyclic
+imports are rejected before type checking.
 
-`--compile-module name` compiles exactly one non-executable implementation and
-does not generate `_start`. `--emit metadata` validates the selected source
-interface and implementation before writing the `.lmi`; subsequent typed IR,
-x86-64 machine IR, assembly or object emission requires that exact `.lmi` as the
-selected module's interface. All imported dependencies must also be `.lmi`,
-and passing another module's implementation source is rejected.
+An imported dependency must be supplied at least as its source interface. Its
+implementation may be omitted from the compilation; a separately compiled
+module object then supplies the definitions at final link time. The self-host
+build compiles each library from its implementation, its matching interface
+and the reachable dependency interfaces, then links the independently built
+module objects.
 
-Compiled metadata is target-specific, deterministic and versioned. It records
-the language ABI, target triple, complete interface declarations and direct
-imports. Every direct import carries the content fingerprint of the exact
-dependency metadata used when it was built. A stale dependency, corrupt or
-truncated file, unsupported format, incompatible language ABI or wrong target
-is rejected before semantic lowering. The content fingerprint is a build
-consistency check rather than an authenticity signature. Luna import/export
-symbols carry the interface fingerprint, so the final linker also rejects an
-object compiled from different metadata.
+The current `lunac` modes are `--executable` and `--library`, both producing
+x86-64 assembly. Stage 1 and later do not emit or consume compiled `.lmi`
+interfaces. The archived Luna 0 metadata format is documented separately for
+historical reconstruction, not as a current command-line or language
+capability.
 
 There are no module partitions, header units, re-exports, wildcard imports
-or cyclic dependencies in Luna 0.
+or cyclic dependencies in the current language.
 
 ## Declarations
 
@@ -235,8 +229,8 @@ takes one string argument naming a C identifier:
 fn shim_memcpy(dest: *void, src: *const void, count: usize) -> *void {
 ```
 
-The function is emitted under the literal name instead of the
-module-fingerprint mangled form, making it visible to external objects at
+The function is emitted under the literal name instead of the normal
+module-and-function mangled form, making it visible to external objects at
 link time. The reserved names `_start` and `_L`-prefixed forms are
 rejected, as are duplicate export names. Luna code still calls the
 function by its declared name; the attribute changes only the emitted

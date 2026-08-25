@@ -1,5 +1,10 @@
 # Luna bootstrap frontend
 
+> **Historical m0 bootstrap record.** Artifact paths and `.lmi` commands in
+> this document describe the archived reconstruction. Current interfaces and
+> implementations live under `compiler/include/` and `compiler/src/` and are
+> compiled from source by `tools/selfhost.py`.
+
 The first self-hosting frontend stage is implemented in Luna and compiled
 directly to x86-64 objects. It does not translate through C, call the hosted
 C23 frontend, depend on libc or issue raw system calls. The C23 compiler
