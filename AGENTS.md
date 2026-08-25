@@ -20,10 +20,21 @@ python3 tools/selfhost.py verify   # rebuild with stage-next; every artifact
                                    # must be byte-identical (fixed point)
 python3 tools/selfhost.py test     # compile+run tests/cases against
                                    # out/stage-next/bin, exact exit codes
+python3 tools/selfhost.py audit    # read-only static gate: anchor hashes,
+                                   # module graph vs. sources, source rules
+python3 tools/refmt.py --check     # formatting gate: zero files needing
+                                   # reflow, zero token drift
 ```
 
 - `verify` is the core correctness gate for any change under `library/`,
   `compiler/` or `drivers/`. It takes a few minutes.
+- The build graph is derived, not hand-maintained: `LIBRARIES` in
+  `tools/selfhost.py` is the single module registry, and dependencies,
+  link order and driver closures are read out of the `import` lines in
+  the sources themselves. `audit` fails whenever the registry, the
+  sources and the anchor disagree.
+- `audit` and `refmt.py --check` are the fast static gates; run them
+  before the slow `verify` + `test` pair.
 - Test expectations live in `tests/expectations.txt`
   (`<case>.la <exit-code>`); negative codes are fatal signals, e.g. `-8`
   for a division trap. Expected-failure cases use
@@ -41,27 +52,44 @@ python3 tools/selfhost.py test     # compile+run tests/cases against
 
 ## Style
 
-- Column budget is 120; `tools/refmt.py` reflows sources to it and must
-  keep every file's whitespace-insensitive token stream identical.
+- Column budget is 120; `tools/refmt.py` reflows sources to it
+  (quote-aware splitting, breaking at commas and `&&`/`||` first) and
+  must keep every file's whitespace-insensitive token stream identical.
 - Enumerative mappings (keywords, token-to-kind tables) are data tables
   plus a loop, never long if-chains.
 - A source file is a soft 2,000-line ceiling; split along pass
-  boundaries into interface/implementation module pairs and register
-  the new modules in `tools/selfhost.py`.
-- Semantic lowering lives under `compiler/middleend/semantic/`
-  (`context`, `attributes`, `modules`, `types`, `consteval`,
-  `intrinsics`, `functions`, `expr`, `stmt`) with the pipeline entry remaining in
-  `sema.la`; imports flow strictly downward in that order.
+  boundaries into interface/implementation module pairs — a `foo/`
+  subdirectory behind a thin `foo.la` facade that keeps the public
+  entry points — and register the new modules in `LIBRARIES`.
+- A submodule may never import its parent facade (imports are acyclic);
+  when a pass must recurse through the facade, hand the entry point
+  down as a function pointer (see the `Lowerer` type in
+  `compiler/middleend/semantic/expr/api.lh`).
+- Semantic lowering lives under `compiler/middleend/semantic/` with the
+  pipeline entry remaining in `sema.la`; imports flow strictly downward
+  in this order: `context` (+ `context/{lookup,builder}`),
+  `attributes`, `modules`, `types` (+ `types/{lookup,visibility}`),
+  `consteval` (+ `consteval/{model,engine}`), `intrinsics`,
+  `functions` (+ `functions/ir`), `expr` (+ `expr/{base,numeric,
+  strings,api,initializer,access,operators}`), `stmt` (+
+  `stmt/{api,labels}`).
 
 ## Layout
 
 - `anchor/` — fixed-point `lunac`, `luna-as`, `luna-link` from m0, with
   `SHA256SUMS` + `PROVENANCE.md`. Sole binary trust root.
 - `library/` — runtime, Linux syscall layer (`linux/`), standard library
-  (`std/`): allocation, byte buffers, UTF-8 text, paths, file I/O.
-- `compiler/` — `frontend/` (lexer, parser), `middleend/` (type, ir,
-  sema), `backend/x86_64/` (text, abi, frame, codegen, object,
-  assembler, linker, elf). Correctness-first, no optimization.
+  (`std/`): allocation, byte buffers, checked arithmetic (`checked`),
+  ASCII classification (`ascii`), binary encoding (`binary`), UTF-8
+  text, paths, file I/O.
+- `compiler/` — `frontend/` (lexer, syntax, parser over
+  `parser/{state,expression,statements,declarations}`), `middleend/`
+  (type, ir + `ir/verify`, sema, `semantic/*` — see Style for the
+  lowering order), `backend/x86_64/` (text, abi, frame, codegen over
+  `codegen/{support,instruction/{value,call}}`, object, elf over
+  `elf/{format,reader,writer}`, assembler over
+  `assembler/{operands,encoding,source}`, linker).
+  Correctness-first, no optimization.
 - `drivers/` — freestanding argument-driven tool programs.
 - `tests/cases/` — executable behavior programs returning their verdict
   as the exit status.
@@ -83,5 +111,7 @@ From `docs/architecture.md` — do not violate:
 - Only target is `x86_64-unknown-linux-gnu`; `isize`/`usize` are target-sized.
 - Luna modules are matched interface/implementation pairs
   (`foo.lh` declares exports; `foo.la` defines).
-- New modules must be registered in `tools/selfhost.py` (`LIBRARIES`,
-  `LIBRARY_ORDER`, driver interface lists) so the fixed point covers them.
+- New modules must be registered in `tools/selfhost.py`'s `LIBRARIES`
+  (the single registry — build order and driver closures are derived
+  from source imports) so the fixed point covers them; `audit` must
+  stay green.

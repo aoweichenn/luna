@@ -10,7 +10,8 @@ contract and the planned way back off C dependencies.
 `extern fn` declarations name C symbols with System V ABI classification
 (scalars, aggregates, variadic calls with the `%al` protocol). The linker
 consumes both the project's own LUNAOBJ1 objects and standard ELF64
-relocatable objects (`compiler/backend/x86_64/elf.la`), mapping
+relocatable objects (`compiler/backend/x86_64/elf/reader.la`, behind the
+`elf.la` facade), mapping
 sections onto the four-region model and applying `PC32`, `PLT32`, `64`,
 `32` and `32S` relocations. TLS, COMDAT, REL relocations and other
 unsupported content are rejected; notes and debug sections are dropped.
@@ -38,7 +39,8 @@ the runtime already owns.
 
 `luna-as --emit elf` turns Luna assembly into a standard ELF64 `ET_REL`
 object that any host linker accepts. `elf::save`
-(`compiler/backend/x86_64/elf.la`) serializes the shared object model
+(`compiler/backend/x86_64/elf/writer.la`, behind the `elf.la` facade)
+serializes the shared object model
 with one section per region (`.text`/`.rodata`/`.data`/`.bss`), a
 locals-first symbol table, `RELA` relocations with explicit addends and
 an empty `.note.GNU-stack`; the default `lunaobj` output is unchanged.
