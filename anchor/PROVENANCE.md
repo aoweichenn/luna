@@ -153,3 +153,16 @@ artifact byte-identical between the two stages, and `test` passed
 181/181. The stage-fixed executables were copied here and `SHA256SUMS`
 refreshed. Compiler sources may now adopt qualified names and alias or
 selective imports per the iteration discipline.
+
+## 2026-08-25: promotion to the multi-implementation-unit toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`d0da3560a5d5c940b3a10f05b6f7b83b0fc44cb4`
+(`feat: support multiple module implementation units`). Provenance chain: the
+previous anchor built `out/stage-next`, which rebuilt itself into
+`out/stage-fixed`; remote x86-64 `verify` confirmed every artifact
+byte-identical between the two stages, and `test` passed 205/205. The
+stage-fixed executables were copied here and `SHA256SUMS` refreshed. Production
+modules may now split one named module across multiple registered `.la`
+implementation units while retaining one shared private declaration/import
+scope.
