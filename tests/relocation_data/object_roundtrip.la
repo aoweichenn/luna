@@ -1,0 +1,111 @@
+module tests.relocation_data.object_roundtrip;
+
+import luna.bootstrap.backend.x86_64.assembler as assembler;
+import luna.bootstrap.backend.x86_64.elf as elf;
+import luna.bootstrap.backend.x86_64.object as object;
+import luna.runtime;
+import luna.std.bytes as bytes;
+import luna.std.text as text;
+
+enum ProbeLayout: usize {
+    relocation_count = 2, second_address_offset = 16, byte_count = 24,
+}
+
+fn relocation_table_is_valid(value: object::Object) -> bool {
+    if (!object::is_valid(value) || object::relocation_count(value) != ProbeLayout.relocation_count as usize) {
+        return false;
+    }
+    if (value.rodata.length != ProbeLayout.byte_count as usize) {
+        return false;
+    }
+    let expected_name: text::ViewResult = text::from_c_string("dispatch_target", 32);
+    if (expected_name.error != runtime::Error.none) {
+        return false;
+    }
+    for (var index: usize = 0; index < ProbeLayout.relocation_count as usize; index += 1) {
+        let found: object::RelocationResult = object::get_relocation(value, index);
+        if (found.error != runtime::Error.none) {
+            return false;
+        }
+        let relocation: object::Relocation = found.relocation;
+        let expected_offset: usize = index * (ProbeLayout.second_address_offset as usize);
+        let shape_is_valid: bool = relocation.section == object::Section.rodata &&
+            relocation.kind == object::RelocationKind.absolute64;
+        let value_is_valid: bool = relocation.offset == expected_offset && relocation.addend == 0;
+        if (!shape_is_valid || !value_is_valid) {
+            return false;
+        }
+        let symbol_result: object::SymbolResult = object::get_symbol(value, relocation.symbol_index);
+        if (symbol_result.error != runtime::Error.none) {
+            return false;
+        }
+        let name: text::ViewResult = object::symbol_name(value, symbol_result.symbol);
+        if (name.error != runtime::Error.none || !text::equal(name.view, expected_name.view)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn first_error(current: runtime::Error, next: runtime::Error) -> runtime::Error {
+    return current == runtime::Error.none ? next : current;
+}
+
+fn main() -> i32 {
+    let source: text::ViewResult = text::from_c_string(
+        ".section .rodata,\"a\",@progbits\n"
+        ".extern dispatch_target\n"
+        ".balign 8\n"
+        ".type dispatch_table, @object\n"
+        "dispatch_table:\n"
+        ".quad dispatch_target\n"
+        ".balign 16\n"
+        ".quad dispatch_target\n"
+        ".size dispatch_table, .-dispatch_table\n"
+        ".section .note.GNU-stack,\"\",@progbits\n", 512);
+    if (source.error != runtime::Error.none) {
+        return 1;
+    }
+    let assembled: assembler::Result = assembler::assemble(source.view);
+    if (assembled.error != runtime::Error.none || !relocation_table_is_valid(assembled.object)) {
+        return 2;
+    }
+
+    let serialized: bytes::BufferResult = object::serialize(assembled.object);
+    if (serialized.error != runtime::Error.none) {
+        return 3;
+    }
+    let restored: object::Result = object::deserialize(
+        serialized.buffer.data as *const u8, serialized.buffer.length);
+    if (restored.error != runtime::Error.none || !relocation_table_is_valid(restored.object)) {
+        return 4;
+    }
+    let serialized_again: bytes::BufferResult = object::serialize(restored.object);
+    if (serialized_again.error != runtime::Error.none || !bytes::equal(
+            serialized.buffer, serialized_again.buffer.data as *const u8, serialized_again.buffer.length)) {
+        return 5;
+    }
+
+    let elf_bytes: bytes::BufferResult = elf::save(assembled.object);
+    if (elf_bytes.error != runtime::Error.none) {
+        return 6;
+    }
+    let elf_object: object::Result = elf::load(elf_bytes.buffer.data as *const u8, elf_bytes.buffer.length);
+    if (elf_object.error != runtime::Error.none || !relocation_table_is_valid(elf_object.object)) {
+        return 7;
+    }
+    let elf_bytes_again: bytes::BufferResult = elf::save(elf_object.object);
+    if (elf_bytes_again.error != runtime::Error.none || !bytes::equal(
+            elf_bytes.buffer, elf_bytes_again.buffer.data as *const u8, elf_bytes_again.buffer.length)) {
+        return 8;
+    }
+
+    var release_error: runtime::Error = bytes::release(elf_bytes_again.buffer);
+    release_error = first_error(release_error, object::release(elf_object.object));
+    release_error = first_error(release_error, bytes::release(elf_bytes.buffer));
+    release_error = first_error(release_error, bytes::release(serialized_again.buffer));
+    release_error = first_error(release_error, object::release(restored.object));
+    release_error = first_error(release_error, bytes::release(serialized.buffer));
+    release_error = first_error(release_error, object::release(assembled.object));
+    return release_error == runtime::Error.none ? 42 : 9;
+}

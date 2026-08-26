@@ -30,8 +30,8 @@ fn syntax_tree_empty() -> SyntaxTree {
 }
 
 fn syntax_tree_storage_is_valid(tree: SyntaxTree) -> bool {
-    if (!bytes::is_valid(tree.storage) || tree.storage.length % sizeof(SyntaxNode) != 0 ||
-        tree.count > SyntaxLimit.maximum_nodes as usize) {
+    let storage_is_shaped: bool = bytes::is_valid(tree.storage) && tree.storage.length % sizeof(SyntaxNode) == 0;
+    if (!storage_is_shaped || tree.count > SyntaxLimit.maximum_nodes as usize) {
         return false;
     }
     return tree.count == tree.storage.length / sizeof(SyntaxNode);
@@ -50,13 +50,17 @@ fn syntax_tree_is_valid(tree: SyntaxTree) -> bool {
     }
 
     let nodes: *const SyntaxNode = tree.storage.data as *const SyntaxNode;
-    var node_index: usize = 0;
-    while (node_index < tree.count) {
+    let maximum_flags: usize = (SyntaxFlag.final_method as usize) * 2 - 1;
+    for (var node_index: usize = 0; node_index < tree.count; node_index += 1) {
         let node: SyntaxNode = nodes[node_index];
-        if ((node.kind as usize) > (SyntaxKind.selective_import_names as usize) || node.flags > 524287 ||
-            node.span.line == 0 || node.span.column == 0 || node.span.length >
-                (SyntaxLimit.maximum_size as usize) - node.span.offset || (node.token_index != none &&
-                node.token_index >= tree.token_count)) {
+        let node_tag_is_valid: bool = (node.kind as usize) <= (SyntaxKind.super_expression as usize) &&
+            node.flags <= maximum_flags;
+        let source_position_is_valid: bool = node.span.line != 0 && node.span.column != 0;
+        let span_is_valid: bool = node.span.length <= (SyntaxLimit.maximum_size as usize) - node.span.offset;
+        let token_is_valid: bool = node.token_index == none || node.token_index < tree.token_count;
+        let source_is_valid: bool = source_position_is_valid && span_is_valid;
+        let reference_is_valid: bool = source_is_valid && token_is_valid;
+        if (!node_tag_is_valid || !reference_is_valid) {
             return false;
         }
         if (node_index == tree.root) {
@@ -73,17 +77,17 @@ fn syntax_tree_is_valid(tree: SyntaxTree) -> bool {
             if (node.first_child != none || node.last_child != none) {
                 return false;
             }
-            node_index += 1;
             continue;
         }
-        if (node.child_count > tree.count || node.first_child >= tree.count || node.last_child >= tree.count) {
+        let child_count_is_valid: bool = node.child_count <= tree.count;
+        let child_range_is_valid: bool = node.first_child < tree.count && node.last_child < tree.count;
+        if (!child_count_is_valid || !child_range_is_valid) {
             return false;
         }
 
         var child_index: usize = node.first_child;
         var previous_child: usize = none;
-        var visited: usize = 0;
-        while (visited < node.child_count) {
+        for (var visited: usize = 0; visited < node.child_count; visited += 1) {
             if (child_index >= tree.count) {
                 return false;
             }
@@ -92,32 +96,26 @@ fn syntax_tree_is_valid(tree: SyntaxTree) -> bool {
             }
             previous_child = child_index;
             child_index = nodes[child_index].next_sibling;
-            visited += 1;
         }
         if (previous_child != node.last_child || child_index != none) {
             return false;
         }
-        node_index += 1;
     }
     if (nodes[tree.root].kind != SyntaxKind.program || nodes[tree.root].next_sibling != none) {
         return false;
     }
 
-    node_index = 0;
-    while (node_index < tree.count) {
+    for (var node_index: usize = 0; node_index < tree.count; node_index += 1) {
         var ancestor: usize = node_index;
-        var depth: usize = 0;
-        while (ancestor != tree.root && depth < tree.count) {
+        for (var depth: usize = 0; ancestor != tree.root && depth < tree.count; depth += 1) {
             ancestor = nodes[ancestor].parent;
             if (ancestor >= tree.count) {
                 return false;
             }
-            depth += 1;
         }
         if (ancestor != tree.root) {
             return false;
         }
-        node_index += 1;
     }
     return true;
 }
@@ -140,4 +138,3 @@ fn syntax_tree_release(tree: SyntaxTree) -> runtime::Error {
     }
     return bytes::release(tree.storage);
 }
-

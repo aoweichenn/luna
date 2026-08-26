@@ -1,6 +1,7 @@
 module luna.bootstrap.middleend.semantic.expr.probe;
 
 import luna.bootstrap.frontend.lexer as lexer;
+import luna.bootstrap.middleend.semantic.classes as classes;
 import luna.bootstrap.middleend.semantic.consteval.engine as const_engine;
 import luna.bootstrap.middleend.semantic.consteval.model as const_model;
 import luna.bootstrap.middleend.semantic.context.builder as builder;
@@ -179,11 +180,30 @@ fn probe_name(context: *context::Context, node: syntax::SyntaxNode, expected_typ
     return invalid_result();
 }
 
+fn probe_this(context: *context::Context, expected_type: usize) -> Result {
+    if (context->current_function >= context->function_count) {
+        return invalid_result();
+    }
+    let functions_data: *const context::Function = context->functions.data as
+            *const context::Function;
+    let function: context::Function = functions_data[context->current_function];
+    if (!callable::has_receiver(function.identity)) {
+        return invalid_result();
+    }
+    let receiver_type: usize = functions::function_receiver_type(context, function);
+    var result: Result = type_result(expected_type, receiver_type);
+    result.category = category::Category.rvalue;
+    return result;
+}
+
 fn probe_initializer(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
     if (!type_is_valid(context, expected_type)) {
         return incompatible_result();
     }
     let record: type_info::Record = context::type_record(context, expected_type);
+    if (record.kind == type_info::Kind.class_type) {
+        return incompatible_result();
+    }
     if (node.kind == syntax::SyntaxKind.zero_initializer) {
         let numeric_is_valid: bool = type_info::is_integer(record.kind) || type_info::is_float(record.kind);
         let discrete_is_valid: bool = record.kind == type_info::Kind.boolean ||
@@ -312,13 +332,15 @@ fn probe_member(context: *context::Context, node: syntax::SyntaxNode, expected_t
         return incompatible_result();
     }
     let owner: type_info::Record = context::type_record(context, owner_type);
-    let aggregate_kind: bool = owner.kind == type_info::Kind.structure || owner.kind == type_info::Kind.record_union;
-    if (!aggregate_kind) {
+    if (!type_info::is_record(owner.kind)) {
         return incompatible_result();
     }
     let lookup: types::FieldLookup =
         type_lookup::lookup_field(context, owner_type, context->current_unit, member_node.token_index);
     if (lookup.status != types::FieldStatus.found) {
+        return incompatible_result();
+    }
+    if (owner.kind == type_info::Kind.class_type && !classes::field_is_accessible(context, lookup.field_id)) {
         return incompatible_result();
     }
     let fields: *const type_info::Field = context->types.fields.data as
@@ -375,6 +397,9 @@ fn expression(context: *context::Context, node_id: usize, expected_type: usize) 
     }
     case syntax::SyntaxKind.name_expression {
         return probe_name(context, node, expected_type);
+    }
+    case syntax::SyntaxKind.this_expression {
+        return probe_this(context, expected_type);
     }
     case syntax::SyntaxKind.zero_initializer, syntax::SyntaxKind.aggregate_initializer {
         return probe_initializer(context, node, expected_type);

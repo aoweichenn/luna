@@ -113,6 +113,12 @@ unmangled. Globals are module-local labels. Executables define a freestanding
 Linux syscall 60. Generated programs contain no dynamic loader or libc
 dependency.
 
+Read-only IR globals may carry contiguous, ordered function-reference slices.
+The emitter writes ordinary bytes around `.quad <canonical-function-symbol>`
+entries; the project assembler preserves each entry as an `absolute64`
+relocation for the linker. Mutable globals and source-level module variables do
+not gain this capability in M3.2.
+
 The self-hosted integration gate sends every generated assembly file through
 the Luna assembler, validates its `LUNAOBJ1` object, then sends the complete
 object graph through the Luna linker. The resulting executable is static,

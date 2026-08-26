@@ -1,0 +1,124 @@
+module tests.relocation_data.ir_codegen;
+
+import luna.bootstrap.backend.x86_64.codegen as codegen;
+import luna.bootstrap.frontend.parser as parser;
+import luna.bootstrap.middleend.ir as ir;
+import luna.bootstrap.middleend.ir.verify as ir_verify;
+import luna.bootstrap.middleend.sema as sema;
+import luna.bootstrap.middleend.semantic.context as context;
+import luna.runtime;
+import luna.std.bytes as bytes;
+import luna.std.text as text;
+
+enum ProbeLayout: usize {
+    address_bytes = 8, second_address_offset = 16, byte_count = 24,
+}
+
+fn pattern_count(data: *const u8, length: usize, pattern: *const u8, pattern_length: usize) -> usize {
+    if (data == null || pattern == null) {
+        return 0;
+    }
+    if (pattern_length == 0 || pattern_length > length) {
+        return 0;
+    }
+    var count: usize = 0;
+    for (var offset: usize = 0; offset <= length - pattern_length; offset += 1) {
+        var matches: bool = true;
+        for (var index: usize = 0; index < pattern_length && matches; index += 1) {
+            matches = data[offset + index] == pattern[index];
+        }
+        if (matches) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+fn first_error(current: runtime::Error, next: runtime::Error) -> runtime::Error {
+    return current == runtime::Error.none ? next : current;
+}
+
+fn main() -> i32 {
+    let source: text::ViewResult = text::from_c_string(
+        "module tests.relocation_probe;\nextern fn dispatch_target() -> i32;\n", 96);
+    let path: text::ViewResult = text::from_c_string("relocation-probe.la", 32);
+    if (source.error != runtime::Error.none || path.error != runtime::Error.none) {
+        return 1;
+    }
+    let frontend: parser::FrontendResult = parser::frontend_parse(source.view);
+    let frontend_has_diagnostics: bool = frontend.lex.diagnostics.count != 0 || frontend.parse.diagnostics.count != 0;
+    if (frontend.error != runtime::Error.none || frontend_has_diagnostics) {
+        return 2;
+    }
+    var input: context::Input = context::input_empty(false);
+    let unit: context::Unit = {
+        source = source.view, tokens = frontend.lex.tokens, tree = frontend.parse.tree,
+        path_offset = 0, path_length = 0,
+    };
+    if (!context::input_add(&input, unit, path.view)) {
+        return 3;
+    }
+    var semantic: context::Result = sema::check(input);
+    if (!context::result_is_success(semantic) || semantic.ir.function_count != 1) {
+        return 4;
+    }
+
+    let placeholder: [24]u8 = {};
+    let global_id: usize = ir::add_global(
+        &semantic.ir, &placeholder[0] as *const u8, ProbeLayout.byte_count as usize,
+        ProbeLayout.address_bytes as usize, true);
+    if (global_id == ir::no_id()) {
+        return 5;
+    }
+    if (!ir::add_global_function_reference(&semantic.ir, global_id, 0, 0)) {
+        return 6;
+    }
+    if (!ir::add_global_function_reference(
+            &semantic.ir, global_id, ProbeLayout.second_address_offset as usize, 0)) {
+        return 7;
+    }
+    if (!ir_verify::is_valid(semantic.ir, semantic.types)) {
+        return 8;
+    }
+
+    let references: *ir::GlobalFunctionReference = semantic.ir.global_function_references.data as
+            *ir::GlobalFunctionReference;
+    references[1].byte_offset = 4;
+    if (ir_verify::is_valid(semantic.ir, semantic.types)) {
+        return 9;
+    }
+    references[1].byte_offset = ProbeLayout.second_address_offset as usize;
+    semantic.ir.global_bytes.data[0] = 1;
+    if (ir_verify::is_valid(semantic.ir, semantic.types)) {
+        return 10;
+    }
+    semantic.ir.global_bytes.data[0] = 0;
+    references[0].function_id = ir::no_id();
+    if (ir_verify::is_valid(semantic.ir, semantic.types)) {
+        return 11;
+    }
+    references[0].function_id = 0;
+
+    let first_backend: codegen::BackendResult = codegen::emit_assembly(input, semantic.ir, semantic.types);
+    let second_backend: codegen::BackendResult = codegen::emit_assembly(input, semantic.ir, semantic.types);
+    let first_is_valid: bool = codegen::backend_is_success(first_backend, input, semantic.ir, semantic.types);
+    let second_is_valid: bool = codegen::backend_is_success(second_backend, input, semantic.ir, semantic.types);
+    if (!first_is_valid || !second_is_valid) {
+        return 12;
+    }
+    if (!bytes::equal(first_backend.assembly, second_backend.assembly.data as *const u8,
+            second_backend.assembly.length)) {
+        return 13;
+    }
+    if (pattern_count(first_backend.assembly.data as *const u8, first_backend.assembly.length,
+            "    .quad dispatch_target\n", 26) != 2) {
+        return 14;
+    }
+
+    var release_error: runtime::Error = codegen::backend_release(second_backend);
+    release_error = first_error(release_error, codegen::backend_release(first_backend));
+    release_error = first_error(release_error, context::result_release(semantic));
+    release_error = first_error(release_error, context::input_release(input));
+    release_error = first_error(release_error, parser::frontend_result_release(frontend));
+    return release_error == runtime::Error.none ? 42 : 15;
+}

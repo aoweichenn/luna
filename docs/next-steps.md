@@ -17,6 +17,7 @@ implementation status is tracked in `roadmap.md`.
 | C23 disposition review | landed in `syntax-plan.md`; m1.2-m1.10 sequenced |
 | `anchor/` | promoted to the m1.1 stage-fixed toolchain (0.2 done) |
 | Negative tests | `FAIL <diagnostic-kind>` harness landed (0.3 done) |
+| M3.0 direct classes / M3.1 inheritance | implemented; fixed-point promotion remains a separate release step |
 
 ## Step 0 — close m1.1 completely
 
@@ -113,10 +114,10 @@ landed as m1.7 by explicit FFI decision, with declared-width arguments.
   encoding and source layers; and ELF format/reader/writer services. Every
   implementation is below 1,000 lines; split again only at a real extension
   boundary rather than to satisfy a line-count target.
-- Global variables initialized with function addresses: needs a data
-  symbol relocation path (`.quad`-style); not required by any accepted
-  example. Note the language currently has no module-scope variables at
-  all; the `@align` object mount in m1.3 mounts on locals until then.
+- Source-level module variables initialized with function addresses remain
+  deferred. M3.2 provides the compiler-owned read-only `.quad` relocation
+  path for vtables, but does not expose general module-scope variables; the
+  `@align` object mount in m1.3 still mounts on locals until then.
 - Threads/atomics (standard library per syntax-plan decision 6),
   `_BitInt(N)`, macros: remain out of scope per `syntax-plan.md`.
 
@@ -129,13 +130,30 @@ side-effect-free argument probing, exact call resolution and expected
 function-type selection, plus folded trailing defaults inserted after overload
 selection and one shared value-category service, as described in
 [`m2-callable-infrastructure.md`](m2-callable-infrastructure.md). The callable
-foundation is complete; M3.0 may now add class metadata, access, overloaded
-constructors and direct methods without parallel callable machinery.
+foundation is complete and M3.0 now consumes it directly. `Function` owns the
+kind/owner/receiver identity, bindings are owner-scoped and the versioned
+signature writer keeps existing free-function signatures byte-identical. The
+class store owns records plus contiguous field/method policy slices. M3.0 adds
+`pub`/`prot`/`priv` fields, implicit `this`, receiver qualifiers, same-module
+`impl` blocks, overloaded/defaulted constructors and direct methods, exact class copies and
+ordinary non-polymorphic layout/ABI classification. Cross-module execution,
+negative policy cases and implementation-unit permutation are executable gates.
 
-The ownership-free class system follows as M3 in
-[`m3-oop-design.md`](m3-oop-design.md). It consumes M2 for overloaded methods
-and constructors before adding access control, single inheritance, virtual
-dispatch, restricted operators, non-owning bound methods and minimal RTTI.
+M3.1 single inheritance and explicit override contracts are now implemented as
+specified in [`m3-oop-design.md`](m3-oop-design.md): base-at-zero layout,
+inherited lookup without hiding, `prot`, mandatory first-statement
+`super.init`, direct `super` calls, explicit pointer upcasts, final checks and
+deterministic virtual/abstract slot metadata.
+
+M3.2 read-only function-address relocation data is implemented: verified
+IR reference slices lower to `.quad <symbol>`, remain `absolute64` through the
+bootstrap object and ELF64 paths, and are covered by deterministic,
+malformed-input and executable-link tests. M3.3 now adds one vptr only to
+polymorphic hierarchies, concrete final-overrider tables, virtual pointer calls
+through `call_indirect`, exact-value/final devirtualization and most-derived
+construction dispatch. The next class-system milestone is M3.4 operators,
+bound methods, RTTI and friendship. None of these later milestones changes M3.0 ownership semantics:
+there is still no automatic lifetime or resource management.
 
 ## Discipline reminders
 

@@ -189,12 +189,14 @@ resolved by a separately linked module object.
 
 The self-hosted middle end builds explicit callable bindings after canonical
 signatures are available. An iterative heap sort orders function IDs by
-complete module name, source name and signature; adjacent equal module/name
-identities become one binding with a contiguous candidate slice. IR function
-construction and statement lowering consume that same sequence rather than
-sorting independently. Function, parameter, slot, block and global
-construction therefore remains deterministic when source units are supplied
-in a different order, without recursive sorting or downstream order drift.
+complete module name, canonical owner, source name and signature; adjacent
+equal module/owner/name identities become one binding with a contiguous
+candidate slice. Each function owns one callable identity containing its kind,
+optional owner type and receiver kind. IR function construction and statement
+lowering consume that same sequence rather than sorting independently.
+Function, parameter, slot, block and global construction therefore remains
+deterministic when source units are supplied in a different order, without
+recursive sorting or downstream order drift.
 
 Multi-candidate calls are resolved by a non-emitting expression probe split
 across one interface and three same-module implementation units. The probe
@@ -211,6 +213,46 @@ predicates derive pointer qualification, project member/index storage and
 decide addressability or assignability; bitfields are represented as
 non-addressable storage rather than special-casing boolean triples at every
 consumer.
+
+Class metadata uses the same dependency-root pattern. The
+`semantic.classes.model` module defines class, field-access and method records
+and groups their buffers into one lazily empty store. Semantic context owns that
+store as one validated lifecycle unit; collection, layout and access passes sit
+above context rather than leaking policy into the record model.
+The class pass records nominal identities after named-type collection, lets the
+shared record-layout pass resolve complete non-polymorphic storage, then builds
+contiguous per-class field and method slices. Field slices follow layout order;
+method slices are selected from the canonical callable order one owner at a
+time, so class-record order and global function order are never accidentally
+coupled. The validator checks those slices, explicit access, dispatch policy,
+the single-base relation, absence of vptrs and class-value composition.
+
+M3.1 adds one canonical `base_type` field to the semantic type record. The class
+metadata record mirrors that relation, but layout, field lookup, IR member
+verification and x86-64 ABI classification all consume the type relation rather
+than copied inherited fields. Layout resolves the base first, begins direct
+field placement at the base's padded size and keeps the base address at offset
+zero. A bounded DFS over class records validates cycles and final bases.
+
+After direct methods are collected, a base-first DFS state machine analyzes
+each hierarchy independently of source order. Exact method keys ignore owner
+but retain receiver and explicit parameter types. Valid overrides reuse the
+inherited slot; new virtual or abstract declarations receive the next canonical
+slot. The same pass propagates polymorphic and abstract flags, rejects missing
+or final overrides and preserves distinct inherited overloads. M3.1 stores no
+vptr and emits no indirect call; `super` and static-type calls lower directly.
+
+Class methods reuse the ordinary `Function`, signature, binding, default and IR
+records. Their callable identity supplies owner and receiver policy. Semantic
+parameter slices contain only source parameters; IR construction synthesizes
+the anonymous receiver as the first ABI parameter, so it never affects source
+arity or default insertion. The non-emitting call probe classifies a call target as
+constructor, instance, static or free before filtering an owner-scoped binding.
+The emitting lowerer evaluates an instance receiver once; constructors create
+and zero a complete slot before passing its address. Direct calls then use the
+same aggregate argument/result pipeline as free functions. The x86-64 ABI
+classifier treats classes and structures through the same field recursion;
+class values at an external-C boundary are rejected earlier by semantics.
 
 Default parameters reuse that callable pipeline. One `DefaultProfile` records
 the required arity and validates trailing placement and declaration mounts;

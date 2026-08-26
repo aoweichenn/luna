@@ -1,6 +1,9 @@
 module luna.bootstrap.middleend.semantic.functions;
 
 import luna.bootstrap.middleend.semantic.attributes as attributes;
+import luna.bootstrap.middleend.semantic.callable as callable;
+import luna.bootstrap.middleend.semantic.classes as classes;
+import luna.bootstrap.middleend.semantic.classes.model as class_model;
 import luna.bootstrap.middleend.semantic.consteval.engine as const_engine;
 import luna.bootstrap.middleend.semantic.consteval.model as const_model;
 import luna.bootstrap.middleend.semantic.context.lookup as names;
@@ -203,6 +206,22 @@ fn external_name_is_reserved(context: *context::Context, unit_index: usize, toke
             unit->source.data[token.span.offset + 1] == 'L');
 }
 
+fn diagnose_external_type(
+    context: *context::Context, type_id: usize, unit_index: usize, span: lexer::SourceSpan,
+    related_unit: usize, related_span: lexer::SourceSpan) -> bool {
+    if (type_id == context::no_id()) {
+        return true;
+    }
+    let kind: type_info::Kind = context::type_record(context, type_id).kind;
+    let type_is_invalid: bool = kind == type_info::Kind.array || kind == type_info::Kind.class_type;
+    if (!type_is_invalid) {
+        return true;
+    }
+    let diagnostic: context::DiagnosticKind = kind == type_info::Kind.class_type ?
+        context::DiagnosticKind.invalid_class_abi : context::DiagnosticKind.invalid_external;
+    return context::add_diagnostic(context, diagnostic, unit_index, span, related_unit, related_span, type_id);
+}
+
 fn validate_external_signature(context: *context::Context, function_id: usize) -> bool {
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
@@ -219,23 +238,16 @@ fn validate_external_signature(context: *context::Context, function_id: usize) -
             context::token(context, symbol.declaration_unit, symbol.name_token).span,
             context::no_id(), context::empty_span(), function_id);
     }
-    if (function.return_type != context::no_id() &&
-        context::type_record(
-            context, function.return_type).kind == type_info::Kind.array) {
-        context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_external, symbol.declaration_unit,
-            context::node(context, symbol.declaration_unit, symbol.declaration_node).span,
-            context::no_id(), context::empty_span(), function.return_type);
-    }
+    diagnose_external_type(
+        context, function.return_type, symbol.declaration_unit,
+        context::node(context, symbol.declaration_unit, symbol.declaration_node).span,
+        context::no_id(), context::empty_span());
     for (var index: usize = 0; index < function.parameter_count; index += 1) {
         let parameter: context::Parameter = parameters[function.first_parameter + index];
-        let record: type_info::Record = context::type_record(context, parameter.type_id);
-        if (record.kind == type_info::Kind.array) {
-            context::add_diagnostic(
-                context, context::DiagnosticKind.invalid_external, parameter.unit_index,
-                context::node(context, parameter.unit_index, parameter.declaration_node).span, symbol.declaration_unit,
-                context::node(context, symbol.declaration_unit, symbol.declaration_node).span, parameter.type_id);
-        }
+        diagnose_external_type(
+            context, parameter.type_id, parameter.unit_index,
+            context::node(context, parameter.unit_index, parameter.declaration_node).span, symbol.declaration_unit,
+            context::node(context, symbol.declaration_unit, symbol.declaration_node).span);
     }
     return context->error == runtime::Error.none;
 }
@@ -324,8 +336,8 @@ fn validate_function_declaration_form(
 }
 
 fn add_function_declaration(
-    context: *context::Context, module_id: usize, unit_index: usize, declaration_id: usize,
-    declaration: syntax::SyntaxNode, interface_unit: bool, defaults: DefaultProfile) -> usize {
+    context: *context::Context, identity: callable::Identity, module_id: usize, unit_index: usize,
+    declaration_id: usize, declaration: syntax::SyntaxNode, interface_unit: bool, defaults: DefaultProfile) -> usize {
     let none: usize = context::no_id();
     var parameter_count: usize = 0;
     var return_node: usize = none;
@@ -353,6 +365,9 @@ fn add_function_declaration(
     if ((declaration.flags & (syntax::SyntaxFlag.asm_function as usize)) != 0) {
         flags |= context::SymbolFlag.asm_function as usize;
     }
+    if ((declaration.flags & (syntax::SyntaxFlag.abstract_method as usize)) != 0) {
+        flags |= context::SymbolFlag.abstract_method as usize;
+    }
     if (interface_unit) {
         flags |= context::SymbolFlag.interface_declaration as usize;
     }
@@ -375,7 +390,8 @@ fn add_function_declaration(
     }
     let function_id: usize = append_function(
         context, {
-            symbol_id = symbol_id, binding_id = none, interface_unit = interface_unit ? unit_index : none,
+            identity = identity, symbol_id = symbol_id, binding_id = none,
+            interface_unit = interface_unit ? unit_index : none,
             interface_node = interface_unit ? declaration_id : none, implementation_unit = interface_unit ?
                 none : unit_index, implementation_node = interface_unit ? none : declaration_id,
             return_type = type_info::BuiltinType.type_void as usize, first_parameter = none, parameter_count = 0,
@@ -405,9 +421,45 @@ fn add_function_declaration(
     return function_id;
 }
 
+fn collect_function_declaration(
+    context: *context::Context, identity: callable::Identity, module_id: usize, unit_index: usize,
+    declaration_id: usize, declaration: syntax::SyntaxNode, interface_unit: bool, duplicate_name: usize) {
+    var defaults: DefaultProfile = {
+        required_parameter_count = 0, default_count = 0, valid = false,
+    };
+    validate_function_declaration_form(context, unit_index, declaration, interface_unit, &defaults);
+    let lookup: FunctionDeclarationLookup =
+        lookup_function_declaration(context, identity, module_id, unit_index, declaration);
+    let match: FunctionDeclarationMatch = classify_function_declaration(
+        context, unit_index, declaration, interface_unit, duplicate_name, lookup.named_function, lookup.overload);
+    switch (match.action) {
+    case FunctionDeclarationAction.add_candidate {
+        add_function_declaration(
+            context, identity, module_id, unit_index, declaration_id, declaration, interface_unit, defaults);
+    }
+    case FunctionDeclarationAction.attach_definition {
+        reject_repeated_defaults(context, match.related_id, unit_index, declaration, defaults);
+        attach_function_definition(context, match.related_id, unit_index, declaration_id, declaration);
+    }
+    case FunctionDeclarationAction.duplicate_overload {
+        report_function_declaration_conflict(
+            context, context::DiagnosticKind.duplicate_function, unit_index, declaration, match.related_id);
+    }
+    case FunctionDeclarationAction.contract_mismatch {
+        report_function_declaration_conflict(
+            context, context::DiagnosticKind.signature_mismatch, unit_index, declaration, match.related_id);
+    }
+    case FunctionDeclarationAction.non_callable_conflict {
+        report_function_declaration_conflict(
+            context, context::DiagnosticKind.duplicate_name, unit_index, declaration, match.related_id);
+    }
+    }
+}
+
 fn collect_functions_in_unit(
     context: *context::Context, module_id: usize, unit_index: usize, interface_unit: bool) -> bool {
     let none: usize = context::no_id();
+    let identity: callable::Identity = callable::free_function();
     if (unit_index == none) {
         return true;
     }
@@ -418,39 +470,10 @@ fn collect_functions_in_unit(
         if (declaration.kind == syntax::SyntaxKind.function_declaration && (declaration.flags &
                 (syntax::SyntaxFlag.const_function as usize)) == 0) {
             validate_asm_function(context, unit_index, declaration, interface_unit);
-            var defaults: DefaultProfile = {
-                required_parameter_count = 0, default_count = 0, valid = false,
-            };
-            validate_function_declaration_form(context, unit_index, declaration, interface_unit, &defaults);
             let duplicate_name: usize =
                 names::find_any_local_symbol(context, module_id, unit_index, declaration.token_index);
-            let lookup: FunctionDeclarationLookup =
-                lookup_function_declaration(context, module_id, unit_index, declaration);
-            let match: FunctionDeclarationMatch = classify_function_declaration(
-                context, unit_index, declaration, interface_unit, duplicate_name,
-                lookup.named_function, lookup.overload);
-            switch (match.action) {
-            case FunctionDeclarationAction.add_candidate {
-                add_function_declaration(
-                    context, module_id, unit_index, declaration_id, declaration, interface_unit, defaults);
-            }
-            case FunctionDeclarationAction.attach_definition {
-                reject_repeated_defaults(context, match.related_id, unit_index, declaration, defaults);
-                attach_function_definition(context, match.related_id, unit_index, declaration_id, declaration);
-            }
-            case FunctionDeclarationAction.duplicate_overload {
-                report_function_declaration_conflict(
-                    context, context::DiagnosticKind.duplicate_function, unit_index, declaration, match.related_id);
-            }
-            case FunctionDeclarationAction.contract_mismatch {
-                report_function_declaration_conflict(
-                    context, context::DiagnosticKind.signature_mismatch, unit_index, declaration, match.related_id);
-            }
-            case FunctionDeclarationAction.non_callable_conflict {
-                report_function_declaration_conflict(
-                    context, context::DiagnosticKind.duplicate_name, unit_index, declaration, match.related_id);
-            }
-            }
+            collect_function_declaration(
+                context, identity, module_id, unit_index, declaration_id, declaration, interface_unit, duplicate_name);
         }
     }
     return context->error == runtime::Error.none;
@@ -477,6 +500,9 @@ fn collect_functions(context: *context::Context) -> bool {
             }
         }
     }
+    if (!collect_class_methods(context)) {
+        return false;
+    }
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
     let symbols: *const context::Symbol = context->symbols.data as
@@ -490,7 +516,9 @@ fn collect_functions(context: *context::Context) -> bool {
             function.implementation_unit == context::no_id();
         let definition_is_required: bool = modules[symbol.module_id].implementation_count != 0 &&
             (function.flags & (context::SymbolFlag.external as usize)) == 0;
-        if (definition_is_missing && definition_is_required) {
+        let abstract_method: bool = (function.flags & (context::SymbolFlag.abstract_method as usize)) != 0;
+        let body_is_required: bool = definition_is_required && !abstract_method;
+        if (definition_is_missing && body_is_required) {
             context::add_diagnostic(
                 context, context::DiagnosticKind.missing_definition, symbol.declaration_unit,
                 context::node(context, symbol.declaration_unit, symbol.declaration_node).span,

@@ -8,6 +8,7 @@ import luna.bootstrap.frontend.lexer as lexer;
 import luna.bootstrap.frontend.syntax as syntax;
 import luna.bootstrap.middleend.ir as ir;
 import luna.bootstrap.middleend.semantic.attributes as attributes;
+import luna.bootstrap.middleend.semantic.classes as classes;
 import luna.bootstrap.middleend.semantic.consteval as consteval;
 import luna.bootstrap.middleend.semantic.consteval.engine as const_engine;
 import luna.bootstrap.middleend.semantic.consteval.model as const_model;
@@ -86,6 +87,12 @@ fn lower_variable(context: *context::Context, node_id: usize, node: syntax::Synt
         }
     }
     let type_record: type_info::Record = context::type_record(context, type_id);
+    if (classes::class_is_abstract(context, type_id)) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_abstract_class, context->current_unit, node.span,
+            none, context::empty_span(), type_id);
+        return false;
+    }
     if (type_record.kind == type_info::Kind.type_void || (type_record.flags & ((type_info::Flag.header as usize) |
                 (type_info::Flag.flexible as usize))) != 0) {
         context::add_diagnostic(
@@ -875,11 +882,11 @@ fn add_parameter_locals(context: *context::Context, function_id: usize) -> bool 
     let semantic_parameters: *const context::Parameter = context->parameters.data as
             *const context::Parameter;
     var child: usize = declaration.first_child;
-    var index: usize = 0;
-    while (index < function.parameter_count) {
+    let receiver_count: usize = functions::function_receiver_parameter_count(function);
+    for (var index: usize = 0; index < function.parameter_count; index += 1) {
         let parameter_node: syntax::SyntaxNode = context::node(context, function.implementation_unit, child);
         let parameter: context::Parameter = semantic_parameters[ function.first_parameter + index];
-        let ir_parameter: ir::Parameter = ir_parameters[ ir_function.first_parameter + index];
+        let ir_parameter: ir::Parameter = ir_parameters[ir_function.first_parameter + receiver_count + index];
         builder::append_local(
             context, {
                 function_id = function_id, type_id = parameter.type_id, slot_id = ir_parameter.slot_id,
@@ -888,7 +895,6 @@ fn add_parameter_locals(context: *context::Context, function_id: usize) -> bool 
                 volatile_binding = false, constant_binding = false, integer_value = 0,
             });
         child = parameter_node.next_sibling;
-        index += 1;
     }
     return context->error == runtime::Error.none;
 }

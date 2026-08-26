@@ -1,0 +1,354 @@
+module luna.bootstrap.middleend.semantic.functions;
+
+struct IdentityResult {
+    identity: callable::Identity;
+    valid: bool;
+}
+
+fn method_diagnostic(
+    context: *context::Context, kind: context::DiagnosticKind, unit_index: usize,
+    declaration: syntax::SyntaxNode, owner_type: usize) {
+    var related_unit: usize = context::no_id();
+    var related_span: lexer::SourceSpan = context::empty_span();
+    if (owner_type < context->types.type_count) {
+        let owner: type_info::Record = context::type_record(context, owner_type);
+        related_unit = owner.declaration_unit;
+        related_span = context::node(context, owner.declaration_unit, owner.declaration_node).span;
+    }
+    context::add_diagnostic(context, kind, unit_index, declaration.span, related_unit, related_span, owner_type);
+}
+
+fn receiver_kind(declaration: syntax::SyntaxNode) -> callable::ReceiverKind {
+    let read_only: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.read_only);
+    let volatile_access: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.volatile_);
+    if (volatile_access) {
+        return read_only ? callable::ReceiverKind.read_only_volatile : callable::ReceiverKind.writable_volatile;
+    }
+    return read_only ? callable::ReceiverKind.read_only : callable::ReceiverKind.writable;
+}
+
+fn receiver_is_qualified(declaration: syntax::SyntaxNode) -> bool {
+    let read_only: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.read_only);
+    let volatile_access: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.volatile_);
+    return read_only || volatile_access;
+}
+
+fn method_identity(
+    context: *context::Context, owner_type: usize, unit_index: usize,
+    declaration: syntax::SyntaxNode) -> IdentityResult {
+    let static_method: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.static_method);
+    let constructor: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.constructor);
+    if (static_method) {
+        if (constructor || receiver_is_qualified(declaration)) {
+            method_diagnostic(context, context::DiagnosticKind.invalid_receiver, unit_index, declaration, owner_type);
+            return {identity = callable::free_function(), valid = false};
+        }
+        return {
+            identity = {
+                kind = callable::Kind.static_method, owner_type = owner_type, receiver = callable::ReceiverKind.none,
+            }, valid = true,
+        };
+    }
+    if (constructor && receiver_is_qualified(declaration)) {
+        method_diagnostic(context, context::DiagnosticKind.invalid_receiver, unit_index, declaration, owner_type);
+        return {identity = callable::free_function(), valid = false};
+    }
+    return {
+        identity = {
+            kind = constructor ? callable::Kind.constructor : callable::Kind.instance_method, owner_type = owner_type,
+            receiver = constructor ? callable::ReceiverKind.writable : receiver_kind(declaration),
+        }, valid = true,
+    };
+}
+
+fn constructor_return_is_valid(
+    context: *context::Context, owner_type: usize, unit_index: usize, declaration: syntax::SyntaxNode) -> bool {
+    if (!declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.constructor)) {
+        return true;
+    }
+    var parameter_count: usize = 0;
+    var return_node: usize = context::no_id();
+    var body_node: usize = context::no_id();
+    if (!function_parts(context, unit_index, declaration, &parameter_count, &return_node, &body_node)) {
+        return false;
+    }
+    if (return_node == context::no_id()) {
+        return true;
+    }
+    method_diagnostic(context, context::DiagnosticKind.invalid_method, unit_index, declaration, owner_type);
+    return false;
+}
+
+fn node_is_super_init_call(context: *context::Context, unit_index: usize, node_id: usize) -> bool {
+    let node: syntax::SyntaxNode = context::node(context, unit_index, node_id);
+    if (node.kind != syntax::SyntaxKind.call_expression || node.child_count == 0) {
+        return false;
+    }
+    let callee: syntax::SyntaxNode = context::node(context, unit_index, node.first_child);
+    if (callee.kind != syntax::SyntaxKind.member_expression || callee.child_count != 2) {
+        return false;
+    }
+    let base: syntax::SyntaxNode = context::node(context, unit_index, callee.first_child);
+    let member: syntax::SyntaxNode = context::node(context, unit_index, base.next_sibling);
+    let super_base: bool = base.kind == syntax::SyntaxKind.super_expression;
+    let init_member: bool = context::token_equals_bytes(context, unit_index, member.token_index, "init", 4);
+    return super_base && init_member;
+}
+
+fn count_super_init_calls(context: *context::Context, unit_index: usize, node_id: usize, depth: usize) -> usize {
+    if (depth >= context::Limit.maximum_type_depth as usize) {
+        return 0;
+    }
+    var count: usize = node_is_super_init_call(context, unit_index, node_id) ? 1 : 0;
+    let node: syntax::SyntaxNode = context::node(context, unit_index, node_id);
+    for (var child: usize = node.first_child; child != context::no_id();
+        child = context::node(context, unit_index, child).next_sibling) {
+        count += count_super_init_calls(context, unit_index, child, depth + 1);
+    }
+    return count;
+}
+
+fn first_statement_calls_super_init(context: *context::Context, unit_index: usize, body_id: usize) -> bool {
+    let body: syntax::SyntaxNode = context::node(context, unit_index, body_id);
+    if (body.child_count == 0) {
+        return false;
+    }
+    let statement: syntax::SyntaxNode = context::node(context, unit_index, body.first_child);
+    if (statement.kind != syntax::SyntaxKind.expression_statement || statement.child_count != 1) {
+        return false;
+    }
+    return node_is_super_init_call(context, unit_index, statement.first_child);
+}
+
+fn base_constructor_call_is_valid(
+    context: *context::Context, owner_type: usize, unit_index: usize, declaration: syntax::SyntaxNode) -> bool {
+    if (!declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.constructor)) {
+        return true;
+    }
+    if (classes::base_type(context, owner_type) == context::no_id()) {
+        return true;
+    }
+    var parameter_count: usize = 0;
+    var return_node: usize = context::no_id();
+    var body_node: usize = context::no_id();
+    if (!function_parts(context, unit_index, declaration, &parameter_count, &return_node, &body_node)) {
+        return false;
+    }
+    let first_call_is_valid: bool = body_node != context::no_id() &&
+        first_statement_calls_super_init(context, unit_index, body_node);
+    let call_count: usize = body_node == context::no_id() ?
+        0 : count_super_init_calls(context, unit_index, body_node, 0);
+    if (!first_call_is_valid || call_count != 1) {
+        method_diagnostic(context, context::DiagnosticKind.invalid_super, unit_index, declaration, owner_type);
+        return false;
+    }
+    return true;
+}
+
+fn class_method_access_is_valid(declaration: syntax::SyntaxNode) -> bool {
+    let access: class_model::Access = classes::access_from_flags(declaration.flags);
+    return access == class_model::Access.public_access || access == class_model::Access.protected_access;
+}
+
+fn method_has_defaults(context: *context::Context, unit_index: usize, declaration: syntax::SyntaxNode) -> bool {
+    for (var child: usize = declaration.first_child; child != context::no_id();
+        child = context::node(context, unit_index, child).next_sibling) {
+        let parameter: syntax::SyntaxNode = context::node(context, unit_index, child);
+        if (parameter.kind != syntax::SyntaxKind.parameter) {
+            return false;
+        }
+        if (parameter.child_count == 2) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn method_form_is_valid(
+    context: *context::Context, owner_type: usize, unit_index: usize, declaration: syntax::SyntaxNode) -> bool {
+    let variadic: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.variadic);
+    let virtual_flags: usize = (syntax::SyntaxFlag.virtual_method as usize) |
+        (syntax::SyntaxFlag.abstract_method as usize) | (syntax::SyntaxFlag.override_method as usize);
+    let virtual_contract: bool = (declaration.flags & virtual_flags) != 0;
+    let invalid_defaults: bool = virtual_contract && method_has_defaults(context, unit_index, declaration);
+    if (variadic || invalid_defaults) {
+        method_diagnostic(context, context::DiagnosticKind.invalid_method, unit_index, declaration, owner_type);
+        return false;
+    }
+    return true;
+}
+
+fn mark_member_exported(context: *context::Context, function_id: usize) {
+    if (function_id == context::no_id()) {
+        return;
+    }
+    var functions: *context::Function = context->functions.data as
+            *context::Function;
+    let symbol_id: usize = functions[function_id].symbol_id;
+    functions[function_id].flags |= context::SymbolFlag.member_exported as usize;
+    let symbols: *context::Symbol = context->symbols.data as
+            *context::Symbol;
+    symbols[symbol_id].flags |= context::SymbolFlag.member_exported as usize;
+}
+
+fn collect_declared_method(
+    context: *context::Context, module_id: usize, owner_type: usize, unit_index: usize,
+    declaration_id: usize, declaration: syntax::SyntaxNode) {
+    if (!class_method_access_is_valid(declaration) ||
+        !declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.bodyless)) {
+        method_diagnostic(context, context::DiagnosticKind.invalid_method, unit_index, declaration, owner_type);
+        return;
+    }
+    if (!method_form_is_valid(context, owner_type, unit_index, declaration)) {
+        return;
+    }
+    let identity: IdentityResult = method_identity(context, owner_type, unit_index, declaration);
+    if (!identity.valid || !constructor_return_is_valid(context, owner_type, unit_index, declaration)) {
+        return;
+    }
+    collect_function_declaration(
+        context, identity.identity, module_id, unit_index, declaration_id, declaration, true, context::no_id());
+    let owner: type_info::Record = context::type_record(context, owner_type);
+    if ((owner.flags & (type_info::Flag.exported as usize)) != 0) {
+        let lookup: FunctionDeclarationLookup =
+            lookup_function_declaration(context, identity.identity, module_id, unit_index, declaration);
+        mark_member_exported(context, lookup.overload);
+    }
+}
+
+fn collect_class_declaration_methods(
+    context: *context::Context, module_id: usize, owner_type: usize, record: type_info::Record) {
+    let declaration: syntax::SyntaxNode = context::node(context, record.declaration_unit, record.declaration_node);
+    for (var child: usize = declaration.first_child; child != context::no_id();
+        child = context::node(context, record.declaration_unit, child).next_sibling) {
+        let member: syntax::SyntaxNode = context::node(context, record.declaration_unit, child);
+        if (member.kind == syntax::SyntaxKind.function_declaration) {
+            collect_declared_method(context, module_id, owner_type, record.declaration_unit, child, member);
+        }
+    }
+}
+
+fn impl_owner_type(
+    context: *context::Context, module_id: usize, unit_index: usize, declaration: syntax::SyntaxNode) -> usize {
+    if (declaration.child_count == 0) {
+        return context::no_id();
+    }
+    let owner_type: usize = types::resolve_type_node(context, unit_index, declaration.first_child);
+    if (owner_type == context::no_id()) {
+        return owner_type;
+    }
+    let owner: type_info::Record = context::type_record(context, owner_type);
+    let owner_module: usize = names::unit_module(context, owner.declaration_unit);
+    if (owner.kind != type_info::Kind.class_type || owner_module != module_id) {
+        method_diagnostic(context, context::DiagnosticKind.invalid_method_definition, unit_index, declaration,
+            owner_type);
+        return context::no_id();
+    }
+    return owner_type;
+}
+
+fn collect_defined_method(
+    context: *context::Context, module_id: usize, owner_type: usize, unit_index: usize,
+    declaration_id: usize, declaration: syntax::SyntaxNode) {
+    if (declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.bodyless)) {
+        method_diagnostic(context, context::DiagnosticKind.invalid_method_definition, unit_index, declaration,
+            owner_type);
+        return;
+    }
+    let identity: IdentityResult = method_identity(context, owner_type, unit_index, declaration);
+    let constructor_is_valid: bool = constructor_return_is_valid(context, owner_type, unit_index, declaration) &&
+        base_constructor_call_is_valid(context, owner_type, unit_index, declaration);
+    if (!identity.valid || !constructor_is_valid) {
+        return;
+    }
+    let lookup: FunctionDeclarationLookup =
+        lookup_function_declaration(context, identity.identity, module_id, unit_index, declaration);
+    let private_method: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.private_access);
+    if (private_method && declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.constructor)) {
+        method_diagnostic(context, context::DiagnosticKind.invalid_method_definition, unit_index, declaration,
+            owner_type);
+        return;
+    }
+    let declaration_is_invalid: bool = private_method ? lookup.overload != context::no_id() :
+        lookup.overload == context::no_id();
+    if (declaration_is_invalid) {
+        method_diagnostic(context, context::DiagnosticKind.invalid_method_definition, unit_index, declaration,
+            owner_type);
+        return;
+    }
+    if (lookup.overload != context::no_id()) {
+        let functions: *const context::Function = context->functions.data as
+                *const context::Function;
+        let abstract_method: bool = (functions[lookup.overload].flags &
+                (context::SymbolFlag.abstract_method as usize)) != 0;
+        if (abstract_method) {
+            method_diagnostic(
+                context, context::DiagnosticKind.invalid_method_definition, unit_index, declaration, owner_type);
+            return;
+        }
+    }
+    collect_function_declaration(
+        context, identity.identity, module_id, unit_index, declaration_id, declaration, false, context::no_id());
+}
+
+fn collect_impl_methods(
+    context: *context::Context, module_id: usize, unit_index: usize, declaration: syntax::SyntaxNode) {
+    let invalid_flags: usize = (syntax::SyntaxFlag.exported as usize) | (syntax::SyntaxFlag.external as usize);
+    let declaration_is_invalid: bool = (declaration.flags & invalid_flags) != 0;
+    if (names::unit_is_interface(context, unit_index) || declaration_is_invalid) {
+        method_diagnostic(context, context::DiagnosticKind.invalid_method_definition, unit_index, declaration,
+            context::no_id());
+        return;
+    }
+    let owner_type: usize = impl_owner_type(context, module_id, unit_index, declaration);
+    if (owner_type == context::no_id()) {
+        return;
+    }
+    let owner_node: syntax::SyntaxNode = context::node(context, unit_index, declaration.first_child);
+    for (var child: usize = owner_node.next_sibling; child != context::no_id();
+        child = context::node(context, unit_index, child).next_sibling) {
+        let method: syntax::SyntaxNode = context::node(context, unit_index, child);
+        if (method.kind == syntax::SyntaxKind.function_declaration) {
+            collect_defined_method(context, module_id, owner_type, unit_index, child, method);
+        }
+    }
+}
+
+fn collect_impl_blocks_in_unit(context: *context::Context, module_id: usize, unit_index: usize) {
+    if (unit_index == context::no_id()) {
+        return;
+    }
+    for (var declaration_id: usize = names::first_declaration(context, unit_index);
+        declaration_id != context::no_id() && context->error == runtime::Error.none;
+        declaration_id = context::node(context, unit_index, declaration_id).next_sibling) {
+        let declaration: syntax::SyntaxNode = context::node(context, unit_index, declaration_id);
+        if (declaration.kind == syntax::SyntaxKind.impl_declaration) {
+            collect_impl_methods(context, module_id, unit_index, declaration);
+        }
+    }
+}
+
+fn collect_class_methods(context: *context::Context) -> bool {
+    let records: *const class_model::Record = context->classes.records.data as
+            *const class_model::Record;
+    for (var record_id: usize = 0;
+        record_id < context->classes.record_count && context->error == runtime::Error.none;
+        record_id += 1) {
+        let owner_type: usize = records[record_id].type_id;
+        let type_record: type_info::Record = context::type_record(context, owner_type);
+        collect_class_declaration_methods(
+            context, names::unit_module(context, type_record.declaration_unit), owner_type, type_record);
+    }
+    let modules: *const context::Module = context->modules.data as
+            *const context::Module;
+    for (var module_id: usize = 0;
+        module_id < context->module_count && context->error == runtime::Error.none;
+        module_id += 1) {
+        collect_impl_blocks_in_unit(context, module_id, modules[module_id].interface_unit);
+        for (var index: usize = 0; index < modules[module_id].implementation_count; index += 1) {
+            collect_impl_blocks_in_unit(
+                context, module_id, names::module_implementation_unit(context, module_id, index));
+        }
+    }
+    return context->error == runtime::Error.none;
+}

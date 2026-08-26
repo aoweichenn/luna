@@ -2,11 +2,12 @@
 
 ## Status and scope
 
-This is the design draft for the planned M3 phase. It consumes the canonical
-signature, overload, default-parameter and value-category foundation delivered
-by [`m2-callable-infrastructure.md`](m2-callable-infrastructure.md). The older
-uppercase M2/M3 headings in `roadmap.md` belong to archived Luna 0 bootstrap
-milestones.
+This is the accepted design for the M3 phase. M3.0 direct classes, M3.1 single
+inheritance/contracts, M3.2 relocation data and M3.3 dynamic dispatch are implemented; M3.4-M3.5 remain planned. The design consumes the
+canonical signature, overload, default-parameter and value-category foundation
+delivered by [`m2-callable-infrastructure.md`](m2-callable-infrastructure.md).
+The older uppercase M2/M3 headings in `roadmap.md` belong to archived Luna 0
+bootstrap milestones.
 
 M3 takes modern C++'s useful zero-cost object model as a reference while
 deliberately rejecting its historical compatibility surface. The phase adds no
@@ -19,7 +20,7 @@ For this design, "composition is deferred" means:
 - raw pointers to other classes remain legal and non-owning;
 - existing structure/union/array nesting remains unchanged.
 
-The primary M3 features are classes, explicit receiver methods, overloaded
+The primary M3 features are classes, implicit-receiver methods, overloaded
 constructors/methods, access control, single inheritance, opt-in virtual
 dispatch, restricted operators, non-owning bound methods and minimal RTTI.
 
@@ -37,7 +38,7 @@ dispatch, restricted operators, non-owning bound methods and minimal RTTI.
    conversion ranking, implicit numeric/pointer conversion or object slicing.
 5. **Modules remain the outer namespace.** `::` continues to mean module
    qualification only. `.` and `->` select fields or methods.
-6. **Separate interface and implementation.** Public/protected class contracts
+6. **Separate interface and implementation.** `pub`/`prot` class contracts
    live in the module interface; method bodies may be distributed across the
    module's implementation units.
 7. **No C++ lookup inheritance.** There is no ADL, friend injection, using
@@ -74,29 +75,37 @@ ClassMember      ::= Access FieldDeclaration
                    | ExposedAccess OperatorDeclaration
                    | "friend" "class" Identifier ";"
 
-Access           ::= "public" | "protected" | "private"
-ExposedAccess    ::= "public" | "protected"
+Access           ::= "pub" | "prot" | "priv"
+ExposedAccess    ::= "pub" | "prot"
+
+MethodSignature  ::= Identifier "(" [ ParameterList ] ")"
+                     [ "const" ] [ "volatile" ] [ "->" Type ]
 
 MethodDeclaration ::= "static" "fn" Signature ";"
-                    | "fn" ReceiverSignature ";"
-                    | "virtual" [ "final" ] "fn" ReceiverSignature ";"
-                    | "abstract" "fn" ReceiverSignature ";"
-                    | "override" [ "final" ] "fn" ReceiverSignature ";"
+                    | "fn" MethodSignature ";"
+                    | "virtual" [ "final" ] "fn" MethodSignature ";"
+                    | "abstract" "fn" MethodSignature ";"
+                    | "override" [ "final" ] "fn" MethodSignature ";"
 
-ConstructorDeclaration ::= "init" "(" "self" ":" "*" "Self"
-                           [ "," ParameterList ] ")" ";"
-OperatorDeclaration    ::= "operator" OperatorToken ReceiverSignature ";"
+ConstructorDeclaration ::= "init" "(" [ ParameterList ] ")" ";"
+OperatorDeclaration    ::= "operator" OperatorToken MethodSignature ";"
 
 ImplDeclaration  ::= "impl" QualifiedType "{" MethodDefinition* "}"
 
 MethodDefinition ::= "static" "fn" Signature FunctionBody
-                   | "fn" ReceiverSignature FunctionBody
-                   | "init" "(" "self" ":" "*" "Self"
-                     [ "," ParameterList ] ")" FunctionBody
-                   | "operator" OperatorToken ReceiverSignature FunctionBody
-                   | "private" "static" "fn" Signature FunctionBody
-                   | "private" "fn" ReceiverSignature FunctionBody
+                   | "fn" MethodSignature FunctionBody
+                   | "init" "(" [ ParameterList ] ")" FunctionBody
+                   | "operator" OperatorToken MethodSignature FunctionBody
+                   | "priv" "static" "fn" Signature FunctionBody
+                   | "priv" "fn" MethodSignature FunctionBody
 ```
+
+This grammar describes the complete accepted M3 direction. The implemented
+M3.0 subset has no base/final clause, virtual/abstract/override/operator/friend
+member or bound-method form. It accepts explicit-access fields, `pub` or
+`prot` direct method/constructor contracts, `priv` body-only methods,
+static methods and same-module `impl` blocks. Later milestones activate the
+remaining productions without changing the M3.0 spellings.
 
 `abstract` implies virtual. `static` is mutually exclusive with `virtual`,
 `abstract` and `override`. `final` on a method is legal only on a virtual
@@ -107,60 +116,57 @@ contract: the canonical order above is the only accepted spelling.
 
 ```luna
 export class Shape {
-    protected x: f64;
-    protected y: f64;
+    prot x: f64;
+    prot y: f64;
 
-    public init(self: *Self, x: f64, y: f64);
-    public virtual fn area(self: *const Self) -> f64;
-    public fn translate(self: *Self, dx: f64, dy: f64);
+    pub init(x: f64, y: f64);
+    pub virtual fn area() const -> f64;
+    pub fn translate(dx: f64, dy: f64);
 }
 
 export final class Circle : Shape {
-    private radius: f64;
+    priv radius: f64;
 
-    public init(self: *Self, x: f64, y: f64, radius: f64);
-    public override fn area(self: *const Self) -> f64;
+    pub init(x: f64, y: f64, radius: f64);
+    pub override fn area() const -> f64;
 }
 ```
 
 A class has at most one base class. Every field carries explicit access;
-interface method declarations are explicitly `public` or `protected`. Private
+interface method declarations are explicitly `pub` or `prot`. Private
 methods live only in `impl` blocks, avoiding C++'s need to expose private method
 declarations in public headers. There is no default access based on declaration
 spelling.
-
-`Self` is a contextual type name inside a class declaration or its `impl`
-blocks. It denotes the class currently being declared or implemented.
 
 ### Method definitions
 
 ```luna
 impl Shape {
-    init(self: *Self, x: f64, y: f64) {
-        self->x = x;
-        self->y = y;
+    init(x: f64, y: f64) {
+        this->x = x;
+        this->y = y;
     }
 
-    fn area(self: *const Self) -> f64 {
+    fn area() const -> f64 {
         return 0.0;
     }
 
-    fn translate(self: *Self, dx: f64, dy: f64) {
-        self->x += dx;
-        self->y += dy;
+    fn translate(dx: f64, dy: f64) {
+        this->x += dx;
+        this->y += dy;
     }
 
-    private fn coordinate_sum(self: *const Self) -> f64 {
-        return self->x + self->y;
+    priv fn coordinate_sum() const -> f64 {
+        return this->x + this->y;
     }
 }
 ```
 
 An `impl Type` block is legal only in the module that declares `Type`. It does
-not open an extension-method mechanism. Matching public/protected class
+not open an extension-method mechanism. Matching `pub`/`prot` class
 declarations omit their access and dispatch modifiers on the body definition;
 the declaration owns the contract. A method introduced with a body only in an
-`impl` block must say `private` explicitly, preventing a misspelled public
+`impl` block must say `priv` explicitly, preventing a misspelled public
 method definition from silently creating another method.
 
 Method definitions may be spread across any implementation units of the
@@ -169,20 +175,19 @@ method.
 
 ### Receivers
 
-An instance method has an explicit first parameter named `self`:
+An instance method has an implicit receiver and the body accesses it through
+the reserved `this` pointer. The receiver never appears in the source parameter
+list. A method is writable by default; trailing `const`, `volatile` or
+`const volatile` qualifies the pointee. A `static fn` has no receiver and cannot
+use `this`. `Self` is an ordinary unresolved type name unless a declaration
+actually introduces that name; it has no contextual behavior.
 
-- `self: *Self` requires a mutable receiver;
-- `self: *const Self` is a read-only receiver;
-- volatile qualification follows the existing pointer rules;
-- a `static fn` has no receiver.
-
-The receiver is part of method compatibility but is not written at a call
-site. Receiver binding has one narrow qualification rule: a mutable object or
-`*Self` may bind to `*const Self`; the reverse is invalid. This does not create
-a general implicit pointer conversion elsewhere in the language. An
-address-backed temporary may bind only to a read-only receiver and remains
-valid for the existing enclosing-expression lifetime; a mutable receiver
-requires a mutable lvalue.
+Receiver kind remains part of callable compatibility and canonical identity.
+A mutable object may bind to a `const` method; the reverse is invalid. This
+narrow binding rule does not create a general implicit pointer conversion. An
+address-backed temporary may bind only to a `const` method and remains valid for
+the existing enclosing-expression lifetime; a writable method requires a
+mutable lvalue.
 
 Variadic, `const fn`, `asm fn` and `@export_name` methods are outside the first
 M3 implementation. `@inline` and `@noreturn` may apply once their existing
@@ -219,9 +224,9 @@ pointer-to-member types or general closures.
 M3 adds overloaded `init` constructors on top of the M2 callable resolver:
 
 ```luna
-public init(self: *Self);
-public init(self: *Self, value: i32);
-public init(self: *Self, text: *const u8, length: usize = 0);
+pub init();
+pub init(value: i32);
+pub init(text: *const u8, length: usize = 0);
 ```
 
 ```luna
@@ -282,9 +287,9 @@ Free-function lookup never considers argument classes. There is no ADL.
 
 | Access | Available from |
 | --- | --- |
-| `public` | all valid importers and class implementations |
-| `protected` | methods of the declaring class and derived classes |
-| `private` | methods of the declaring class and explicit same-module friend classes |
+| `pub` | all valid importers and class implementations |
+| `prot` | methods of the declaring class and derived classes |
+| `priv` | methods of the declaring class and explicit same-module friend classes |
 
 Being in the same Luna module does not bypass class access without an explicit
 restricted `friend class` declaration. An `impl` block establishes the current
@@ -342,10 +347,12 @@ value, passed by value or returned by value; raw pointers to them are legal.
 ### Call rules
 
 - non-virtual methods always use direct calls;
-- a virtual call through an object whose exact dynamic type is statically known
-  may be emitted as a direct call;
-- a virtual call through a base pointer loads the target from the vtable and
-  uses the existing indirect-call IR;
+- a virtual call through an object value with `.` has that value's exact
+  dynamic type and is emitted directly;
+- a virtual call through `->`, including `this->method()`, loads the target
+  from the vtable and uses the existing indirect-call IR;
+- a `final` method or a call through a pointer to a `final class` is emitted
+  directly because its final overrider is statically known;
 - `super.method()` is always direct;
 - pointer calls retain the existing null trap before method lookup/dispatch.
 
@@ -357,6 +364,7 @@ method and calls it explicitly.
 
 Classes use the existing x86-64 target layout rules with these additions:
 
+0. an otherwise empty complete class has size and alignment one;
 1. the single base subobject is at offset zero;
 2. a class that first introduces virtual methods receives one hidden vtable
    pointer after its base subobject, or at offset zero when it has no base;
@@ -377,9 +385,19 @@ Vtable slots are deterministic:
    canonical type-descriptor pointer without changing slot indices.
 
 Each concrete polymorphic class owns one compiler-generated read-only vtable.
-The symbol is derived from the canonical module and class name. Every slot is a
-function address with an absolute relocation. Abstract classes need no
-instantiable vtable until all slots have concrete final overriders.
+The table is a module-local IR global allocated in canonical class-record
+order. Every slot is a function address with an absolute relocation. Abstract
+classes need no instantiable vtable until all slots have concrete final
+overriders; each concrete descendant materializes its own final-overrider
+table.
+
+Construction does not reproduce C++'s temporary construction-phase dynamic
+types. Luna zeroes the complete most-derived storage, installs that concrete
+class's vptr, then enters its constructor. `super.init(...)` operates on the
+same base-at-zero object and never replaces the vptr, so a virtual call made
+during construction observes the most-derived class. The zero-before-vptr
+ordering and absence of implicit destruction make this rule deterministic
+without construction vtables or pure-virtual runtime stubs.
 
 ## Lowering model
 
@@ -392,23 +410,40 @@ ordinary structure flags:
 ClassRecord {
     type_id
     base_type
+    first_field / field_count
     first_method / method_count
     vptr_offset
+    vtable_global
     flags: exported, final, abstract, polymorphic
 }
 
+ClassFieldRecord {
+    field_id
+    access
+}
+
 MethodRecord {
-    owner_type
     function_id
-    receiver_flags
     access
     dispatch: static, direct, virtual, abstract
     virtual_slot
 }
 ```
 
-Class and method names enter per-class bindings backed by the M2 overload-set
-and canonical callable-signature services.
+`Function` owns the shared callable identity: kind, owner type and receiver
+kind. `MethodRecord` contains only class-specific policy and dispatch metadata,
+so declaration matching, mangling and overload selection cannot disagree with
+a duplicated method identity. Class and method names enter owner-scoped
+bindings backed by the M2 candidate slices and canonical-signature services.
+The dependency-root `semantic.classes.model` module owns these records in one
+`Store`; semantic context carries that store as a single lifecycle unit instead
+of exposing unrelated class buffers throughout the compiler.
+
+The ordinary type record mirrors `vptr_offset` as layout metadata. The generic
+type-table validator therefore recomputes hidden-pointer placement together
+with bases, direct fields, alignment and tail padding, while `ClassRecord`
+retains the same value for dispatch-policy queries. A disagreement is an
+internal invariant failure rather than an unchecked hidden gap.
 
 ### IR and backend
 
@@ -420,16 +455,57 @@ Virtual dispatch reuses existing operations where possible:
 
 ```text
 receiver null_check
-    -> load vtable pointer
-    -> load slot function pointer
+    -> byte-offset to the hierarchy's fixed vptr
+    -> load read-only vtable pointer
+    -> byte-offset to the canonical slot
+    -> load the erased function pointer
     -> call_indirect(receiver, arguments...)
 ```
+
+The indirect function-pointer type contains the receiver as parameter zero,
+followed by the M2 canonical parameter sequence. The slot's concrete target
+may own a derived receiver type, but single inheritance and base-at-zero make
+the machine representation identical; the vtable is the sole erasure boundary.
+Defaults remain call-site data and never enter a slot.
 
 The missing backend foundation is deterministic read-only global relocation
 data. Before virtual dispatch lands, IR/global emission and `luna-as` must be
 able to express a `.quad`-equivalent function-symbol reference and serialize it
 as the already-supported `absolute64` object relocation. This facility is
 compiler-owned and is not exposed as a general module-scope variable feature.
+
+M3.2 models this without teaching raw bytes about class policy:
+
+```text
+Global {
+    byte_offset / byte_count / alignment
+    first_function_reference / function_reference_count
+    read_only
+}
+
+GlobalFunctionReference {
+    global_id
+    byte_offset
+    function_id
+}
+```
+
+References form one contiguous, offset-ordered slice per global. Each reference
+occupies one aligned, zero-filled eight-byte placeholder and targets the
+canonical IR function identity selected by M2; defaults, overload sets, access
+and virtual policy never enter this layer. The IR builder accepts references
+only in read-only globals and the verifier independently recomputes the slices,
+ranges, ordering, placeholder bytes and target bounds. This keeps ordinary
+class storage and future dispatch capability metadata separate: M3.3 consumes
+the record but owns vtable construction.
+
+Code generation replaces each placeholder with exactly one `.quad <symbol>`
+line. `luna-as` accepts this form only in `.rodata`, always preserves it as an
+`absolute64` relocation with addend zero, and never folds even a same-object
+target to a section-relative number because the final virtual address belongs
+to the linker. Object serialization and ELF64 `ET_REL` writing reuse the
+existing absolute relocation representation; no ownership, allocator or
+general source-level global facility is introduced.
 
 ## Restricted operators
 
@@ -534,15 +610,27 @@ sources.
 
 ### M3.0: class metadata and direct methods
 
+Status: implemented and covered by executable, negative, cross-module, ABI and
+source-order tests.
+
+- shared callable identities and owner-scoped bindings, with unchanged
+  free-function ABI;
+- one class-metadata store for class, field-access and method records;
+- nominal empty class identities, module visibility and canonical encoding;
 - lexer/parser nodes for `class`, `impl`, access and method modifiers;
-- `Self`, explicit receivers and M2 method overload matching;
+- implicit `this`, receiver qualifiers and M2 method overload matching;
 - complete non-polymorphic class layout;
-- private/protected/public access checks;
+- `priv`/`prot`/`pub` access checks;
 - overloaded constructors, instance/static direct calls and defaults;
 - exact-value copy/parameter/result behavior;
 - no inheritance or virtual dispatch yet.
 
 ### M3.1: single inheritance
+
+Status: implemented and covered by executable, negative, cross-module, ABI and
+source-order tests. M3.1 assigns contract slots and abstractness metadata but
+does not itself emit vptrs or perform dynamic dispatch; M3.3 now consumes that
+metadata.
 
 - one complete base at offset zero;
 - inherited lookup without hiding;
@@ -553,12 +641,19 @@ sources.
 
 ### M3.2: vtable data foundation
 
+Status: implemented as a class-neutral relocation foundation. It emits no
+vptrs or vtables by itself; M3.3 now consumes its read-only reference data.
+
 - read-only IR globals containing symbol references;
-- `.quad`-equivalent assembly representation;
+- canonical per-global function-reference slices over zero placeholders;
+- `.quad <symbol>` assembly representation restricted to `.rodata`;
 - `absolute64` assembler/object/ELF round trips;
-- deterministic relocation and malformed-input tests.
+- deterministic relocation, executable link and malformed-input tests.
 
 ### M3.3: virtual and abstract dispatch
+
+Status: implemented with executable, null-trap, cross-module, layout,
+devirtualization, relocation and source-order coverage.
 
 - deterministic slot assignment and vtable emission;
 - hidden vptr initialization and layout verification;
@@ -611,7 +706,7 @@ Every slice needs positive, negative and determinism coverage:
 | Modern C++ idea | Luna M3 decision |
 | --- | --- |
 | classes with access control | retained, every access explicit |
-| member and static functions | retained with explicit receiver/`static` |
+| member and static functions | retained with implicit `this`/`static` |
 | single inheritance | retained |
 | virtual/override/final | retained, override always explicit |
 | abstract methods | retained as `abstract fn`, no `= 0` syntax |

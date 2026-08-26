@@ -8,6 +8,9 @@ import luna.bootstrap.middleend.semantic.context.lookup as names;
 
 import luna.bootstrap.frontend.lexer as lexer;
 import luna.bootstrap.middleend.ir as ir;
+import luna.bootstrap.middleend.semantic.callable as callable;
+import luna.bootstrap.middleend.semantic.classes as classes;
+import luna.bootstrap.middleend.semantic.classes.model as class_model;
 import luna.bootstrap.middleend.semantic.expr.base as base;
 import luna.bootstrap.middleend.semantic.expr.probe as probe;
 import luna.bootstrap.middleend.semantic.functions as functions;
@@ -202,6 +205,39 @@ fn lower_name(context: *context::Context, node: syntax::SyntaxNode, expected_typ
         type_id = local.type_id, value_id = context::no_id(), address_id = address_id, constant_value = 0,
         has_constant = false, category = category::lvalue(local.mutable_binding, local.volatile_binding),
         valid = address_id != context::no_id(), bitfield_segment = context::no_id(),
+    };
+    return builder::load_lvalue(context, node, expression);
+}
+
+fn lower_this(context: *context::Context, node: syntax::SyntaxNode) -> context::Expression {
+    let none: usize = context::no_id();
+    if (context->current_function >= context->function_count) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_receiver, context->current_unit, node.span, none,
+            context::empty_span(), none);
+        return base::invalid_expression();
+    }
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    let function: context::Function = functions[context->current_function];
+    if (!callable::has_receiver(function.identity)) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_receiver, context->current_unit, node.span, none,
+            context::empty_span(), context->current_function);
+        return base::invalid_expression();
+    }
+    let receiver_type: usize = functions::function_receiver_type(context, function);
+    let ir_functions: *const ir::Function = context->ir.functions.data as
+            *const ir::Function;
+    let ir_function: ir::Function = ir_functions[function.ir_function];
+    let ir_parameters: *const ir::Parameter = context->ir.parameters.data as
+            *const ir::Parameter;
+    let receiver: ir::Parameter = ir_parameters[ir_function.first_parameter];
+    let address_id: usize = builder::address_of_slot(context, node, receiver.slot_id, receiver_type, true, false);
+    let expression: context::Expression = {
+        type_id = receiver_type, value_id = none, address_id = address_id, constant_value = 0,
+        has_constant = false, category = category::Category.read_only_lvalue,
+        valid = address_id != none, bitfield_segment = none,
     };
     return builder::load_lvalue(context, node, expression);
 }
@@ -430,7 +466,7 @@ fn lower_member(context: *context::Context, node: syntax::SyntaxNode, lowerer: a
         return base::invalid_expression();
     }
     let owner_record: type_info::Record = context::type_record(context, owner_type);
-    if (owner_record.kind != type_info::Kind.structure && owner_record.kind != type_info::Kind.record_union) {
+    if (!type_info::is_record(owner_record.kind)) {
         context::add_diagnostic(
             context, context::DiagnosticKind.invalid_member, context->current_unit, node.span, context::no_id(),
             context::empty_span(), owner_type);
@@ -458,6 +494,13 @@ fn lower_member(context: *context::Context, node: syntax::SyntaxNode, lowerer: a
     let fields: *const type_info::Field = context->types.fields.data as
             *const type_info::Field;
     let field: type_info::Field = fields[lookup.field_id];
+    if (owner_record.kind == type_info::Kind.class_type && !classes::field_is_accessible(context, lookup.field_id)) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.inaccessible_member, context->current_unit, name_node.span,
+            field.declaration_unit, context::node(context, field.declaration_unit, field.declaration_node).span,
+            lookup.field_id);
+        return base::invalid_expression();
+    }
     let field_record: type_info::Record = context::type_record(context, field.type_id);
     if (field_record.kind == type_info::Kind.array && (field_record.flags & (type_info::Flag.flexible as usize)) != 0) {
         // A flexible member access yields *T at the member offset, not an
@@ -563,19 +606,18 @@ fn lower_index(context: *context::Context, node: syntax::SyntaxNode, lowerer: ap
     return builder::load_lvalue(context, node, result);
 }
 
-fn resolve_direct_function(
-    context: *context::Context, node_id: usize, node: syntax::SyntaxNode, binding_id: usize) -> usize {
-    let visible_count: usize = functions::binding_visible_count(context, binding_id, context->current_unit);
-    if (visible_count <= 1) {
-        return functions::binding_single_function(context, binding_id, context->current_unit);
-    }
-    let resolution: probe::Resolution = probe::resolve_call(context, node_id, node, binding_id);
+fn resolve_selected_function(
+    context: *context::Context, node_id: usize, node: syntax::SyntaxNode, target: probe::CallTarget) -> usize {
+    let resolution: probe::Resolution = probe::resolve_call_target(context, node_id, node, target);
     if (resolution.status == probe::ResolutionStatus.selected) {
         return resolution.function_id;
     }
-    let kind: context::DiagnosticKind = resolution.status == probe::ResolutionStatus.ambiguous ?
-        context::DiagnosticKind.ambiguous_call : context::DiagnosticKind.no_matching_overload;
-    add_callable_diagnostic(context, kind, node, binding_id);
+    let visible_count: usize = probe::call_target_visible_count(context, target);
+    let inaccessible: bool = target.owner_type != context::no_id() && visible_count == 0;
+    let kind: context::DiagnosticKind = inaccessible ? context::DiagnosticKind.inaccessible_member :
+        (resolution.status == probe::ResolutionStatus.ambiguous ?
+            context::DiagnosticKind.ambiguous_call : context::DiagnosticKind.no_matching_overload);
+    add_callable_diagnostic(context, kind, node, target.binding_id);
     return context::no_id();
 }
 
@@ -660,10 +702,12 @@ fn collect_default_call_arguments(
     context: *context::Context, function: context::Function, explicit_count: usize, values: *bytes::Buffer) {
     let parameters: *const context::Parameter = context->parameters.data as
             *const context::Parameter;
+    let parameter_count: usize = functions::function_argument_parameter_count(function);
+    let first_parameter: usize = functions::function_first_argument_parameter(function);
     for (var index: usize = explicit_count;
-        index < function.parameter_count && context->error == runtime::Error.none;
+        index < parameter_count && context->error == runtime::Error.none;
         index += 1) {
-        let parameter: context::Parameter = parameters[function.first_parameter + index];
+        let parameter: context::Parameter = parameters[first_parameter + index];
         if (parameter.default_node == context::no_id()) {
             context->error = runtime::Error.invalid_argument;
             return;
@@ -681,6 +725,274 @@ fn call_parameter_type(
         parameters[first_parameter + index].type_id;
 }
 
+fn convert_value(context: *context::Context, node: syntax::SyntaxNode, value_id: usize, target_type: usize) -> usize {
+    if (value_id == context::no_id()) {
+        return context::no_id();
+    }
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let source_type: usize = values[value_id].type_id;
+    if (source_type == target_type) {
+        return value_id;
+    }
+    var conversion: ir::Instruction = builder::instruction(ir::Opcode.convert, node);
+    conversion.left = value_id;
+    conversion.auxiliary = source_type;
+    return builder::emit_value(context, conversion, target_type);
+}
+
+fn pointer_type(context: *context::Context, element_type: usize, read_only: bool) -> usize {
+    if (context->error != runtime::Error.none) {
+        return context::no_id();
+    }
+    let result: type_info::IdResult = type_info::table_pointer(&context->types, element_type, read_only, false);
+    context->error = result.error;
+    return result.error == runtime::Error.none ? result.type_id : context::no_id();
+}
+
+fn byte_pointer_type(context: *context::Context, read_only: bool) -> usize {
+    return pointer_type(context, type_info::BuiltinType.unsigned_8 as usize, read_only);
+}
+
+fn offset_byte_pointer(
+    context: *context::Context, node: syntax::SyntaxNode,
+    pointer_value: usize, pointer_type_id: usize, byte_offset: usize) -> usize {
+    if (pointer_value == context::no_id() || pointer_type_id == context::no_id()) {
+        return context::no_id();
+    }
+    if (byte_offset == 0) {
+        return pointer_value;
+    }
+    let offset: context::Expression = builder::emit_integer_constant(
+        context, node, type_info::BuiltinType.unsigned_size as usize, byte_offset as u64);
+    if (!offset.valid) {
+        return context::no_id();
+    }
+    let byte_size: usize = context::type_record(context, type_info::BuiltinType.unsigned_8 as usize).size_bytes;
+    var instruction: ir::Instruction = builder::instruction(ir::Opcode.pointer_offset, node);
+    instruction.left = pointer_value;
+    instruction.right = offset.value_id;
+    instruction.auxiliary = byte_size;
+    return builder::emit_value(context, instruction, pointer_type_id);
+}
+
+fn load_indirect_value(
+    context: *context::Context, node: syntax::SyntaxNode, address: usize, value_type: usize) -> usize {
+    if (address == context::no_id() || value_type == context::no_id()) {
+        return context::no_id();
+    }
+    var instruction: ir::Instruction = builder::instruction(ir::Opcode.load_indirect, node);
+    instruction.left = address;
+    return builder::emit_value(context, instruction, value_type);
+}
+
+fn initialize_class_vptr(
+    context: *context::Context, node: syntax::SyntaxNode, owner_type: usize, object_address: usize) -> bool {
+    let global_id: usize = classes::vtable_global(context, owner_type);
+    if (global_id == context::no_id()) {
+        return true;
+    }
+    let table_pointer: usize = byte_pointer_type(context, true);
+    let object_bytes_type: usize = byte_pointer_type(context, false);
+    let table_storage_type: usize = pointer_type(context, table_pointer, false);
+    let types_are_valid: bool = table_pointer != context::no_id() && object_bytes_type != context::no_id();
+    if (!types_are_valid || table_storage_type == context::no_id()) {
+        return false;
+    }
+    var global_address: ir::Instruction = builder::instruction(ir::Opcode.global_address, node);
+    global_address.auxiliary = global_id;
+    let table_address: usize = builder::emit_value(context, global_address, table_pointer);
+    let object_bytes: usize = convert_value(context, node, object_address, object_bytes_type);
+    let vptr_offset: usize = classes::vptr_offset(context, owner_type);
+    let addresses_are_valid: bool = table_address != context::no_id() && object_bytes != context::no_id();
+    if (!addresses_are_valid || vptr_offset == context::no_id()) {
+        return false;
+    }
+    let vptr_bytes: usize = offset_byte_pointer(context, node, object_bytes, object_bytes_type, vptr_offset);
+    let vptr_storage: usize = convert_value(context, node, vptr_bytes, table_storage_type);
+    let table_value: context::Expression = {
+        type_id = table_pointer, value_id = table_address, address_id = context::no_id(), constant_value = 0,
+        has_constant = false, category = category::Category.rvalue,
+        valid = table_address != context::no_id(), bitfield_segment = context::no_id(),
+    };
+    return builder::store_to_address(context, node, vptr_storage, table_pointer, table_value);
+}
+
+fn virtual_function_type(context: *context::Context, function: context::Function) -> usize {
+    var parameter_types: bytes::Buffer = bytes::empty();
+    let receiver_type: usize = functions::function_receiver_type(context, function);
+    if (receiver_type == context::no_id()) {
+        return context::no_id();
+    }
+    let receiver_appended: bytes::BufferResult = bytes::append(
+        parameter_types, (&receiver_type) as *const usize as *const u8, sizeof(usize));
+    parameter_types = receiver_appended.buffer;
+    context->error = receiver_appended.error;
+    let parameters: *const context::Parameter = context->parameters.data as *const context::Parameter;
+    for (var index: usize = 0;
+        index < function.parameter_count && context->error == runtime::Error.none;
+        index += 1) {
+        let type_id: usize = parameters[function.first_parameter + index].type_id;
+        let appended: bytes::BufferResult = bytes::append(
+            parameter_types, (&type_id) as *const usize as *const u8, sizeof(usize));
+        parameter_types = appended.buffer;
+        context->error = appended.error;
+    }
+    let type_ids: *const usize = parameter_types.data as *const usize;
+    let parameter_count: usize = parameter_types.length / sizeof(usize);
+    let result: usize = context->error == runtime::Error.none ?
+        context::function_pointer_type(context, function.return_type, type_ids, parameter_count) : context::no_id();
+    let release_error: runtime::Error = bytes::release(parameter_types);
+    if (context->error == runtime::Error.none) {
+        context->error = release_error;
+    }
+    return context->error == runtime::Error.none ? result : context::no_id();
+}
+
+fn load_virtual_callee(
+    context: *context::Context, node: syntax::SyntaxNode, plan: class_model::DispatchPlan,
+    function: context::Function, receiver_address: usize) -> usize {
+    let byte_pointer: usize = byte_pointer_type(context, true);
+    let table_storage_type: usize = pointer_type(context, byte_pointer, true);
+    if (byte_pointer == context::no_id() || table_storage_type == context::no_id()) {
+        return context::no_id();
+    }
+    let object_bytes: usize = convert_value(context, node, receiver_address, byte_pointer);
+    let vptr_bytes: usize = offset_byte_pointer(context, node, object_bytes, byte_pointer, plan.vptr_offset);
+    let vptr_storage: usize = convert_value(context, node, vptr_bytes, table_storage_type);
+    let table_address: usize = load_indirect_value(context, node, vptr_storage, byte_pointer);
+    var slot_offset: usize = 0;
+    let address_bytes: usize = ir::Limit.function_address_bytes as usize;
+    if (@mul_overflow(plan.virtual_slot, address_bytes, &slot_offset)) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    let slot_bytes: usize = offset_byte_pointer(context, node, table_address, byte_pointer, slot_offset);
+    let function_type: usize = virtual_function_type(context, function);
+    let function_storage_type: usize = pointer_type(context, function_type, true);
+    if (function_type == context::no_id() || function_storage_type == context::no_id()) {
+        return context::no_id();
+    }
+    let function_storage: usize = convert_value(context, node, slot_bytes, function_storage_type);
+    return load_indirect_value(context, node, function_storage, function_type);
+}
+
+fn call_has_exact_dynamic_type(context: *context::Context, target: probe::CallTarget) -> bool {
+    if (target.receiver_source != probe::ReceiverSource.expression) {
+        return true;
+    }
+    return context::type_record(context, target.receiver_type).kind != type_info::Kind.pointer;
+}
+
+fn constructor_receiver(
+    context: *context::Context, node: syntax::SyntaxNode, owner_type: usize, values: *bytes::Buffer) -> usize {
+    let slot_id: usize = ir::add_slot(&context->ir, builder::current_ir_function(context), owner_type, true, false, 0);
+    let address_id: usize = builder::address_of_slot(context, node, slot_id, owner_type, false, false);
+    let storage_is_valid: bool = slot_id != context::no_id() && address_id != context::no_id();
+    if (!storage_is_valid || !builder::zero_slot(context, node, slot_id, owner_type)) {
+        return context::no_id();
+    }
+    if (!initialize_class_vptr(context, node, owner_type, address_id)) {
+        return context::no_id();
+    }
+    return append_call_argument(context, values, address_id) ? address_id : context::no_id();
+}
+
+fn receiver_storage_address(
+    context: *context::Context, node: syntax::SyntaxNode, receiver: context::Expression) -> usize {
+    if (receiver.address_id == context::no_id()) {
+        return context::no_id();
+    }
+    let values: *const ir::Value = context->ir.values.data as
+            *const ir::Value;
+    let storage_type: usize = values[receiver.address_id].type_id;
+    if (context::type_record(context, storage_type).kind == type_info::Kind.pointer) {
+        return receiver.address_id;
+    }
+    if (storage_type != receiver.type_id) {
+        return context::no_id();
+    }
+    let slot_id: usize = ir::add_slot(
+        &context->ir, builder::current_ir_function(context), receiver.type_id, true, false, 0);
+    let address_id: usize = builder::address_of_slot(context, node, slot_id, receiver.type_id, false, false);
+    let storage_is_valid: bool = slot_id != context::no_id() && address_id != context::no_id();
+    if (!storage_is_valid) {
+        return context::no_id();
+    }
+    return builder::store_to_address(context, node, address_id, receiver.type_id, receiver) ?
+        address_id : context::no_id();
+}
+
+fn instance_receiver(
+    context: *context::Context, node: syntax::SyntaxNode, target: probe::CallTarget,
+    receiver_type: usize, lowerer: api::Lowerer, values: *bytes::Buffer) -> usize {
+    let receiver: context::Expression = api::invoke(lowerer, context, target.receiver_node, context::no_id());
+    if (!receiver.valid) {
+        return context::no_id();
+    }
+    let callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let operation: lexer::TokenKind = context::token(context, context->current_unit, callee.token_index).kind;
+    var address_id: usize = context::no_id();
+    if (operation == lexer::TokenKind.arrow) {
+        address_id = receiver.value_id;
+        var check: ir::Instruction = builder::instruction(ir::Opcode.null_check, node);
+        check.left = address_id;
+        builder::emit_void(context, check);
+    } else {
+        address_id = receiver_storage_address(context, node, receiver);
+    }
+    if (address_id == context::no_id()) {
+        return address_id;
+    }
+    let ir_values: *const ir::Value = context->ir.values.data as
+            *const ir::Value;
+    let source_type: usize = ir_values[address_id].type_id;
+    if (source_type != receiver_type) {
+        var conversion: ir::Instruction = builder::instruction(ir::Opcode.convert, node);
+        conversion.left = address_id;
+        conversion.auxiliary = source_type;
+        address_id = builder::emit_value(context, conversion, receiver_type);
+    }
+    return append_call_argument(context, values, address_id) ? address_id : context::no_id();
+}
+
+fn current_receiver(
+    context: *context::Context, node: syntax::SyntaxNode, receiver_type: usize, values: *bytes::Buffer) -> usize {
+    let receiver: context::Expression = lower_this(context, node);
+    if (!receiver.valid) {
+        return context::no_id();
+    }
+    var address_id: usize = receiver.value_id;
+    let ir_values: *const ir::Value = context->ir.values.data as
+            *const ir::Value;
+    let source_type: usize = ir_values[address_id].type_id;
+    if (source_type != receiver_type) {
+        var conversion: ir::Instruction = builder::instruction(ir::Opcode.convert, node);
+        conversion.left = address_id;
+        conversion.auxiliary = source_type;
+        address_id = builder::emit_value(context, conversion, receiver_type);
+    }
+    return append_call_argument(context, values, address_id) ? address_id : context::no_id();
+}
+
+fn collect_direct_receiver(
+    context: *context::Context, node: syntax::SyntaxNode, target: probe::CallTarget,
+    receiver_type: usize, lowerer: api::Lowerer, values: *bytes::Buffer) -> usize {
+    switch (target.receiver_source) {
+    case probe::ReceiverSource.construction {
+        return constructor_receiver(context, node, target.owner_type, values);
+    }
+    case probe::ReceiverSource.expression {
+        return instance_receiver(context, node, target, receiver_type, lowerer, values);
+    }
+    case probe::ReceiverSource.current_object {
+        return current_receiver(context, node, receiver_type, values);
+    }
+    default {
+        return context::no_id();
+    }
+    }
+}
+
 fn lower_call(
     context: *context::Context, node_id: usize, node: syntax::SyntaxNode,
     lowerer: api::Lowerer) -> context::Expression {
@@ -690,23 +1002,36 @@ fn lower_call(
         return base::invalid_expression();
     }
     let callee_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-    var direct_binding: usize = none;
-    var direct_function: usize = none;
+    let target: probe::CallTarget = probe::direct_call_target(context, node);
+    var selected_function: usize = none;
     var callee_value: usize = none;
-    if (callee_node.kind == syntax::SyntaxKind.name_expression && callee_node.child_count != 0) {
-        direct_binding = functions::lookup_qualified_callable_binding(
-            context, context->current_unit, callee_node, true);
-        if (direct_binding == none) {
+    var call_dispatch: class_model::DispatchPlan = {
+        kind = class_model::CallDispatch.direct, vptr_offset = none, virtual_slot = none,
+    };
+    let constructor_is_unbound: bool = target.kind == callable::Kind.constructor && !target.valid;
+    if (target.receiver_source == probe::ReceiverSource.current_object && !target.valid) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_super, context->current_unit, node.span, none,
+            context::empty_span(), target.owner_type);
+        return base::invalid_expression();
+    }
+    if (constructor_is_unbound && target.owner_type != none) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_class_initialization, context->current_unit, node.span, none,
+            context::empty_span(), target.owner_type);
+        return base::invalid_expression();
+    }
+    if (target.valid) {
+        selected_function = resolve_selected_function(context, node_id, node, target);
+        if (selected_function == none) {
             return base::invalid_expression();
         }
-    } else if (callee_node.kind == syntax::SyntaxKind.name_expression &&
-        builder::find_local(
-            context, context->current_unit, callee_node.token_index) == none) {
-        direct_binding = functions::lookup_callable_binding(context, context->current_unit, callee_node.token_index);
-    }
-    if (direct_binding != none) {
-        direct_function = resolve_direct_function(context, node_id, node, direct_binding);
-        if (direct_function == none) {
+        call_dispatch = classes::dispatch_plan(
+            context, target.owner_type, selected_function, call_has_exact_dynamic_type(context, target));
+        let direct_abstract_call: bool = classes::method_is_abstract(context, selected_function) &&
+            call_dispatch.kind == class_model::CallDispatch.direct;
+        if (direct_abstract_call) {
+            add_callable_diagnostic(context, context::DiagnosticKind.invalid_method, node, target.binding_id);
             return base::invalid_expression();
         }
     }
@@ -721,13 +1046,13 @@ fn lower_call(
             *const context::Symbol;
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
-    if (direct_function != none) {
-        let function: context::Function = functions[direct_function];
+    if (selected_function != none) {
+        let function: context::Function = functions[selected_function];
         return_type = function.return_type;
         ir_callee = function.ir_function;
-        parameter_count = function.parameter_count;
-        required_parameter_count = function.required_parameter_count;
-        first_parameter = function.first_parameter;
+        parameter_count = functions::function_argument_parameter_count(function);
+        required_parameter_count = functions::function_required_argument_count(function);
+        first_parameter = functions::function_first_argument_parameter(function);
         callee_no_return = (function.flags & (context::SymbolFlag.no_return as usize)) != 0;
     } else {
         let callee: context::Expression = api::invoke(lowerer, context, node.first_child, none);
@@ -749,11 +1074,11 @@ fn lower_call(
         parameters_from_fields = true;
     }
     let argument_total: usize = node.child_count - 1;
-    let arity_is_valid: bool = direct_function == none ? argument_total == parameter_count :
-        functions::function_accepts_arity(context, direct_function, argument_total);
+    let arity_is_valid: bool = selected_function == none ? argument_total == parameter_count :
+        functions::function_accepts_arity(context, selected_function, argument_total);
     if (!arity_is_valid) {
-        let related_unit: usize = direct_function == none ? none :
-            symbols[functions[direct_function].symbol_id].declaration_unit;
+        let related_unit: usize = selected_function == none ? none :
+            symbols[functions[selected_function].symbol_id].declaration_unit;
         context::add_diagnostic(
             context, context::DiagnosticKind.argument_count, context->current_unit, node.span,
             related_unit, context::empty_span(), required_parameter_count);
@@ -764,6 +1089,24 @@ fn lower_call(
     let type_fields: *const type_info::Field = context->types.fields.data as
             *const type_info::Field;
     var argument_values: bytes::Buffer = bytes::empty();
+    var constructed_address: usize = none;
+    let target_has_receiver: bool = target.receiver_source != probe::ReceiverSource.none;
+    if (selected_function != none && target_has_receiver) {
+        let receiver_type: usize = functions::function_receiver_type(context, functions[selected_function]);
+        constructed_address = collect_direct_receiver(context, node, target, receiver_type, lowerer, &argument_values);
+        if (constructed_address == none) {
+            bytes::release(argument_values);
+            return base::invalid_expression();
+        }
+        if (call_dispatch.kind == class_model::CallDispatch.virtual_call) {
+            callee_value = load_virtual_callee(
+                context, node, call_dispatch, functions[selected_function], constructed_address);
+            if (callee_value == none) {
+                bytes::release(argument_values);
+                return base::invalid_expression();
+            }
+        }
+    }
     var child: usize = callee_node.next_sibling;
     for (var index: usize = 0;
         index < argument_total && context->error == runtime::Error.none;
@@ -780,17 +1123,20 @@ fn lower_call(
         }
         child = argument_node.next_sibling;
     }
-    if (direct_function != none && argument_total < parameter_count) {
-        collect_default_call_arguments(context, functions[direct_function], argument_total, &argument_values);
+    if (selected_function != none && argument_total < parameter_count) {
+        collect_default_call_arguments(context, functions[selected_function], argument_total, &argument_values);
     }
-    var instruction: ir::Instruction =
-        builder::instruction(direct_function != none ? ir::Opcode.call : ir::Opcode.call_indirect, node);
-    if (direct_function != none) {
+    let indirect_call: bool = callee_value != none;
+    var instruction: ir::Instruction = builder::instruction(
+        indirect_call ? ir::Opcode.call_indirect : ir::Opcode.call, node);
+    if (!indirect_call) {
         instruction.auxiliary = ir_callee;
     } else {
-        var check: ir::Instruction = builder::instruction(ir::Opcode.null_check, node);
-        check.left = callee_value;
-        builder::emit_void(context, check);
+        if (selected_function == none) {
+            var check: ir::Instruction = builder::instruction(ir::Opcode.null_check, node);
+            check.left = callee_value;
+            builder::emit_void(context, check);
+        }
         instruction.left = callee_value;
     }
     let return_record: type_info::Record = context::type_record(context, return_type);
@@ -820,6 +1166,13 @@ fn lower_call(
         var marker: ir::Instruction = builder::instruction(ir::Opcode.unreachable, node);
         builder::emit_void(context, marker);
         context->current_block = builder::add_current_block(context);
+    }
+    if (target.receiver_source == probe::ReceiverSource.construction && instruction_id != none) {
+        return {
+            type_id = target.owner_type, value_id = none, address_id = constructed_address,
+            constant_value = 0, has_constant = false, category = category::Category.temporary,
+            valid = true, bitfield_segment = none,
+        };
     }
     let result_category: category::Category = type_info::is_memory(return_record.kind) ?
         category::Category.temporary : category::Category.rvalue;

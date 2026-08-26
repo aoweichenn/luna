@@ -12,9 +12,9 @@ fn no_id() -> usize {
 fn invalid_record() -> Record {
     let none: usize = no_id();
     return {
-        kind = Kind.invalid, element_type = none, element_count = 0, declaration_unit = none,
-        declaration_node = none, name_token = none, first_field = none, field_count = 0, size_bytes = 0,
-        alignment_bytes = 0, flags = Flag.none as usize,
+        kind = Kind.invalid, element_type = none, element_count = 0, base_type = none, vptr_offset = none,
+        declaration_unit = none, declaration_node = none, name_token = none, first_field = none, field_count = 0,
+            size_bytes = 0, alignment_bytes = 0, flags = Flag.none as usize,
     };
 }
 
@@ -178,12 +178,30 @@ fn table_create() -> TableResult {
     };
 }
 
-fn kind_is_named(kind: Kind) -> bool {
-    return kind == Kind.structure || kind == Kind.record_union || kind == Kind.enumeration;
+fn is_named(kind: Kind) -> bool {
+    switch (kind) {
+    case Kind.structure, Kind.record_union, Kind.enumeration, Kind.class_type {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn is_record(kind: Kind) -> bool {
+    switch (kind) {
+    case Kind.structure, Kind.record_union, Kind.class_type {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
 }
 
 fn kind_is_declared(kind: Kind) -> bool {
-    return kind_is_named(kind) || kind == Kind.alias;
+    return is_named(kind) || kind == Kind.alias;
 }
 
 fn table_add_named(
@@ -333,21 +351,34 @@ fn table_flexible_array(table: *Table, element_type: usize) -> IdResult {
     };
 }
 
+fn field_slice_is_appendable(owner: Record, next_field: usize) -> bool {
+    if (owner.field_count == 0) {
+        return owner.first_field == no_id();
+    }
+    return owner.first_field <= next_field && owner.field_count == next_field - owner.first_field;
+}
+
 fn table_add_field(table: Table, field: Field) -> TableResult {
-    if (!table_storage_is_valid(table) || field.owner_type >= table.type_count ||
-        field.type_id >= table.type_count || field.declaration_unit == no_id() ||
-        field.declaration_node == no_id() || field.name_token == no_id() ||
-        field.alignment_bytes > (Limit.maximum_alignment as usize) ||
-        (field.alignment_bytes & (field.alignment_bytes - 1)) != 0) {
+    let owner_is_valid: bool = table_storage_is_valid(table) && field.owner_type < table.type_count;
+    let declaration_is_valid: bool = field.declaration_unit != no_id() && field.declaration_node != no_id();
+    let field_is_valid: bool = field.type_id < table.type_count && field.name_token != no_id();
+    let alignment_is_bounded: bool = field.alignment_bytes <= (Limit.maximum_alignment as usize);
+    let no_alignment_override: bool = field.alignment_bytes == 0;
+    let nonzero_power_of_two: bool = field.alignment_bytes != 0 &&
+        (field.alignment_bytes & (field.alignment_bytes - 1)) == 0;
+    let alignment_is_power: bool = no_alignment_override || nonzero_power_of_two;
+    let identity_is_valid: bool = declaration_is_valid && field_is_valid;
+    let alignment_is_valid: bool = alignment_is_bounded && alignment_is_power;
+    let input_is_valid: bool = owner_is_valid && identity_is_valid;
+    if (!input_is_valid || !alignment_is_valid) {
         return {
             table = table, error = runtime::Error.invalid_argument,
         };
     }
     let records: *Record = table.types.data as *Record;
     let owner: Record = records[field.owner_type];
-    if (!kind_is_named(owner.kind) || (owner.flags & (Flag.complete as usize)) != 0 ||
-        (owner.field_count == 0 && owner.first_field != no_id()) || (owner.field_count != 0 &&
-            owner.first_field + owner.field_count != table.field_count)) {
+    let owner_is_open: bool = is_named(owner.kind) && (owner.flags & (Flag.complete as usize)) == 0;
+    if (!owner_is_open || !field_slice_is_appendable(owner, table.field_count)) {
         return {
             table = table, error = runtime::Error.invalid_argument,
         };
@@ -533,6 +564,47 @@ fn table_set_alias_target(table: Table, type_id: usize, target_type: usize) -> r
     return runtime::Error.none;
 }
 
+fn table_set_base(table: Table, type_id: usize, base_type: usize) -> runtime::Error {
+    let types_are_in_range: bool = type_id < table.type_count && base_type < table.type_count;
+    if (!table_storage_is_valid(table) || !types_are_in_range) {
+        return runtime::Error.invalid_argument;
+    }
+    var records: *Record = table.types.data as *Record;
+    let derived: Record = records[type_id];
+    let base: Record = records[base_type];
+    let classes_are_valid: bool = derived.kind == Kind.class_type && base.kind == Kind.class_type;
+    let relation_is_empty: bool = derived.base_type == no_id() && type_id != base_type;
+    if (!classes_are_valid || !relation_is_empty) {
+        return runtime::Error.invalid_argument;
+    }
+    records[type_id].base_type = base_type;
+    return runtime::Error.none;
+}
+
+fn table_set_vptr(table: Table, type_id: usize, vptr_offset: usize) -> runtime::Error {
+    if (!table_storage_is_valid(table) || type_id >= table.type_count) {
+        return runtime::Error.invalid_argument;
+    }
+    let pointer_alignment: usize = Limit.target_pointer_alignment as usize;
+    let pointer_size: usize = Limit.target_pointer_bytes as usize;
+    let offset_is_aligned: bool = (vptr_offset & (pointer_alignment - 1)) == 0;
+    let offset_is_bounded: bool = vptr_offset <= (Limit.maximum_size as usize) - pointer_size;
+    if (!offset_is_aligned || !offset_is_bounded) {
+        return runtime::Error.invalid_argument;
+    }
+    let records: *Record = table.types.data as *Record;
+    let record: Record = records[type_id];
+    let shape_is_valid: bool = record.kind == Kind.class_type && record.vptr_offset == no_id();
+    let state_is_incomplete: bool = (record.flags & (Flag.complete as usize)) == 0;
+    let state_is_resolving: bool = (record.flags & (Flag.resolving as usize)) != 0;
+    let state_is_valid: bool = state_is_incomplete && state_is_resolving;
+    if (!shape_is_valid || !state_is_valid) {
+        return runtime::Error.invalid_argument;
+    }
+    records[type_id].vptr_offset = vptr_offset;
+    return runtime::Error.none;
+}
+
 fn table_set_resolving(table: Table, type_id: usize, resolving: bool) -> runtime::Error {
     if (!table_storage_is_valid(table) || type_id < BuiltinType.count as usize || type_id >= table.type_count) {
         return runtime::Error.invalid_argument;
@@ -550,14 +622,26 @@ fn table_set_resolving(table: Table, type_id: usize, resolving: bool) -> runtime
 }
 
 fn is_integer(kind: Kind) -> bool {
-    return kind == Kind.signed_8 || kind == Kind.signed_16 || kind == Kind.signed_32 || kind == Kind.signed_64 ||
-        kind == Kind.signed_size || kind == Kind.unsigned_8 || kind == Kind.unsigned_16 || kind == Kind.unsigned_32 ||
-        kind == Kind.unsigned_64 || kind == Kind.unsigned_size;
+    switch (kind) {
+    case Kind.signed_8, Kind.signed_16, Kind.signed_32, Kind.signed_64, Kind.signed_size,
+        Kind.unsigned_8, Kind.unsigned_16, Kind.unsigned_32, Kind.unsigned_64, Kind.unsigned_size {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
 }
 
 fn is_signed_integer(kind: Kind) -> bool {
-    return kind == Kind.signed_8 || kind == Kind.signed_16 || kind == Kind.signed_32 || kind == Kind.signed_64 ||
-        kind == Kind.signed_size;
+    switch (kind) {
+    case Kind.signed_8, Kind.signed_16, Kind.signed_32, Kind.signed_64, Kind.signed_size {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
 }
 
 fn is_float(kind: Kind) -> bool {
@@ -565,29 +649,46 @@ fn is_float(kind: Kind) -> bool {
 }
 
 fn is_scalar(kind: Kind) -> bool {
-    return kind == Kind.boolean || is_integer(kind) || is_float(kind) ||
-        kind == Kind.pointer || kind == Kind.enumeration || kind == Kind.function_pointer;
+    switch (kind) {
+    case Kind.boolean, Kind.pointer, Kind.enumeration, Kind.function_pointer {
+        return true;
+    }
+    default {
+        return is_integer(kind) || is_float(kind);
+    }
+    }
 }
 
 fn is_memory(kind: Kind) -> bool {
-    return kind == Kind.array || kind == Kind.structure || kind == Kind.record_union || kind == Kind.va_list_type;
+    switch (kind) {
+    case Kind.array, Kind.structure, Kind.record_union, Kind.va_list_type, Kind.class_type {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
 }
 
 fn bit_width(kind: Kind) -> usize {
-    if (kind == Kind.boolean || kind == Kind.signed_8 || kind == Kind.unsigned_8) {
+    switch (kind) {
+    case Kind.boolean, Kind.signed_8, Kind.unsigned_8 {
         return 8;
     }
-    if (kind == Kind.signed_16 || kind == Kind.unsigned_16) {
+    case Kind.signed_16, Kind.unsigned_16 {
         return 16;
     }
-    if (kind == Kind.signed_32 || kind == Kind.unsigned_32 || kind == Kind.float_32) {
+    case Kind.signed_32, Kind.unsigned_32, Kind.float_32 {
         return 32;
     }
-    if (kind == Kind.signed_64 || kind == Kind.signed_size || kind == Kind.unsigned_64 || kind == Kind.unsigned_size ||
-        kind == Kind.float_64 || kind == Kind.pointer || kind == Kind.function_pointer) {
+    case Kind.signed_64, Kind.signed_size, Kind.unsigned_64, Kind.unsigned_size,
+        Kind.float_64, Kind.pointer, Kind.function_pointer {
         return 64;
     }
-    return 0;
+    default {
+        return 0;
+    }
+    }
 }
 
 fn table_is_valid(table: Table, require_complete: bool) -> bool {
@@ -599,8 +700,27 @@ fn table_is_valid(table: Table, require_complete: bool) -> bool {
     var index: usize = 0;
     while (index < table.type_count) {
         let record: Record = records[index];
-        if ((record.kind as usize) > (Kind.va_list_type as usize) || record.flags > 255) {
+        if ((record.kind as usize) > (Kind.class_type as usize) || record.flags > 255) {
             return false;
+        }
+        let has_base: bool = record.base_type != no_id();
+        let base_is_allowed: bool = record.kind == Kind.class_type || !has_base;
+        let vptr_is_allowed: bool = record.kind == Kind.class_type || record.vptr_offset == no_id();
+        if (!base_is_allowed || !vptr_is_allowed) {
+            return false;
+        }
+        if (has_base) {
+            if (record.base_type >= table.type_count || record.base_type == index) {
+                return false;
+            }
+            let base: Record = records[record.base_type];
+            let base_is_class: bool = base.kind == Kind.class_type;
+            let base_is_complete: bool = (base.flags & (Flag.complete as usize)) != 0;
+            let derived_is_complete: bool = (record.flags & (Flag.complete as usize)) != 0;
+            let completeness_matches: bool = !derived_is_complete || base_is_complete;
+            if (!base_is_class || !completeness_matches) {
+                return false;
+            }
         }
         if (index < BuiltinType.count as usize) {
             if (record.kind != builtin_kind(index) || record.element_type != no_id() ||
@@ -716,7 +836,7 @@ fn table_is_valid(table: Table, require_complete: bool) -> bool {
                     return false;
                 }
             }
-        } else if (kind_is_named(record.kind)) {
+        } else if (is_named(record.kind)) {
             let complete: bool = (record.flags & (Flag.complete as usize)) != 0;
             if (record.declaration_unit == no_id() ||
                 record.declaration_node == no_id() || record.name_token == no_id() ||
@@ -731,6 +851,9 @@ fn table_is_valid(table: Table, require_complete: bool) -> bool {
                 return false;
             }
             if (record.kind != Kind.enumeration && record.element_type != no_id()) {
+                return false;
+            }
+            if (record.kind != Kind.class_type && record.vptr_offset != no_id()) {
                 return false;
             }
         } else {
@@ -780,12 +903,45 @@ fn table_is_valid(table: Table, require_complete: bool) -> bool {
                 record.field_count != 0) {
                 return false;
             }
-        } else if (record.kind == Kind.structure || record.kind == Kind.record_union) {
+        } else if (is_record(record.kind)) {
             let is_union: bool = record.kind == Kind.record_union;
             // A packed structure lays fields out back to back with alignment 1.
             let is_packed: bool = (record.flags & (Flag.packed as usize)) != 0;
             var expected_size: usize = 0;
             var expected_alignment: usize = 1;
+            if (record.kind == Kind.class_type && record.base_type != no_id()) {
+                let base: Record = records[record.base_type];
+                expected_size = base.size_bytes;
+                expected_alignment = base.alignment_bytes;
+            }
+            if (record.kind == Kind.class_type && record.vptr_offset != no_id()) {
+                let base_vptr: usize = record.base_type == no_id() ? no_id() : records[record.base_type].vptr_offset;
+                if (base_vptr != no_id()) {
+                    if (record.vptr_offset != base_vptr) {
+                        return false;
+                    }
+                } else {
+                    let pointer_alignment: usize = Limit.target_pointer_alignment as usize;
+                    let pointer_mask: usize = pointer_alignment - 1;
+                    if (expected_size > (Limit.maximum_size as usize) - pointer_mask) {
+                        return false;
+                    }
+                    let expected_vptr: usize = (expected_size + pointer_mask) & ~pointer_mask;
+                    if (record.vptr_offset != expected_vptr || expected_vptr > (Limit.maximum_size as usize) -
+                            (Limit.target_pointer_bytes as usize)) {
+                        return false;
+                    }
+                    expected_size = expected_vptr + (Limit.target_pointer_bytes as usize);
+                    if (expected_alignment < pointer_alignment) {
+                        expected_alignment = pointer_alignment;
+                    }
+                }
+            } else {
+                let class_has_base: bool = record.kind == Kind.class_type && record.base_type != no_id();
+                if (class_has_base && records[record.base_type].vptr_offset != no_id()) {
+                    return false;
+                }
+            }
             var has_flexible: bool = false;
             var field_index: usize = 0;
             while (field_index < record.field_count) {
@@ -871,4 +1027,3 @@ fn table_release(table: Table) -> runtime::Error {
     let field_error: runtime::Error = bytes::release(table.fields);
     return type_error != runtime::Error.none ? type_error : field_error;
 }
-

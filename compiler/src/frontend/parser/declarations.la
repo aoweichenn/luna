@@ -7,6 +7,12 @@ import luna.bootstrap.frontend.lexer as lexer;
 import luna.bootstrap.frontend.syntax as syntax;
 import luna.runtime;
 
+type MemberParser = fn(*state::State, usize) -> usize;
+
+fn parser_at_member_list_end(state: *state::State) -> bool {
+    return state->current.kind == lexer::TokenKind.right_brace || state->current.kind == lexer::TokenKind.end;
+}
+
 fn parser_parse_module_name(state: *state::State, declaration: usize) -> bool {
     var saw_name: bool = false;
     while (state->error == runtime::Error.none) {
@@ -86,22 +92,157 @@ fn parser_parse_field(state: *state::State, owner: usize) -> usize {
     return field;
 }
 
+fn access_flag(kind: lexer::TokenKind) -> usize {
+    switch (kind) {
+    case lexer::TokenKind.keyword_pub {
+        return syntax::SyntaxFlag.public_access as usize;
+    }
+    case lexer::TokenKind.keyword_prot {
+        return syntax::SyntaxFlag.protected_access as usize;
+    }
+    case lexer::TokenKind.keyword_priv {
+        return syntax::SyntaxFlag.private_access as usize;
+    }
+    default {
+        return syntax::SyntaxFlag.none as usize;
+    }
+    }
+}
+
+fn parser_parse_class_member(state: *state::State, owner: usize) -> usize {
+    let access_token: lexer::Token = state->current;
+    let access: usize = access_flag(access_token.kind);
+    if (access == syntax::SyntaxFlag.none as usize) {
+        return parser_parse_field(state, owner);
+    }
+    state::parser_advance(state);
+    var flags: usize = access | (syntax::SyntaxFlag.member_function as usize);
+    switch (state->current.kind) {
+    case lexer::TokenKind.keyword_static {
+        state::parser_advance(state);
+        flags |= syntax::SyntaxFlag.static_method as usize;
+        state::parser_expect(state, lexer::TokenKind.keyword_fn);
+        return parser_parse_function_declaration(state, access_token, flags, syntax::syntax_no_index(), 0);
+    }
+    case lexer::TokenKind.keyword_virtual {
+        state::parser_advance(state);
+        flags |= syntax::SyntaxFlag.virtual_method as usize;
+        if (state::parser_match(state, lexer::TokenKind.keyword_final)) {
+            flags |= syntax::SyntaxFlag.final_method as usize;
+        }
+        state::parser_expect(state, lexer::TokenKind.keyword_fn);
+        return parser_parse_function_declaration(state, access_token, flags, syntax::syntax_no_index(), 0);
+    }
+    case lexer::TokenKind.keyword_abstract {
+        state::parser_advance(state);
+        flags |= syntax::SyntaxFlag.abstract_method as usize;
+        state::parser_expect(state, lexer::TokenKind.keyword_fn);
+        return parser_parse_function_declaration(state, access_token, flags, syntax::syntax_no_index(), 0);
+    }
+    case lexer::TokenKind.keyword_override {
+        state::parser_advance(state);
+        flags |= syntax::SyntaxFlag.override_method as usize;
+        if (state::parser_match(state, lexer::TokenKind.keyword_final)) {
+            flags |= syntax::SyntaxFlag.final_method as usize;
+        }
+        state::parser_expect(state, lexer::TokenKind.keyword_fn);
+        return parser_parse_function_declaration(state, access_token, flags, syntax::syntax_no_index(), 0);
+    }
+    case lexer::TokenKind.keyword_fn {
+        state::parser_advance(state);
+        return parser_parse_function_declaration(state, access_token, flags, syntax::syntax_no_index(), 0);
+    }
+    default {}
+    }
+    if (state->current.kind == lexer::TokenKind.identifier &&
+        state::parser_identifier_text_is(state, state->current, "init", 4)) {
+        flags |= syntax::SyntaxFlag.constructor as usize;
+        return parser_parse_function_declaration(state, access_token, flags, syntax::syntax_no_index(), 0);
+    }
+    let field: usize = parser_parse_field(state, owner);
+    if (field != syntax::syntax_no_index()) {
+        state::parser_add_node_flags(state, field, access);
+    }
+    return field;
+}
+
 fn parser_parse_aggregate_declaration(
     state: *state::State, start: lexer::Token, declaration_kind: syntax::SyntaxKind, flags: usize,
-    first_attribute: usize, attribute_count: usize) -> usize {
+    first_attribute: usize, attribute_count: usize, member_parser: MemberParser) -> usize {
     let none: usize = syntax::syntax_no_index();
     let name: lexer::Token = state->current;
     let name_index: usize = state->current_index;
     state::parser_expect(state, lexer::TokenKind.identifier);
     let declaration: usize = state::parser_new_node(state, declaration_kind, start.span, name_index);
     state::parser_add_node_flags(state, declaration, flags);
+    if (declaration_kind == syntax::SyntaxKind.class_declaration &&
+        state::parser_match(state, lexer::TokenKind.colon)) {
+        state::parser_add_node_flags(state, declaration, syntax::SyntaxFlag.has_base as usize);
+        let base_type: usize = expression::parser_parse_type(state);
+        if (base_type != none) {
+            state::parser_add_child(state, declaration, base_type);
+        }
+    }
     state::parser_expect(state, lexer::TokenKind.left_brace);
-    while (state->error == runtime::Error.none && state->current.kind != lexer::TokenKind.right_brace &&
-        state->current.kind != lexer::TokenKind.end) {
+    for (; state->error == runtime::Error.none && !parser_at_member_list_end(state);) {
         let index_before: usize = state->current_index;
-        let field: usize = parser_parse_field(state, declaration);
-        if (field != none) {
-            state::parser_add_child(state, declaration, field);
+        let member: usize = member_parser(state, declaration);
+        if (member != none) {
+            state::parser_add_child(state, declaration, member);
+        }
+        if (state->current_index == index_before && state->current.kind != lexer::TokenKind.end) {
+            state::parser_advance(state);
+        }
+    }
+    state::parser_expect(state, lexer::TokenKind.right_brace);
+    statements::parser_attach_attributes(state, declaration, first_attribute, attribute_count);
+    state::parser_set_node_span(state, declaration, state::parser_join_spans(start.span, state->previous.span));
+    return declaration;
+}
+
+fn parser_parse_impl_member(state: *state::State, owner: usize) -> usize {
+    let none: usize = syntax::syntax_no_index();
+    let start: lexer::Token = state->current;
+    var flags: usize = syntax::SyntaxFlag.member_function as usize;
+    if (state::parser_match(state, lexer::TokenKind.keyword_priv)) {
+        flags |= syntax::SyntaxFlag.private_access as usize;
+    }
+    if (state::parser_match(state, lexer::TokenKind.keyword_static)) {
+        flags |= syntax::SyntaxFlag.static_method as usize;
+    }
+    if (state::parser_match(state, lexer::TokenKind.keyword_fn)) {
+        return parser_parse_function_declaration(state, start, flags, none, 0);
+    }
+    if (state->current.kind == lexer::TokenKind.identifier &&
+        state::parser_identifier_text_is(state, state->current, "init", 4)) {
+        flags |= syntax::SyntaxFlag.constructor as usize;
+        return parser_parse_function_declaration(state, start, flags, none, 0);
+    }
+    state::parser_add_diagnostic(
+        state, lexer::DiagnosticKind.expected_declaration, state->current.span, lexer::TokenKind.keyword_fn,
+        state->current.kind, owner);
+    if (state->current.kind != lexer::TokenKind.end) {
+        state::parser_advance(state);
+    }
+    return none;
+}
+
+fn parser_parse_impl_declaration(
+    state: *state::State, start: lexer::Token, flags: usize, first_attribute: usize, attribute_count: usize) -> usize {
+    let none: usize = syntax::syntax_no_index();
+    let declaration: usize =
+        state::parser_new_node(state, syntax::SyntaxKind.impl_declaration, start.span, state->current_index);
+    state::parser_add_node_flags(state, declaration, flags);
+    let owner_type: usize = expression::parser_parse_type(state);
+    if (owner_type != none) {
+        state::parser_add_child(state, declaration, owner_type);
+    }
+    state::parser_expect(state, lexer::TokenKind.left_brace);
+    for (; state->error == runtime::Error.none && !parser_at_member_list_end(state);) {
+        let index_before: usize = state->current_index;
+        let method: usize = parser_parse_impl_member(state, declaration);
+        if (method != none) {
+            state::parser_add_child(state, declaration, method);
         }
         if (state->current_index == index_before && state->current.kind != lexer::TokenKind.end) {
             state::parser_advance(state);
@@ -231,6 +372,13 @@ fn parser_parse_function_declaration(
         }
     }
     state::parser_expect(state, lexer::TokenKind.right_parenthesis);
+    let member_function: bool = (flags & (syntax::SyntaxFlag.member_function as usize)) != 0;
+    if (member_function && state::parser_match(state, lexer::TokenKind.keyword_const)) {
+        state::parser_add_node_flags(state, function, syntax::SyntaxFlag.read_only as usize);
+    }
+    if (member_function && state::parser_match(state, lexer::TokenKind.keyword_volatile)) {
+        state::parser_add_node_flags(state, function, syntax::SyntaxFlag.volatile_ as usize);
+    }
     if (state::parser_match(
             state, lexer::TokenKind.arrow)) {
         let return_type: usize = expression::parser_parse_type(state);
@@ -318,6 +466,19 @@ fn parser_parse_top_level_declaration(state: *state::State) -> usize {
     var attribute_count: usize = 0;
     statements::parser_parse_attributes(state, &first_attribute, &attribute_count);
 
+    if (state::parser_match(state, lexer::TokenKind.keyword_final)) {
+        flags |= syntax::SyntaxFlag.final_class as usize;
+        state::parser_expect(state, lexer::TokenKind.keyword_class);
+        if ((flags & (syntax::SyntaxFlag.external as usize)) != 0) {
+            state::parser_add_diagnostic(
+                state, lexer::DiagnosticKind.invalid_external_declaration, start.span,
+                lexer::TokenKind.keyword_fn, lexer::TokenKind.keyword_class, 0);
+        }
+        return parser_parse_aggregate_declaration(
+            state, start, syntax::SyntaxKind.class_declaration, flags, first_attribute, attribute_count,
+            parser_parse_class_member);
+    }
+
     if (state::parser_match(
             state, lexer::TokenKind.keyword_struct)) {
         if ((flags & (syntax::SyntaxFlag.external as usize)) != 0) {
@@ -326,7 +487,8 @@ fn parser_parse_top_level_declaration(state: *state::State) -> usize {
                 lexer::TokenKind.keyword_struct, 0);
         }
         return parser_parse_aggregate_declaration(
-            state, start, syntax::SyntaxKind.structure_declaration, flags, first_attribute, attribute_count);
+            state, start, syntax::SyntaxKind.structure_declaration, flags, first_attribute, attribute_count,
+            parser_parse_field);
     }
     if (state::parser_match(
             state, lexer::TokenKind.keyword_union)) {
@@ -336,7 +498,22 @@ fn parser_parse_top_level_declaration(state: *state::State) -> usize {
                 lexer::TokenKind.keyword_union, 0);
         }
         return parser_parse_aggregate_declaration(
-            state, start, syntax::SyntaxKind.union_declaration, flags, first_attribute, attribute_count);
+            state, start, syntax::SyntaxKind.union_declaration, flags, first_attribute, attribute_count,
+            parser_parse_field);
+    }
+    if (state::parser_match(
+            state, lexer::TokenKind.keyword_class)) {
+        if ((flags & (syntax::SyntaxFlag.external as usize)) != 0) {
+            state::parser_add_diagnostic(
+                state, lexer::DiagnosticKind.invalid_external_declaration, start.span, lexer::TokenKind.keyword_fn,
+                lexer::TokenKind.keyword_class, 0);
+        }
+        return parser_parse_aggregate_declaration(
+            state, start, syntax::SyntaxKind.class_declaration, flags, first_attribute, attribute_count,
+            parser_parse_class_member);
+    }
+    if (state::parser_match(state, lexer::TokenKind.keyword_impl)) {
+        return parser_parse_impl_declaration(state, start, flags, first_attribute, attribute_count);
     }
     if (state::parser_match(
             state, lexer::TokenKind.keyword_enum)) {

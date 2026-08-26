@@ -108,6 +108,7 @@ ordinals:
 | 17..19 | structure, union, enum | canonical module and declared name |
 | 20 | function pointer | convention, `u32` parameter count, parameter types, result type |
 | 21 | `va_list` | none |
+| 22 | class | canonical module and declared name |
 
 Pointer qualifier bits are `const:1 | volatile:2`. A named identity is `u32`
 module-component count, then every component as `u32` byte length plus bytes,
@@ -301,6 +302,19 @@ locations point at the exact declaration rather than at an arbitrary
 representative of the set. Each function also records its owning binding. The
 binding records one representative spelling only for lookup; it does not own
 the declarations or collapse their visibility flags.
+
+Before M3 adds method syntax, `Function` stores one `CallableIdentity` value
+containing its kind, optional owner type and receiver kind. `Binding` stores
+the same owner scope. Module functions use the canonical no-owner identity;
+future class members therefore enter the same candidate and signature pipeline
+without making method metadata another source of callable identity.
+
+Version 1 assigns callable-kind bytes `0..4` to free, static, instance,
+constructor and operator callables. Receiver bytes `0..4` denote none,
+writable, read-only, writable-volatile and read-only-volatile receivers. Owner
+kind `1` denotes a named owner type; its canonical type payload follows the
+fixed six-byte signature header and precedes the parameter count. Existing
+free-function signatures keep their exact byte representation.
 
 The candidate array is built once after canonical signatures are available.
 It is sorted by module, name and canonical signature, then partitioned into

@@ -46,8 +46,9 @@ fn function_matches_type(context: *context::Context, function_id: usize, target_
             *const context::Function;
     let function: context::Function = functions_data[function_id];
     let variadic: bool = (function.flags & (context::SymbolFlag.variadic as usize)) != 0;
-    let shape_matches: bool = function.parameter_count == target.field_count &&
-        function.return_type == target.element_type;
+    let parameter_count: usize = functions::function_argument_parameter_count(function);
+    let first_parameter: usize = functions::function_first_argument_parameter(function);
+    let shape_matches: bool = parameter_count == target.field_count && function.return_type == target.element_type;
     if (variadic || !shape_matches) {
         return false;
     }
@@ -55,8 +56,8 @@ fn function_matches_type(context: *context::Context, function_id: usize, target_
             *const context::Parameter;
     let fields: *const type_info::Field = context->types.fields.data as
             *const type_info::Field;
-    for (var index: usize = 0; index < function.parameter_count; index += 1) {
-        if (parameters[function.first_parameter + index].type_id != fields[target.first_field + index].type_id) {
+    for (var index: usize = 0; index < parameter_count; index += 1) {
+        if (parameters[first_parameter + index].type_id != fields[target.first_field + index].type_id) {
             return false;
         }
     }
@@ -119,14 +120,273 @@ fn function_value_expression(context: *context::Context, binding_id: usize, expe
     return result(Status.compatible, type_id, resolution.function_id);
 }
 
-fn candidate_call_status(context: *context::Context, node: syntax::SyntaxNode, function_id: usize) -> Status {
+fn invalid_call_target() -> CallTarget {
+    return {
+        binding_id = context::no_id(), kind = callable::Kind.free_function, owner_type = context::no_id(),
+        receiver_node = context::no_id(), receiver_type = context::no_id(),
+        receiver_category = category::Category.rvalue, receiver_source = ReceiverSource.none,
+        name_token = context::no_id(), valid = false,
+    };
+}
+
+fn named_class_type(context: *context::Context, node: syntax::SyntaxNode) -> usize {
+    if (node.kind != syntax::SyntaxKind.name_expression) {
+        return context::no_id();
+    }
+    let symbol_id: usize = node.child_count == 0 ? names::lookup_symbol(
+            context, context->current_unit, node.token_index, context::SymbolKind.named_type) :
+        names::lookup_qualified_symbol(context, context->current_unit, node, context::SymbolKind.named_type, false);
+    if (symbol_id == context::no_id()) {
+        return context::no_id();
+    }
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    var type_id: usize = symbols[symbol_id].type_id;
+    let record: type_info::Record = context::type_record(context, type_id);
+    if (record.kind == type_info::Kind.alias) {
+        type_id = record.element_type;
+    }
+    return context::type_record(context, type_id).kind == type_info::Kind.class_type ? type_id : context::no_id();
+}
+
+fn constructor_call_target(context: *context::Context, callee: syntax::SyntaxNode) -> CallTarget {
+    let owner_type: usize = named_class_type(context, callee);
+    if (owner_type == context::no_id()) {
+        return invalid_call_target();
+    }
+    let binding_id: usize = functions::lookup_constructor_binding(context, owner_type);
+    let constructible: bool = !classes::class_is_abstract(context, owner_type);
+    return {
+        binding_id = binding_id, kind = callable::Kind.constructor, owner_type = owner_type,
+        receiver_node = context::no_id(), receiver_type = owner_type,
+        receiver_category = category::Category.writable_lvalue, receiver_source = ReceiverSource.construction,
+        name_token = context::no_id(), valid = binding_id != context::no_id() && constructible,
+    };
+}
+
+fn lookup_member_binding(context: *context::Context, owner_type: usize, name_token: usize) -> usize {
+    var current: usize = owner_type;
+    for (var depth: usize = 0; depth < context::Limit.maximum_type_depth as usize; depth += 1) {
+        let binding_id: usize = functions::lookup_owned_callable_binding(
+            context, context->current_unit, current, name_token);
+        if (binding_id != context::no_id()) {
+            return binding_id;
+        }
+        current = classes::base_type(context, current);
+        if (current == context::no_id()) {
+            return context::no_id();
+        }
+    }
+    return context::no_id();
+}
+
+fn static_call_target(context: *context::Context, base: syntax::SyntaxNode, member: syntax::SyntaxNode) -> CallTarget {
+    let owner_type: usize = named_class_type(context, base);
+    if (owner_type == context::no_id()) {
+        return invalid_call_target();
+    }
+    let binding_id: usize = lookup_member_binding(context, owner_type, member.token_index);
+    return {
+        binding_id = binding_id, kind = callable::Kind.static_method, owner_type = owner_type,
+        receiver_node = context::no_id(), receiver_type = context::no_id(),
+        receiver_category = category::Category.rvalue, receiver_source = ReceiverSource.none,
+        name_token = member.token_index, valid = binding_id != context::no_id(),
+    };
+}
+
+fn instance_call_target(
+    context: *context::Context, callee: syntax::SyntaxNode,
+    base_node: syntax::SyntaxNode, member: syntax::SyntaxNode) -> CallTarget {
+    let base: Result = expression(context, callee.first_child, context::no_id());
+    if (base.status != Status.compatible) {
+        return invalid_call_target();
+    }
+    let operation: lexer::TokenKind = context::token(context, context->current_unit, callee.token_index).kind;
+    var owner_type: usize = base.type_id;
+    var receiver_category: category::Category = base.category;
+    if (operation == lexer::TokenKind.arrow) {
+        let pointer: type_info::Record = context::type_record(context, base.type_id);
+        if (pointer.kind != type_info::Kind.pointer) {
+            return invalid_call_target();
+        }
+        owner_type = pointer.element_type;
+        receiver_category = category::pointee(pointer);
+    } else if (operation != lexer::TokenKind.dot || !category::has_storage(base.category)) {
+        return invalid_call_target();
+    }
+    if (context::type_record(context, owner_type).kind != type_info::Kind.class_type) {
+        return invalid_call_target();
+    }
+    let binding_id: usize = lookup_member_binding(context, owner_type, member.token_index);
+    return {
+        binding_id = binding_id, kind = callable::Kind.instance_method, owner_type = owner_type,
+        receiver_node = callee.first_child, receiver_type = base_node.kind == syntax::SyntaxKind.invalid ?
+            context::no_id() : base.type_id, receiver_category = receiver_category,
+        receiver_source = ReceiverSource.expression, name_token = member.token_index,
+        valid = binding_id != context::no_id(),
+    };
+}
+
+fn current_receiver_category(context: *context::Context) -> category::Category {
+    if (context->current_function >= context->function_count) {
+        return category::Category.rvalue;
+    }
+    let functions_data: *const context::Function = context->functions.data as
+            *const context::Function;
+    let function: context::Function = functions_data[context->current_function];
+    switch (function.identity.receiver) {
+    case callable::ReceiverKind.writable {
+        return category::Category.writable_lvalue;
+    }
+    case callable::ReceiverKind.read_only {
+        return category::Category.read_only_lvalue;
+    }
+    case callable::ReceiverKind.writable_volatile {
+        return category::Category.writable_volatile_lvalue;
+    }
+    case callable::ReceiverKind.read_only_volatile {
+        return category::Category.volatile_lvalue;
+    }
+    default {
+        return category::Category.rvalue;
+    }
+    }
+}
+
+fn super_call_target(context: *context::Context, base: syntax::SyntaxNode, member: syntax::SyntaxNode) -> CallTarget {
+    var invalid: CallTarget = invalid_call_target();
+    invalid.kind = callable::Kind.instance_method;
+    invalid.receiver_source = ReceiverSource.current_object;
+    invalid.name_token = member.token_index;
+    if (base.kind != syntax::SyntaxKind.super_expression) {
+        return invalid;
+    }
+    if (context->current_function >= context->function_count) {
+        return invalid;
+    }
+    let functions_data: *const context::Function = context->functions.data as
+            *const context::Function;
+    let current: context::Function = functions_data[context->current_function];
+    let owner_type: usize = classes::base_type(context, current.identity.owner_type);
+    invalid.owner_type = owner_type;
+    if (!callable::has_receiver(current.identity) || owner_type == context::no_id()) {
+        return invalid;
+    }
+    let constructor: bool = context::token_equals_bytes(context, context->current_unit, member.token_index, "init", 4);
+    if (constructor && current.identity.kind != callable::Kind.constructor) {
+        invalid.kind = callable::Kind.constructor;
+        invalid.name_token = context::no_id();
+        return invalid;
+    }
+    let binding_id: usize = constructor ? functions::lookup_constructor_binding(context, owner_type) :
+        lookup_member_binding(context, owner_type, member.token_index);
+    return {
+        binding_id = binding_id, kind = constructor ? callable::Kind.constructor : callable::Kind.instance_method,
+        owner_type = owner_type, receiver_node = context::no_id(), receiver_type = current.identity.owner_type,
+        receiver_category = current_receiver_category(context), receiver_source = ReceiverSource.current_object,
+        name_token = constructor ? context::no_id() : member.token_index, valid = binding_id != context::no_id(),
+    };
+}
+
+fn member_call_target(context: *context::Context, callee: syntax::SyntaxNode) -> CallTarget {
+    if (callee.kind != syntax::SyntaxKind.member_expression || callee.child_count != 2) {
+        return invalid_call_target();
+    }
+    let base: syntax::SyntaxNode = context::node(context, context->current_unit, callee.first_child);
+    let member: syntax::SyntaxNode = context::node(context, context->current_unit, base.next_sibling);
+    let operation: lexer::TokenKind = context::token(context, context->current_unit, callee.token_index).kind;
+    if (operation == lexer::TokenKind.dot) {
+        let super_target: CallTarget = super_call_target(context, base, member);
+        if (base.kind == syntax::SyntaxKind.super_expression) {
+            return super_target;
+        }
+    }
+    if (operation == lexer::TokenKind.dot) {
+        let static_target: CallTarget = static_call_target(context, base, member);
+        if (static_target.valid) {
+            return static_target;
+        }
+    }
+    return instance_call_target(context, callee, base, member);
+}
+
+fn direct_call_target(context: *context::Context, node: syntax::SyntaxNode) -> CallTarget {
+    if (node.child_count == 0) {
+        return invalid_call_target();
+    }
+    let callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let constructor: CallTarget = constructor_call_target(context, callee);
+    if (constructor.owner_type != context::no_id()) {
+        return constructor;
+    }
+    let member: CallTarget = member_call_target(context, callee);
+    let super_call: bool = member.receiver_source == ReceiverSource.current_object;
+    if (member.valid || super_call) {
+        return member;
+    }
+    let binding_id: usize = direct_call_binding(context, callee);
+    return {
+        binding_id = binding_id, kind = callable::Kind.free_function, owner_type = callable::no_owner(),
+        receiver_node = context::no_id(), receiver_type = context::no_id(),
+        receiver_category = category::Category.rvalue, receiver_source = ReceiverSource.none,
+        name_token = context::no_id(), valid = binding_id != context::no_id(),
+    };
+}
+
+fn receiver_is_compatible(required: callable::ReceiverKind, actual: category::Category) -> bool {
+    switch (required) {
+    case callable::ReceiverKind.writable {
+        return actual == category::Category.writable_lvalue;
+    }
+    case callable::ReceiverKind.read_only {
+        return category::has_storage(actual) && !category::is_volatile(actual);
+    }
+    case callable::ReceiverKind.writable_volatile {
+        return actual == category::Category.writable_volatile_lvalue;
+    }
+    case callable::ReceiverKind.read_only_volatile {
+        return category::is_volatile(actual);
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn candidate_owner_is_compatible(context: *context::Context, function: context::Function, target: CallTarget) -> bool {
+    if (!target.valid || function.identity.kind != target.kind) {
+        return false;
+    }
+    if (target.name_token == context::no_id()) {
+        return function.identity.owner_type == target.owner_type;
+    }
+    return classes::is_base_of(context, function.identity.owner_type, target.owner_type);
+}
+
+fn candidate_target_is_compatible(context: *context::Context, function: context::Function, target: CallTarget) -> bool {
+    if (!candidate_owner_is_compatible(context, function, target)) {
+        return false;
+    }
+    if (target.kind != callable::Kind.instance_method) {
+        return true;
+    }
+    return receiver_is_compatible(function.identity.receiver, target.receiver_category);
+}
+
+fn candidate_call_status(
+    context: *context::Context, node: syntax::SyntaxNode, function_id: usize, target: CallTarget) -> Status {
     if (function_id >= context->function_count || node.child_count == 0) {
         return Status.invalid;
     }
     let functions_data: *const context::Function = context->functions.data as
             *const context::Function;
     let function: context::Function = functions_data[function_id];
+    if (!candidate_target_is_compatible(context, function, target)) {
+        return Status.incompatible;
+    }
     let variadic: bool = (function.flags & (context::SymbolFlag.variadic as usize)) != 0;
+    let parameter_count: usize = functions::function_argument_parameter_count(function);
+    let first_parameter: usize = functions::function_first_argument_parameter(function);
     let argument_count: usize = node.child_count - 1;
     if (!functions::function_accepts_arity(context, function_id, argument_count)) {
         return Status.incompatible;
@@ -137,9 +397,9 @@ fn candidate_call_status(context: *context::Context, node: syntax::SyntaxNode, f
     var child: usize = callee.next_sibling;
     var candidate_status: Status = Status.compatible;
     for (var argument_index: usize = 0; argument_index < argument_count; argument_index += 1) {
-        let variadic_extra: bool = argument_index >= function.parameter_count;
+        let variadic_extra: bool = argument_index >= parameter_count;
         let expected_type: usize = variadic_extra ? context::no_id() :
-            parameters[function.first_parameter + argument_index].type_id;
+            parameters[first_parameter + argument_index].type_id;
         let argument: Result = expression(context, child, expected_type);
         switch (argument.status) {
         case Status.incompatible {
@@ -299,8 +559,82 @@ fn remember_call_selection(context: *context::Context, node_id: usize, function_
     return true;
 }
 
-fn resolve_call(context: *context::Context, node_id: usize, node: syntax::SyntaxNode, binding_id: usize) -> Resolution {
-    if (binding_id >= context->binding_count) {
+fn target_binding(context: *context::Context, target: CallTarget, owner_type: usize) -> usize {
+    if (target.name_token == context::no_id()) {
+        return owner_type == target.owner_type ? target.binding_id : context::no_id();
+    }
+    return functions::lookup_owned_callable_binding(context, context->current_unit, owner_type, target.name_token);
+}
+
+fn target_candidate_is_visible(context: *context::Context, target: CallTarget, function_id: usize) -> bool {
+    let functions_data: *const context::Function = context->functions.data as
+            *const context::Function;
+    let function: context::Function = functions_data[function_id];
+    if (!candidate_owner_is_compatible(context, function, target)) {
+        return false;
+    }
+    if (target.name_token != context::no_id() && classes::method_is_shadowed(context, target.owner_type, function_id)) {
+        return false;
+    }
+    return functions::function_is_visible(context, function_id, context->current_unit);
+}
+
+fn visit_target_candidates(
+    context: *context::Context, node: syntax::SyntaxNode, target: CallTarget, candidates: *CandidateResolution) {
+    var owner_type: usize = target.owner_type;
+    for (var depth: usize = 0; depth < context::Limit.maximum_type_depth as usize; depth += 1) {
+        let binding_id: usize = target_binding(context, target, owner_type);
+        if (binding_id != context::no_id()) {
+            let bindings: *const context::Binding = context->bindings.data as
+                    *const context::Binding;
+            let candidate_count: usize = bindings[binding_id].candidate_count;
+            for (var index: usize = 0; index < candidate_count; index += 1) {
+                let function_id: usize = functions::binding_candidate(context, binding_id, index);
+                if (target_candidate_is_visible(context, target, function_id)) {
+                    consider_candidate(
+                        candidates, function_id, candidate_call_status(context, node, function_id, target));
+                }
+            }
+        }
+        if (target.name_token == context::no_id()) {
+            return;
+        }
+        owner_type = classes::base_type(context, owner_type);
+        if (owner_type == context::no_id()) {
+            return;
+        }
+    }
+}
+
+fn call_target_visible_count(context: *context::Context, target: CallTarget) -> usize {
+    var count: usize = 0;
+    var owner_type: usize = target.owner_type;
+    for (var depth: usize = 0; depth < context::Limit.maximum_type_depth as usize; depth += 1) {
+        let binding_id: usize = target_binding(context, target, owner_type);
+        if (binding_id != context::no_id()) {
+            let bindings: *const context::Binding = context->bindings.data as
+                    *const context::Binding;
+            for (var index: usize = 0; index < bindings[binding_id].candidate_count; index += 1) {
+                let function_id: usize = functions::binding_candidate(context, binding_id, index);
+                if (functions::function_is_visible(context, function_id, context->current_unit)) {
+                    count += 1;
+                }
+            }
+        }
+        if (target.name_token == context::no_id()) {
+            return count;
+        }
+        owner_type = classes::base_type(context, owner_type);
+        if (owner_type == context::no_id()) {
+            return count;
+        }
+    }
+    return count;
+}
+
+fn resolve_call_target(
+    context: *context::Context, node_id: usize, node: syntax::SyntaxNode, target: CallTarget) -> Resolution {
+    if (!target.valid) {
         context->error = runtime::Error.invalid_argument;
         return {status = ResolutionStatus.invalid, function_id = context::no_id()};
     }
@@ -311,24 +645,15 @@ fn resolve_call(context: *context::Context, node_id: usize, node: syntax::Syntax
     if (cached != context::no_id()) {
         let functions_data: *const context::Function = context->functions.data as
                 *const context::Function;
-        if (cached >= context->function_count || functions_data[cached].binding_id != binding_id) {
+        if (cached >= context->function_count ||
+            !candidate_target_is_compatible(context, functions_data[cached], target)) {
             context->error = runtime::Error.invalid_argument;
             return {status = ResolutionStatus.invalid, function_id = context::no_id()};
         }
         return {status = ResolutionStatus.selected, function_id = cached};
     }
-    let bindings: *const context::Binding = context->bindings.data as
-            *const context::Binding;
-    let candidate_count: usize = bindings[binding_id].candidate_count;
     var candidates: CandidateResolution = candidate_resolution();
-    for (var candidate_index: usize = 0; candidate_index < candidate_count; candidate_index += 1) {
-        let function_id: usize = functions::binding_candidate(context, binding_id, candidate_index);
-        if (!functions::function_is_visible(context, function_id, context->current_unit)) {
-            continue;
-        }
-        let status: Status = candidate_call_status(context, node, function_id);
-        consider_candidate(&candidates, function_id, status);
-    }
+    visit_target_candidates(context, node, target, &candidates);
     let resolution: Resolution = finish_candidate_resolution(candidates);
     if (resolution.status == ResolutionStatus.selected) {
         if (!remember_call_selection(context, node_id, resolution.function_id)) {
@@ -336,6 +661,16 @@ fn resolve_call(context: *context::Context, node_id: usize, node: syntax::Syntax
         }
     }
     return resolution;
+}
+
+fn resolve_call(context: *context::Context, node_id: usize, node: syntax::SyntaxNode, binding_id: usize) -> Resolution {
+    let target: CallTarget = {
+        binding_id = binding_id, kind = callable::Kind.free_function, owner_type = callable::no_owner(),
+        receiver_node = context::no_id(), receiver_type = context::no_id(),
+        receiver_category = category::Category.rvalue, receiver_source = ReceiverSource.none,
+        name_token = context::no_id(), valid = binding_id != context::no_id(),
+    };
+    return resolve_call_target(context, node_id, node, target);
 }
 
 fn direct_call_binding(context: *context::Context, callee: syntax::SyntaxNode) -> usize {
@@ -387,11 +722,14 @@ fn probe_call(context: *context::Context, node_id: usize, node: syntax::SyntaxNo
         return invalid_result();
     }
     let callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-    let binding_id: usize = direct_call_binding(context, callee);
-    if (binding_id == context::no_id()) {
+    let target: CallTarget = direct_call_target(context, node);
+    if (!target.valid) {
+        if (target.kind == callable::Kind.constructor && target.owner_type != context::no_id()) {
+            return incompatible_result();
+        }
         return probe_indirect_call(context, node, callee, expected_type);
     }
-    let resolution: Resolution = resolve_call(context, node_id, node, binding_id);
+    let resolution: Resolution = resolve_call_target(context, node_id, node, target);
     if (resolution.status == ResolutionStatus.ambiguous) {
         return result(Status.ambiguous, context::no_id(), context::no_id());
     }
@@ -400,8 +738,9 @@ fn probe_call(context: *context::Context, node_id: usize, node: syntax::SyntaxNo
     }
     let functions_data: *const context::Function = context->functions.data as
             *const context::Function;
-    var call_result: Result = materialized_result(
-        context, expected_type, functions_data[resolution.function_id].return_type);
+    let result_type: usize = target.receiver_source == ReceiverSource.construction ? target.owner_type :
+        functions_data[resolution.function_id].return_type;
+    var call_result: Result = materialized_result(context, expected_type, result_type);
     call_result.function_id = resolution.function_id;
     return call_result;
 }

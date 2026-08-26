@@ -26,7 +26,8 @@ fn function_parameter_types_match(
 }
 
 fn function_overload_key_matches(
-    context: *context::Context, function_id: usize, unit_index: usize, declaration: syntax::SyntaxNode) -> bool {
+    context: *context::Context, identity: callable::Identity, function_id: usize,
+    unit_index: usize, declaration: syntax::SyntaxNode) -> bool {
     let none: usize = context::no_id();
     var parameter_count: usize = 0;
     var return_node: usize = none;
@@ -38,7 +39,7 @@ fn function_overload_key_matches(
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
     let function: context::Function = functions[function_id];
-    if (parameter_count != function.parameter_count) {
+    if (!callable::same_identity(function.identity, identity) || parameter_count != function.parameter_count) {
         return false;
     }
     let variadic_matches: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.variadic) ==
@@ -80,8 +81,8 @@ struct FunctionDeclarationLookup {
 }
 
 fn lookup_function_declaration(
-    context: *context::Context, module_id: usize, unit_index: usize,
-    declaration: syntax::SyntaxNode) -> FunctionDeclarationLookup {
+    context: *context::Context, identity: callable::Identity, module_id: usize,
+    unit_index: usize, declaration: syntax::SyntaxNode) -> FunctionDeclarationLookup {
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
     let symbols: *const context::Symbol = context->symbols.data as
@@ -90,16 +91,18 @@ fn lookup_function_declaration(
         named_function = context::no_id(), overload = context::no_id(),
     };
     for (var function_id: usize = 0; function_id < context->function_count; function_id += 1) {
-        let symbol: context::Symbol = symbols[functions[function_id].symbol_id];
-        let owner_matches: bool = symbol.module_id == module_id;
+        let function: context::Function = functions[function_id];
+        let symbol: context::Symbol = symbols[function.symbol_id];
+        let module_matches: bool = symbol.module_id == module_id;
+        let owner_matches: bool = callable::same_owner(function.identity, identity);
+        let scope_matches: bool = module_matches && owner_matches;
         let name_matches: bool = context::tokens_equal(
             context, unit_index, declaration.token_index, symbol.declaration_unit, symbol.name_token);
-        let identity_matches: bool = owner_matches && name_matches;
-        if (identity_matches) {
+        if (scope_matches && name_matches) {
             if (result.named_function == context::no_id()) {
                 result.named_function = function_id;
             }
-            if (function_overload_key_matches(context, function_id, unit_index, declaration)) {
+            if (function_overload_key_matches(context, identity, function_id, unit_index, declaration)) {
                 result.overload = function_id;
                 return result;
             }

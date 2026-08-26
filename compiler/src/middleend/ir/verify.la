@@ -2,12 +2,70 @@ module luna.bootstrap.middleend.ir.verify;
 
 import luna.bootstrap.frontend.lexer as lexer;
 import luna.runtime as runtime;
+import luna.std.checked as checked;
 
 fn range_is_valid(first: usize, count: usize, total: usize) -> bool {
     if (count == 0) {
         return first == model::no_id();
     }
     return first < total && count <= total - first;
+}
+
+fn global_shape_is_valid(
+    global: model::Global, expected_byte_offset: usize, byte_count: usize,
+    expected_reference: usize, reference_count: usize) -> bool {
+    let byte_position_is_valid: bool = global.byte_count != 0 && global.byte_offset == expected_byte_offset;
+    let byte_range_is_valid: bool = checked::range_is_valid(global.byte_offset, global.byte_count, byte_count);
+    let alignment_is_bounded: bool = global.alignment_bytes != 0 && global.alignment_bytes <= 8;
+    let alignment_is_valid: bool = alignment_is_bounded && (global.alignment_bytes & (global.alignment_bytes - 1)) == 0;
+    let reference_range_is_valid: bool = range_is_valid(
+        global.first_function_reference, global.function_reference_count, reference_count);
+    let reference_position_is_valid: bool = global.function_reference_count == 0 ?
+            global.first_function_reference == model::no_id() : global.first_function_reference == expected_reference;
+    let byte_shape_is_valid: bool = byte_position_is_valid && byte_range_is_valid;
+    let reference_shape_is_valid: bool = reference_range_is_valid && reference_position_is_valid;
+    let storage_shape_is_valid: bool = byte_shape_is_valid && alignment_is_valid;
+    return storage_shape_is_valid && reference_shape_is_valid;
+}
+
+fn global_reference_bytes_are_zero(
+    ir: model::Store, global: model::Global, reference: model::GlobalFunctionReference) -> bool {
+    let address_bytes: usize = model::Limit.function_address_bytes as usize;
+    let storage_offset: usize = global.byte_offset + reference.byte_offset;
+    for (var index: usize = 0; index < address_bytes; index += 1) {
+        if (ir.global_bytes.data[storage_offset + index] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn global_references_are_valid(
+    ir: model::Store, global: model::Global, global_id: usize,
+    references: *const model::GlobalFunctionReference) -> bool {
+    var previous_end: usize = 0;
+    let address_bytes: usize = model::Limit.function_address_bytes as usize;
+    let reference_end: usize = global.first_function_reference + global.function_reference_count;
+    for (var index: usize = global.first_function_reference; index < reference_end; index += 1) {
+        let reference: model::GlobalFunctionReference = references[index];
+        let owner_and_target_are_valid: bool = reference.global_id == global_id &&
+            reference.function_id < ir.function_count;
+        let range_is_valid: bool = checked::range_is_valid(reference.byte_offset, address_bytes, global.byte_count);
+        let alignment_is_valid: bool = global.alignment_bytes == address_bytes &&
+            (reference.byte_offset & (address_bytes - 1)) == 0;
+        let position_is_valid: bool = reference.byte_offset >= previous_end;
+        if (!owner_and_target_are_valid || !range_is_valid) {
+            return false;
+        }
+        if (!alignment_is_valid || !position_is_valid) {
+            return false;
+        }
+        if (!global_reference_bytes_are_zero(ir, global, reference)) {
+            return false;
+        }
+        previous_end = reference.byte_offset + address_bytes;
+    }
+    return true;
 }
 
 fn value_operand_is_valid(
@@ -146,6 +204,10 @@ fn member_address_offset_is_valid(
             return true;
         }
         index += 1;
+    }
+    let inherited_address: bool = owner.kind == type_info::Kind.class_type && owner.base_type != model::no_id();
+    if (inherited_address && offset < records[owner.base_type].size_bytes) {
+        return member_address_offset_is_valid(types, owner.base_type, offset, element_type, depth + 1);
     }
     return false;
 }
@@ -379,6 +441,8 @@ fn is_valid(ir: model::Store, types: type_info::Table) -> bool {
         return false;
     }
     let globals: *const model::Global = ir.globals.data as *const model::Global;
+    let global_function_references: *const model::GlobalFunctionReference = ir.global_function_references.data as
+            *const model::GlobalFunctionReference;
     let functions: *const model::Function = ir.functions.data as *const model::Function;
     let parameters: *const model::Parameter = ir.parameters.data as *const model::Parameter;
     let slots: *const model::Slot = ir.slots.data as *const model::Slot;
@@ -388,20 +452,28 @@ fn is_valid(ir: model::Store, types: type_info::Table) -> bool {
     let arguments: *const model::Argument = ir.arguments.data as *const model::Argument;
     let type_records: *const type_info::Record = types.types.data as *const type_info::Record;
 
-    var index: usize = 0;
     var expected_global_offset: usize = 0;
-    while (index < ir.global_count) {
+    var expected_global_reference: usize = 0;
+    for (var index: usize = 0; index < ir.global_count; index += 1) {
         let global: model::Global = globals[index];
-        if (global.byte_count == 0 || global.byte_offset != expected_global_offset ||
-            global.byte_offset > ir.global_bytes.length || global.byte_count >
-                ir.global_bytes.length - global.byte_offset || global.alignment_bytes == 0 ||
-            global.alignment_bytes > 8 || (global.alignment_bytes & (global.alignment_bytes - 1)) != 0) {
+        if (!global_shape_is_valid(
+                global, expected_global_offset, ir.global_bytes.length,
+                expected_global_reference, ir.global_function_reference_count)) {
+            return false;
+        }
+        if (global.function_reference_count != 0 && !global.read_only) {
+            return false;
+        }
+        if (global.function_reference_count != 0 && !global_references_are_valid(
+                ir, global, index, global_function_references)) {
             return false;
         }
         expected_global_offset += global.byte_count;
-        index += 1;
+        expected_global_reference += global.function_reference_count;
     }
-    if (expected_global_offset != ir.global_bytes.length) {
+    let all_global_bytes_are_owned: bool = expected_global_offset == ir.global_bytes.length;
+    let all_global_references_are_owned: bool = expected_global_reference == ir.global_function_reference_count;
+    if (!all_global_bytes_are_owned || !all_global_references_are_owned) {
         return false;
     }
 
@@ -409,7 +481,7 @@ fn is_valid(ir: model::Store, types: type_info::Table) -> bool {
     var counted_slots: usize = 0;
     var counted_blocks: usize = 0;
     var counted_values: usize = 0;
-    index = 0;
+    var index: usize = 0;
     while (index < ir.function_count) {
         let function: model::Function = functions[index];
         if (function.declaration_unit == none || function.declaration_node == none || function.name_token == none ||
@@ -434,7 +506,7 @@ fn is_valid(ir: model::Store, types: type_info::Table) -> bool {
             if (parameter.function_id != index || parameter.type_id >= types.type_count ||
                 !type_can_be_value(types, parameter.type_id) ||
                 parameter.slot_id >= ir.slot_count || slots[parameter.slot_id].function_id != index ||
-                slots[parameter.slot_id].type_id != parameter.type_id || parameter.name_token == none) {
+                slots[parameter.slot_id].type_id != parameter.type_id) {
                 return false;
             }
             item += 1;

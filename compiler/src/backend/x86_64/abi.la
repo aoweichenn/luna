@@ -72,14 +72,18 @@ fn scalar_class(kind: type_info::Kind) -> Class {
 fn merge_leaf(
     classification: *Classification, offset_bytes: usize, size_bytes: usize, alignment_bytes: usize,
     abi_class: Class) -> bool {
-    if (classification == null || size_bytes == 0 || size_bytes > 8 || alignment_bytes == 0 ||
-        offset_bytes % alignment_bytes != 0 || offset_bytes > 15 || size_bytes > 16 - offset_bytes) {
+    let output_is_valid: bool = classification != null && size_bytes != 0;
+    let scalar_shape_is_valid: bool = size_bytes <= 8 && alignment_bytes != 0;
+    let alignment_is_valid: bool = scalar_shape_is_valid && offset_bytes % alignment_bytes == 0;
+    let offset_is_bounded: bool = offset_bytes <= 15;
+    let range_is_valid: bool = offset_is_bounded && size_bytes <= 16 - offset_bytes;
+    let layout_is_valid: bool = alignment_is_valid && range_is_valid;
+    if (!output_is_valid || !layout_is_valid) {
         return set_memory(classification);
     }
     let first: usize = offset_bytes / 8;
     let last: usize = (offset_bytes + size_bytes - 1) / 8;
-    var index: usize = first;
-    while (index <= last) {
+    for (var index: usize = first; index <= last; index += 1) {
         if (index == 0) {
             classification->first = class_merge(classification->first, abi_class);
         } else if (index == 1) {
@@ -87,7 +91,6 @@ fn merge_leaf(
         } else {
             return set_memory(classification);
         }
-        index += 1;
     }
     return true;
 }
@@ -95,8 +98,9 @@ fn merge_leaf(
 fn merge_type(
     types: type_info::Table, type_id: usize, base_offset: usize, depth: usize,
     classification: *Classification) -> bool {
-    if (type_id >= types.type_count || depth > Limit.maximum_type_depth as usize ||
-        classification == null || classification->first == Class.memory) {
+    let input_is_valid: bool = type_id < types.type_count && depth <= Limit.maximum_type_depth as usize;
+    let output_is_valid: bool = classification != null && classification->first != Class.memory;
+    if (!input_is_valid || !output_is_valid) {
         return set_memory(classification);
     }
     let records: *const type_info::Record = types.types.data as *const type_info::Record;
@@ -108,27 +112,28 @@ fn merge_type(
     }
     if (record.kind == type_info::Kind.array) {
         let element: type_info::Record = records[record.element_type];
-        var index: usize = 0;
-        while (index < record.element_count) {
+        for (var index: usize = 0; index < record.element_count; index += 1) {
             if (index > (Limit.maximum_size as usize) / element.size_bytes ||
                 !merge_type(
                     types, record.element_type, base_offset + index * element.size_bytes, depth + 1, classification)) {
                 return false;
             }
-            index += 1;
         }
         return true;
     }
-    if (record.kind == type_info::Kind.structure || record.kind == type_info::Kind.record_union) {
-        var index: usize = 0;
-        while (index < record.field_count) {
+    if (type_info::is_record(record.kind)) {
+        if (record.kind == type_info::Kind.class_type && record.base_type != type_info::no_id()) {
+            if (!merge_type(types, record.base_type, base_offset, depth + 1, classification)) {
+                return false;
+            }
+        }
+        for (var index: usize = 0; index < record.field_count; index += 1) {
             let field: type_info::Field = fields[record.first_field + index];
             if (field.offset_bytes > (Limit.maximum_size as usize) - base_offset ||
                 !merge_type(
                     types, field.type_id, base_offset + field.offset_bytes, depth + 1, classification)) {
                 return false;
             }
-            index += 1;
         }
         return true;
     }
@@ -272,8 +277,7 @@ fn build_return(abi: *Abi, function: *Function, types: type_info::Table) -> bool
     function->first_return_piece = abi->piece_count;
     var general_index: usize = 0;
     var vector_index: usize = 0;
-    var index: usize = 0;
-    while (index < classification.eightbyte_count) {
+    for (var index: usize = 0; index < classification.eightbyte_count; index += 1) {
         let abi_class: Class = piece_class(classification, index);
         let register_index: usize = abi_class == Class.integer ? general_index : vector_index;
         if (abi_class == Class.integer) {
@@ -291,7 +295,6 @@ fn build_return(abi: *Abi, function: *Function, types: type_info::Table) -> bool
             return false;
         }
         function->return_piece_count += 1;
-        index += 1;
     }
     return true;
 }
@@ -329,19 +332,23 @@ fn build_aggregate_parameter(
     let classification: Classification = classify(types, parameter->type_id);
     var required_general: usize = 0;
     var required_vector: usize = 0;
-    var index: usize = 0;
-    while (index < classification.eightbyte_count && classification.first != Class.memory) {
+    for (var index: usize = 0;
+        index < classification.eightbyte_count && classification.first != Class.memory;
+        index += 1) {
         if (piece_class(
                 classification, index) == Class.integer) {
             required_general += 1;
         } else {
             required_vector += 1;
         }
-        index += 1;
     }
-    let registers_fit: bool = classification.first != Class.memory && required_general <=
-            (Limit.general_register_count as usize) - function->general_register_count &&
-        required_vector <= (Limit.vector_register_count as usize) - function->vector_register_count;
+    let register_classification: bool = classification.first != Class.memory;
+    let general_registers_fit: bool = required_general <=
+        (Limit.general_register_count as usize) - function->general_register_count;
+    let vector_registers_fit: bool = required_vector <=
+        (Limit.vector_register_count as usize) - function->vector_register_count;
+    let register_counts_fit: bool = general_registers_fit && vector_registers_fit;
+    let registers_fit: bool = register_classification && register_counts_fit;
     if (!registers_fit) {
         var offset: usize = 0;
         var area_size: usize = 0;
@@ -363,8 +370,7 @@ fn build_aggregate_parameter(
     parameter->piece_count = classification.eightbyte_count;
     parameter->abi_class = classification.eightbyte_count == 1 ? classification.first : Class.no_class;
     parameter->location = LocationKind.invalid;
-    index = 0;
-    while (index < classification.eightbyte_count) {
+    for (var index: usize = 0; index < classification.eightbyte_count; index += 1) {
         let abi_class: Class = piece_class(classification, index);
         let is_integer: bool = abi_class == Class.integer;
         let register_index: usize = is_integer ? function->general_register_count : function->vector_register_count;
@@ -381,7 +387,6 @@ fn build_aggregate_parameter(
                 }) == no_id()) {
             return false;
         }
-        index += 1;
     }
     return true;
 }
@@ -404,6 +409,14 @@ fn build_parameter(
     return built && add_parameter(abi, parameter) != none;
 }
 
+fn finish_function(abi: *Abi, function: *Function) -> bool {
+    function->call_frame_size_bytes = align_up(function->stack_argument_size_bytes, Limit.stack_alignment as usize);
+    let frame_exists: bool = function->call_frame_size_bytes != no_id();
+    let frame_is_bounded: bool = function->call_frame_size_bytes <= Limit.maximum_stack_size as usize;
+    let frame_is_valid: bool = frame_exists && frame_is_bounded;
+    return frame_is_valid && add_function(abi, *function) != no_id();
+}
+
 fn analyze(ir: ir::Store, types: type_info::Table) -> Result {
     var abi: Abi = empty();
     if (!ir_check::is_valid(ir, types)) {
@@ -414,8 +427,9 @@ fn analyze(ir: ir::Store, types: type_info::Table) -> Result {
     let functions: *const ir::Function = ir.functions.data as *const ir::Function;
     let parameters: *const ir::Parameter = ir.parameters.data as *const ir::Parameter;
     let none: usize = no_id();
-    var function_id: usize = 0;
-    while (function_id < ir.function_count && abi.error == runtime::Error.none) {
+    for (var function_id: usize = 0;
+        function_id < ir.function_count && abi.error == runtime::Error.none;
+        function_id += 1) {
         let source: ir::Function = functions[function_id];
         var function: Function = {
             function_id = function_id, first_parameter = source.parameter_count == 0 ? none : abi.parameter_count,
@@ -429,8 +443,9 @@ fn analyze(ir: ir::Store, types: type_info::Table) -> Result {
             abi.error = runtime::Error.invalid_argument;
             break;
         }
-        var index: usize = 0;
-        while (index < source.parameter_count && abi.error == runtime::Error.none) {
+        for (var index: usize = 0;
+            index < source.parameter_count && abi.error == runtime::Error.none;
+            index += 1) {
             if (!build_parameter(
                     &abi, &function, parameters[source.first_parameter + index], index, types)) {
                 if (abi.error == runtime::Error.none) {
@@ -439,27 +454,22 @@ fn analyze(ir: ir::Store, types: type_info::Table) -> Result {
                 break;
             }
             function.parameter_count += 1;
-            index += 1;
         }
-        function.call_frame_size_bytes = align_up(function.stack_argument_size_bytes, Limit.stack_alignment as usize);
-        if (function.call_frame_size_bytes == no_id() || function.call_frame_size_bytes >
-                Limit.maximum_stack_size as usize ||
-            add_function(
-                &abi, function) == none) {
+        let parameters_are_valid: bool = abi.error == runtime::Error.none;
+        if (!parameters_are_valid || !finish_function(&abi, &function)) {
             if (abi.error == runtime::Error.none) {
                 abi.error = runtime::Error.invalid_argument;
             }
             break;
         }
-        function_id += 1;
     }
     let type_records: *const type_info::Record = types.types.data as *const type_info::Record;
     let type_fields: *const type_info::Field = types.fields.data as *const type_info::Field;
-    var signature_type: usize = 0;
-    while (signature_type < types.type_count && abi.error == runtime::Error.none) {
+    for (var signature_type: usize = 0;
+        signature_type < types.type_count && abi.error == runtime::Error.none;
+        signature_type += 1) {
         let record: type_info::Record = type_records[signature_type];
         if (record.kind != type_info::Kind.function_pointer) {
-            signature_type += 1;
             continue;
         }
         var synthesized: Function = {
@@ -474,8 +484,9 @@ fn analyze(ir: ir::Store, types: type_info::Table) -> Result {
             abi.error = runtime::Error.invalid_argument;
             break;
         }
-        var parameter_index: usize = 0;
-        while (parameter_index < record.field_count && abi.error == runtime::Error.none) {
+        for (var parameter_index: usize = 0;
+            parameter_index < record.field_count && abi.error == runtime::Error.none;
+            parameter_index += 1) {
             var ir_parameter: ir::Parameter = {
                 function_id = none, type_id = type_fields[ record.first_field + parameter_index].type_id,
                 slot_id = none, name_token = none,
@@ -488,20 +499,13 @@ fn analyze(ir: ir::Store, types: type_info::Table) -> Result {
                 break;
             }
             synthesized.parameter_count += 1;
-            parameter_index += 1;
         }
-        synthesized.call_frame_size_bytes =
-            align_up(synthesized.stack_argument_size_bytes, Limit.stack_alignment as usize);
-        if (abi.error == runtime::Error.none && (synthesized.call_frame_size_bytes == no_id() ||
-                synthesized.call_frame_size_bytes > Limit.maximum_stack_size
-                        as usize ||
-                add_function(
-                    &abi, synthesized) == none)) {
+        let function_is_finished: bool = abi.error == runtime::Error.none && finish_function(&abi, &synthesized);
+        if (!function_is_finished) {
             if (abi.error == runtime::Error.none) {
                 abi.error = runtime::Error.invalid_argument;
             }
         }
-        signature_type += 1;
     }
     if (abi.error != runtime::Error.none) {
         let error: runtime::Error = abi.error;

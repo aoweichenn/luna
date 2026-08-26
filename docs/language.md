@@ -319,6 +319,155 @@ callback: fn(i32, i32) -> i32;
 Arrays do not decay to pointers. There are no implicit integer promotions,
 implicit pointer/integer conversions or truthiness conversions.
 
+M3.0 adds non-polymorphic classes with explicit access and an implicit `this`
+receiver:
+
+```luna
+export class Counter {
+    priv value: i32;
+
+    pub init(value: i32 = 0);
+    pub fn get() const -> i32;
+    pub fn add(delta: i32 = 1);
+    pub static fn answer() -> i32;
+}
+
+impl Counter {
+    init(value: i32) {
+        this->value = value;
+    }
+
+    fn get() const -> i32 {
+        return this->value;
+    }
+
+    fn add(delta: i32) {
+        this->value += delta;
+    }
+
+    static fn answer() -> i32 {
+        return 42;
+    }
+}
+```
+
+Every field says `pub`, `prot` or `priv`; there is no default access. Public
+and protected method contracts are bodyless declarations in the class.
+Their definitions live in `impl Type` blocks in the declaring module and omit
+the access modifier. A private method is introduced only as `priv fn` or
+`priv static fn` with a body in an `impl` block. Fields and methods share one
+member namespace, so a field name cannot also name a method. Method bodies may
+be split across the module's implementation units, but each declared method
+requires exactly one matching definition.
+
+The receiver never appears in the source parameter list. An instance method is
+writable by default; trailing `const`, `volatile` or `const volatile` qualifies
+its implicit receiver. The method body receives the reserved `this` pointer and
+uses ordinary pointer-member syntax such as `this->value`. `Self` has no
+contextual meaning.
+
+The compiler records receiver qualification in callable identity and inserts
+one anonymous first parameter only when lowering to IR and the System V ABI. A
+writable object can bind to a `const` method; a read-only object cannot bind to
+a writable method. `object.method(...)` requires address-backed storage, while
+`pointer->method(...)` performs the normal null check. A temporary class value
+may bind to a `const` method but not a writable one. Selecting a method without
+immediately calling it is not a bound-method value in M3.0.
+
+Constructors are overloaded `init` methods with an implicit writable receiver
+and no result type; receiver qualifiers are invalid. `Counter(args...)` selects
+a constructor using the exact M2
+overload/default rules, allocates complete local storage, zeroes it and then
+passes its address to the selected body. A class with no matching constructor
+cannot be constructed. `{}` and named aggregate initialization remain invalid
+for every class. Static methods use `Type.method(args...)`; calling a static
+method through an object, or an instance method through a type, is invalid.
+
+Class layout uses the ordinary target alignment rules and has no hidden storage
+in M3.0. An otherwise empty class has size and alignment 1, preserving nonzero
+array stride and distinct object addresses. Class identity is the declaring
+module plus class name. Exact same-class initialization, assignment, parameter
+passing and return are representation copies and use the normal System V
+aggregate classifier. There are no copy/move constructors, assignment hooks,
+destructors or implicit conversions.
+
+`pub` members are accessible wherever the class is visible. `prot` and `priv`
+members are accessible only while lowering a method of that class in M3.0;
+merely sharing a module grants no access. Protected access expands to
+derived classes only when M3.1 inheritance lands.
+
+Class-valued fields, including arrays containing class values, are rejected in
+M3.0. Raw pointers to classes are legal, non-owning fields. Class fields also
+reject bitfields, flexible arrays, anonymous members and packed layout.
+`sizeof` and `alignof` are supported; `offsetof` remains limited to structures
+and unions. Passing or returning a class by value through `extern fn` is
+rejected, while a raw class pointer retains the ordinary C pointer ABI.
+
+M3.0 adds no ownership, lifetime, allocation or automatic cleanup semantics.
+Operators, bound methods, RTTI and friendship belong to later M3 milestones.
+
+M3.1 adds public single inheritance and static polymorphism contracts:
+
+```luna
+class Base {
+    prot stored: i32;
+
+    pub init(value: i32);
+    pub virtual fn read() const -> i32;
+}
+
+final class Derived : Base {
+    pub init(value: i32);
+    pub override final fn read() const -> i32;
+}
+
+impl Derived {
+    init(value: i32) {
+        super.init(value);
+    }
+
+    fn read() const -> i32 {
+        return this->stored + 1;
+    }
+}
+```
+
+Every class has at most one base. Inheritance is always public; the base must
+be a complete visible non-final class. The base subobject begins at offset zero
+and direct fields follow its complete padded size. No vptr is added in M3.1.
+For example, a four-byte base followed by one `i32` derived field produces an
+eight-byte derived object with alignment four.
+
+Field and method lookup starts at the static class and walks the base chain.
+Distinct inherited overloads remain visible; Luna does not implement C++ name
+hiding. A derived field cannot repeat an inherited field or method name, and a
+derived method cannot reuse an inherited field name. `priv` remains available
+only to its declaring class; `prot` is also available to derived methods.
+
+Derived constructors do not inherit base constructors. Each derived `init`
+must call `super.init(...)` exactly once as its first statement. `super.method`
+starts lookup at the immediate base and always performs a direct call. It is
+not a value and cannot be stored.
+
+`virtual` introduces a deterministic method slot, `abstract` introduces an
+unimplemented slot, and a matching derived implementation must say `override`.
+`final` prevents inheritance or a further override. Parameters, receiver
+qualification and result type must match exactly. Abstract classes and
+abstract methods cannot be used as concrete values or direct call targets; raw
+pointers to abstract classes remain legal.
+
+M3.3 materializes those slots as read-only vtables. A call through `->`,
+including `this->method()`, null-checks the receiver and dispatches a virtual
+method through the object's vptr. A call through an exact object value with
+`.`, a `super` call, a final method or a pointer to a final class is direct.
+Only polymorphic hierarchies carry a vptr; ordinary classes retain their M3.0
+layout. Complete object storage is zeroed and receives its most-derived vptr
+before constructor execution, and `super.init` does not replace that vptr.
+
+Derived-to-base pointer conversion is explicit with `as` and preserves the
+address because the base is at offset zero. Class values never slice: passing a
+Derived value where Base is required is a type mismatch.
+
 In the bootstrap memory milestone, a pointer qualifier applies to writes
 through that pointer: `*T` permits reads and writes, while `*const T` permits
 only reads. Taking the address of a mutable lvalue produces `*T`; taking the

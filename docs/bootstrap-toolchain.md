@@ -133,6 +133,13 @@ relocations. Unknown directives or instructions, malformed operands,
 duplicate definitions, unresolved local branches, overflow and unsupported
 encodings are hard errors.
 
+The M3.2 data form `.quad <symbol>` is accepted only while `.rodata` is active.
+It appends one zero placeholder and records an `absolute64` relocation with
+addend zero. The symbol must be declared or defined somewhere in the assembly
+unit, and numeric constants, addend expressions, comma lists and uses from
+text/writable data are rejected. A same-object definition still produces a
+relocation: only the final linker knows its absolute virtual address.
+
 The freestanding stage driver reads exactly
 `bootstrap-assembly-input.s`, writes `bootstrap-object-output.lo` on success
 and exits with status 42. Assembly errors exit with status 2 and report the

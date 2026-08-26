@@ -182,6 +182,14 @@ fn alignment(assembler: *encoding::State, input: text::View, exponent: bool) -> 
     return true;
 }
 
+fn symbol_address(assembler: *encoding::State, input: text::View) -> bool {
+    let name: text::View = operands::trim(input);
+    if (!symbol_name_is_valid(name)) {
+        return encoding::fail(assembler, runtime::Error.invalid_argument);
+    }
+    return encoding::append_symbol_address(assembler, name);
+}
+
 fn directive(assembler: *encoding::State, line: text::View) -> bool {
     var split: usize = 0;
     while (split < line.length && !operands::is_space(line.data[split])) {
@@ -237,6 +245,9 @@ fn directive(assembler: *encoding::State, line: text::View) -> bool {
         let value: text::View = operands::trim(arguments);
         return operands::parse_bits(value, &bits) && encoding::fits_u8(bits) && encoding::append_u8(assembler,
             bits as u8);
+    }
+    if (operands::equal(directive, ".quad", 5)) {
+        return symbol_address(assembler, arguments);
     }
     if (operands::equal(directive, ".p2align", 8)) {
         return alignment(assembler, arguments, true);
@@ -357,7 +368,8 @@ fn resolve_fixups(assembler: *encoding::State) -> bool {
         if (symbol == null) {
             return encoding::fail(assembler, runtime::Error.invalid_argument);
         }
-        if (symbol->defined && symbol->section == fixup.section) {
+        let same_section: bool = symbol->defined && symbol->section == fixup.section;
+        if (fixup.kind != encoding::FixupKind.absolute64 && same_section) {
             if (!patch(
                     assembler, fixup, symbol->value)) {
                 return false;
@@ -371,12 +383,28 @@ fn resolve_fixups(assembler: *encoding::State) -> bool {
         if (!symbol->defined) {
             symbol->global = true;
         }
-        if (!object::add_relocation(
-                &assembler->object, {
-                    section = fixup.section, offset = fixup.offset, symbol_index = found.index, kind = fixup.kind ==
-                            encoding::FixupKind.call ? object::RelocationKind.plt32 : object::RelocationKind.pc32,
-                                addend = -4,
-                })) {
+        var relocation_kind: object::RelocationKind = object::RelocationKind.pc32;
+        var addend: isize = -4;
+        switch (fixup.kind) {
+        case encoding::FixupKind.call {
+            relocation_kind = object::RelocationKind.plt32;
+        }
+        case encoding::FixupKind.rip_relative {
+            relocation_kind = object::RelocationKind.pc32;
+        }
+        case encoding::FixupKind.absolute64 {
+            relocation_kind = object::RelocationKind.absolute64;
+            addend = 0;
+        }
+        default {
+            return encoding::fail(assembler, runtime::Error.invalid_argument);
+        }
+        }
+        let relocation: object::Relocation = {
+            section = fixup.section, offset = fixup.offset, symbol_index = found.index,
+            kind = relocation_kind, addend = addend,
+        };
+        if (!object::add_relocation(&assembler->object, relocation)) {
             return encoding::fail(assembler, assembler->object.error);
         }
         index += 1;

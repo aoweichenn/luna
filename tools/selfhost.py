@@ -97,7 +97,12 @@ LIBRARIES = {
     "type": compiler_module("luna.bootstrap.middleend.type", "middleend/type"),
     "ir": compiler_module("luna.bootstrap.middleend.ir", "middleend/ir"),
     "ir_verify": compiler_module("luna.bootstrap.middleend.ir.verify", "middleend/ir/verify"),
+    "sem_callable": compiler_module("luna.bootstrap.middleend.semantic.callable", "middleend/semantic/callable"),
     "sem_value": compiler_module("luna.bootstrap.middleend.semantic.value", "middleend/semantic/value"),
+    "sem_class_model": compiler_module(
+        "luna.bootstrap.middleend.semantic.classes.model",
+        "middleend/semantic/classes/model",
+    ),
     "sem_ctx": compiler_module("luna.bootstrap.middleend.semantic.context", "middleend/semantic/context"),
     "sem_ctx_lookup": compiler_module(
         "luna.bootstrap.middleend.semantic.context.lookup",
@@ -122,6 +127,7 @@ LIBRARIES = {
         "luna.bootstrap.middleend.semantic.types.visibility",
         "middleend/semantic/types/visibility",
     ),
+    "sem_classes": compiler_module("luna.bootstrap.middleend.semantic.classes", "middleend/semantic/classes"),
     "sem_consteval_model": compiler_module(
         "luna.bootstrap.middleend.semantic.consteval.model",
         "middleend/semantic/consteval/model",
@@ -141,6 +147,7 @@ LIBRARIES = {
         "middleend/semantic/functions/overloads",
         "middleend/semantic/functions/bindings",
         "middleend/semantic/functions/defaults",
+        "middleend/semantic/functions/methods",
     ),
     "sem_funcs_ir": compiler_module(
         "luna.bootstrap.middleend.semantic.functions.ir",
@@ -786,6 +793,27 @@ def require_test_success(
         )
 
 
+def require_two_unit_order_identity(
+    compiler: list[str | pathlib.Path],
+    work: pathlib.Path,
+    stem: str,
+    interface: pathlib.Path,
+    first_unit: pathlib.Path,
+    second_unit: pathlib.Path,
+    *,
+    timeout: int,
+) -> None:
+    outputs = (work / f"{stem}-first.s", work / f"{stem}-second.s")
+    orders = ((first_unit, second_unit), (second_unit, first_unit))
+    for output, units in zip(outputs, orders, strict=True):
+        require_test_success(
+            [*compiler, "--library", "-o", output, *units, interface],
+            timeout=timeout,
+        )
+    if outputs[0].read_bytes() != outputs[1].read_bytes():
+        raise AssertionError("assembly differs after implementation-unit permutation")
+
+
 def execute_callable_identity_tests(
     stage_bin: pathlib.Path,
     runner: tuple[str, ...],
@@ -836,39 +864,83 @@ def execute_callable_identity_tests(
 
     name = "callable-source-order"
     try:
-        first_order = work / "order-first.s"
-        second_order = work / "order-second.s"
-        order_interface = source_root / "order.lh"
-        first_unit = source_root / "order" / "first.la"
-        second_unit = source_root / "order" / "second.la"
-        require_test_success(
-            [
-                *compiler,
-                "--library",
-                "-o",
-                first_order,
-                first_unit,
-                second_unit,
-                order_interface,
-            ],
+        require_two_unit_order_identity(
+            compiler,
+            work,
+            "order",
+            source_root / "order.lh",
+            source_root / "order" / "first.la",
+            source_root / "order" / "second.la",
             timeout=timeout,
         )
-        require_test_success(
-            [
-                *compiler,
-                "--library",
-                "-o",
-                second_order,
-                second_unit,
-                first_unit,
-                order_interface,
-            ],
-            timeout=timeout,
-        )
-        if first_order.read_bytes() != second_order.read_bytes():
-            raise AssertionError("assembly differs after implementation-unit permutation")
         passed += 1
         print(f"PASS {name} (byte-identical assembly)")
+    except Exception as error:  # noqa: BLE001 - report and continue
+        failed.append(name)
+        print(f"FAIL {name}: {error}")
+
+    name = "method-source-order"
+    try:
+        method_order = source_root / "method_order"
+        require_two_unit_order_identity(
+            compiler,
+            work,
+            "methods",
+            source_root / "method_order.lh",
+            method_order / "alpha.la",
+            method_order / "zed.la",
+            timeout=timeout,
+        )
+        passed += 1
+        print(f"PASS {name} (byte-identical assembly)")
+    except Exception as error:  # noqa: BLE001 - report and continue
+        failed.append(name)
+        print(f"FAIL {name}: {error}")
+
+    name = "method-hierarchy-source-order"
+    try:
+        inheritance_order = source_root / "inheritance_order"
+        require_two_unit_order_identity(
+            compiler,
+            work,
+            "inheritance",
+            source_root / "inheritance_order.lh",
+            inheritance_order / "base.la",
+            inheritance_order / "derived.la",
+            timeout=timeout,
+        )
+        passed += 1
+        print(f"PASS {name} (byte-identical assembly)")
+    except Exception as error:  # noqa: BLE001 - report and continue
+        failed.append(name)
+        print(f"FAIL {name}: {error}")
+
+    name = "class-dispatch-shape"
+    try:
+        assembly = work / "class-dispatch.s"
+        require_test_success(
+            [
+                *compiler,
+                "--executable",
+                "-o",
+                assembly,
+                ROOT / "tests" / "cases" / "class_devirtualization.la",
+            ],
+            timeout=timeout,
+        )
+        assembly_text = assembly.read_text(encoding="utf-8")
+        indirect_call_count = assembly_text.count("    call *%r11\n")
+        vtable_slot_count = assembly_text.count("    .quad ")
+        if indirect_call_count != 1:
+            raise AssertionError(
+                f"expected one virtual call, found {indirect_call_count}"
+            )
+        if vtable_slot_count != 3:
+            raise AssertionError(
+                f"expected three vtable slots, found {vtable_slot_count}"
+            )
+        passed += 1
+        print(f"PASS {name} (1 indirect call, 3 vtable slots)")
     except Exception as error:  # noqa: BLE001 - report and continue
         failed.append(name)
         print(f"FAIL {name}: {error}")
@@ -946,6 +1018,135 @@ def syscall_object(stage_bin: pathlib.Path) -> pathlib.Path:
     _start, so linking it into every test executable is inert for cases
     that never touch syscalls."""
     return stage_bin.parent / "objects" / "syscall.lo"
+
+
+def execute_relocation_data_tests(
+    stage_bin: pathlib.Path,
+    runner: tuple[str, ...],
+) -> tuple[int, list[str]]:
+    source_root = ROOT / "tests" / "relocation_data"
+    work = ROOT / "out" / "tests" / "relocation-data"
+    reset(work)
+    timeout = timeout_seconds(runner)
+    assembler = tool(stage_bin, "luna-as", runner)
+    linker = tool(stage_bin, "luna-link", runner)
+    passed = 0
+    failed: list[str] = []
+
+    probes = {
+        "readonly-ir-function-address": "ir_codegen.la",
+        "readonly-object-relocation-roundtrip": "object_roundtrip.la",
+    }
+    for name, source_name in probes.items():
+        try:
+            source = source_root / source_name
+            assembly = work / f"{name}.s"
+            object_file = work / f"{name}.lo"
+            executable = work / name
+            require_test_success(
+                [
+                    *tool(stage_bin, "lunac", runner),
+                    "--executable",
+                    "-o",
+                    assembly,
+                    *driver_units(source),
+                ],
+                timeout=timeout,
+            )
+            require_test_success(
+                [*assembler, "-o", object_file, assembly],
+                timeout=timeout,
+            )
+            link_keys = implementation_closure(driver_dependencies(source))
+            library_objects = [
+                stage_bin.parent / "objects" / f"{key}.lo" for key in link_keys
+            ]
+            require_test_success(
+                [*linker, "-o", executable, object_file, *library_objects],
+                timeout=timeout,
+            )
+            completed = test_command([*runner, executable], timeout=timeout)
+            if completed.returncode != 42:
+                raise AssertionError(
+                    f"relocation probe returned {completed.returncode}, expected 42"
+                )
+            passed += 1
+            print(f"PASS {name} (exit 42)")
+        except Exception as error:  # noqa: BLE001 - report and continue
+            failed.append(name)
+            print(f"FAIL {name}: {error}")
+
+    name = "readonly-function-address-link"
+    try:
+        objects = (work / "dispatch-first.lo", work / "dispatch-second.lo")
+        for output in objects:
+            require_test_success(
+                [*assembler, "-o", output, source_root / "dispatch.s"],
+                timeout=timeout,
+            )
+        if objects[0].read_bytes() != objects[1].read_bytes():
+            raise AssertionError("absolute relocation object is not deterministic")
+
+        elf_object = work / "dispatch.o"
+        require_test_success(
+            [
+                *assembler,
+                "--emit",
+                "elf",
+                "-o",
+                elf_object,
+                source_root / "dispatch.s",
+            ],
+            timeout=timeout,
+        )
+        executable = work / "dispatch"
+        require_test_success(
+            [*linker, "-o", executable, elf_object],
+            timeout=timeout,
+        )
+        completed = test_command([*runner, executable], timeout=timeout)
+        if completed.returncode != 42:
+            raise AssertionError(
+                f"dispatch executable returned {completed.returncode}, expected 42"
+            )
+        passed += 1
+        print(f"PASS {name} (deterministic LUNAOBJ1, ELF round-trip, exit 42)")
+    except Exception as error:  # noqa: BLE001 - report and continue
+        failed.append(name)
+        print(f"FAIL {name}: {error}")
+
+    malformed = {
+        "readonly-function-address-expression": ("fail_expression.s", 3),
+        "readonly-function-address-section": ("fail_section.s", 2),
+        "readonly-function-address-unknown": ("fail_unknown.s", 2),
+    }
+    for name, (source_name, expected_line) in malformed.items():
+        try:
+            completed = test_command(
+                [
+                    *assembler,
+                    "-o",
+                    work / f"{name}.lo",
+                    source_root / source_name,
+                ],
+                timeout=timeout,
+            )
+            if completed.returncode != 2:
+                raise AssertionError(
+                    f"luna-as returned {completed.returncode}, expected 2"
+                )
+            expected_error = f"assembler:{expected_line}\n"
+            if completed.stderr != expected_error:
+                raise AssertionError(
+                    f"stderr {completed.stderr!r}, expected {expected_error!r}"
+                )
+            passed += 1
+            print(f"PASS {name} (rejected at line {expected_line})")
+        except Exception as error:  # noqa: BLE001 - report and continue
+            failed.append(name)
+            print(f"FAIL {name}: {error}")
+
+    return passed, failed
 
 
 def execute_ffi_tests(
@@ -1203,6 +1404,12 @@ def execute_tests(stage_bin: pathlib.Path, runner: tuple[str, ...]) -> int:
     )
     passed += identity_passed
     failed.extend(identity_failed)
+    relocation_passed, relocation_failed = execute_relocation_data_tests(
+        stage_bin,
+        runner,
+    )
+    passed += relocation_passed
+    failed.extend(relocation_failed)
     ffi_passed, ffi_failed, ffi_skipped = execute_ffi_tests(stage_bin, runner)
     passed += ffi_passed
     failed.extend(ffi_failed)

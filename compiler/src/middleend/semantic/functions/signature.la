@@ -5,7 +5,7 @@ enum SignatureFormat: usize {
 }
 
 enum SignatureCallableKind: usize {
-    free_function = 0,
+    free_function = 0, static_method = 1, instance_method = 2, constructor = 3, operator_method = 4,
 }
 
 enum SignatureCallingConvention: usize {
@@ -13,11 +13,11 @@ enum SignatureCallingConvention: usize {
 }
 
 enum SignatureOwnerKind: usize {
-    none = 0,
+    none = 0, named_type = 1,
 }
 
 enum SignatureReceiverKind: usize {
-    none = 0,
+    none = 0, writable = 1, read_only = 2, writable_volatile = 3, read_only_volatile = 4,
 }
 
 enum SignatureFunctionFlag: usize {
@@ -32,11 +32,11 @@ enum SignatureTypeTag: usize {
     invalid = 0, type_void = 1, boolean = 2, signed_8 = 3, signed_16 = 4, signed_32 = 5, signed_64 = 6,
     signed_size = 7, unsigned_8 = 8, unsigned_16 = 9, unsigned_32 = 10, unsigned_64 = 11, unsigned_size = 12,
     float_32 = 13, float_64 = 14, pointer = 15, array = 16, structure = 17, record_union = 18, enumeration = 19,
-    function_pointer = 20, va_list_type = 21,
+    function_pointer = 20, va_list_type = 21, class_type = 22,
 }
 
 enum SignatureTypeTagMap: usize {
-    kind_count = 23,
+    kind_count = 24,
 }
 
 struct SignatureWriter {
@@ -95,6 +95,60 @@ fn signature_writer_bytes(writer: *SignatureWriter, data: *const u8, length: usi
     let appended: bytes::BufferResult = bytes::append(writer->output, data, length);
     writer->output = appended.buffer;
     writer->error = appended.error;
+}
+
+fn signature_callable_kind(writer: *SignatureWriter, kind: callable::Kind) {
+    switch (kind) {
+    case callable::Kind.free_function {
+        signature_writer_byte(writer, SignatureCallableKind.free_function as usize as u8);
+    }
+    case callable::Kind.static_method {
+        signature_writer_byte(writer, SignatureCallableKind.static_method as usize as u8);
+    }
+    case callable::Kind.instance_method {
+        signature_writer_byte(writer, SignatureCallableKind.instance_method as usize as u8);
+    }
+    case callable::Kind.constructor {
+        signature_writer_byte(writer, SignatureCallableKind.constructor as usize as u8);
+    }
+    case callable::Kind.operator_method {
+        signature_writer_byte(writer, SignatureCallableKind.operator_method as usize as u8);
+    }
+    default {
+        signature_writer_fail(writer, runtime::Error.invalid_argument);
+    }
+    }
+}
+
+fn signature_receiver_kind(writer: *SignatureWriter, receiver: callable::ReceiverKind) {
+    switch (receiver) {
+    case callable::ReceiverKind.none {
+        signature_writer_byte(writer, SignatureReceiverKind.none as usize as u8);
+    }
+    case callable::ReceiverKind.writable {
+        signature_writer_byte(writer, SignatureReceiverKind.writable as usize as u8);
+    }
+    case callable::ReceiverKind.read_only {
+        signature_writer_byte(writer, SignatureReceiverKind.read_only as usize as u8);
+    }
+    case callable::ReceiverKind.writable_volatile {
+        signature_writer_byte(writer, SignatureReceiverKind.writable_volatile as usize as u8);
+    }
+    case callable::ReceiverKind.read_only_volatile {
+        signature_writer_byte(writer, SignatureReceiverKind.read_only_volatile as usize as u8);
+    }
+    default {
+        signature_writer_fail(writer, runtime::Error.invalid_argument);
+    }
+    }
+}
+
+fn signature_callable_identity(writer: *SignatureWriter, identity: callable::Identity) {
+    signature_callable_kind(writer, identity.kind);
+    let owner_kind: u8 = callable::has_owner(identity) ? SignatureOwnerKind.named_type as usize as u8 :
+        SignatureOwnerKind.none as usize as u8;
+    signature_writer_byte(writer, owner_kind);
+    signature_receiver_kind(writer, identity.receiver);
 }
 
 fn signature_token_is_valid(unit: *const context::Unit, token: lexer::Token) -> bool {
@@ -177,7 +231,7 @@ fn signature_type_tag(kind: type_info::Kind) -> u8 {
         SignatureTypeTag.pointer as usize as u8, SignatureTypeTag.array as usize as u8,
         SignatureTypeTag.structure as usize as u8, SignatureTypeTag.record_union as usize as u8,
         SignatureTypeTag.enumeration as usize as u8, invalid, SignatureTypeTag.function_pointer as usize as u8,
-        SignatureTypeTag.va_list_type as usize as u8,
+        SignatureTypeTag.va_list_type as usize as u8, SignatureTypeTag.class_type as usize as u8,
     };
     let kind_index: usize = kind as usize;
     if (kind_index >= SignatureTypeTagMap.kind_count as usize) {
@@ -213,7 +267,8 @@ fn signature_type_payload(
         signature_writer_u64(writer, record.element_count as u64);
         signature_type(context, writer, record.element_type, depth + 1);
     }
-    case type_info::Kind.structure, type_info::Kind.record_union, type_info::Kind.enumeration {
+    case type_info::Kind.structure, type_info::Kind.record_union, type_info::Kind.enumeration,
+        type_info::Kind.class_type {
         signature_named_type(context, writer, record);
     }
     case type_info::Kind.function_pointer {
@@ -270,8 +325,18 @@ fn function_signature_input_is_valid(context: *context::Context, function_id: us
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
     let function: context::Function = functions[function_id];
-    let parameter_count_is_valid: bool = function.parameter_count <= SignatureFormat.maximum_u32 as usize;
+    if (!callable::is_valid(function.identity, context->types.type_count)) {
+        return false;
+    }
+    let parameter_count_is_valid: bool = function_argument_parameter_count(function) <=
+        SignatureFormat.maximum_u32 as usize;
     return function_signature_state_is_empty(function) && parameter_count_is_valid;
+}
+
+fn signature_owner_payload(context: *context::Context, writer: *SignatureWriter, identity: callable::Identity) {
+    if (callable::has_owner(identity)) {
+        signature_type(context, writer, identity.owner_type, 0);
+    }
 }
 
 fn append_function_signature(context: *context::Context, function_id: usize) -> bool {
@@ -286,16 +351,17 @@ fn append_function_signature(context: *context::Context, function_id: usize) -> 
     var writer: SignatureWriter = signature_writer(context->callable_signatures);
     signature_writer_byte(&writer, SignatureFormat.version as usize as u8);
     signature_writer_byte(&writer, SignatureCallingConvention.system_v as usize as u8);
-    signature_writer_byte(&writer, SignatureCallableKind.free_function as usize as u8);
-    signature_writer_byte(&writer, SignatureOwnerKind.none as usize as u8);
-    signature_writer_byte(&writer, SignatureReceiverKind.none as usize as u8);
+    signature_callable_identity(&writer, function.identity);
     signature_writer_byte(&writer, function_signature_flags(function));
-    signature_writer_u32(&writer, function.parameter_count as u32);
+    signature_owner_payload(context, &writer, function.identity);
+    let parameter_count: usize = function_argument_parameter_count(function);
+    let first_parameter: usize = function_first_argument_parameter(function);
+    signature_writer_u32(&writer, parameter_count as u32);
 
     let parameters: *const context::Parameter = context->parameters.data as
             *const context::Parameter;
-    for (var index: usize = 0; index < function.parameter_count && signature_writer_is_active(&writer); index += 1) {
-        signature_type(context, &writer, parameters[function.first_parameter + index].type_id, 0);
+    for (var index: usize = 0; index < parameter_count && signature_writer_is_active(&writer); index += 1) {
+        signature_type(context, &writer, parameters[first_parameter + index].type_id, 0);
     }
     signature_type(context, &writer, function.return_type, 0);
     context->callable_signatures = writer.output;

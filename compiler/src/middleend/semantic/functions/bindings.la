@@ -77,12 +77,39 @@ fn functions_share_binding(context: *context::Context, left_function: usize, rig
             *const context::Function;
     let symbols: *const context::Symbol = context->symbols.data as
             *const context::Symbol;
-    let left: context::Symbol = symbols[functions[left_function].symbol_id];
-    let right: context::Symbol = symbols[functions[right_function].symbol_id];
+    let left_record: context::Function = functions[left_function];
+    let right_record: context::Function = functions[right_function];
+    let left: context::Symbol = symbols[left_record.symbol_id];
+    let right: context::Symbol = symbols[right_record.symbol_id];
     let modules_match: bool = left.module_id == right.module_id;
+    let owners_match: bool = callable::same_owner(left_record.identity, right_record.identity);
+    let scopes_match: bool = modules_match && owners_match;
     let names_match: bool = context::tokens_equal(
         context, left.declaration_unit, left.name_token, right.declaration_unit, right.name_token);
-    return modules_match && names_match;
+    return scopes_match && names_match;
+}
+
+fn function_owner_is_before(context: *context::Context, left_function: usize, right_function: usize) -> bool {
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    let left_owner: usize = functions[left_function].identity.owner_type;
+    let right_owner: usize = functions[right_function].identity.owner_type;
+    if (left_owner == callable::no_owner()) {
+        return true;
+    }
+    if (right_owner == callable::no_owner()) {
+        return false;
+    }
+    let records: *const type_info::Record = context->types.types.data as
+            *const type_info::Record;
+    let left: type_info::Record = records[left_owner];
+    let right: type_info::Record = records[right_owner];
+    let left_module: usize = names::unit_module(context, left.declaration_unit);
+    let right_module: usize = names::unit_module(context, right.declaration_unit);
+    if (left_module != right_module) {
+        return module_name_is_before(context, left_module, right_module);
+    }
+    return token_is_before(context, left.declaration_unit, left.name_token, right.declaration_unit, right.name_token);
 }
 
 fn function_is_before(context: *context::Context, left_function: usize, right_function: usize) -> bool {
@@ -94,6 +121,9 @@ fn function_is_before(context: *context::Context, left_function: usize, right_fu
     let right: context::Symbol = symbols[functions[right_function].symbol_id];
     if (left.module_id != right.module_id) {
         return module_name_is_before(context, left.module_id, right.module_id);
+    }
+    if (!callable::same_owner(functions[left_function].identity, functions[right_function].identity)) {
+        return function_owner_is_before(context, left_function, right_function);
     }
     if (!context::tokens_equal(
             context, left.declaration_unit, left.name_token, right.declaration_unit, right.name_token)) {
@@ -166,6 +196,7 @@ fn begin_binding(context: *context::Context, function_id: usize, candidate_index
     return append_binding(
         context, {
             kind = context::BindingKind.callable_set, module_id = symbol.module_id,
+            owner_type = functions[function_id].identity.owner_type,
             declaration_unit = symbol.declaration_unit, declaration_node = symbol.declaration_node,
             name_token = symbol.name_token, first_candidate = candidate_index, candidate_count = 1,
         });
@@ -236,10 +267,12 @@ fn binding_candidate_is_valid(
     }
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
-    let owner_matches: bool = functions[function_id].binding_id == binding_id;
+    let binding_matches: bool = functions[function_id].binding_id == binding_id;
+    let owner_matches: bool = functions[function_id].identity.owner_type == binding.owner_type;
+    let candidate_matches: bool = binding_matches && owner_matches;
     let first_function: usize = candidates[binding.first_candidate];
     let identity_matches: bool = functions_share_binding(context, first_function, function_id);
-    return owner_matches && identity_matches;
+    return candidate_matches && identity_matches;
 }
 
 fn function_bindings_are_valid(context: *context::Context) -> bool {
@@ -254,7 +287,12 @@ fn function_bindings_are_valid(context: *context::Context) -> bool {
         let kind_is_valid: bool = binding.kind == context::BindingKind.callable_set;
         let position_is_valid: bool = binding.first_candidate == expected_candidate;
         let shape_is_valid: bool = kind_is_valid && position_is_valid;
-        if (!shape_is_valid || !binding_range_is_valid(context, binding)) {
+        let owner_is_valid: bool = binding.owner_type == callable::no_owner() ||
+            binding.owner_type < context->types.type_count;
+        if (!shape_is_valid || !owner_is_valid) {
+            return false;
+        }
+        if (!binding_range_is_valid(context, binding)) {
             return false;
         }
         for (var candidate_index: usize = 0; candidate_index < binding.candidate_count; candidate_index += 1) {
@@ -285,8 +323,14 @@ fn candidate_is_visible_in_module(
             *const context::Symbol;
     let function: context::Function = functions[function_id];
     let symbol: context::Symbol = symbols[function.symbol_id];
+    if (callable::has_owner(function.identity) && !classes::method_is_accessible(context, function_id)) {
+        return false;
+    }
     let owner_module: usize = names::unit_module(context, unit_index);
     if (owner_module != binding_module) {
+        if (callable::has_owner(function.identity)) {
+            return (function.flags & (context::SymbolFlag.member_exported as usize)) != 0;
+        }
         return (symbol.flags & (context::SymbolFlag.exported as usize)) != 0;
     }
     if (!names::unit_is_interface(context, unit_index)) {
@@ -333,13 +377,54 @@ fn find_module_binding(context: *context::Context, unit_index: usize, module_id:
             *const context::Binding;
     for (var binding_id: usize = 0; binding_id < context->binding_count; binding_id += 1) {
         let binding: context::Binding = bindings[binding_id];
-        let identity_matches: bool = binding.kind == context::BindingKind.callable_set &&
-            binding.module_id == module_id;
+        let scope_matches: bool = binding.module_id == module_id && binding.owner_type == callable::no_owner();
+        let identity_matches: bool = binding.kind == context::BindingKind.callable_set && scope_matches;
         let name_matches: bool = context::tokens_equal(
             context, unit_index, name_token, binding.declaration_unit, binding.name_token);
         let binding_matches: bool = identity_matches && name_matches;
         if (binding_matches && binding_has_visible_candidate(context, binding, unit_index)) {
             return binding_id;
+        }
+    }
+    return context::no_id();
+}
+
+fn lookup_owned_callable_binding(
+    context: *context::Context, unit_index: usize, owner_type: usize, name_token: usize) -> usize {
+    if (owner_type >= context->types.type_count) {
+        return context::no_id();
+    }
+    let owner: type_info::Record = context::type_record(context, owner_type);
+    let module_id: usize = names::unit_module(context, owner.declaration_unit);
+    let bindings: *const context::Binding = context->bindings.data as
+            *const context::Binding;
+    for (var binding_id: usize = 0; binding_id < context->binding_count; binding_id += 1) {
+        let binding: context::Binding = bindings[binding_id];
+        let owner_matches: bool = binding.module_id == module_id && binding.owner_type == owner_type;
+        let name_matches: bool = context::tokens_equal(
+            context, unit_index, name_token, binding.declaration_unit, binding.name_token);
+        if (owner_matches && name_matches) {
+            return binding_id;
+        }
+    }
+    return context::no_id();
+}
+
+fn lookup_constructor_binding(context: *context::Context, owner_type: usize) -> usize {
+    let bindings: *const context::Binding = context->bindings.data as
+            *const context::Binding;
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    for (var binding_id: usize = 0; binding_id < context->binding_count; binding_id += 1) {
+        let binding: context::Binding = bindings[binding_id];
+        if (binding.owner_type != owner_type || binding.candidate_count == 0) {
+            continue;
+        }
+        for (var index: usize = 0; index < binding.candidate_count; index += 1) {
+            let function_id: usize = binding_candidate(context, binding_id, index);
+            if (functions[function_id].identity.kind == callable::Kind.constructor) {
+                return binding_id;
+            }
         }
     }
     return context::no_id();

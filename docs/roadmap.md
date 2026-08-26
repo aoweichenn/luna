@@ -253,16 +253,19 @@ above. The accepted design direction is tracked in
 - [x] M2.3 default parameters
 - [x] M2.4 reusable value-category foundation
 
-## Planned M3: object-oriented programming
+## Current M3: object-oriented programming
 
 M3 consumes the completed M2 callable foundation. Its design is tracked in
 [`m3-oop-design.md`](m3-oop-design.md).
 
 - [x] class-system design draft
-- [ ] M3.0 class metadata, access, overloaded constructors and direct methods
-- [ ] M3.1 single inheritance and explicit override contracts
-- [ ] M3.2 read-only global function-address relocations
-- [ ] M3.3 virtual/abstract dispatch
+- [x] M3.0a shared callable identities and owner-scoped bindings
+- [x] M3.0b class metadata model and semantic-store lifecycle
+- [x] M3.0c nominal empty classes and canonical type identity
+- [x] M3.0 class metadata, access, overloaded constructors and direct methods
+- [x] M3.1 single inheritance and explicit override contracts
+- [x] M3.2 read-only global function-address relocations
+- [x] M3.3 virtual/abstract dispatch
 - [ ] M3.4 restricted operators, bound methods, RTTI and friendship
 - [ ] M3.5 optional opaque classes
 
