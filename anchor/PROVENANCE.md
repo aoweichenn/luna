@@ -194,3 +194,19 @@ artifact byte-identical; the final test run passed 215/215, including overload
 duplicates, result/contract mismatches, missing definitions, private/exported
 visibility and implementation-order permutation. The stage-fixed executables
 were copied here and `SHA256SUMS` refreshed.
+
+## 2026-08-26: promotion to the M2.2 exact-overload toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`74e6d8509d37aaaf1c73e080d4f49267a4cfd59b`
+(`feat: resolve callable overloads exactly`). The promoted compiler resolves
+multi-candidate calls through a non-emitting compatibility probe, preserves
+nested ambiguity, memoizes stable call selections by syntax node and selects
+overloaded function values from an exact expected function-pointer type. The
+probe is split across core, operator and call implementation units behind one
+interface. Remote x86-64 verification on `caw` confirmed every
+stage-next/stage-fixed assembly, object and executable artifact byte-identical;
+the final test run passed 233/233, including literal/null/initializer
+ambiguity, array shape, pointer qualification and arithmetic, function values,
+nested calls and single evaluation. The stage-fixed executables were copied
+here and `SHA256SUMS` refreshed.
