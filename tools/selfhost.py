@@ -139,6 +139,7 @@ LIBRARIES = {
         "middleend/semantic/functions/signature",
         "middleend/semantic/functions/overloads",
         "middleend/semantic/functions/bindings",
+        "middleend/semantic/functions/defaults",
     ),
     "sem_funcs_ir": compiler_module(
         "luna.bootstrap.middleend.semantic.functions.ir",

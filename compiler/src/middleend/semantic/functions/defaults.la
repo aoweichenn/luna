@@ -1,0 +1,242 @@
+module luna.bootstrap.middleend.semantic.functions;
+
+struct DefaultProfile {
+    required_parameter_count: usize;
+    default_count: usize;
+    valid: bool;
+}
+
+struct DefaultValue {
+    kind: context::ParameterDefaultKind;
+    value: u64;
+    valid: bool;
+}
+
+fn no_default_value() -> DefaultValue {
+    return {
+        kind = context::ParameterDefaultKind.none, value = 0, valid = false,
+    };
+}
+
+fn parameter_default_node(context: *context::Context, unit_index: usize, parameter: syntax::SyntaxNode) -> usize {
+    if (parameter.child_count != 2) {
+        return context::no_id();
+    }
+    let type_node: syntax::SyntaxNode = context::node(context, unit_index, parameter.first_child);
+    return type_node.next_sibling;
+}
+
+fn declaration_has_parameter_name(
+    context: *context::Context, unit_index: usize, declaration: syntax::SyntaxNode, name_token: usize) -> bool {
+    for (var child: usize = declaration.first_child; child != context::no_id();
+        child = context::node(context, unit_index, child).next_sibling) {
+        let parameter: syntax::SyntaxNode = context::node(context, unit_index, child);
+        if (parameter.kind != syntax::SyntaxKind.parameter) {
+            break;
+        }
+        if (context::tokens_equal(context, unit_index, name_token, unit_index, parameter.token_index)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn default_expression_is_source_independent(
+    context: *context::Context, unit_index: usize, declaration: syntax::SyntaxNode, node_id: usize) -> bool {
+    let node: syntax::SyntaxNode = context::node(context, unit_index, node_id);
+    if (node.kind == syntax::SyntaxKind.intrinsic_expression) {
+        return false;
+    }
+    if (node.kind == syntax::SyntaxKind.member_expression) {
+        return true;
+    }
+    if (node.kind == syntax::SyntaxKind.name_expression) {
+        if (node.child_count != 0) {
+            return true;
+        }
+        return !declaration_has_parameter_name(context, unit_index, declaration, node.token_index);
+    }
+    for (var child: usize = node.first_child; child != context::no_id();
+        child = context::node(context, unit_index, child).next_sibling) {
+        if (!default_expression_is_source_independent(context, unit_index, declaration, child)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn integer_default_fits(context: *context::Context, type_id: usize, value: u64) -> bool {
+    let record: type_info::Record = context::type_record(context, type_id);
+    if (type_info::is_integer(record.kind)) {
+        return const_engine::const_integer_fits(record.kind, value);
+    }
+    if (record.kind != type_info::Kind.enumeration) {
+        return false;
+    }
+    let underlying: type_info::Record = context::type_record(context, record.element_type);
+    return const_engine::const_integer_fits(underlying.kind, value);
+}
+
+fn enum_default_type(context: *context::Context, unit_index: usize, node_id: usize) -> usize {
+    let node: syntax::SyntaxNode = context::node(context, unit_index, node_id);
+    if (node.kind == syntax::SyntaxKind.parenthesized_expression && node.child_count == 1) {
+        return enum_default_type(context, unit_index, node.first_child);
+    }
+    if (node.kind != syntax::SyntaxKind.member_expression || node.child_count != 2) {
+        return context::no_id();
+    }
+    let owner: syntax::SyntaxNode = context::node(context, unit_index, node.first_child);
+    let symbol_id: usize = names::lookup_qualified_symbol(
+        context, unit_index, owner, context::SymbolKind.named_type, false);
+    if (symbol_id == context::no_id()) {
+        return context::no_id();
+    }
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    var type_id: usize = symbols[symbol_id].type_id;
+    let record: type_info::Record = context::type_record(context, type_id);
+    if (record.kind == type_info::Kind.alias) {
+        type_id = record.element_type;
+    }
+    return context::type_record(context, type_id).kind == type_info::Kind.enumeration ? type_id : context::no_id();
+}
+
+fn evaluate_default_value(
+    context: *context::Context, unit_index: usize,
+    declaration: syntax::SyntaxNode, node_id: usize, type_id: usize) -> DefaultValue {
+    let node: syntax::SyntaxNode = context::node(context, unit_index, node_id);
+    let record: type_info::Record = context::type_record(context, type_id);
+    if (node.kind == syntax::SyntaxKind.null_expression) {
+        let pointer_type: bool = record.kind == type_info::Kind.pointer ||
+            record.kind == type_info::Kind.function_pointer;
+        return pointer_type ? {
+            kind = context::ParameterDefaultKind.null_pointer, value = 0, valid = true,
+        } : no_default_value();
+    }
+    if (!default_expression_is_source_independent(context, unit_index, declaration, node_id)) {
+        return no_default_value();
+    }
+    let evaluated: const_model::Value = const_engine::expression(context, unit_index, node_id);
+    let constant_is_valid: bool = evaluated.is_constant && !evaluated.error;
+    if (!constant_is_valid) {
+        return no_default_value();
+    }
+    if (record.kind == type_info::Kind.boolean) {
+        return evaluated.is_boolean ? {
+            kind = context::ParameterDefaultKind.boolean, value = evaluated.value, valid = true,
+        } : no_default_value();
+    }
+    let source_enum: usize = enum_default_type(context, unit_index, node_id);
+    let target_is_enum: bool = record.kind == type_info::Kind.enumeration;
+    let enum_types_match: bool = target_is_enum && source_enum == type_id;
+    if (target_is_enum || source_enum != context::no_id()) {
+        let enum_value_fits: bool = !evaluated.is_boolean && integer_default_fits(context, type_id, evaluated.value);
+        let enum_is_valid: bool = enum_types_match && enum_value_fits;
+        return enum_is_valid ? {
+            kind = context::ParameterDefaultKind.integer, value = evaluated.value, valid = true,
+        } : no_default_value();
+    }
+    let integer_is_valid: bool = !evaluated.is_boolean && integer_default_fits(context, type_id, evaluated.value);
+    return integer_is_valid ? {
+        kind = context::ParameterDefaultKind.integer, value = evaluated.value, valid = true,
+    } : no_default_value();
+}
+
+fn function_default_profile(
+    context: *context::Context, unit_index: usize,
+    declaration: syntax::SyntaxNode, parameter_count: usize) -> DefaultProfile {
+    var profile: DefaultProfile = {
+        required_parameter_count = parameter_count, default_count = 0, valid = true,
+    };
+    var child: usize = declaration.first_child;
+    for (var index: usize = 0; index < parameter_count; index += 1) {
+        let parameter: syntax::SyntaxNode = context::node(context, unit_index, child);
+        let child_count_is_valid: bool = parameter.child_count == 1 || parameter.child_count == 2;
+        if (parameter.kind != syntax::SyntaxKind.parameter || !child_count_is_valid) {
+            context->error = runtime::Error.invalid_argument;
+            profile.valid = false;
+            return profile;
+        }
+        let has_default: bool = parameter.child_count == 2;
+        if (has_default) {
+            if (profile.default_count == 0) {
+                profile.required_parameter_count = index;
+            }
+            profile.default_count += 1;
+        } else if (profile.default_count != 0) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.invalid_default_placement, unit_index,
+                parameter.span, context::no_id(), context::empty_span(), index);
+            profile.valid = false;
+        }
+        child = parameter.next_sibling;
+    }
+    if (profile.default_count == 0) {
+        return profile;
+    }
+    let external: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.external);
+    let variadic: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.variadic);
+    let abi_mount_is_invalid: bool = external || variadic;
+    let named_export: bool = attributes::declaration_has_attribute(
+        context, unit_index, declaration, attributes::Attribute.export_name);
+    if (abi_mount_is_invalid || named_export) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_default_function, unit_index,
+            declaration.span, context::no_id(), context::empty_span(), profile.default_count);
+        profile.valid = false;
+    }
+    return profile;
+}
+
+fn collect_parameter_default(
+    context: *context::Context, unit_index: usize, declaration: syntax::SyntaxNode, parameter: syntax::SyntaxNode,
+    type_id: usize, defaults_are_enabled: bool) -> DefaultValue {
+    let default_node: usize = parameter_default_node(context, unit_index, parameter);
+    if (default_node == context::no_id() || !defaults_are_enabled) {
+        return no_default_value();
+    }
+    let value: DefaultValue = evaluate_default_value(context, unit_index, declaration, default_node, type_id);
+    if (!value.valid) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_default_expression, unit_index,
+            context::node(context, unit_index, default_node).span, context::no_id(), context::empty_span(), type_id);
+    }
+    return value;
+}
+
+fn reject_repeated_defaults(
+    context: *context::Context, function_id: usize, unit_index: usize,
+    declaration: syntax::SyntaxNode, profile: DefaultProfile) {
+    if (profile.default_count == 0) {
+        return;
+    }
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    let related: context::Symbol = symbols[functions[function_id].symbol_id];
+    context::add_diagnostic(
+        context, context::DiagnosticKind.repeated_default, unit_index, declaration.span, related.declaration_unit,
+        context::node(context, related.declaration_unit, related.declaration_node).span, function_id);
+}
+
+fn function_accepts_arity(context: *context::Context, function_id: usize, argument_count: usize) -> bool {
+    if (function_id >= context->function_count) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    let function: context::Function = functions[function_id];
+    if (function.required_parameter_count > function.parameter_count) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let variadic: bool = function_has_symbol_flag(function, context::SymbolFlag.variadic);
+    if (variadic) {
+        return argument_count >= function.parameter_count;
+    }
+    let accepted_range: bool = argument_count >= function.required_parameter_count &&
+        argument_count <= function.parameter_count;
+    return accepted_range;
+}

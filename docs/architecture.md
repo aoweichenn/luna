@@ -204,6 +204,13 @@ in a lazily allocated syntax-node table. The emitting lowerer then consumes the
 selected function and evaluates each argument exactly once. Single-candidate
 calls retain the established lowering path.
 
+Default parameters reuse that callable pipeline. One `DefaultProfile` records
+the required arity and validates trailing placement and declaration mounts;
+each accepted parameter stores a folded integer, boolean or null value. The
+shared arity predicate participates in candidate filtering, while the call
+argument collector appends omitted values only after selection. Defaults never
+enter canonical signatures, mangling or function-pointer types.
+
 All modules in one invocation share canonical named-type and function records.
 This preserves type identity across module boundaries and rejects ambiguous
 unqualified imports. Function overload keys use canonical parameter types,

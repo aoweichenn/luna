@@ -135,7 +135,8 @@ _L + hex(canonical module name) + _ + hex(function name)
 它不包含模块指纹，但包含完整、版本化的函数签名。签名覆盖参数、结果、变参状态、
 调用约定以及预留的 owner/receiver 类别，因此同名重载拥有不同链接身份，调用方与
 实现方的 ABI 签名不一致也会在链接时表现为未解析符号。当前 self-host 流程仍从同一
-源码图全量重建所有对象，避免混用旧对象。
+源码图全量重建所有对象，避免混用旧对象。默认参数只属于源码接口和调用方物化，
+不进入重载 key、链接签名或函数指针类型。
 
 ## 二、已冻结的即时规则
 
@@ -198,7 +199,7 @@ source bytes。
 
 ### 已有低风险快速跳过
 
-当前 `library/`、`compiler/` 和 `drivers/` 中共有 432 条 import，其中 390 条是
+当前 `library/`、`compiler/` 和 `drivers/` 中共有 434 条 import，其中 392 条是
 alias import，没有一条 selective import。实现已经按 `selective_node != no_id`
 跳过普通和 alias imports，因此当前生产源码不会进入 flat-name 的二次全表验证。
 

@@ -146,7 +146,7 @@ is deliberate.
 | `noreturn` | modernized | `@noreturn`, m1.2 |
 | `inline` | adopted | `@inline` metadata, m1.2 |
 | function overloading | modernized | exact, unranked callable sets; M2.0-M2.2 |
-| default arguments | planned | constant trailing defaults; M2.3 |
+| default arguments | modernized | folded trailing defaults; M2.3 |
 | multiple return values | alternative | aggregate returns, already in the language |
 
 ### Concurrency, signals and non-local jumps

@@ -634,6 +634,45 @@ fn collect_variadic_call_argument(
     append_call_argument(context, values, argument.value_id);
 }
 
+fn default_call_argument(context: *context::Context, parameter: context::Parameter) -> context::Expression {
+    if (parameter.default_node == context::no_id()) {
+        return base::invalid_expression();
+    }
+    let node: syntax::SyntaxNode = context::node(context, parameter.unit_index, parameter.default_node);
+    switch (parameter.default_kind) {
+    case context::ParameterDefaultKind.integer {
+        return builder::emit_integer_constant(context, node, parameter.type_id, parameter.default_value);
+    }
+    case context::ParameterDefaultKind.boolean {
+        return builder::emit_boolean_constant(context, node, parameter.default_value != 0);
+    }
+    case context::ParameterDefaultKind.null_pointer {
+        return builder::emit_null_constant(context, node, parameter.type_id);
+    }
+    default {
+        return base::invalid_expression();
+    }
+    }
+}
+
+fn collect_default_call_arguments(
+    context: *context::Context, function: context::Function, explicit_count: usize, values: *bytes::Buffer) {
+    let parameters: *const context::Parameter = context->parameters.data as
+            *const context::Parameter;
+    for (var index: usize = explicit_count;
+        index < function.parameter_count && context->error == runtime::Error.none;
+        index += 1) {
+        let parameter: context::Parameter = parameters[function.first_parameter + index];
+        if (parameter.default_node == context::no_id()) {
+            context->error = runtime::Error.invalid_argument;
+            return;
+        }
+        let argument: context::Expression = default_call_argument(context, parameter);
+        let node: syntax::SyntaxNode = context::node(context, parameter.unit_index, parameter.default_node);
+        collect_fixed_call_argument(context, node, argument, parameter.type_id, values);
+    }
+}
+
 fn call_parameter_type(
     parameters: *const context::Parameter, fields: *const type_info::Field,
     first_parameter: usize, index: usize, parameters_from_fields: bool) -> usize {
@@ -673,10 +712,10 @@ fn lower_call(
     var return_type: usize = none;
     var ir_callee: usize = none;
     var parameter_count: usize = 0;
+    var required_parameter_count: usize = 0;
     var first_parameter: usize = none;
     var parameters_from_fields: bool = false;
     var callee_no_return: bool = false;
-    var callee_variadic: bool = false;
     let symbols: *const context::Symbol = context->symbols.data as
             *const context::Symbol;
     let functions: *const context::Function = context->functions.data as
@@ -686,9 +725,9 @@ fn lower_call(
         return_type = function.return_type;
         ir_callee = function.ir_function;
         parameter_count = function.parameter_count;
+        required_parameter_count = function.required_parameter_count;
         first_parameter = function.first_parameter;
         callee_no_return = (function.flags & (context::SymbolFlag.no_return as usize)) != 0;
-        callee_variadic = (function.flags & (context::SymbolFlag.variadic as usize)) != 0;
     } else {
         let callee: context::Expression = api::invoke(lowerer, context, node.first_child, none);
         if (!callee.valid) {
@@ -704,18 +743,19 @@ fn lower_call(
         callee_value = callee.value_id;
         return_type = callee_record.element_type;
         parameter_count = callee_record.field_count;
+        required_parameter_count = parameter_count;
         first_parameter = callee_record.first_field;
         parameters_from_fields = true;
     }
     let argument_total: usize = node.child_count - 1;
-    let exact_arity: bool = !callee_variadic && argument_total == parameter_count;
-    let variadic_arity: bool = callee_variadic && argument_total >= parameter_count;
-    if (!exact_arity && !variadic_arity) {
+    let arity_is_valid: bool = direct_function == none ? argument_total == parameter_count :
+        functions::function_accepts_arity(context, direct_function, argument_total);
+    if (!arity_is_valid) {
         let related_unit: usize = direct_function == none ? none :
             symbols[functions[direct_function].symbol_id].declaration_unit;
         context::add_diagnostic(
             context, context::DiagnosticKind.argument_count, context->current_unit, node.span,
-            related_unit, context::empty_span(), parameter_count);
+            related_unit, context::empty_span(), required_parameter_count);
         return base::invalid_expression();
     }
     let parameters: *const context::Parameter = context->parameters.data as
@@ -738,6 +778,9 @@ fn lower_call(
             collect_fixed_call_argument(context, argument_node, argument, parameter_type, &argument_values);
         }
         child = argument_node.next_sibling;
+    }
+    if (direct_function != none && argument_total < parameter_count) {
+        collect_default_call_arguments(context, functions[direct_function], argument_total, &argument_values);
     }
     var instruction: ir::Instruction =
         builder::instruction(direct_function != none ? ir::Opcode.call : ir::Opcode.call_indirect, node);

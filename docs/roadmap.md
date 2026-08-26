@@ -250,7 +250,7 @@ above. The accepted design direction is tracked in
 - [x] M2.0 canonical signatures, deterministic ordering and symbol mangling
 - [x] M2.1 bindings, overload sets and declaration/definition matching
 - [x] M2.2 exact overload calls and function-pointer selection
-- [ ] M2.3 default parameters
+- [x] M2.3 default parameters
 - [ ] M2.4 reusable value-category foundation
 
 ## Planned M3: object-oriented programming

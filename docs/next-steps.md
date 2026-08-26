@@ -122,13 +122,15 @@ landed as m1.7 by explicit FFI decision, with declared-width arguments.
 
 ## Current M2 direction
 
-M2.0-M2.2 have landed the versioned canonical type/signature encoding,
+M2.0-M2.3 have landed the versioned canonical type/signature encoding,
 signature-bearing Luna symbols, explicit callable bindings, deterministic
 candidate slices, interface/multi-implementation matching by overload key,
 side-effect-free argument probing, exact call resolution and expected
-function-type selection, as described in
-[`m2-callable-infrastructure.md`](m2-callable-infrastructure.md). M2.3 is next:
-constant trailing defaults and call-site insertion after overload selection.
+function-type selection, plus folded trailing defaults inserted after overload
+selection, as described in
+[`m2-callable-infrastructure.md`](m2-callable-infrastructure.md). M2.4 is next:
+one reusable value-category service for addressability, mutability and
+temporary state before M3 receiver binding.
 
 The ownership-free class system follows as M3 in
 [`m3-oop-design.md`](m3-oop-design.md). It consumes M2 for overloaded methods

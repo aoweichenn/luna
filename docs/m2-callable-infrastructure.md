@@ -560,14 +560,37 @@ fn open(path: *const u8, flags: u32, mode: u32) -> i32 { ... }
 The first implementation accepts only expressions fully resolved during
 interface checking:
 
-- literals and typed constants;
+- integer, character and boolean literals, plus `null` for pointer types;
+- typed integer/boolean constants;
 - enum members;
-- constant arithmetic/conversions;
+- constant integer arithmetic/conversions;
 - `sizeof`, `alignof` and other accepted constant layout queries;
 - valid `const fn` results.
 
 Defaults cannot reference `self`, another parameter, a local, mutable state, a
-runtime call or a source-position intrinsic.
+runtime call or a source-position intrinsic. Floating, string and aggregate
+defaults remain outside M2.3 because the current constant-value model carries
+only integer/boolean bits; they are rejected rather than lowered with hidden
+run-time work.
+
+### M2.3 storage and validation model
+
+`DefaultProfile` scans one declaration's parameters once and records the
+required parameter count, default count and validity. It diagnoses a required
+parameter after the first default and rejects defaults on `extern`, variadic or
+`@export_name` functions. Ordinary `const fn` declarations also reject
+defaults because their evaluator retains exact arity.
+
+Each accepted parameter stores one folded `ParameterDefaultKind` value:
+integer, boolean or null pointer. Implementations paired with an interface must
+omit defaults; repeating one reports `repeated_default`. A private or otherwise
+unique definition may carry its defaults directly.
+
+The overload resolver calls the shared `function_accepts_arity` predicate and
+still probes only explicit arguments. After one candidate is selected, the
+call argument collector lowers every explicit argument once and appends folded
+defaults in parameter order. Indirect calls require the complete function type
+arity and never inherit defaults from the source declaration.
 
 ### Type and ABI rules
 
@@ -592,8 +615,8 @@ draw(red); // ambiguous_call
 Multiple viable candidates remain ambiguous. M2 performs no C++ preference for
 the overload requiring fewer inserted defaults.
 
-Default parameters are initially rejected on `extern`, variadic and
-`@export_name` functions. M3 initially rejects defaults on virtual/abstract or
+Default parameters are rejected on `extern`, variadic, `@export_name` and
+`const fn` functions. M3 initially rejects defaults on virtual/abstract or
 override methods, avoiding C++'s split between statically chosen defaults and
 dynamically chosen bodies.
 

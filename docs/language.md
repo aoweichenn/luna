@@ -535,8 +535,29 @@ An overload set is not itself a run-time value; a complete expected
 function-pointer type must select one candidate. Function-pointer types are
 currently fixed-arity, so variadic functions can be called directly but cannot
 form function values. `extern fn` names retain exact external symbol identity
-and do not form overload sets. Default arguments are not yet accepted;
-variadic declarations and definitions use the explicit-width contract below.
+and do not form overload sets.
+
+Trailing parameters may provide compile-time defaults:
+
+```luna
+fn open(path: *const u8, flags: u32 = 0, mode: u32 = 0) -> i32;
+open("data.bin");
+```
+
+Every parameter after the first default must also have a default. An interface
+owns exported defaults and its implementation omits them; a unique private
+definition may carry defaults directly. Accepted defaults are integer,
+character, boolean and enum constant expressions, constant layout queries,
+valid integer/boolean `const fn` results, and `null` for pointer types. They
+cannot reference parameters or locals and cannot perform run-time or
+source-position work. Floating, string and aggregate defaults are not yet
+accepted.
+
+Defaults expand candidate arity but add no overload preference. They are not
+part of overload identity, function-pointer types or symbols. Indirect calls
+therefore still require every argument in the function-pointer type. Defaults
+are rejected on `extern`, variadic, `@export_name` and `const fn` functions.
+Variadic declarations and definitions use the explicit-width contract below.
 
 An executable entry point has one of exactly two signatures:
 
