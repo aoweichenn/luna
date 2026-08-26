@@ -179,3 +179,18 @@ and executable artifact byte-identical. The final test run passed 208/208,
 including exact version-1 signature symbols, implementation-unit order
 permutation and matching/mismatched separately compiled callable identities.
 The stage-fixed executables were copied here and `SHA256SUMS` refreshed.
+
+## 2026-08-26: promotion to the M2.1 overload-binding toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`104d7337c585a9bc0fd493998e75d16a181f1c66`
+(`feat: add callable overload bindings`). The promoted compiler has explicit
+module-local callable bindings, canonical candidate slices, overload-key
+interface/implementation merging and per-candidate visibility. The semantic
+functions module is split across collection, signature, overload and binding
+implementation units behind one interface. Remote x86-64 verification on
+`caw` confirmed every stage-next/stage-fixed assembly, object and executable
+artifact byte-identical; the final test run passed 215/215, including overload
+duplicates, result/contract mismatches, missing definitions, private/exported
+visibility and implementation-order permutation. The stage-fixed executables
+were copied here and `SHA256SUMS` refreshed.
