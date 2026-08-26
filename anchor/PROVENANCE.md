@@ -210,3 +210,19 @@ the final test run passed 233/233, including literal/null/initializer
 ambiguity, array shape, pointer qualification and arithmetic, function values,
 nested calls and single evaluation. The stage-fixed executables were copied
 here and `SHA256SUMS` refreshed.
+
+## 2026-08-26: promotion to the M2.3 default-parameter toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`064dce904591c38f6228c0958d040a9a9b64fadb`
+(`feat: add folded default parameters`). The promoted compiler parses and
+validates trailing defaults, stores folded integer/boolean/null parameter
+values, expands callable arity without ranking and appends omitted values only
+after overload selection. Interface defaults remain caller-side source API;
+implementations omit them, and function types and link identities remain
+unchanged. Remote x86-64 verification on `caw` confirmed every
+stage-next/stage-fixed assembly, object and executable artifact byte-identical;
+the final test run passed 252/252, including interface/private defaults,
+constant and layout folding, exact enum typing, function-pointer arity,
+overload ambiguity and invalid placement/expression/mount diagnostics. The
+stage-fixed executables were copied here and `SHA256SUMS` refreshed.
