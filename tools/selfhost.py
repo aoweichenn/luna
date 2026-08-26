@@ -154,6 +154,12 @@ LIBRARIES = {
         "middleend/semantic/expr/strings",
     ),
     "sem_expr_api": compiler_module("luna.bootstrap.middleend.semantic.expr.api", "middleend/semantic/expr/api"),
+    "sem_expr_probe": compiler_module(
+        "luna.bootstrap.middleend.semantic.expr.probe",
+        "middleend/semantic/expr/probe",
+        "middleend/semantic/expr/probe/operators",
+        "middleend/semantic/expr/probe/call",
+    ),
     "sem_expr_initializer": compiler_module(
         "luna.bootstrap.middleend.semantic.expr.initializer",
         "middleend/semantic/expr/initializer",

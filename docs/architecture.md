@@ -196,6 +196,14 @@ sorting independently. Function, parameter, slot, block and global
 construction therefore remains deterministic when source units are supplied
 in a different order, without recursive sorting or downstream order drift.
 
+Multi-candidate calls are resolved by a non-emitting expression probe split
+across one interface and three same-module implementation units. The probe
+classifies expressions as compatible, incompatible, ambiguous or invalid,
+accumulates candidate state without ranking, and memoizes selected nested calls
+in a lazily allocated syntax-node table. The emitting lowerer then consumes the
+selected function and evaluates each argument exactly once. Single-candidate
+calls retain the established lowering path.
+
 All modules in one invocation share canonical named-type and function records.
 This preserves type identity across module boundaries and rejects ambiguous
 unqualified imports. Function overload keys use canonical parameter types,

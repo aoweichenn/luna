@@ -129,11 +129,13 @@ Import {
 
 ```text
 _L + hex(canonical module name) + _ + hex(function name)
+   + __ + hex(versioned canonical callable signature)
 ```
 
-它不包含模块指纹，也不包含函数签名。由于当前语言明确禁止重载，模块名和函数名
-足以保证同一构建内的唯一性；但链接器不会发现调用方与实现方来自不兼容的旧接口。
-当前 self-host 流程通过从同一源码图全量重建所有对象来避免这种混用。
+它不包含模块指纹，但包含完整、版本化的函数签名。签名覆盖参数、结果、变参状态、
+调用约定以及预留的 owner/receiver 类别，因此同名重载拥有不同链接身份，调用方与
+实现方的 ABI 签名不一致也会在链接时表现为未解析符号。当前 self-host 流程仍从同一
+源码图全量重建所有对象，避免混用旧对象。
 
 ## 二、已冻结的即时规则
 
@@ -171,10 +173,12 @@ find_local_symbol         O(S)
 find_module_symbol        O(S)
 find_qualifier_target     O(I)
 find_imported_symbol      O(I * S)
+find_module_binding       O(B)
 ```
 
 其中 `M` 是 module 数，`I` 是当前模块 import 数，`S` 是 compilation 中的全局
-symbol 数。每次字符串比较还要重新访问两个 unit 的 source bytes。
+symbol 数，`B` 是 callable binding 数。每次字符串比较还要重新访问两个 unit 的
+source bytes。
 
 `validate_imported_names()` 只处理建立 flat binding 的 selective imports；设其数量为
 `J`，验证路径仍然较重：
@@ -194,7 +198,7 @@ symbol 数。每次字符串比较还要重新访问两个 unit 的 source bytes
 
 ### 已有低风险快速跳过
 
-当前 `library/`、`compiler/` 和 `drivers/` 中共有 413 条 import，其中 371 条是
+当前 `library/`、`compiler/` 和 `drivers/` 中共有 432 条 import，其中 390 条是
 alias import，没有一条 selective import。实现已经按 `selective_node != no_id`
 跳过普通和 alias imports，因此当前生产源码不会进入 flat-name 的二次全表验证。
 
@@ -214,9 +218,10 @@ UnitImportScope
     selected NameId  -> target ModuleId
 ```
 
-当前 Luna 使用统一模块名字空间，并明确禁止函数重载，因此不需要预埋
-`NamespaceKind` 或 `FunctionSet`。enum member 属于其 enum 的独立成员空间，不进入
-模块顶层索引。
+当前 Luna 使用统一模块名字空间。类型、常量与 callable binding 仍不能占用同一个
+顶层名字；函数重载则由一个 `Binding` 指向规范排序的候选切片。后续索引必须保留
+这种集合语义，但不需要预埋通用 `NamespaceKind`。enum member 属于其 enum 的独立
+成员空间，不进入模块顶层索引。
 
 ImportScope 可以先把 selective name 映射到 target module；目标声明是否存在，
 仍在相应声明收集完成后校验。这样不必为构建 Binding 提前打乱现有类型、常量和
@@ -431,9 +436,10 @@ variadic、layout attributes、flexible members、anonymous members、bitfields 
 当前 Luna 模块系统的用户侧规则是稳健的，主要债务集中在内部查找和作用域表示：
 
 > ModuleGraph 只管理依赖，UnitImportScope 只管理名字绑定，ModuleSymbolIndex 只管理
-> 声明查找，AST 只提供声明语义和诊断来源。
+> 声明查找，CallableBinding 只管理同名候选集合，AST 只提供声明语义和诊断来源。
 
-保持 `::` 为模块限定符、保持 `.` 为字段和成员访问是正确方向。当前语言明确禁止
-函数重载，因此也不应为了假设中的 C++ 式方法重载提前复杂化 Binding。当前阶段
-保持一个接口、共享私有作用域的多个实现文件和源码依赖闭包模型，等测试或测量证明
-需要时再扩展内部结构，风险最低。
+保持 `::` 为模块限定符、保持 `.` 为字段和成员访问是正确方向。当前 callable
+binding 已经以最小模型支持自由函数重载：候选身份属于 `Function`，名字集合属于
+`Binding`，解析结果由独立 probe 产生；不需要引入 C++ 式 ADL 或跨模块集合合并。
+继续保持一个接口、共享私有作用域的多个实现文件和源码依赖闭包模型，等测试或测量
+证明需要时再扩展通用名字索引，风险最低。

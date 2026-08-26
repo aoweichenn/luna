@@ -1,0 +1,421 @@
+module luna.bootstrap.middleend.semantic.expr.probe;
+
+import luna.bootstrap.frontend.lexer as lexer;
+import luna.bootstrap.middleend.semantic.consteval.engine as const_engine;
+import luna.bootstrap.middleend.semantic.consteval.model as const_model;
+import luna.bootstrap.middleend.semantic.context.builder as builder;
+import luna.bootstrap.middleend.semantic.context.lookup as names;
+import luna.bootstrap.middleend.semantic.functions as functions;
+import luna.bootstrap.middleend.semantic.intrinsics as intrinsics;
+import luna.bootstrap.middleend.semantic.types as types;
+import luna.bootstrap.middleend.semantic.types.lookup as type_lookup;
+import luna.bootstrap.middleend.type as type_info;
+import luna.runtime as runtime;
+import luna.std.bytes as bytes;
+import luna.std.memory as memory;
+
+fn result(status: Status, type_id: usize, function_id: usize) -> Result {
+    return {
+        status = status, type_id = type_id, function_id = function_id,
+        lvalue = false, mutable_lvalue = false, volatile_lvalue = false,
+    };
+}
+
+fn invalid_result() -> Result {
+    return result(Status.invalid, context::no_id(), context::no_id());
+}
+
+fn incompatible_result() -> Result {
+    return result(Status.incompatible, context::no_id(), context::no_id());
+}
+
+fn failure_result(value: Result) -> Result {
+    switch (value.status) {
+    case Status.ambiguous {
+        return result(Status.ambiguous, context::no_id(), context::no_id());
+    }
+    case Status.invalid {
+        return invalid_result();
+    }
+    default {
+        return incompatible_result();
+    }
+    }
+}
+
+fn merged_failure(left: Result, right: Result) -> Result {
+    let ambiguous: bool = left.status == Status.ambiguous || right.status == Status.ambiguous;
+    if (ambiguous) {
+        return result(Status.ambiguous, context::no_id(), context::no_id());
+    }
+    let invalid: bool = left.status == Status.invalid || right.status == Status.invalid;
+    return invalid ? invalid_result() : incompatible_result();
+}
+
+fn type_result(expected_type: usize, actual_type: usize) -> Result {
+    if (expected_type != context::no_id() && expected_type != actual_type) {
+        return incompatible_result();
+    }
+    return result(Status.compatible, actual_type, context::no_id());
+}
+
+fn type_is_valid(context: *context::Context, type_id: usize) -> bool {
+    return type_id < context->types.type_count && context::type_record(context,
+        type_id).kind != type_info::Kind.invalid;
+}
+
+fn integer_literal(
+    context: *context::Context, node: syntax::SyntaxNode, expected_type: usize, negative: bool) -> Result {
+    let target_type: usize = expected_type == context::no_id() ?
+        type_info::BuiltinType.signed_32 as usize : expected_type;
+    if (!type_is_valid(context, target_type)) {
+        return incompatible_result();
+    }
+    let kind: type_info::Kind = context::type_record(context, target_type).kind;
+    if (!type_info::is_integer(kind)) {
+        return incompatible_result();
+    }
+    var magnitude: u64 = 0;
+    if (!context::parse_unsigned(context, context->current_unit, node.token_index, &magnitude)) {
+        return invalid_result();
+    }
+    if (!context::integer_fits_type(kind, magnitude, negative)) {
+        return incompatible_result();
+    }
+    return type_result(expected_type, target_type);
+}
+
+fn character_literal(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
+    let target_type: usize = expected_type == context::no_id() ?
+        type_info::BuiltinType.signed_32 as usize : expected_type;
+    if (!type_is_valid(context, target_type)) {
+        return incompatible_result();
+    }
+    let kind: type_info::Kind = context::type_record(context, target_type).kind;
+    if (!type_info::is_integer(kind)) {
+        return incompatible_result();
+    }
+    var value: u64 = 0;
+    if (!context::decode_character(context, context->current_unit, node.token_index, &value)) {
+        return invalid_result();
+    }
+    if (!context::integer_fits_type(kind, value, false)) {
+        return incompatible_result();
+    }
+    return type_result(expected_type, target_type);
+}
+
+fn floating_literal(context: *context::Context, expected_type: usize) -> Result {
+    let target_type: usize = expected_type == context::no_id() ?
+        type_info::BuiltinType.float_64 as usize : expected_type;
+    if (!type_is_valid(context, target_type)) {
+        return incompatible_result();
+    }
+    if (!type_info::is_float(context::type_record(context, target_type).kind)) {
+        return incompatible_result();
+    }
+    return type_result(expected_type, target_type);
+}
+
+fn null_literal(context: *context::Context, expected_type: usize) -> Result {
+    if (!type_is_valid(context, expected_type)) {
+        return incompatible_result();
+    }
+    let kind: type_info::Kind = context::type_record(context, expected_type).kind;
+    let pointer_kind: bool = kind == type_info::Kind.pointer || kind == type_info::Kind.function_pointer;
+    return pointer_kind ? type_result(expected_type, expected_type) : incompatible_result();
+}
+
+fn string_literal(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
+    let token: lexer::Token = context::token(context, context->current_unit, node.token_index);
+    var element_type: usize = type_info::BuiltinType.unsigned_8 as usize;
+    if (token.kind == lexer::TokenKind.string_u16) {
+        element_type = type_info::BuiltinType.unsigned_16 as usize;
+    } else if (token.kind == lexer::TokenKind.string_u32) {
+        element_type = type_info::BuiltinType.unsigned_32 as usize;
+    }
+    let pointer: type_info::IdResult = type_info::table_pointer(&context->types, element_type, true, false);
+    context->error = pointer.error;
+    if (pointer.error != runtime::Error.none) {
+        return invalid_result();
+    }
+    return type_result(expected_type, pointer.type_id);
+}
+
+fn constant_symbol(context: *context::Context, node: syntax::SyntaxNode) -> usize {
+    return names::lookup_qualified_symbol(context, context->current_unit, node, context::SymbolKind.constant, false);
+}
+
+fn probe_name(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
+    if (node.child_count == 0) {
+        let local_id: usize = builder::find_local(context, context->current_unit, node.token_index);
+        if (local_id != context::no_id()) {
+            let locals: *const context::Local = context->locals.data as
+                    *const context::Local;
+            let local: context::Local = locals[local_id];
+            var local_result: Result = type_result(expected_type, local.type_id);
+            local_result.lvalue = true;
+            local_result.mutable_lvalue = local.mutable_binding;
+            local_result.volatile_lvalue = local.volatile_binding;
+            return local_result;
+        }
+    }
+    let symbol_id: usize = constant_symbol(context, node);
+    if (symbol_id != context::no_id()) {
+        let symbols: *const context::Symbol = context->symbols.data as
+                *const context::Symbol;
+        return type_result(expected_type, symbols[symbol_id].type_id);
+    }
+    let binding_id: usize = functions::lookup_qualified_callable_binding(context, context->current_unit, node, false);
+    if (binding_id != context::no_id()) {
+        return function_value_expression(context, binding_id, expected_type);
+    }
+    return invalid_result();
+}
+
+fn probe_initializer(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
+    if (!type_is_valid(context, expected_type)) {
+        return incompatible_result();
+    }
+    let record: type_info::Record = context::type_record(context, expected_type);
+    if (node.kind == syntax::SyntaxKind.zero_initializer) {
+        let numeric_is_valid: bool = type_info::is_integer(record.kind) || type_info::is_float(record.kind);
+        let discrete_is_valid: bool = record.kind == type_info::Kind.boolean ||
+            record.kind == type_info::Kind.enumeration;
+        let scalar_is_valid: bool = numeric_is_valid || discrete_is_valid;
+        let nullable_is_valid: bool = record.kind == type_info::Kind.pointer;
+        let zero_is_valid: bool = scalar_is_valid || nullable_is_valid;
+        return zero_is_valid || type_info::is_memory(record.kind) ?
+            type_result(expected_type, expected_type) : incompatible_result();
+    }
+    let aggregate_kind: bool = record.kind == type_info::Kind.structure || record.kind == type_info::Kind.record_union;
+    let initializer_is_valid: bool = aggregate_kind || record.kind == type_info::Kind.array;
+    if (!initializer_is_valid) {
+        return incompatible_result();
+    }
+    var array_cursor: usize = 0;
+    for (var child: usize = node.first_child; child != context::no_id();
+        child = context::node(context, context->current_unit, child).next_sibling) {
+        let initializer: syntax::SyntaxNode = context::node(context, context->current_unit, child);
+        var value_node: usize = initializer.first_child;
+        var value_type: usize = context::no_id();
+        if (record.kind == type_info::Kind.array) {
+            if (initializer.kind != syntax::SyntaxKind.initializer_element) {
+                return incompatible_result();
+            }
+            if ((initializer.flags & (syntax::SyntaxFlag.indexed as usize)) != 0) {
+                if (initializer.child_count != 2) {
+                    return invalid_result();
+                }
+                let index: const_model::Value = const_engine::expression(
+                    context, context->current_unit, initializer.first_child);
+                let index_is_valid: bool = index.is_constant && !index.error;
+                if (!index_is_valid || index.is_boolean) {
+                    return invalid_result();
+                }
+                if (index.value >= record.element_count as u64) {
+                    return incompatible_result();
+                }
+                array_cursor = index.value as usize;
+                value_node = context::node(context, context->current_unit, value_node).next_sibling;
+            }
+            if (array_cursor >= record.element_count) {
+                return incompatible_result();
+            }
+            array_cursor += 1;
+            value_type = record.element_type;
+            let value: syntax::SyntaxNode = context::node(context, context->current_unit, value_node);
+            let nested_array: bool = context::type_record(context, value_type).kind == type_info::Kind.array;
+            if (nested_array && value.kind == syntax::SyntaxKind.aggregate_initializer) {
+                return incompatible_result();
+            }
+        } else {
+            let field: types::FieldLookup =
+                type_lookup::lookup_field(context, expected_type, context->current_unit, initializer.token_index);
+            if (field.status != types::FieldStatus.found || initializer.child_count != 1) {
+                return incompatible_result();
+            }
+            let fields: *const type_info::Field = context->types.fields.data as
+                    *const type_info::Field;
+            value_type = fields[field.field_id].type_id;
+        }
+        let value: Result = expression(context, value_node, value_type);
+        if (value.status != Status.compatible) {
+            return failure_result(value);
+        }
+    }
+    return type_result(expected_type, expected_type);
+}
+
+fn probe_enum_member(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
+    if (node.child_count != 2) {
+        return incompatible_result();
+    }
+    let owner: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let member: syntax::SyntaxNode = context::node(context, context->current_unit, owner.next_sibling);
+    if (owner.kind != syntax::SyntaxKind.name_expression || member.kind != syntax::SyntaxKind.name_expression) {
+        return incompatible_result();
+    }
+    let symbol_id: usize = names::lookup_qualified_symbol(
+        context, context->current_unit, owner, context::SymbolKind.named_type, false);
+    if (symbol_id == context::no_id()) {
+        return incompatible_result();
+    }
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    var type_id: usize = symbols[symbol_id].type_id;
+    let alias: type_info::Record = context::type_record(context, type_id);
+    if (alias.kind == type_info::Kind.alias) {
+        type_id = alias.element_type;
+    }
+    if (context::type_record(context, type_id).kind != type_info::Kind.enumeration) {
+        return incompatible_result();
+    }
+    let member_id: usize = types::find_enum_member(context, type_id, context->current_unit, member.token_index);
+    return member_id == context::no_id() ? incompatible_result() : type_result(expected_type, type_id);
+}
+
+fn probe_member(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
+    let enumeration: Result = probe_enum_member(context, node, expected_type);
+    if (enumeration.status == Status.compatible) {
+        return enumeration;
+    }
+    if (node.child_count != 2) {
+        return invalid_result();
+    }
+    let base_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let member_node: syntax::SyntaxNode = context::node(context, context->current_unit, base_node.next_sibling);
+    let base: Result = expression(context, node.first_child, context::no_id());
+    if (base.status != Status.compatible) {
+        return failure_result(base);
+    }
+    if (!type_is_valid(context, base.type_id)) {
+        return invalid_result();
+    }
+    let operation: lexer::TokenKind = context::token(context, context->current_unit, node.token_index).kind;
+    var owner_type: usize = base.type_id;
+    var mutable_lvalue: bool = base.mutable_lvalue;
+    var volatile_lvalue: bool = base.volatile_lvalue;
+    let base_record: type_info::Record = context::type_record(context, base.type_id);
+    if (operation == lexer::TokenKind.arrow) {
+        if (base_record.kind != type_info::Kind.pointer) {
+            return incompatible_result();
+        }
+        owner_type = base_record.element_type;
+        mutable_lvalue = (base_record.flags & (type_info::Flag.read_only as usize)) == 0;
+        volatile_lvalue = (base_record.flags & (type_info::Flag.volatile_pointee as usize)) != 0;
+    } else if (operation != lexer::TokenKind.dot || !base.lvalue) {
+        return incompatible_result();
+    }
+    let owner: type_info::Record = context::type_record(context, owner_type);
+    let aggregate_kind: bool = owner.kind == type_info::Kind.structure || owner.kind == type_info::Kind.record_union;
+    if (!aggregate_kind) {
+        return incompatible_result();
+    }
+    let lookup: types::FieldLookup =
+        type_lookup::lookup_field(context, owner_type, context->current_unit, member_node.token_index);
+    if (lookup.status != types::FieldStatus.found) {
+        return incompatible_result();
+    }
+    let fields: *const type_info::Field = context->types.fields.data as
+            *const type_info::Field;
+    var member_result: Result = type_result(expected_type, fields[lookup.field_id].type_id);
+    member_result.lvalue = true;
+    member_result.mutable_lvalue = mutable_lvalue;
+    member_result.volatile_lvalue = volatile_lvalue;
+    return member_result;
+}
+
+fn probe_index(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
+    if (node.child_count != 2) {
+        return invalid_result();
+    }
+    let base_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let base: Result = expression(context, node.first_child, context::no_id());
+    let index: Result = expression(context, base_node.next_sibling, type_info::BuiltinType.unsigned_size as usize);
+    if (base.status != Status.compatible || index.status != Status.compatible) {
+        return merged_failure(base, index);
+    }
+    let record: type_info::Record = context::type_record(context, base.type_id);
+    let indexable: bool = record.kind == type_info::Kind.array || record.kind == type_info::Kind.pointer;
+    if (!indexable) {
+        return incompatible_result();
+    }
+    var indexed: Result = type_result(expected_type, record.element_type);
+    indexed.lvalue = true;
+    if (record.kind == type_info::Kind.array) {
+        indexed.mutable_lvalue = base.mutable_lvalue;
+        indexed.volatile_lvalue = base.volatile_lvalue;
+    } else {
+        indexed.mutable_lvalue = (record.flags & (type_info::Flag.read_only as usize)) == 0;
+        indexed.volatile_lvalue = (record.flags & (type_info::Flag.volatile_pointee as usize)) != 0;
+    }
+    return indexed;
+}
+
+fn expression(context: *context::Context, node_id: usize, expected_type: usize) -> Result {
+    let node: syntax::SyntaxNode = context::node(context, context->current_unit, node_id);
+    switch (node.kind) {
+    case syntax::SyntaxKind.integer_expression {
+        return integer_literal(context, node, expected_type, false);
+    }
+    case syntax::SyntaxKind.character_expression {
+        return character_literal(context, node, expected_type);
+    }
+    case syntax::SyntaxKind.floating_expression {
+        return floating_literal(context, expected_type);
+    }
+    case syntax::SyntaxKind.boolean_expression {
+        return type_result(expected_type, type_info::BuiltinType.boolean as usize);
+    }
+    case syntax::SyntaxKind.string_expression {
+        return string_literal(context, node, expected_type);
+    }
+    case syntax::SyntaxKind.null_expression {
+        return null_literal(context, expected_type);
+    }
+    case syntax::SyntaxKind.name_expression {
+        return probe_name(context, node, expected_type);
+    }
+    case syntax::SyntaxKind.zero_initializer, syntax::SyntaxKind.aggregate_initializer {
+        return probe_initializer(context, node, expected_type);
+    }
+    case syntax::SyntaxKind.parenthesized_expression {
+        return node.child_count == 1 ? expression(context, node.first_child, expected_type) : invalid_result();
+    }
+    case syntax::SyntaxKind.call_expression {
+        return probe_call(context, node_id, node, expected_type);
+    }
+    case syntax::SyntaxKind.index_expression {
+        return probe_index(context, node, expected_type);
+    }
+    case syntax::SyntaxKind.member_expression {
+        return probe_member(context, node, expected_type);
+    }
+    case syntax::SyntaxKind.unary_expression {
+        return probe_unary(context, node, expected_type);
+    }
+    case syntax::SyntaxKind.cast_expression {
+        return probe_cast(context, node, expected_type);
+    }
+    case syntax::SyntaxKind.binary_expression {
+        return probe_binary(context, node, expected_type);
+    }
+    case syntax::SyntaxKind.conditional_expression {
+        return probe_conditional(context, node, expected_type);
+    }
+    case syntax::SyntaxKind.sizeof_expression, syntax::SyntaxKind.alignof_expression,
+        syntax::SyntaxKind.offsetof_expression {
+        return type_result(expected_type, type_info::BuiltinType.unsigned_size as usize);
+    }
+    case syntax::SyntaxKind.va_arg_expression {
+        return probe_va_arg(context, node, expected_type);
+    }
+    case syntax::SyntaxKind.intrinsic_expression {
+        return probe_intrinsic(context, node, expected_type);
+    }
+    default {
+        return invalid_result();
+    }
+    }
+}

@@ -277,7 +277,7 @@ fn function_bindings_are_valid(context: *context::Context) -> bool {
     return true;
 }
 
-fn candidate_is_visible(
+fn candidate_is_visible_in_module(
     context: *context::Context, function_id: usize, unit_index: usize, binding_module: usize) -> bool {
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
@@ -295,6 +295,23 @@ fn candidate_is_visible(
     return (symbol.flags & (context::SymbolFlag.interface_declaration as usize)) != 0;
 }
 
+fn function_is_visible(context: *context::Context, function_id: usize, unit_index: usize) -> bool {
+    if (function_id >= context->function_count) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    let binding_id: usize = functions[function_id].binding_id;
+    if (binding_id >= context->binding_count) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let bindings: *const context::Binding = context->bindings.data as
+            *const context::Binding;
+    return candidate_is_visible_in_module(context, function_id, unit_index, bindings[binding_id].module_id);
+}
+
 fn binding_has_visible_candidate(context: *context::Context, binding: context::Binding, unit_index: usize) -> bool {
     if (!binding_range_is_valid(context, binding)) {
         context->error = runtime::Error.invalid_argument;
@@ -304,7 +321,7 @@ fn binding_has_visible_candidate(context: *context::Context, binding: context::B
             *const usize;
     for (var index: usize = 0; index < binding.candidate_count; index += 1) {
         let function_id: usize = candidates[binding.first_candidate + index];
-        if (candidate_is_visible(context, function_id, unit_index, binding.module_id)) {
+        if (candidate_is_visible_in_module(context, function_id, unit_index, binding.module_id)) {
             return true;
         }
     }
@@ -421,7 +438,7 @@ fn binding_single_function(context: *context::Context, binding_id: usize, unit_i
     var found: usize = context::no_id();
     for (var index: usize = 0; index < binding.candidate_count; index += 1) {
         let function_id: usize = candidates[binding.first_candidate + index];
-        if (candidate_is_visible(context, function_id, unit_index, binding.module_id)) {
+        if (candidate_is_visible_in_module(context, function_id, unit_index, binding.module_id)) {
             if (found != context::no_id()) {
                 return context::no_id();
             }
@@ -429,6 +446,50 @@ fn binding_single_function(context: *context::Context, binding_id: usize, unit_i
         }
     }
     return found;
+}
+
+fn binding_candidate(context: *context::Context, binding_id: usize, candidate_index: usize) -> usize {
+    if (binding_id >= context->binding_count) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    let bindings: *const context::Binding = context->bindings.data as
+            *const context::Binding;
+    let binding: context::Binding = bindings[binding_id];
+    if (!binding_range_is_valid(context, binding) || candidate_index >= binding.candidate_count) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    let candidates: *const usize = context->callable_candidates.data as
+            *const usize;
+    let function_id: usize = candidates[binding.first_candidate + candidate_index];
+    if (function_id >= context->function_count) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    return function_id;
+}
+
+fn binding_visible_count(context: *context::Context, binding_id: usize, unit_index: usize) -> usize {
+    if (binding_id >= context->binding_count) {
+        context->error = runtime::Error.invalid_argument;
+        return 0;
+    }
+    let bindings: *const context::Binding = context->bindings.data as
+            *const context::Binding;
+    let binding: context::Binding = bindings[binding_id];
+    if (!binding_range_is_valid(context, binding)) {
+        context->error = runtime::Error.invalid_argument;
+        return 0;
+    }
+    var count: usize = 0;
+    for (var candidate_index: usize = 0; candidate_index < binding.candidate_count; candidate_index += 1) {
+        let function_id: usize = binding_candidate(context, binding_id, candidate_index);
+        if (function_is_visible(context, function_id, unit_index)) {
+            count += 1;
+        }
+    }
+    return count;
 }
 
 fn ordered_function_id(context: *context::Context, index: usize) -> usize {

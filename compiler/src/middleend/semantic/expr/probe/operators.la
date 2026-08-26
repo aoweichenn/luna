@@ -1,0 +1,285 @@
+module luna.bootstrap.middleend.semantic.expr.probe;
+
+fn cast_is_valid(source: type_info::Record, target: type_info::Record, source_type: usize, target_type: usize) -> bool {
+    if (source_type == target_type) {
+        return true;
+    }
+    if (type_info::is_integer(source.kind) && type_info::is_integer(target.kind)) {
+        return true;
+    }
+    let integer_float: bool = type_info::is_integer(source.kind) && type_info::is_float(target.kind);
+    let float_integer: bool = type_info::is_float(source.kind) && type_info::is_integer(target.kind);
+    let float_float: bool = type_info::is_float(source.kind) && type_info::is_float(target.kind);
+    let cross_numeric: bool = integer_float || float_integer;
+    if (cross_numeric || float_float) {
+        return true;
+    }
+    if (source.kind == type_info::Kind.enumeration) {
+        return source.element_type == target_type;
+    }
+    if (target.kind == type_info::Kind.enumeration) {
+        return target.element_type == source_type;
+    }
+    if (source.kind == type_info::Kind.pointer && target.kind == type_info::Kind.pointer) {
+        let drops_read_only: bool = (source.flags & (type_info::Flag.read_only as usize)) != 0 &&
+            (target.flags & (type_info::Flag.read_only as usize)) == 0;
+        let drops_volatile: bool = (source.flags & (type_info::Flag.volatile_pointee as usize)) != 0 &&
+            (target.flags & (type_info::Flag.volatile_pointee as usize)) == 0;
+        return !drops_read_only && !drops_volatile;
+    }
+    if (source.kind == type_info::Kind.function_pointer && target.kind == type_info::Kind.function_pointer) {
+        return true;
+    }
+    let function_to_integer: bool = source.kind == type_info::Kind.function_pointer &&
+        target.kind == type_info::Kind.unsigned_size;
+    let integer_to_function: bool = target.kind == type_info::Kind.function_pointer &&
+        source.kind == type_info::Kind.unsigned_size;
+    if (function_to_integer || integer_to_function) {
+        return true;
+    }
+    if (source.kind == type_info::Kind.pointer) {
+        return target.kind == type_info::Kind.unsigned_size;
+    }
+    if (target.kind == type_info::Kind.pointer) {
+        return source.kind == type_info::Kind.unsigned_size;
+    }
+    return false;
+}
+
+fn probe_cast(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
+    if (node.child_count != 2) {
+        return invalid_result();
+    }
+    let operand_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let target_type: usize = types::resolve_type_node(context, context->current_unit, operand_node.next_sibling);
+    if (!type_is_valid(context, target_type)) {
+        return invalid_result();
+    }
+    let target: type_info::Record = context::type_record(context, target_type);
+    let operand_expected: usize = operand_node.kind == syntax::SyntaxKind.null_expression ?
+        target_type : context::no_id();
+    let operand: Result = expression(context, node.first_child, operand_expected);
+    if (operand.status != Status.compatible) {
+        return failure_result(operand);
+    }
+    let source: type_info::Record = context::type_record(context, operand.type_id);
+    if (!cast_is_valid(source, target, operand.type_id, target_type)) {
+        return incompatible_result();
+    }
+    return type_result(expected_type, target_type);
+}
+
+fn binary_is_comparison(operation: lexer::TokenKind) -> bool {
+    let equality: bool = operation == lexer::TokenKind.equal_equal || operation == lexer::TokenKind.bang_equal;
+    let lower: bool = operation == lexer::TokenKind.less || operation == lexer::TokenKind.less_equal;
+    let greater: bool = operation == lexer::TokenKind.greater || operation == lexer::TokenKind.greater_equal;
+    let ordering: bool = lower || greater;
+    return equality || ordering;
+}
+
+fn binary_is_arithmetic(operation: lexer::TokenKind) -> bool {
+    let additive: bool = operation == lexer::TokenKind.plus || operation == lexer::TokenKind.minus;
+    let multiplicative: bool = operation == lexer::TokenKind.star || operation == lexer::TokenKind.slash;
+    let remainder: bool = operation == lexer::TokenKind.percent;
+    let product: bool = multiplicative || remainder;
+    return additive || product;
+}
+
+fn binary_is_bitwise(operation: lexer::TokenKind) -> bool {
+    let direct: bool = operation == lexer::TokenKind.ampersand || operation == lexer::TokenKind.pipe;
+    let xor_or_left: bool = operation == lexer::TokenKind.caret || operation == lexer::TokenKind.shift_left;
+    let shifts: bool = xor_or_left || operation == lexer::TokenKind.shift_right;
+    return direct || shifts;
+}
+
+fn pointer_arithmetic_is_allowed(context: *context::Context, pointer_type: usize) -> bool {
+    if (!type_is_valid(context, pointer_type)) {
+        return false;
+    }
+    let pointer: type_info::Record = context::type_record(context, pointer_type);
+    if (pointer.kind != type_info::Kind.pointer || !type_is_valid(context, pointer.element_type)) {
+        return false;
+    }
+    let element: type_info::Record = context::type_record(context, pointer.element_type);
+    let element_kind_is_valid: bool = element.kind != type_info::Kind.type_void &&
+        element.kind != type_info::Kind.array;
+    return element_kind_is_valid && element.size_bytes != 0;
+}
+
+fn probe_pointer_binary(
+    context: *context::Context, node: syntax::SyntaxNode, operation: lexer::TokenKind, expected_type: usize) -> Result {
+    let left_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let left: Result = expression(context, node.first_child, context::no_id());
+    let right: Result = expression(context, left_node.next_sibling, context::no_id());
+    if (left.status != Status.compatible || right.status != Status.compatible) {
+        return merged_failure(left, right);
+    }
+    let left_record: type_info::Record = context::type_record(context, left.type_id);
+    let right_record: type_info::Record = context::type_record(context, right.type_id);
+    let left_is_pointer: bool = left_record.kind == type_info::Kind.pointer;
+    let right_is_pointer: bool = right_record.kind == type_info::Kind.pointer;
+    if (left_is_pointer != right_is_pointer) {
+        let pointer_type: usize = left_is_pointer ? left.type_id : right.type_id;
+        let count_type: usize = left_is_pointer ? right.type_id : left.type_id;
+        let count_is_valid: bool = count_type == type_info::BuiltinType.unsigned_size as usize;
+        return count_is_valid && pointer_arithmetic_is_allowed(context, pointer_type) ?
+            type_result(expected_type, pointer_type) : incompatible_result();
+    }
+    let matching_pointers: bool = left_is_pointer && left.type_id == right.type_id;
+    let pointer_difference: bool = operation == lexer::TokenKind.minus && matching_pointers;
+    return pointer_difference && pointer_arithmetic_is_allowed(context, left.type_id) ?
+        type_result(expected_type, type_info::BuiltinType.unsigned_size as usize) : incompatible_result();
+}
+
+fn callable_binding(context: *context::Context, node: syntax::SyntaxNode) -> usize {
+    if (node.kind != syntax::SyntaxKind.name_expression) {
+        return context::no_id();
+    }
+    if (node.child_count != 0) {
+        return functions::lookup_qualified_callable_binding(context, context->current_unit, node, false);
+    }
+    let local_id: usize = builder::find_local(context, context->current_unit, node.token_index);
+    return local_id == context::no_id() ?
+        functions::lookup_callable_binding(context, context->current_unit, node.token_index) : context::no_id();
+}
+
+fn probe_unary(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
+    if (node.child_count != 1) {
+        return invalid_result();
+    }
+    let operand_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let operation: lexer::TokenKind = context::token(context, context->current_unit, node.token_index).kind;
+    if (operation == lexer::TokenKind.minus && operand_node.kind == syntax::SyntaxKind.integer_expression) {
+        return integer_literal(context, operand_node, expected_type, true);
+    }
+    if (operation == lexer::TokenKind.ampersand) {
+        let binding_id: usize = callable_binding(context, operand_node);
+        if (binding_id != context::no_id()) {
+            return function_value_expression(context, binding_id, expected_type);
+        }
+        let operand: Result = expression(context, node.first_child, context::no_id());
+        if (operand.status != Status.compatible) {
+            return failure_result(operand);
+        }
+        if (!operand.lvalue) {
+            return incompatible_result();
+        }
+        let pointer: type_info::IdResult = type_info::table_pointer(
+            &context->types, operand.type_id, !operand.mutable_lvalue, operand.volatile_lvalue);
+        context->error = pointer.error;
+        return pointer.error == runtime::Error.none ? type_result(expected_type, pointer.type_id) : invalid_result();
+    }
+    if (operation == lexer::TokenKind.bang) {
+        let operand: Result = expression(context, node.first_child, type_info::BuiltinType.boolean as usize);
+        return operand.status == Status.compatible ?
+            type_result(expected_type, type_info::BuiltinType.boolean as usize) : failure_result(operand);
+    }
+    let operand_expected: usize = operation == lexer::TokenKind.star ? context::no_id() : expected_type;
+    let operand: Result = expression(context, node.first_child, operand_expected);
+    if (operand.status != Status.compatible) {
+        return failure_result(operand);
+    }
+    if (!type_is_valid(context, operand.type_id)) {
+        return invalid_result();
+    }
+    let record: type_info::Record = context::type_record(context, operand.type_id);
+    if (operation == lexer::TokenKind.star) {
+        if (record.kind != type_info::Kind.pointer) {
+            return incompatible_result();
+        }
+        if (context::type_record(context, record.element_type).kind == type_info::Kind.type_void) {
+            return incompatible_result();
+        }
+        var dereferenced: Result = type_result(expected_type, record.element_type);
+        dereferenced.lvalue = true;
+        dereferenced.mutable_lvalue = (record.flags & (type_info::Flag.read_only as usize)) == 0;
+        dereferenced.volatile_lvalue = (record.flags & (type_info::Flag.volatile_pointee as usize)) != 0;
+        return dereferenced;
+    }
+    let numeric: bool = type_info::is_integer(record.kind) || type_info::is_float(record.kind);
+    let sign_operator: bool = operation == lexer::TokenKind.plus || operation == lexer::TokenKind.minus;
+    if (sign_operator && numeric) {
+        return type_result(expected_type, operand.type_id);
+    }
+    if (operation == lexer::TokenKind.tilde && type_info::is_integer(record.kind)) {
+        return type_result(expected_type, operand.type_id);
+    }
+    return incompatible_result();
+}
+
+fn probe_binary(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
+    if (node.child_count != 2) {
+        return invalid_result();
+    }
+    let left_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let operation: lexer::TokenKind = context::token(context, context->current_unit, node.token_index).kind;
+    let logical: bool = operation == lexer::TokenKind.logical_and || operation == lexer::TokenKind.logical_or;
+    if (logical) {
+        let left: Result = expression(context, node.first_child, type_info::BuiltinType.boolean as usize);
+        let right: Result = expression(context, left_node.next_sibling, type_info::BuiltinType.boolean as usize);
+        let operands_match: bool = left.status == Status.compatible && right.status == Status.compatible;
+        return operands_match ? type_result(expected_type, type_info::BuiltinType.boolean as usize) :
+            merged_failure(left, right);
+    }
+    let additive: bool = operation == lexer::TokenKind.plus || operation == lexer::TokenKind.minus;
+    var pointer_context: bool = expected_type == context::no_id();
+    if (!pointer_context && type_is_valid(context, expected_type)) {
+        let expected_kind: type_info::Kind = context::type_record(context, expected_type).kind;
+        pointer_context = expected_kind == type_info::Kind.pointer || expected_kind == type_info::Kind.unsigned_size;
+    }
+    if (additive && pointer_context) {
+        let pointer_result: Result = probe_pointer_binary(context, node, operation, expected_type);
+        if (pointer_result.status == Status.compatible) {
+            return pointer_result;
+        }
+    }
+    let comparison: bool = binary_is_comparison(operation);
+    let operand_expected: usize = comparison ? context::no_id() : expected_type;
+    let left: Result = expression(context, node.first_child, operand_expected);
+    if (left.status != Status.compatible) {
+        return failure_result(left);
+    }
+    let right: Result = expression(context, left_node.next_sibling, left.type_id);
+    if (right.status != Status.compatible) {
+        return failure_result(right);
+    }
+    if (right.type_id != left.type_id) {
+        return incompatible_result();
+    }
+    let left_record: type_info::Record = context::type_record(context, left.type_id);
+    if (comparison) {
+        let scalar: bool = type_info::is_scalar(left_record.kind);
+        let ordered: bool = type_info::is_integer(left_record.kind) || type_info::is_float(left_record.kind);
+        let equality: bool = operation == lexer::TokenKind.equal_equal || operation == lexer::TokenKind.bang_equal;
+        let operation_is_valid: bool = equality ? scalar : ordered;
+        return operation_is_valid ? type_result(expected_type, type_info::BuiltinType.boolean as usize) :
+            incompatible_result();
+    }
+    let arithmetic: bool = binary_is_arithmetic(operation);
+    let bitwise: bool = binary_is_bitwise(operation);
+    let integer_operator: bool = arithmetic || bitwise;
+    let integer_operation: bool = type_info::is_integer(left_record.kind) && integer_operator;
+    let float_operation: bool = type_info::is_float(left_record.kind) && arithmetic;
+    let float_remainder: bool = type_info::is_float(left_record.kind) && operation == lexer::TokenKind.percent;
+    let valid_float_operation: bool = float_operation && !float_remainder;
+    let operation_is_valid: bool = integer_operation || valid_float_operation;
+    return operation_is_valid ? type_result(expected_type, left.type_id) : incompatible_result();
+}
+
+fn probe_conditional(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
+    if (node.child_count != 3) {
+        return invalid_result();
+    }
+    let condition_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let then_node: syntax::SyntaxNode = context::node(context, context->current_unit, condition_node.next_sibling);
+    let condition: Result = expression(context, node.first_child, type_info::BuiltinType.boolean as usize);
+    if (condition.status != Status.compatible) {
+        return failure_result(condition);
+    }
+    let then_value: Result = expression(context, condition_node.next_sibling, expected_type);
+    if (then_value.status != Status.compatible) {
+        return then_value;
+    }
+    let else_value: Result = expression(context, then_node.next_sibling, then_value.type_id);
+    return else_value.status == Status.compatible ? type_result(expected_type, then_value.type_id) : else_value;
+}

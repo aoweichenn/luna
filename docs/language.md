@@ -516,9 +516,27 @@ extern fn allocate(size: usize) -> *void;
 ```
 
 Parameters are passed by value and their bindings are immutable. Pointer
-parameters express mutation explicitly. There is no overloading or default
-argument; variadic declarations and definitions use the explicit-width
-contract described below.
+parameters express mutation explicitly. Module-level Luna functions may share
+a source name when their parameter sequence, arity or variadic state differs.
+Resolution is exact and unranked: return type alone never distinguishes an
+overload, ordinary expressions undergo no implicit conversion, and contextual
+literals compatible with more than one candidate are ambiguous. A cast or an
+already typed expression selects the intended parameter type:
+
+```luna
+fn parse(value: i32) -> i64;
+fn parse(value: f32) -> f64;
+
+let integer: i64 = parse(1 as i32);
+let callback: fn(f32) -> f64 = parse;
+```
+
+An overload set is not itself a run-time value; a complete expected
+function-pointer type must select one candidate. Function-pointer types are
+currently fixed-arity, so variadic functions can be called directly but cannot
+form function values. `extern fn` names retain exact external symbol identity
+and do not form overload sets. Default arguments are not yet accepted;
+variadic declarations and definitions use the explicit-width contract below.
 
 An executable entry point has one of exactly two signatures:
 

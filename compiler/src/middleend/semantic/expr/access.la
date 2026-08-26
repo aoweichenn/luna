@@ -9,6 +9,7 @@ import luna.bootstrap.middleend.semantic.context.lookup as names;
 import luna.bootstrap.frontend.lexer as lexer;
 import luna.bootstrap.middleend.ir as ir;
 import luna.bootstrap.middleend.semantic.expr.base as base;
+import luna.bootstrap.middleend.semantic.expr.probe as probe;
 import luna.bootstrap.middleend.semantic.functions as functions;
 import luna.bootstrap.middleend.semantic.types as types;
 import luna.bootstrap.middleend.type as type_info;
@@ -21,8 +22,9 @@ fn function_value(context: *context::Context, node: syntax::SyntaxNode, function
             *const context::Function;
     let function: context::Function = functions[function_id];
     var parameter_types: bytes::Buffer = bytes::empty();
-    var index: usize = 0;
-    while (index < function.parameter_count && context->error == runtime::Error.none) {
+    for (var index: usize = 0;
+        index < function.parameter_count && context->error == runtime::Error.none;
+        index += 1) {
         let parameters: *const context::Parameter = context->parameters.data as
                 *const context::Parameter;
         let parameter_type: usize = parameters[function.first_parameter + index].type_id;
@@ -30,7 +32,6 @@ fn function_value(context: *context::Context, node: syntax::SyntaxNode, function
             bytes::append(parameter_types, (&parameter_type) as *const usize as *const u8, sizeof(usize));
         parameter_types = appended.buffer;
         context->error = appended.error;
-        index += 1;
     }
     if (context->error != runtime::Error.none) {
         let release_error: runtime::Error = bytes::release(parameter_types);
@@ -59,16 +60,43 @@ fn function_value(context: *context::Context, node: syntax::SyntaxNode, function
     };
 }
 
+fn add_callable_diagnostic(
+    context: *context::Context, kind: context::DiagnosticKind, node: syntax::SyntaxNode, binding_id: usize) {
+    let none: usize = context::no_id();
+    var related_unit: usize = none;
+    var related_span: lexer::SourceSpan = context::empty_span();
+    if (binding_id < context->binding_count) {
+        let bindings: *const context::Binding = context->bindings.data as
+                *const context::Binding;
+        let candidate_count: usize = bindings[binding_id].candidate_count;
+        for (var candidate_index: usize = 0; candidate_index < candidate_count; candidate_index += 1) {
+            let function_id: usize = functions::binding_candidate(context, binding_id, candidate_index);
+            if (functions::function_is_visible(context, function_id, context->current_unit)) {
+                let functions_data: *const context::Function = context->functions.data as
+                        *const context::Function;
+                let symbols: *const context::Symbol = context->symbols.data as
+                        *const context::Symbol;
+                let symbol: context::Symbol = symbols[functions_data[function_id].symbol_id];
+                related_unit = symbol.declaration_unit;
+                related_span = context::node(context, related_unit, symbol.declaration_node).span;
+                break;
+            }
+        }
+    }
+    context::add_diagnostic(context, kind, context->current_unit, node.span, related_unit, related_span, binding_id);
+}
+
 fn function_binding_value(
-    context: *context::Context, node: syntax::SyntaxNode, binding_id: usize) -> context::Expression {
-    let function_id: usize = functions::binding_single_function(context, binding_id, context->current_unit);
-    if (function_id == context::no_id()) {
-        context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_call, context->current_unit, node.span,
-            context::no_id(), context::empty_span(), binding_id);
+    context: *context::Context, node: syntax::SyntaxNode, binding_id: usize,
+    expected_type: usize) -> context::Expression {
+    let resolution: probe::Resolution = probe::resolve_function_value(context, binding_id, expected_type);
+    if (resolution.status != probe::ResolutionStatus.selected) {
+        let kind: context::DiagnosticKind = resolution.status == probe::ResolutionStatus.ambiguous ?
+            context::DiagnosticKind.ambiguous_function_value : context::DiagnosticKind.no_matching_overload;
+        add_callable_diagnostic(context, kind, node, binding_id);
         return base::invalid_expression();
     }
-    return function_value(context, node, function_id);
+    return function_value(context, node, resolution.function_id);
 }
 
 // Emits the resolved value of a module-level constant symbol (flat or
@@ -130,7 +158,8 @@ fn lower_const_name(context: *context::Context, node: syntax::SyntaxNode) -> con
 // probing quietly so a name found under either kind yields exactly one
 // result; only a total miss re-runs the diagnosing lookup to report the
 // qualifier or name failure once.
-fn lower_qualified_name(context: *context::Context, node: syntax::SyntaxNode) -> context::Expression {
+fn lower_qualified_name(
+    context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> context::Expression {
     let none: usize = context::no_id();
     var symbol_id: usize =
         names::lookup_qualified_symbol(context, context->current_unit, node, context::SymbolKind.constant, false);
@@ -139,15 +168,15 @@ fn lower_qualified_name(context: *context::Context, node: syntax::SyntaxNode) ->
     }
     let binding_id: usize = functions::lookup_qualified_callable_binding(context, context->current_unit, node, false);
     if (binding_id != none) {
-        return function_binding_value(context, node, binding_id);
+        return function_binding_value(context, node, binding_id, expected_type);
     }
     names::lookup_qualified_symbol(context, context->current_unit, node, context::SymbolKind.constant, true);
     return base::invalid_expression();
 }
 
-fn lower_name(context: *context::Context, node: syntax::SyntaxNode) -> context::Expression {
+fn lower_name(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> context::Expression {
     if (node.child_count != 0) {
-        return lower_qualified_name(context, node);
+        return lower_qualified_name(context, node, expected_type);
     }
     let const_name: context::Expression = lower_const_name(context, node);
     if (const_name.valid) {
@@ -157,7 +186,7 @@ fn lower_name(context: *context::Context, node: syntax::SyntaxNode) -> context::
     if (local_id == context::no_id()) {
         let binding_id: usize = functions::lookup_callable_binding(context, context->current_unit, node.token_index);
         if (binding_id != context::no_id()) {
-            return function_binding_value(context, node, binding_id);
+            return function_binding_value(context, node, binding_id, expected_type);
         }
         context::add_diagnostic(
             context, context::DiagnosticKind.unknown_name, context->current_unit, node.span, context::no_id(),
@@ -319,7 +348,8 @@ fn store_bitfield(
     let none: usize = context::no_id();
     let segment: context::BitfieldSegment = builder::bitfield_segment(context, segment_id);
     let field_id: usize = builder::bitfield_storage_field(context, segment);
-    if (!value.valid || field_id == none || destination == none) {
+    let destination_is_valid: bool = field_id != none && destination != none;
+    if (!value.valid || !destination_is_valid) {
         return false;
     }
     let fields: *const type_info::Field = context->types.fields.data as
@@ -471,7 +501,8 @@ fn lower_index(context: *context::Context, node: syntax::SyntaxNode, lowerer: ap
     let base: context::Expression = api::invoke(lowerer, context, node.first_child, context::no_id());
     let index: context::Expression = api::invoke(lowerer, context, index_node,
         type_info::BuiltinType.unsigned_size as usize);
-    if (!base.valid || !index.valid || index.type_id != type_info::BuiltinType.unsigned_size as usize) {
+    let operands_are_valid: bool = base.valid && index.valid;
+    if (!operands_are_valid || index.type_id != type_info::BuiltinType.unsigned_size as usize) {
         context::add_diagnostic(
             context, context::DiagnosticKind.invalid_index, context->current_unit, node.span, context::no_id(),
             context::empty_span(), index.type_id);
@@ -531,7 +562,88 @@ fn lower_index(context: *context::Context, node: syntax::SyntaxNode, lowerer: ap
     return builder::load_lvalue(context, node, result);
 }
 
-fn lower_call(context: *context::Context, node: syntax::SyntaxNode, lowerer: api::Lowerer) -> context::Expression {
+fn resolve_direct_function(
+    context: *context::Context, node_id: usize, node: syntax::SyntaxNode, binding_id: usize) -> usize {
+    let visible_count: usize = functions::binding_visible_count(context, binding_id, context->current_unit);
+    if (visible_count <= 1) {
+        return functions::binding_single_function(context, binding_id, context->current_unit);
+    }
+    let resolution: probe::Resolution = probe::resolve_call(context, node_id, node, binding_id);
+    if (resolution.status == probe::ResolutionStatus.selected) {
+        return resolution.function_id;
+    }
+    let kind: context::DiagnosticKind = resolution.status == probe::ResolutionStatus.ambiguous ?
+        context::DiagnosticKind.ambiguous_call : context::DiagnosticKind.no_matching_overload;
+    add_callable_diagnostic(context, kind, node, binding_id);
+    return context::no_id();
+}
+
+fn append_call_argument(context: *context::Context, values: *bytes::Buffer, value: usize) -> bool {
+    let appended: bytes::BufferResult = bytes::append(*values, (&value) as *const usize as *const u8, sizeof(usize));
+    *values = appended.buffer;
+    context->error = appended.error;
+    return appended.error == runtime::Error.none;
+}
+
+fn call_argument_value(context: *context::Context, node: syntax::SyntaxNode, argument: context::Expression) -> usize {
+    let argument_type: type_info::Record = context::type_record(context, argument.type_id);
+    if (!type_info::is_memory(argument_type.kind)) {
+        return argument.value_id;
+    }
+    let snapshot_slot: usize = ir::add_slot(
+        &context->ir, builder::current_ir_function(context), argument.type_id, true, false, 0);
+    let snapshot_address: usize = builder::address_of_slot(
+        context, node, snapshot_slot, argument.type_id, false, false);
+    let snapshot_is_valid: bool = snapshot_slot != context::no_id() && snapshot_address != context::no_id();
+    if (!snapshot_is_valid) {
+        return context::no_id();
+    }
+    return builder::store_to_address(context, node, snapshot_address, argument.type_id, argument) ?
+        snapshot_address : context::no_id();
+}
+
+fn collect_fixed_call_argument(
+    context: *context::Context, node: syntax::SyntaxNode, argument: context::Expression,
+    parameter_type: usize, values: *bytes::Buffer) {
+    if (!argument.valid || argument.type_id != parameter_type) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span,
+            context::no_id(), context::empty_span(), parameter_type);
+        return;
+    }
+    let value: usize = call_argument_value(context, node, argument);
+    if (value == context::no_id()) {
+        context->error = runtime::Error.invalid_argument;
+        return;
+    }
+    append_call_argument(context, values, value);
+}
+
+fn collect_variadic_call_argument(
+    context: *context::Context, node: syntax::SyntaxNode, argument: context::Expression, values: *bytes::Buffer) {
+    var scalar: bool = false;
+    if (argument.valid) {
+        scalar = type_info::is_scalar(context::type_record(context, argument.type_id).kind);
+    }
+    if (!scalar) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_call, context->current_unit, node.span,
+            context::no_id(), context::empty_span(), argument.valid ? argument.type_id : context::no_id());
+        return;
+    }
+    append_call_argument(context, values, argument.value_id);
+}
+
+fn call_parameter_type(
+    parameters: *const context::Parameter, fields: *const type_info::Field,
+    first_parameter: usize, index: usize, parameters_from_fields: bool) -> usize {
+    return parameters_from_fields ? fields[first_parameter + index].type_id :
+        parameters[first_parameter + index].type_id;
+}
+
+fn lower_call(
+    context: *context::Context, node_id: usize, node: syntax::SyntaxNode,
+    lowerer: api::Lowerer) -> context::Expression {
     let none: usize = context::no_id();
     if (node.child_count == 0) {
         context->error = runtime::Error.invalid_argument;
@@ -553,11 +665,8 @@ fn lower_call(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
         direct_binding = functions::lookup_callable_binding(context, context->current_unit, callee_node.token_index);
     }
     if (direct_binding != none) {
-        direct_function = functions::binding_single_function(context, direct_binding, context->current_unit);
+        direct_function = resolve_direct_function(context, node_id, node, direct_binding);
         if (direct_function == none) {
-            context::add_diagnostic(
-                context, context::DiagnosticKind.invalid_call, context->current_unit, node.span,
-                none, context::empty_span(), direct_binding);
             return base::invalid_expression();
         }
     }
@@ -599,8 +708,9 @@ fn lower_call(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
         parameters_from_fields = true;
     }
     let argument_total: usize = node.child_count - 1;
-    if ((!callee_variadic && argument_total != parameter_count) ||
-        (callee_variadic && argument_total < parameter_count)) {
+    let exact_arity: bool = !callee_variadic && argument_total == parameter_count;
+    let variadic_arity: bool = callee_variadic && argument_total >= parameter_count;
+    if (!exact_arity && !variadic_arity) {
         let related_unit: usize = direct_function == none ? none :
             symbols[functions[direct_function].symbol_id].declaration_unit;
         context::add_diagnostic(
@@ -614,62 +724,20 @@ fn lower_call(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
             *const type_info::Field;
     var argument_values: bytes::Buffer = bytes::empty();
     var child: usize = callee_node.next_sibling;
-    var index: usize = 0;
-    while (index < argument_total && context->error == runtime::Error.none) {
+    for (var index: usize = 0;
+        index < argument_total && context->error == runtime::Error.none;
+        index += 1) {
         let variadic_extra: bool = index >= parameter_count;
-        let parameter_type: usize = variadic_extra ? none : (parameters_from_fields ?
-                    type_fields[first_parameter + index].type_id : parameters[first_parameter + index].type_id);
+        let parameter_type: usize = variadic_extra ? none :
+            call_parameter_type(parameters, type_fields, first_parameter, index, parameters_from_fields);
         let argument: context::Expression = api::invoke(lowerer, context, child, parameter_type);
+        let argument_node: syntax::SyntaxNode = context::node(context, context->current_unit, child);
         if (variadic_extra) {
-            // Variadic extras pass at their declared width — no C default
-            // argument promotions — and must classify to a single register or
-            // stack slot, so aggregates are rejected.
-            var extra_scalar: bool = false;
-            if (argument.valid) {
-                let extra_record: type_info::Record = context::type_record(context, argument.type_id);
-                extra_scalar = type_info::is_scalar(extra_record.kind);
-            }
-            if (!extra_scalar) {
-                context::add_diagnostic(
-                    context, context::DiagnosticKind.invalid_call, context->current_unit,
-                    context::node(context, context->current_unit, child).span,
-                    none, context::empty_span(), argument.valid ? argument.type_id : none);
-            } else {
-                var extra_value: usize = argument.value_id;
-                let extra_appended: bytes::BufferResult =
-                    bytes::append(argument_values, (&extra_value) as *const usize as *const u8, sizeof(usize));
-                argument_values = extra_appended.buffer;
-                context->error = extra_appended.error;
-            }
-        } else if (!argument.valid || argument.type_id != parameter_type) {
-            context::add_diagnostic(
-                context, context::DiagnosticKind.type_mismatch, context->current_unit,
-                context::node(context, context->current_unit, child).span, none, context::empty_span(), parameter_type);
+            collect_variadic_call_argument(context, argument_node, argument, &argument_values);
         } else {
-            let argument_type: type_info::Record = context::type_record(context, argument.type_id);
-            var argument_value: usize = argument.value_id;
-            if (type_info::is_memory(argument_type.kind)) {
-                let snapshot_slot: usize = ir::add_slot(
-                    &context->ir, builder::current_ir_function(context), argument.type_id, true, false, 0);
-                let snapshot_address: usize =
-                    builder::address_of_slot(
-                        context, context::node(context, context->current_unit, child),
-                        snapshot_slot, argument.type_id, false, false);
-                if (snapshot_slot == none || snapshot_address == none ||
-                    !builder::store_to_address(
-                        context, context::node(context, context->current_unit, child),
-                        snapshot_address, argument.type_id, argument)) {
-                    context->error = runtime::Error.invalid_argument;
-                }
-                argument_value = snapshot_address;
-            }
-            let appended: bytes::BufferResult =
-                bytes::append(argument_values, (&argument_value) as *const usize as *const u8, sizeof(usize));
-            argument_values = appended.buffer;
-            context->error = appended.error;
+            collect_fixed_call_argument(context, argument_node, argument, parameter_type, &argument_values);
         }
-        child = context::node(context, context->current_unit, child).next_sibling;
-        index += 1;
+        child = argument_node.next_sibling;
     }
     var instruction: ir::Instruction =
         builder::instruction(direct_function != none ? ir::Opcode.call : ir::Opcode.call_indirect, node);
@@ -697,10 +765,8 @@ fn lower_call(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
         instruction_id = builder::emit_void(context, instruction);
     }
     let arguments: *const usize = argument_values.data as *const usize;
-    index = 0;
-    while (index < argument_values.length / sizeof(usize)) {
+    for (var index: usize = 0; index < argument_values.length / sizeof(usize); index += 1) {
         ir::add_argument(&context->ir, instruction_id, arguments[index]);
-        index += 1;
     }
     let release_error: runtime::Error = bytes::release(argument_values);
     if (context->error == runtime::Error.none) {

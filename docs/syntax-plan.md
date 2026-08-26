@@ -145,7 +145,8 @@ is deliberate.
 | variadic definitions, `va_list` | adopted with explicit widths | m1.7; register save areas and typed `va_arg` |
 | `noreturn` | modernized | `@noreturn`, m1.2 |
 | `inline` | adopted | `@inline` metadata, m1.2 |
-| default arguments, overloading | rejected | one exact signature per name |
+| function overloading | modernized | exact, unranked callable sets; M2.0-M2.2 |
+| default arguments | planned | constant trailing defaults; M2.3 |
 | multiple return values | alternative | aggregate returns, already in the language |
 
 ### Concurrency, signals and non-local jumps
@@ -210,8 +211,9 @@ another value of the same exact type. Calling a null function pointer
 traps, mirroring null-pointer dereference rules. Function pointers are
 plain scalar values under the System V ABI (INTEGER class): they can be
 stored in aggregates, passed, returned and re-pointed. No closures: a
-function pointer carries code, never environment. Taking the address of an
-overload-free function by name is unambiguous; there is no conversion
+function pointer carries code, never environment. Taking a function's address
+uses the expected function-pointer type to select an exact overload. A
+multi-candidate name without such a target is ambiguous; there is no conversion
 between distinct function-pointer shapes without `as`.
 
 ### Pointer arithmetic and ordering

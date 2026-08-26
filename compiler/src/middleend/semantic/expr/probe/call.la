@@ -1,0 +1,495 @@
+module luna.bootstrap.middleend.semantic.expr.probe;
+
+fn function_type(context: *context::Context, function_id: usize) -> usize {
+    if (function_id >= context->function_count) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    let function_records: *const context::Function = context->functions.data as
+            *const context::Function;
+    let function: context::Function = function_records[function_id];
+    if ((function.flags & (context::SymbolFlag.variadic as usize)) != 0) {
+        return context::no_id();
+    }
+    let parameters: *const context::Parameter = context->parameters.data as
+            *const context::Parameter;
+    var parameter_types: bytes::Buffer = bytes::empty();
+    for (var index: usize = 0;
+        index < function.parameter_count && context->error == runtime::Error.none;
+        index += 1) {
+        let parameter_type: usize = parameters[function.first_parameter + index].type_id;
+        let appended: bytes::BufferResult =
+            bytes::append(parameter_types, (&parameter_type) as *const usize as *const u8, sizeof(usize));
+        parameter_types = appended.buffer;
+        context->error = appended.error;
+    }
+    let parameter_data: *const usize = parameter_types.data as *const usize;
+    let type_id: usize = context->error == runtime::Error.none ?
+        context::function_pointer_type(context, function.return_type, parameter_data, function.parameter_count) :
+        context::no_id();
+    let release_error: runtime::Error = bytes::release(parameter_types);
+    if (context->error == runtime::Error.none) {
+        context->error = release_error;
+    }
+    return type_id;
+}
+
+fn function_matches_type(context: *context::Context, function_id: usize, target_type: usize) -> bool {
+    if (!type_is_valid(context, target_type) || function_id >= context->function_count) {
+        return false;
+    }
+    let target: type_info::Record = context::type_record(context, target_type);
+    if (target.kind != type_info::Kind.function_pointer) {
+        return false;
+    }
+    let functions_data: *const context::Function = context->functions.data as
+            *const context::Function;
+    let function: context::Function = functions_data[function_id];
+    let variadic: bool = (function.flags & (context::SymbolFlag.variadic as usize)) != 0;
+    let shape_matches: bool = function.parameter_count == target.field_count &&
+        function.return_type == target.element_type;
+    if (variadic || !shape_matches) {
+        return false;
+    }
+    let parameters: *const context::Parameter = context->parameters.data as
+            *const context::Parameter;
+    let fields: *const type_info::Field = context->types.fields.data as
+            *const type_info::Field;
+    for (var index: usize = 0; index < function.parameter_count; index += 1) {
+        if (parameters[function.first_parameter + index].type_id != fields[target.first_field + index].type_id) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn resolve_function_value(context: *context::Context, binding_id: usize, expected_type: usize) -> Resolution {
+    let visible_count: usize = functions::binding_visible_count(context, binding_id, context->current_unit);
+    if (context->error != runtime::Error.none || visible_count == 0) {
+        return {status = ResolutionStatus.invalid, function_id = context::no_id()};
+    }
+    if (expected_type == context::no_id()) {
+        let function_id: usize = functions::binding_single_function(context, binding_id, context->current_unit);
+        if (visible_count != 1) {
+            return {status = ResolutionStatus.ambiguous, function_id = context::no_id()};
+        }
+        let functions_data: *const context::Function = context->functions.data as
+                *const context::Function;
+        let variadic: bool = (functions_data[function_id].flags & (context::SymbolFlag.variadic as usize)) != 0;
+        return variadic ? {status = ResolutionStatus.no_match, function_id = context::no_id()} :
+            {status = ResolutionStatus.selected, function_id = function_id};
+    }
+    var selected: usize = context::no_id();
+    let bindings: *const context::Binding = context->bindings.data as
+            *const context::Binding;
+    let candidate_count: usize = bindings[binding_id].candidate_count;
+    for (var candidate_index: usize = 0; candidate_index < candidate_count; candidate_index += 1) {
+        let function_id: usize = functions::binding_candidate(context, binding_id, candidate_index);
+        let visible: bool = functions::function_is_visible(context, function_id, context->current_unit);
+        if (visible && function_matches_type(context, function_id, expected_type)) {
+            if (selected != context::no_id()) {
+                return {status = ResolutionStatus.ambiguous, function_id = context::no_id()};
+            }
+            selected = function_id;
+        }
+    }
+    return selected == context::no_id() ? {status = ResolutionStatus.no_match, function_id = context::no_id()} :
+        {status = ResolutionStatus.selected, function_id = selected};
+}
+
+fn function_value_expression(context: *context::Context, binding_id: usize, expected_type: usize) -> Result {
+    let resolution: Resolution = resolve_function_value(context, binding_id, expected_type);
+    switch (resolution.status) {
+    case ResolutionStatus.ambiguous {
+        return result(Status.ambiguous, context::no_id(), context::no_id());
+    }
+    case ResolutionStatus.invalid {
+        return invalid_result();
+    }
+    case ResolutionStatus.no_match {
+        return incompatible_result();
+    }
+    default {}
+    }
+    let type_id: usize = expected_type == context::no_id() ?
+        function_type(context, resolution.function_id) : expected_type;
+    if (type_id == context::no_id()) {
+        return invalid_result();
+    }
+    return result(Status.compatible, type_id, resolution.function_id);
+}
+
+fn candidate_call_status(context: *context::Context, node: syntax::SyntaxNode, function_id: usize) -> Status {
+    if (function_id >= context->function_count || node.child_count == 0) {
+        return Status.invalid;
+    }
+    let functions_data: *const context::Function = context->functions.data as
+            *const context::Function;
+    let function: context::Function = functions_data[function_id];
+    let variadic: bool = (function.flags & (context::SymbolFlag.variadic as usize)) != 0;
+    let argument_count: usize = node.child_count - 1;
+    let exact_arity: bool = !variadic && argument_count == function.parameter_count;
+    let variadic_arity: bool = variadic && argument_count >= function.parameter_count;
+    if (!exact_arity && !variadic_arity) {
+        return Status.incompatible;
+    }
+    let parameters: *const context::Parameter = context->parameters.data as
+            *const context::Parameter;
+    let callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    var child: usize = callee.next_sibling;
+    var candidate_status: Status = Status.compatible;
+    for (var argument_index: usize = 0; argument_index < argument_count; argument_index += 1) {
+        let variadic_extra: bool = argument_index >= function.parameter_count;
+        let expected_type: usize = variadic_extra ? context::no_id() :
+            parameters[function.first_parameter + argument_index].type_id;
+        let argument: Result = expression(context, child, expected_type);
+        switch (argument.status) {
+        case Status.incompatible {
+            return Status.incompatible;
+        }
+        case Status.ambiguous {
+            candidate_status = Status.ambiguous;
+        }
+        case Status.invalid {
+            if (candidate_status == Status.compatible) {
+                candidate_status = Status.invalid;
+            }
+        }
+        default {}
+        }
+        if (variadic_extra && argument.status == Status.compatible) {
+            let argument_record: type_info::Record = context::type_record(context, argument.type_id);
+            if (!type_info::is_scalar(argument_record.kind)) {
+                return Status.incompatible;
+            }
+        }
+        child = context::node(context, context->current_unit, child).next_sibling;
+    }
+    return candidate_status;
+}
+
+struct CandidateResolution {
+    selected_function: usize;
+    compatible_count: usize;
+    deferred_status: ResolutionStatus;
+}
+
+fn candidate_resolution() -> CandidateResolution {
+    return {
+        selected_function = context::no_id(), compatible_count = 0, deferred_status = ResolutionStatus.no_match,
+    };
+}
+
+fn consider_candidate(resolution: *CandidateResolution, function_id: usize, status: Status) {
+    switch (status) {
+    case Status.compatible {
+        if (resolution->compatible_count == 0) {
+            resolution->selected_function = function_id;
+        }
+        resolution->compatible_count += 1;
+    }
+    case Status.ambiguous {
+        resolution->deferred_status = ResolutionStatus.ambiguous;
+    }
+    case Status.invalid {
+        if (resolution->deferred_status == ResolutionStatus.no_match) {
+            resolution->deferred_status = ResolutionStatus.invalid;
+        }
+    }
+    default {}
+    }
+}
+
+fn finish_candidate_resolution(resolution: CandidateResolution) -> Resolution {
+    let multiple_matches: bool = resolution.compatible_count > 1;
+    let nested_ambiguity: bool = resolution.deferred_status == ResolutionStatus.ambiguous;
+    if (multiple_matches || nested_ambiguity) {
+        return {status = ResolutionStatus.ambiguous, function_id = context::no_id()};
+    }
+    if (resolution.compatible_count == 1) {
+        return {status = ResolutionStatus.selected, function_id = resolution.selected_function};
+    }
+    return {status = resolution.deferred_status, function_id = context::no_id()};
+}
+
+enum CallSelectionByte: u8 {
+    unset = 255,
+}
+
+fn initialize_call_selections(context: *context::Context) -> bool {
+    if (context->call_selection_count != 0) {
+        return context->call_selections.length == context->call_selection_count * sizeof(usize);
+    }
+    let units: *const context::Unit = context->input.units.data as
+            *const context::Unit;
+    var selection_count: usize = 0;
+    for (var unit_index: usize = 0; unit_index < context->input.unit_count; unit_index += 1) {
+        if (@add_overflow(selection_count, units[unit_index].tree.count, &selection_count)) {
+            context->error = runtime::Error.out_of_memory;
+            return false;
+        }
+    }
+    var byte_count: usize = 0;
+    if (@mul_overflow(selection_count, sizeof(usize), &byte_count)) {
+        context->error = runtime::Error.out_of_memory;
+        return false;
+    }
+    let created: bytes::BufferResult = bytes::with_capacity(byte_count);
+    context->call_selections = created.buffer;
+    context->error = created.error;
+    if (created.error != runtime::Error.none) {
+        return false;
+    }
+    context->call_selections.length = byte_count;
+    context->call_selection_count = selection_count;
+    context->error = memory::fill(
+        context->call_selections.data, CallSelectionByte.unset as u8, context->call_selections.length);
+    return context->error == runtime::Error.none;
+}
+
+fn call_selection_index(context: *context::Context, node_id: usize, result: *usize) -> bool {
+    if (!initialize_call_selections(context)) {
+        return false;
+    }
+    if (result == null || context->current_unit >= context->input.unit_count) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let units: *const context::Unit = context->input.units.data as
+            *const context::Unit;
+    if (node_id >= units[context->current_unit].tree.count) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    var index: usize = node_id;
+    for (var unit_index: usize = 0; unit_index < context->current_unit; unit_index += 1) {
+        if (@add_overflow(index, units[unit_index].tree.count, &index)) {
+            context->error = runtime::Error.invalid_argument;
+            return false;
+        }
+    }
+    if (index >= context->call_selection_count) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    *result = index;
+    return true;
+}
+
+fn selected_call(context: *context::Context, node_id: usize) -> usize {
+    var index: usize = 0;
+    if (!call_selection_index(context, node_id, &index)) {
+        return context::no_id();
+    }
+    let selections: *const usize = context->call_selections.data as
+            *const usize;
+    return selections[index];
+}
+
+fn remember_call_selection(context: *context::Context, node_id: usize, function_id: usize) -> bool {
+    var index: usize = 0;
+    if (!call_selection_index(context, node_id, &index)) {
+        return false;
+    }
+    let selections: *usize = context->call_selections.data as *usize;
+    let existing: usize = selections[index];
+    if (existing != context::no_id() && existing != function_id) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    selections[index] = function_id;
+    return true;
+}
+
+fn resolve_call(context: *context::Context, node_id: usize, node: syntax::SyntaxNode, binding_id: usize) -> Resolution {
+    if (binding_id >= context->binding_count) {
+        context->error = runtime::Error.invalid_argument;
+        return {status = ResolutionStatus.invalid, function_id = context::no_id()};
+    }
+    let cached: usize = selected_call(context, node_id);
+    if (context->error != runtime::Error.none) {
+        return {status = ResolutionStatus.invalid, function_id = context::no_id()};
+    }
+    if (cached != context::no_id()) {
+        let functions_data: *const context::Function = context->functions.data as
+                *const context::Function;
+        if (cached >= context->function_count || functions_data[cached].binding_id != binding_id) {
+            context->error = runtime::Error.invalid_argument;
+            return {status = ResolutionStatus.invalid, function_id = context::no_id()};
+        }
+        return {status = ResolutionStatus.selected, function_id = cached};
+    }
+    let bindings: *const context::Binding = context->bindings.data as
+            *const context::Binding;
+    let candidate_count: usize = bindings[binding_id].candidate_count;
+    var candidates: CandidateResolution = candidate_resolution();
+    for (var candidate_index: usize = 0; candidate_index < candidate_count; candidate_index += 1) {
+        let function_id: usize = functions::binding_candidate(context, binding_id, candidate_index);
+        if (!functions::function_is_visible(context, function_id, context->current_unit)) {
+            continue;
+        }
+        let status: Status = candidate_call_status(context, node, function_id);
+        consider_candidate(&candidates, function_id, status);
+    }
+    let resolution: Resolution = finish_candidate_resolution(candidates);
+    if (resolution.status == ResolutionStatus.selected) {
+        if (!remember_call_selection(context, node_id, resolution.function_id)) {
+            return {status = ResolutionStatus.invalid, function_id = context::no_id()};
+        }
+    }
+    return resolution;
+}
+
+fn direct_call_binding(context: *context::Context, callee: syntax::SyntaxNode) -> usize {
+    if (callee.kind != syntax::SyntaxKind.name_expression) {
+        return context::no_id();
+    }
+    if (callee.child_count != 0) {
+        return functions::lookup_qualified_callable_binding(context, context->current_unit, callee, false);
+    }
+    let local_id: usize = builder::find_local(context, context->current_unit, callee.token_index);
+    return local_id == context::no_id() ?
+        functions::lookup_callable_binding(context, context->current_unit, callee.token_index) : context::no_id();
+}
+
+fn probe_indirect_call(
+    context: *context::Context, node: syntax::SyntaxNode,
+    callee_node: syntax::SyntaxNode, expected_type: usize) -> Result {
+    let callee: Result = expression(context, node.first_child, context::no_id());
+    if (callee.status != Status.compatible) {
+        return failure_result(callee);
+    }
+    if (!type_is_valid(context, callee.type_id)) {
+        return invalid_result();
+    }
+    let function_type: type_info::Record = context::type_record(context, callee.type_id);
+    if (function_type.kind != type_info::Kind.function_pointer) {
+        return incompatible_result();
+    }
+    let argument_count: usize = node.child_count - 1;
+    if (argument_count != function_type.field_count) {
+        return incompatible_result();
+    }
+    let fields: *const type_info::Field = context->types.fields.data as
+            *const type_info::Field;
+    var child: usize = callee_node.next_sibling;
+    for (var argument_index: usize = 0; argument_index < argument_count; argument_index += 1) {
+        let parameter_type: usize = fields[function_type.first_field + argument_index].type_id;
+        let argument: Result = expression(context, child, parameter_type);
+        if (argument.status != Status.compatible) {
+            return failure_result(argument);
+        }
+        child = context::node(context, context->current_unit, child).next_sibling;
+    }
+    return type_result(expected_type, function_type.element_type);
+}
+
+fn probe_call(context: *context::Context, node_id: usize, node: syntax::SyntaxNode, expected_type: usize) -> Result {
+    if (node.child_count == 0) {
+        return invalid_result();
+    }
+    let callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let binding_id: usize = direct_call_binding(context, callee);
+    if (binding_id == context::no_id()) {
+        return probe_indirect_call(context, node, callee, expected_type);
+    }
+    let resolution: Resolution = resolve_call(context, node_id, node, binding_id);
+    if (resolution.status == ResolutionStatus.ambiguous) {
+        return result(Status.ambiguous, context::no_id(), context::no_id());
+    }
+    if (resolution.status != ResolutionStatus.selected) {
+        return resolution.status == ResolutionStatus.invalid ? invalid_result() : incompatible_result();
+    }
+    let functions_data: *const context::Function = context->functions.data as
+            *const context::Function;
+    var call_result: Result = type_result(expected_type, functions_data[resolution.function_id].return_type);
+    call_result.function_id = resolution.function_id;
+    return call_result;
+}
+
+fn probe_va_arg(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
+    if (node.child_count != 2) {
+        return invalid_result();
+    }
+    let list_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let list: Result = expression(context, node.first_child, type_info::BuiltinType.va_list_type as usize);
+    if (list.status != Status.compatible) {
+        return failure_result(list);
+    }
+    let type_id: usize = types::resolve_type_node(context, context->current_unit, list_node.next_sibling);
+    if (!type_is_valid(context, type_id)) {
+        return invalid_result();
+    }
+    return type_info::is_scalar(context::type_record(context, type_id).kind) ?
+        type_result(expected_type, type_id) : incompatible_result();
+}
+
+fn intrinsic_index(context: *context::Context, node: syntax::SyntaxNode) -> usize {
+    for (var index: usize = 0; index < intrinsics::IntrinsicLimit.entries as usize; index += 1) {
+        let entry: intrinsics::IntrinsicEntry = intrinsics::intrinsic_entry(index);
+        if (context::token_equals_bytes(
+                context, context->current_unit, node.token_index, entry.name, entry.name_length)) {
+            return index;
+        }
+    }
+    return context::no_id();
+}
+
+fn probe_source_intrinsic(
+    context: *context::Context, entry: intrinsics::IntrinsicEntry, expected_type: usize) -> Result {
+    if (entry.lowering == intrinsics::IntrinsicLowering.source_line) {
+        return type_result(expected_type, type_info::BuiltinType.unsigned_size as usize);
+    }
+    let pointer: type_info::IdResult = type_info::table_pointer(
+        &context->types, type_info::BuiltinType.unsigned_8 as usize, true, false);
+    context->error = pointer.error;
+    return pointer.error == runtime::Error.none ? type_result(expected_type, pointer.type_id) : invalid_result();
+}
+
+fn probe_intrinsic(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
+    let index: usize = intrinsic_index(context, node);
+    if (index == context::no_id()) {
+        return invalid_result();
+    }
+    let entry: intrinsics::IntrinsicEntry = intrinsics::intrinsic_entry(index);
+    if (node.child_count != entry.arity) {
+        return invalid_result();
+    }
+    if (entry.operand_class == intrinsics::IntrinsicOperandClass.none) {
+        return probe_source_intrinsic(context, entry, expected_type);
+    }
+    if (entry.operand_class == intrinsics::IntrinsicOperandClass.embedded_file) {
+        return invalid_result();
+    }
+    let first_expected: usize = entry.operand_class == intrinsics::IntrinsicOperandClass.integer_overflow ?
+        context::no_id() : expected_type;
+    let first: Result = expression(context, node.first_child, first_expected);
+    if (first.status != Status.compatible) {
+        return first;
+    }
+    if (entry.operand_class == intrinsics::IntrinsicOperandClass.integer_overflow) {
+        return type_result(expected_type, type_info::BuiltinType.boolean as usize);
+    }
+    let first_record: type_info::Record = context::type_record(context, first.type_id);
+    let integer_class: bool = entry.operand_class == intrinsics::IntrinsicOperandClass.integer_scalar ||
+        entry.operand_class == intrinsics::IntrinsicOperandClass.integer_scalar_rotated;
+    let wide_integer: bool = entry.operand_class == intrinsics::IntrinsicOperandClass.integer_scalar_wide;
+    let float_class: bool = entry.operand_class == intrinsics::IntrinsicOperandClass.float_scalar ||
+        entry.operand_class == intrinsics::IntrinsicOperandClass.float_scalar_binary;
+    let accepted_integer_class: bool = integer_class || wide_integer;
+    let integer_is_valid: bool = type_info::is_integer(first_record.kind) && accepted_integer_class;
+    let float_is_valid: bool = type_info::is_float(first_record.kind) && float_class;
+    let operand_is_valid: bool = integer_is_valid || float_is_valid;
+    if (!operand_is_valid) {
+        return incompatible_result();
+    }
+    if (entry.arity >= 2) {
+        let first_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+        let second_expected: usize = integer_class ? type_info::BuiltinType.unsigned_size as usize : first.type_id;
+        let second: Result = expression(context, first_node.next_sibling, second_expected);
+        if (second.status != Status.compatible) {
+            return failure_result(second);
+        }
+    }
+    return type_result(expected_type, first.type_id);
+}

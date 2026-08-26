@@ -317,11 +317,10 @@ Visibility is evaluated per candidate:
 - private implementation-only overloads therefore extend local resolution
   without leaking into the imported overload set.
 
-M2.1 preserves the old lowering path only when exactly one visible candidate
-exists. A multi-candidate binding is never reduced to its first element. Until
-M2.2 installs exact argument probing and selection, attempting to call or take
-the value of such a set reports `invalid_call`; the dedicated M2.1 boundary
-test changes to successful resolution when M2.2 lands.
+The emitting lowerer preserves its established path when exactly one visible
+candidate exists. A multi-candidate binding is never reduced to its first
+element: M2.2 probes its arguments or expected function type and requires one
+exact survivor before any argument IR is emitted.
 
 Declaration collection uses a small classification state rather than mixing
 diagnostics with mutation:
@@ -388,7 +387,8 @@ For a call `name(arguments...)`, resolution is:
 9. emit one direct call.
 
 There is no ranking after filtering. Multiple survivors report
-`ambiguous_call` with deterministic candidate notes.
+`ambiguous_call`; the related location is the first visible declaration in
+canonical candidate order, independent of source-unit order.
 
 ## Side-effect-free argument probing
 
@@ -418,9 +418,31 @@ The probe:
 - lowers the selected expression exactly once after the outer candidate is
   known.
 
-This may be implemented as a small typed-expression plan for call arguments or
-as a reusable type-only semantic service. Re-running the ordinary emitting
-lowerer and rolling back buffers is not acceptable.
+M2.2 implements this as the `luna.bootstrap.middleend.semantic.expr.probe`
+type-only service. Its facade contains result construction, literals, names,
+initializers and access expressions; same-module `probe/operators.la` and
+`probe/call.la` implementation units own operator compatibility and callable
+selection. These are implementation boundaries behind one interface, not
+additional dependency-graph modules.
+
+`CandidateResolution` is a small state accumulator. Definite incompatibility
+eliminates one candidate, nested ambiguity remains ambiguity, and invalid
+expression state is retained only while no exact candidate can be selected.
+The resolver visits the already canonical candidate slice once and performs no
+ranking or source-order tie break.
+
+Nested successful calls are memoized in a lazily allocated table with one
+function ID per syntax node. The table is allocated only when a multi-candidate
+call is actually probed. Final lowering validates the cached binding and uses
+the same selected function, then lowers each explicit argument once from left
+to right. This avoids both speculative IR rollback and a sparse linear cache
+whose repeated lookups would become quadratic.
+
+Compile-time source I/O is deliberately outside candidate probing:
+`@embed(...)` must first be materialized in an explicitly typed binding before
+that binding is passed to an overload set. Malformed type syntax inside a cast
+or `va_arg` retains the ordinary type resolver's diagnostic; ordinary
+compatibility misses themselves emit no diagnostic.
 
 ## Contextual argument rules
 
@@ -479,9 +501,11 @@ Without an expected function type:
 let callback = transform; // ambiguous_function_value
 ```
 
-The target function type compares full parameter/result/calling-convention
-shape. Default parameters do not participate. Indirect calls retain their
-existing exact argument-count rule.
+The target function type compares full parameter/result shape. Default
+parameters do not participate. Luna's current function-pointer syntax is
+fixed-arity, so a variadic function cannot form a function value; direct
+variadic calls remain supported. Indirect calls retain their existing exact
+argument-count rule.
 
 ## Import behavior
 
@@ -579,7 +603,7 @@ dynamically chosen bodies.
 | --- | ---: | ---: | ---: |
 | parameter types/order | yes | yes | yes |
 | result type | no | yes | yes |
-| variadic | yes | yes | yes |
+| variadic | yes | not currently expressible | yes |
 | calling convention/extern | yes | yes | yes |
 | receiver/owner (reserved for M3) | yes | no | yes |
 | parameter names | no | no | no |
@@ -632,8 +656,9 @@ At minimum M2 appends stable kinds for:
 - external/variadic default rejection;
 - internal canonical-signature collision/invariant failure.
 
-Candidate notes are sorted canonically and point to their declarations. New
-enum values append at the end so existing diagnostic ordinals remain stable.
+The related candidate location is chosen canonically and points to its exact
+declaration. New enum values append at the end so existing diagnostic ordinals
+remain stable.
 
 ## Determinism and limits
 
