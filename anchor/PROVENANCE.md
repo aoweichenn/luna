@@ -226,3 +226,20 @@ the final test run passed 252/252, including interface/private defaults,
 constant and layout folding, exact enum typing, function-pointer arity,
 overload ambiguity and invalid placement/expression/mount diagnostics. The
 stage-fixed executables were copied here and `SHA256SUMS` refreshed.
+
+## 2026-08-26: promotion to the M2.4 value-category toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`87014f16abd7281da2e3ec875dd652849f834748`
+(`feat: unify expression value categories`). The promoted compiler replaces
+three expression booleans with one closed, one-word value-category enum shared
+by emitting lowering and overload probing. Pointer qualification and
+member/index projection use centralized strategies; writable bitfields remain
+assignable but non-addressable, while aggregate temporaries remain readable
+but cannot be assigned or addressed. Remote x86-64 verification on `caw`
+confirmed every stage-next/stage-fixed assembly, object and executable artifact
+byte-identical; the final test run passed 256/256, including temporary
+member/index overload probing and rejected temporary address/assignment cases.
+The stage-fixed executables were copied here and `SHA256SUMS` refreshed. M2 is
+complete with this anchor; M3 may consume the shared callable and receiver
+foundations.
