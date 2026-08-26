@@ -120,17 +120,17 @@ landed as m1.7 by explicit FFI decision, with declared-width arguments.
 - Threads/atomics (standard library per syntax-plan decision 6),
   `_BitInt(N)`, macros: remain out of scope per `syntax-plan.md`.
 
-## Current M2 direction
+## Completed M2 callable foundation
 
-M2.0-M2.3 have landed the versioned canonical type/signature encoding,
+M2.0-M2.4 have landed the versioned canonical type/signature encoding,
 signature-bearing Luna symbols, explicit callable bindings, deterministic
 candidate slices, interface/multi-implementation matching by overload key,
 side-effect-free argument probing, exact call resolution and expected
 function-type selection, plus folded trailing defaults inserted after overload
-selection, as described in
-[`m2-callable-infrastructure.md`](m2-callable-infrastructure.md). M2.4 is next:
-one reusable value-category service for addressability, mutability and
-temporary state before M3 receiver binding.
+selection and one shared value-category service, as described in
+[`m2-callable-infrastructure.md`](m2-callable-infrastructure.md). The callable
+foundation is complete; M3.0 may now add class metadata, access, overloaded
+constructors and direct methods without parallel callable machinery.
 
 The ownership-free class system follows as M3 in
 [`m3-oop-design.md`](m3-oop-design.md). It consumes M2 for overloaded methods

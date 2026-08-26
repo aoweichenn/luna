@@ -16,8 +16,7 @@ import luna.std.memory as memory;
 
 fn result(status: Status, type_id: usize, function_id: usize) -> Result {
     return {
-        status = status, type_id = type_id, function_id = function_id,
-        lvalue = false, mutable_lvalue = false, volatile_lvalue = false,
+        status = status, type_id = type_id, function_id = function_id, category = category::Category.rvalue,
     };
 }
 
@@ -57,6 +56,15 @@ fn type_result(expected_type: usize, actual_type: usize) -> Result {
         return incompatible_result();
     }
     return result(Status.compatible, actual_type, context::no_id());
+}
+
+fn materialized_result(context: *context::Context, expected_type: usize, actual_type: usize) -> Result {
+    var materialized: Result = type_result(expected_type, actual_type);
+    if (materialized.status == Status.compatible &&
+        type_info::is_memory(context::type_record(context, actual_type).kind)) {
+        materialized.category = category::Category.temporary;
+    }
+    return materialized;
 }
 
 fn type_is_valid(context: *context::Context, type_id: usize) -> bool {
@@ -154,9 +162,7 @@ fn probe_name(context: *context::Context, node: syntax::SyntaxNode, expected_typ
                     *const context::Local;
             let local: context::Local = locals[local_id];
             var local_result: Result = type_result(expected_type, local.type_id);
-            local_result.lvalue = true;
-            local_result.mutable_lvalue = local.mutable_binding;
-            local_result.volatile_lvalue = local.volatile_binding;
+            local_result.category = category::lvalue(local.mutable_binding, local.volatile_binding);
             return local_result;
         }
     }
@@ -186,7 +192,7 @@ fn probe_initializer(context: *context::Context, node: syntax::SyntaxNode, expec
         let nullable_is_valid: bool = record.kind == type_info::Kind.pointer;
         let zero_is_valid: bool = scalar_is_valid || nullable_is_valid;
         return zero_is_valid || type_info::is_memory(record.kind) ?
-            type_result(expected_type, expected_type) : incompatible_result();
+            materialized_result(context, expected_type, expected_type) : incompatible_result();
     }
     let aggregate_kind: bool = record.kind == type_info::Kind.structure || record.kind == type_info::Kind.record_union;
     let initializer_is_valid: bool = aggregate_kind || record.kind == type_info::Kind.array;
@@ -244,7 +250,7 @@ fn probe_initializer(context: *context::Context, node: syntax::SyntaxNode, expec
             return failure_result(value);
         }
     }
-    return type_result(expected_type, expected_type);
+    return materialized_result(context, expected_type, expected_type);
 }
 
 fn probe_enum_member(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
@@ -294,17 +300,15 @@ fn probe_member(context: *context::Context, node: syntax::SyntaxNode, expected_t
     }
     let operation: lexer::TokenKind = context::token(context, context->current_unit, node.token_index).kind;
     var owner_type: usize = base.type_id;
-    var mutable_lvalue: bool = base.mutable_lvalue;
-    var volatile_lvalue: bool = base.volatile_lvalue;
+    var member_category: category::Category = category::project(base.category);
     let base_record: type_info::Record = context::type_record(context, base.type_id);
     if (operation == lexer::TokenKind.arrow) {
         if (base_record.kind != type_info::Kind.pointer) {
             return incompatible_result();
         }
         owner_type = base_record.element_type;
-        mutable_lvalue = (base_record.flags & (type_info::Flag.read_only as usize)) == 0;
-        volatile_lvalue = (base_record.flags & (type_info::Flag.volatile_pointee as usize)) != 0;
-    } else if (operation != lexer::TokenKind.dot || !base.lvalue) {
+        member_category = category::pointee(base_record);
+    } else if (operation != lexer::TokenKind.dot || !category::has_storage(base.category)) {
         return incompatible_result();
     }
     let owner: type_info::Record = context::type_record(context, owner_type);
@@ -320,9 +324,7 @@ fn probe_member(context: *context::Context, node: syntax::SyntaxNode, expected_t
     let fields: *const type_info::Field = context->types.fields.data as
             *const type_info::Field;
     var member_result: Result = type_result(expected_type, fields[lookup.field_id].type_id);
-    member_result.lvalue = true;
-    member_result.mutable_lvalue = mutable_lvalue;
-    member_result.volatile_lvalue = volatile_lvalue;
+    member_result.category = member_category;
     return member_result;
 }
 
@@ -342,13 +344,10 @@ fn probe_index(context: *context::Context, node: syntax::SyntaxNode, expected_ty
         return incompatible_result();
     }
     var indexed: Result = type_result(expected_type, record.element_type);
-    indexed.lvalue = true;
     if (record.kind == type_info::Kind.array) {
-        indexed.mutable_lvalue = base.mutable_lvalue;
-        indexed.volatile_lvalue = base.volatile_lvalue;
+        indexed.category = category::project(base.category);
     } else {
-        indexed.mutable_lvalue = (record.flags & (type_info::Flag.read_only as usize)) == 0;
-        indexed.volatile_lvalue = (record.flags & (type_info::Flag.volatile_pointee as usize)) != 0;
+        indexed.category = category::pointee(record);
     }
     return indexed;
 }

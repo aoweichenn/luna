@@ -199,7 +199,7 @@ source bytes。
 
 ### 已有低风险快速跳过
 
-当前 `library/`、`compiler/` 和 `drivers/` 中共有 434 条 import，其中 392 条是
+当前 `library/`、`compiler/` 和 `drivers/` 中共有 447 条 import，其中 405 条是
 alias import，没有一条 selective import。实现已经按 `selective_node != no_id`
 跳过普通和 alias imports，因此当前生产源码不会进入 flat-name 的二次全表验证。
 

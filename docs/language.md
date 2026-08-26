@@ -467,9 +467,10 @@ same syntax, and a memory field may be initialized from an lvalue of its exact
 type. Structures, unions and arrays may be copied between exact same-typed
 local lvalues and may be passed or returned by value. Aggregate call arguments
 are snapshotted in source order, and returned temporaries support immutable
-member or array-element access. Aggregate conditional expressions require one
-exact result type and evaluate only the selected branch. Aggregates still
-cannot be compared or used with scalar operators. Reading a union field
+member or array-element access. Such temporary projections may be read but not
+assigned or addressed. Aggregate conditional expressions require one exact
+result type and evaluate only the selected branch. Aggregates still cannot be
+compared or used with scalar operators. Reading a union field
 interprets the bytes currently in the overlapping storage; Luna does not
 track an active union member.
 
@@ -778,11 +779,12 @@ value.field
 pointer->field
 ```
 
-`.` requires a structure or union lvalue. `->` requires a pointer to a
-structure or union, checks that the pointer is non-null, and preserves the
-pointer's read-only qualification for the selected field. Member operations
-may be chained with indexing. `Enum.member` is the separate scoped-enum
-constant form and never denotes an assignable lvalue.
+`.` requires stored structure or union storage: either an lvalue or an
+aggregate temporary. `->` requires a pointer to a structure or union, checks
+that the pointer is non-null, and preserves the pointer's read-only
+qualification for the selected field. Member operations may be chained with
+indexing. `Enum.member` is the separate scoped-enum constant form and never
+denotes an assignable lvalue.
 
 Unary operators are `+ - ! ~ * &`.
 

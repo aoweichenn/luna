@@ -161,11 +161,12 @@ fn probe_unary(context: *context::Context, node: syntax::SyntaxNode, expected_ty
         if (operand.status != Status.compatible) {
             return failure_result(operand);
         }
-        if (!operand.lvalue) {
+        if (!category::is_addressable(operand.category)) {
             return incompatible_result();
         }
         let pointer: type_info::IdResult = type_info::table_pointer(
-            &context->types, operand.type_id, !operand.mutable_lvalue, operand.volatile_lvalue);
+            &context->types, operand.type_id, !category::is_writable(operand.category),
+            category::is_volatile(operand.category));
         context->error = pointer.error;
         return pointer.error == runtime::Error.none ? type_result(expected_type, pointer.type_id) : invalid_result();
     }
@@ -191,9 +192,7 @@ fn probe_unary(context: *context::Context, node: syntax::SyntaxNode, expected_ty
             return incompatible_result();
         }
         var dereferenced: Result = type_result(expected_type, record.element_type);
-        dereferenced.lvalue = true;
-        dereferenced.mutable_lvalue = (record.flags & (type_info::Flag.read_only as usize)) == 0;
-        dereferenced.volatile_lvalue = (record.flags & (type_info::Flag.volatile_pointee as usize)) != 0;
+        dereferenced.category = category::pointee(record);
         return dereferenced;
     }
     let numeric: bool = type_info::is_integer(record.kind) || type_info::is_float(record.kind);
@@ -281,5 +280,6 @@ fn probe_conditional(context: *context::Context, node: syntax::SyntaxNode, expec
         return then_value;
     }
     let else_value: Result = expression(context, then_node.next_sibling, then_value.type_id);
-    return else_value.status == Status.compatible ? type_result(expected_type, then_value.type_id) : else_value;
+    return else_value.status == Status.compatible ?
+        materialized_result(context, expected_type, then_value.type_id) : else_value;
 }

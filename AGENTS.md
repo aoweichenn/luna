@@ -79,7 +79,7 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
 - Semantic lowering implementations live under
   `compiler/src/middleend/semantic/`, with the pipeline entry remaining
   in `compiler/src/middleend/sema.la`; imports flow strictly downward in
-  this order: `context` (+ `context/{lookup,builder}`),
+  this order: `value`, `context` (+ `context/{lookup,builder}`),
   `attributes`, `modules`, `types` (+ `types/{lookup,visibility}`),
   `consteval` (+ `consteval/{model,engine}`), `intrinsics`,
   `functions` (+ `functions/ir`), `expr` (+ `expr/{base,numeric,

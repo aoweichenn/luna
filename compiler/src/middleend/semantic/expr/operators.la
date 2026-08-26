@@ -12,6 +12,7 @@ import luna.bootstrap.middleend.semantic.expr.base as base;
 import luna.bootstrap.middleend.semantic.expr.numeric as numeric;
 import luna.bootstrap.middleend.semantic.functions as functions;
 import luna.bootstrap.middleend.semantic.types as types;
+import luna.bootstrap.middleend.semantic.value as category;
 import luna.bootstrap.middleend.type as type_info;
 import luna.runtime as runtime;
 
@@ -157,7 +158,7 @@ fn lower_unary(context: *context::Context, node: syntax::SyntaxNode, expected_ty
                 context::empty_span(), operand.bitfield_segment);
             return base::invalid_expression();
         }
-        if (!operand.lvalue) {
+        if (!category::is_addressable(operand.category)) {
             context::add_diagnostic(
                 context, context::DiagnosticKind.invalid_lvalue, context->current_unit, node.span, context::no_id(),
                 context::empty_span(), operand.type_id);
@@ -173,15 +174,14 @@ fn lower_unary(context: *context::Context, node: syntax::SyntaxNode, expected_ty
         }
         let pointer: type_info::IdResult =
             type_info::table_pointer(
-                &context->types, operand.type_id, !operand.mutable_lvalue, operand.volatile_lvalue);
+                &context->types, operand.type_id, !category::is_writable(operand.category),
+                category::is_volatile(operand.category));
         context->error = pointer.error;
         var result: context::Expression = operand;
         result.type_id = pointer.type_id;
         result.value_id = operand.address_id;
         result.address_id = context::no_id();
-        result.lvalue = false;
-        result.mutable_lvalue = false;
-        result.volatile_lvalue = false;
+        result.category = category::Category.rvalue;
         return result;
     }
     if (operation == lexer::TokenKind.star) {
@@ -198,9 +198,7 @@ fn lower_unary(context: *context::Context, node: syntax::SyntaxNode, expected_ty
         builder::emit_void(context, check);
         let result: context::Expression = {
             type_id = operand_record.element_type, value_id = context::no_id(), address_id = operand.value_id,
-            constant_value = 0, has_constant = false, lvalue = true, mutable_lvalue = (operand_record.flags &
-                    (type_info::Flag.read_only as usize)) == 0, volatile_lvalue = (operand_record.flags &
-                    (type_info::Flag.volatile_pointee as usize)) != 0, valid = true,
+            constant_value = 0, has_constant = false, category = category::pointee(operand_record), valid = true,
             bitfield_segment = context::no_id(),
         };
         return builder::load_lvalue(context, node, result);
@@ -248,7 +246,7 @@ fn lower_unary(context: *context::Context, node: syntax::SyntaxNode, expected_ty
     }
     return {
         type_id = operand.type_id, value_id = value_id, address_id = context::no_id(), constant_value = constant_value,
-        has_constant = has_constant, lvalue = false, mutable_lvalue = false, volatile_lvalue = false,
+        has_constant = has_constant, category = category::Category.rvalue,
         valid = value_id != context::no_id(), bitfield_segment = context::no_id(),
     };
 }
@@ -390,7 +388,7 @@ fn lower_cast(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
     let value_id: usize = builder::emit_value(context, instruction, target_type);
     return {
         type_id = target_type, value_id = value_id, address_id = context::no_id(), constant_value = 0,
-        has_constant = false, lvalue = false, mutable_lvalue = false, volatile_lvalue = false,
+        has_constant = false, category = category::Category.rvalue,
         valid = value_id != context::no_id(), bitfield_segment = context::no_id(),
     };
 }
@@ -453,12 +451,12 @@ fn lower_short_circuit(
     context->current_block = merge_block;
     let source: context::Expression = {
         type_id = type_info::BuiltinType.boolean as usize, value_id = none, address_id = address, constant_value = 0,
-        has_constant = false, lvalue = true, mutable_lvalue = false, volatile_lvalue = false, valid = true,
+        has_constant = false, category = category::lvalue(false, false), valid = true,
         bitfield_segment = context::no_id(),
     };
     let result: context::Expression = builder::load_lvalue(context, node, source);
     var final_result: context::Expression = result;
-    final_result.lvalue = false;
+    final_result.category = category::Category.rvalue;
     return final_result;
 }
 
@@ -546,7 +544,7 @@ fn lower_binary(context: *context::Context, node: syntax::SyntaxNode, expected_t
         let value_id: usize = emit_pointer_offset(context, node, pointer_value, pointer_type, count_value);
         return {
             type_id = pointer_type, value_id = value_id, address_id = context::no_id(), constant_value = 0,
-            has_constant = false, lvalue = false, mutable_lvalue = false, volatile_lvalue = false,
+            has_constant = false, category = category::Category.rvalue,
             valid = value_id != context::no_id(), bitfield_segment = context::no_id(),
         };
     }
@@ -575,8 +573,8 @@ fn lower_binary(context: *context::Context, node: syntax::SyntaxNode, expected_t
         }
         return {
             type_id = type_info::BuiltinType.unsigned_size as usize, value_id = byte_distance,
-            address_id = context::no_id(), constant_value = 0, has_constant = false, lvalue = false,
-            mutable_lvalue = false, volatile_lvalue = false, valid = byte_distance != context::no_id(),
+            address_id = context::no_id(), constant_value = 0, has_constant = false,
+            category = category::Category.rvalue, valid = byte_distance != context::no_id(),
             bitfield_segment = context::no_id(),
         };
     }
@@ -600,7 +598,7 @@ fn lower_binary(context: *context::Context, node: syntax::SyntaxNode, expected_t
         let value_id: usize = builder::emit_value(context, instruction, type_info::BuiltinType.boolean as usize);
         return {
             type_id = type_info::BuiltinType.boolean as usize, value_id = value_id, address_id = context::no_id(),
-            constant_value = 0, has_constant = false, lvalue = false, mutable_lvalue = false, volatile_lvalue = false,
+            constant_value = 0, has_constant = false, category = category::Category.rvalue,
             valid = value_id != context::no_id(), bitfield_segment = context::no_id(),
         };
     }
@@ -635,7 +633,7 @@ fn lower_binary(context: *context::Context, node: syntax::SyntaxNode, expected_t
     let value_id: usize = builder::emit_value(context, instruction, result_type);
     return {
         type_id = result_type, value_id = value_id, address_id = context::no_id(), constant_value = 0,
-        has_constant = false, lvalue = false, mutable_lvalue = false, volatile_lvalue = false,
+        has_constant = false, category = category::Category.rvalue,
         valid = value_id != context::no_id(), bitfield_segment = context::no_id(),
     };
 }
@@ -688,18 +686,18 @@ fn lower_conditional(
     if (type_info::is_memory(type_record.kind)) {
         return {
             type_id = then_value.type_id, value_id = none, address_id = result_address, constant_value = 0,
-            has_constant = false, lvalue = false, mutable_lvalue = false, volatile_lvalue = false, valid = true,
-            bitfield_segment = context::no_id(),
+            has_constant = false, category = category::Category.temporary, valid = true,
+                bitfield_segment = context::no_id(),
         };
     }
     let source: context::Expression = {
         type_id = then_value.type_id, value_id = none, address_id = result_address, constant_value = 0,
-        has_constant = false, lvalue = true, mutable_lvalue = false, volatile_lvalue = false, valid = true,
+        has_constant = false, category = category::lvalue(false, false), valid = true,
         bitfield_segment = context::no_id(),
     };
     let result: context::Expression = builder::load_lvalue(context, node, source);
     var final_result: context::Expression = result;
-    final_result.lvalue = false;
+    final_result.category = category::Category.rvalue;
     return final_result;
 }
 
@@ -719,7 +717,7 @@ fn lower_va_arg(context: *context::Context, node: syntax::SyntaxNode, lowerer: a
     if (!list.valid) {
         return list;
     }
-    if (!list.lvalue || !list.mutable_lvalue || list.type_id != (type_info::BuiltinType.va_list_type as usize)) {
+    if (!category::is_assignable(list.category) || list.type_id != (type_info::BuiltinType.va_list_type as usize)) {
         context::add_diagnostic(
             context, context::DiagnosticKind.invalid_va_list, context->current_unit, node.span, none,
             context::empty_span(), 0);
@@ -746,8 +744,7 @@ fn lower_va_arg(context: *context::Context, node: syntax::SyntaxNode, lowerer: a
     let value_id: usize = builder::emit_value(context, instruction, type_id);
     return {
         type_id = type_id, value_id = value_id, address_id = none, constant_value = 0, has_constant = false,
-        lvalue = false, mutable_lvalue = false, volatile_lvalue = false, valid = value_id != none,
-        bitfield_segment = none,
+        category = category::Category.rvalue, valid = value_id != none, bitfield_segment = none,
     };
 }
 

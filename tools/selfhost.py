@@ -97,6 +97,7 @@ LIBRARIES = {
     "type": compiler_module("luna.bootstrap.middleend.type", "middleend/type"),
     "ir": compiler_module("luna.bootstrap.middleend.ir", "middleend/ir"),
     "ir_verify": compiler_module("luna.bootstrap.middleend.ir.verify", "middleend/ir/verify"),
+    "sem_value": compiler_module("luna.bootstrap.middleend.semantic.value", "middleend/semantic/value"),
     "sem_ctx": compiler_module("luna.bootstrap.middleend.semantic.context", "middleend/semantic/context"),
     "sem_ctx_lookup": compiler_module(
         "luna.bootstrap.middleend.semantic.context.lookup",

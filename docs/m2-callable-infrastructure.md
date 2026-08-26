@@ -645,20 +645,32 @@ M2 also consolidates the existing expression flags needed by future receivers
 without adding method syntax:
 
 ```text
-ValueCategory {
-    type_id
-    address_id
-    lvalue
-    mutable
-    volatile
-    temporary
-}
+ValueCategory =
+    rvalue | temporary |
+    read_only_lvalue | writable_lvalue |
+    volatile_lvalue | writable_volatile_lvalue |
+    read_only_bitfield | writable_bitfield |
+    volatile_bitfield | writable_volatile_bitfield |
+    temporary_bitfield
 ```
 
-The service must answer whether an expression is addressable, mutable,
-read-only or a temporary. M3 will build `ReceiverBinding` from this service for
-`object.method()` and `pointer->method()` rather than embedding another set of
-ad-hoc checks in member lowering.
+M2.4 implements this as the dependency-root
+`luna.bootstrap.middleend.semantic.value` module. `Expression` and the
+non-emitting probe `Result` both carry one `Category`; the former three
+`lvalue/mutable_lvalue/volatile_lvalue` booleans no longer exist.
+
+The closed enum admits no contradictory flag combination and occupies one
+target word. `pointee` derives qualification from a pointer record, while
+`project` preserves lvalue or temporary state through member/index access.
+Predicates distinguish stored, addressable, assignable, writable, volatile and
+temporary values. Bitfields remain assignable when writable but are never
+addressable. Common rvalue/temporary construction is a direct enum constant,
+avoiding helper-call overhead in the unoptimized self-hosting compiler.
+
+Aggregate calls, initializers and memory conditional results are temporaries.
+Their fields and elements remain readable, including during overload probing,
+but cannot be assigned or addressed. M3 will build `ReceiverBinding` from this
+service rather than embedding another set of ad-hoc checks in member lowering.
 
 M2 does not add reference types. Existing explicit pointers remain sufficient
 for future receivers and avoid introducing another alias/lifetime surface.

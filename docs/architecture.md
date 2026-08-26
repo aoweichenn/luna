@@ -204,6 +204,14 @@ in a lazily allocated syntax-node table. The emitting lowerer then consumes the
 selected function and evaluates each argument exactly once. Single-candidate
 calls retain the established lowering path.
 
+Value-category semantics live in the dependency-root `semantic.value` module,
+below semantic context. Emitting expressions and non-emitting probe results
+carry the same closed one-word category enum. Central constructors and
+predicates derive pointer qualification, project member/index storage and
+decide addressability or assignability; bitfields are represented as
+non-addressable storage rather than special-casing boolean triples at every
+consumer.
+
 Default parameters reuse that callable pipeline. One `DefaultProfile` records
 the required arity and validates trailing placement and declaration mounts;
 each accepted parameter stores a folded integer, boolean or null value. The

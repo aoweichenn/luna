@@ -12,6 +12,7 @@ import luna.bootstrap.middleend.semantic.expr.base as base;
 import luna.bootstrap.middleend.semantic.expr.probe as probe;
 import luna.bootstrap.middleend.semantic.functions as functions;
 import luna.bootstrap.middleend.semantic.types as types;
+import luna.bootstrap.middleend.semantic.value as category;
 import luna.bootstrap.middleend.type as type_info;
 import luna.runtime as runtime;
 import luna.std.bytes as bytes;
@@ -55,8 +56,7 @@ fn function_value(context: *context::Context, node: syntax::SyntaxNode, function
     let value_id: usize = builder::emit_value(context, instruction, pointer_type);
     return {
         type_id = pointer_type, value_id = value_id, address_id = none, constant_value = 0, has_constant = false,
-        lvalue = false, mutable_lvalue = false, volatile_lvalue = false, valid = value_id != none,
-        bitfield_segment = context::no_id(),
+        category = category::Category.rvalue, valid = value_id != none, bitfield_segment = context::no_id(),
     };
 }
 
@@ -200,9 +200,8 @@ fn lower_name(context: *context::Context, node: syntax::SyntaxNode, expected_typ
         context, node, local.slot_id, local.type_id, !local.mutable_binding, local.volatile_binding);
     let expression: context::Expression = {
         type_id = local.type_id, value_id = context::no_id(), address_id = address_id, constant_value = 0,
-        has_constant = false, lvalue = true, mutable_lvalue = local.mutable_binding,
-        volatile_lvalue = local.volatile_binding, valid = address_id != context::no_id(),
-        bitfield_segment = context::no_id(),
+        has_constant = false, category = category::lvalue(local.mutable_binding, local.volatile_binding),
+        valid = address_id != context::no_id(), bitfield_segment = context::no_id(),
     };
     return builder::load_lvalue(context, node, expression);
 }
@@ -303,8 +302,8 @@ fn emit_bitfield_extract(
 }
 
 fn lower_bitfield_member(
-    context: *context::Context, node: syntax::SyntaxNode, owner_address: usize, segment_id: usize, mutable_lvalue: bool,
-    volatile_lvalue: bool) -> context::Expression {
+    context: *context::Context, node: syntax::SyntaxNode, owner_address: usize,
+    segment_id: usize, member_category: category::Category) -> context::Expression {
     let none: usize = context::no_id();
     let segment: context::BitfieldSegment = builder::bitfield_segment(context, segment_id);
     let field_id: usize = builder::bitfield_storage_field(context, segment);
@@ -315,7 +314,9 @@ fn lower_bitfield_member(
             *const type_info::Field;
     let field: type_info::Field = fields[field_id];
     let pointer: type_info::IdResult =
-        type_info::table_pointer(&context->types, field.type_id, !mutable_lvalue, volatile_lvalue);
+        type_info::table_pointer(
+            &context->types, field.type_id, !category::is_writable(member_category),
+            category::is_volatile(member_category));
     context->error = pointer.error;
     var instruction: ir::Instruction = builder::instruction(ir::Opcode.member_address, node);
     instruction.left = owner_address;
@@ -325,8 +326,7 @@ fn lower_bitfield_member(
         builder::load_lvalue(
             context, node, {
                 type_id = field.type_id, value_id = none, address_id = address_id, constant_value = 0,
-                has_constant = false, lvalue = true, mutable_lvalue = mutable_lvalue, volatile_lvalue = volatile_lvalue,
-                valid = address_id != none, bitfield_segment = none,
+                has_constant = false, category = member_category, valid = address_id != none, bitfield_segment = none,
             });
     if (!loaded.valid) {
         return base::invalid_expression();
@@ -335,7 +335,7 @@ fn lower_bitfield_member(
         emit_bitfield_extract(context, node, field.type_id, loaded.value_id, segment.bit_offset, segment.bit_width);
     return {
         type_id = field.type_id, value_id = extracted, address_id = address_id, constant_value = 0,
-        has_constant = false, lvalue = true, mutable_lvalue = mutable_lvalue, volatile_lvalue = volatile_lvalue,
+        has_constant = false, category = category::as_bitfield(member_category),
         valid = extracted != none, bitfield_segment = segment_id,
     };
 }
@@ -408,8 +408,7 @@ fn lower_member(context: *context::Context, node: syntax::SyntaxNode, lowerer: a
     }
     var owner_type: usize = base.type_id;
     var owner_address: usize = base.address_id;
-    var mutable_lvalue: bool = base.mutable_lvalue;
-    var volatile_lvalue: bool = base.volatile_lvalue;
+    var member_category: category::Category = category::project(base.category);
     if (operation == lexer::TokenKind.arrow) {
         let pointer_record: type_info::Record = context::type_record(context, base.type_id);
         if (pointer_record.kind != type_info::Kind.pointer) {
@@ -420,8 +419,7 @@ fn lower_member(context: *context::Context, node: syntax::SyntaxNode, lowerer: a
         }
         owner_type = pointer_record.element_type;
         owner_address = base.value_id;
-        mutable_lvalue = (pointer_record.flags & (type_info::Flag.read_only as usize)) == 0;
-        volatile_lvalue = (pointer_record.flags & (type_info::Flag.volatile_pointee as usize)) != 0;
+        member_category = category::pointee(pointer_record);
         var check: ir::Instruction = builder::instruction(ir::Opcode.null_check, node);
         check.left = owner_address;
         builder::emit_void(context, check);
@@ -450,7 +448,7 @@ fn lower_member(context: *context::Context, node: syntax::SyntaxNode, lowerer: a
         let segment_id: usize =
             builder::lookup_bitfield_segment(context, owner_type, context->current_unit, name_node.token_index);
         if (segment_id != context::no_id()) {
-            return lower_bitfield_member(context, node, owner_address, segment_id, mutable_lvalue, volatile_lvalue);
+            return lower_bitfield_member(context, node, owner_address, segment_id, member_category);
         }
         context::add_diagnostic(
             context, context::DiagnosticKind.unknown_field, context->current_unit, name_node.span, context::no_id(),
@@ -465,7 +463,9 @@ fn lower_member(context: *context::Context, node: syntax::SyntaxNode, lowerer: a
         // A flexible member access yields *T at the member offset, not an
         // array lvalue; it composes with raw-pointer indexing and arithmetic.
         let element_pointer: type_info::IdResult =
-            type_info::table_pointer(&context->types, field_record.element_type, !mutable_lvalue, volatile_lvalue);
+            type_info::table_pointer(
+                &context->types, field_record.element_type, !category::is_writable(member_category),
+                category::is_volatile(member_category));
         context->error = element_pointer.error;
         var flexible_instruction: ir::Instruction = builder::instruction(ir::Opcode.member_address, node);
         flexible_instruction.left = owner_address;
@@ -473,12 +473,14 @@ fn lower_member(context: *context::Context, node: syntax::SyntaxNode, lowerer: a
         let flexible_address: usize = builder::emit_value(context, flexible_instruction, element_pointer.type_id);
         return {
             type_id = element_pointer.type_id, value_id = flexible_address, address_id = context::no_id(),
-            constant_value = 0, has_constant = false, lvalue = false, mutable_lvalue = false, volatile_lvalue = false,
+            constant_value = 0, has_constant = false, category = category::Category.rvalue,
             valid = flexible_address != context::no_id(), bitfield_segment = context::no_id(),
         };
     }
     let pointer: type_info::IdResult =
-        type_info::table_pointer(&context->types, field.type_id, !mutable_lvalue, volatile_lvalue);
+        type_info::table_pointer(
+            &context->types, field.type_id, !category::is_writable(member_category),
+            category::is_volatile(member_category));
     context->error = pointer.error;
     var instruction: ir::Instruction = builder::instruction(ir::Opcode.member_address, node);
     instruction.left = owner_address;
@@ -486,7 +488,7 @@ fn lower_member(context: *context::Context, node: syntax::SyntaxNode, lowerer: a
     let address_id: usize = builder::emit_value(context, instruction, pointer.type_id);
     let result: context::Expression = {
         type_id = field.type_id, value_id = context::no_id(), address_id = address_id, constant_value = 0,
-        has_constant = false, lvalue = true, mutable_lvalue = mutable_lvalue, volatile_lvalue = volatile_lvalue,
+        has_constant = false, category = member_category,
         valid = address_id != context::no_id(), bitfield_segment = context::no_id(),
     };
     return builder::load_lvalue(context, node, result);
@@ -511,13 +513,11 @@ fn lower_index(context: *context::Context, node: syntax::SyntaxNode, lowerer: ap
     let base_record: type_info::Record = context::type_record(context, base.type_id);
     var element_type: usize = context::no_id();
     var base_address: usize = context::no_id();
-    var mutable_lvalue: bool = false;
-    var volatile_lvalue: bool = false;
+    var element_category: category::Category = category::Category.rvalue;
     if (base_record.kind == type_info::Kind.array && base.address_id != context::no_id()) {
         element_type = base_record.element_type;
         base_address = base.address_id;
-        mutable_lvalue = base.lvalue && base.mutable_lvalue;
-        volatile_lvalue = base.lvalue && base.volatile_lvalue;
+        element_category = category::project(base.category);
         let bound: context::Expression =
             builder::emit_integer_constant(
                 context, node, type_info::BuiltinType.unsigned_size as usize, base_record.element_count as u64);
@@ -528,8 +528,7 @@ fn lower_index(context: *context::Context, node: syntax::SyntaxNode, lowerer: ap
     } else if (base_record.kind == type_info::Kind.pointer) {
         element_type = base_record.element_type;
         base_address = base.value_id;
-        mutable_lvalue = (base_record.flags & (type_info::Flag.read_only as usize)) == 0;
-        volatile_lvalue = (base_record.flags & (type_info::Flag.volatile_pointee as usize)) != 0;
+        element_category = category::pointee(base_record);
         if (context::type_record(
                 context, element_type).kind == type_info::Kind.type_void) {
             element_type = context::no_id();
@@ -547,7 +546,9 @@ fn lower_index(context: *context::Context, node: syntax::SyntaxNode, lowerer: ap
     }
     let element_record: type_info::Record = context::type_record(context, element_type);
     let pointer: type_info::IdResult =
-        type_info::table_pointer(&context->types, element_type, !mutable_lvalue, volatile_lvalue);
+        type_info::table_pointer(
+            &context->types, element_type, !category::is_writable(element_category),
+            category::is_volatile(element_category));
     context->error = pointer.error;
     var offset: ir::Instruction = builder::instruction(ir::Opcode.pointer_offset, node);
     offset.left = base_address;
@@ -556,7 +557,7 @@ fn lower_index(context: *context::Context, node: syntax::SyntaxNode, lowerer: ap
     let address_id: usize = builder::emit_value(context, offset, pointer.type_id);
     let result: context::Expression = {
         type_id = element_type, value_id = context::no_id(), address_id = address_id, constant_value = 0,
-        has_constant = false, lvalue = true, mutable_lvalue = mutable_lvalue, volatile_lvalue = volatile_lvalue,
+        has_constant = false, category = element_category,
         valid = address_id != context::no_id(), bitfield_segment = context::no_id(),
     };
     return builder::load_lvalue(context, node, result);
@@ -820,10 +821,11 @@ fn lower_call(
         builder::emit_void(context, marker);
         context->current_block = builder::add_current_block(context);
     }
+    let result_category: category::Category = type_info::is_memory(return_record.kind) ?
+        category::Category.temporary : category::Category.rvalue;
     return {
         type_id = return_type, value_id = type_info::is_memory(return_record.kind) ? none : result_value, address_id =
             type_info::is_memory(return_record.kind) ? result_value : none, constant_value = 0, has_constant = false,
-        lvalue = false, mutable_lvalue = false, volatile_lvalue = false, valid = instruction_id != none,
-        bitfield_segment = context::no_id(),
+        category = result_category, valid = instruction_id != none, bitfield_segment = context::no_id(),
     };
 }
