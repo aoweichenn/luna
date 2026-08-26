@@ -1,0 +1,357 @@
+module luna.bootstrap.middleend.semantic.functions;
+
+enum SignatureFormat: usize {
+    version = 1, u32_byte_count = 4, u64_byte_count = 8, bits_per_byte = 8, byte_mask = 0xff, maximum_u32 = 0xffffffff,
+}
+
+enum SignatureCallableKind: usize {
+    free_function = 0,
+}
+
+enum SignatureCallingConvention: usize {
+    system_v = 0,
+}
+
+enum SignatureOwnerKind: usize {
+    none = 0,
+}
+
+enum SignatureReceiverKind: usize {
+    none = 0,
+}
+
+enum SignatureFunctionFlag: usize {
+    variadic = 1, no_return = 2, external = 4,
+}
+
+enum SignatureTypeQualifier: usize {
+    read_only = 1, volatile_pointee = 2,
+}
+
+enum SignatureTypeTag: usize {
+    invalid = 0, type_void = 1, boolean = 2, signed_8 = 3, signed_16 = 4, signed_32 = 5, signed_64 = 6,
+    signed_size = 7, unsigned_8 = 8, unsigned_16 = 9, unsigned_32 = 10, unsigned_64 = 11, unsigned_size = 12,
+    float_32 = 13, float_64 = 14, pointer = 15, array = 16, structure = 17, record_union = 18, enumeration = 19,
+    function_pointer = 20, va_list_type = 21,
+}
+
+enum SignatureTypeTagMap: usize {
+    kind_count = 23,
+}
+
+struct SignatureWriter {
+    output: bytes::Buffer;
+    error: runtime::Error;
+}
+
+fn signature_writer(output: bytes::Buffer) -> SignatureWriter {
+    return {
+        output = output, error = runtime::Error.none,
+    };
+}
+
+fn signature_writer_is_active(writer: *SignatureWriter) -> bool {
+    return writer != null && writer->error == runtime::Error.none;
+}
+
+fn signature_writer_fail(writer: *SignatureWriter, error: runtime::Error) {
+    if (signature_writer_is_active(writer)) {
+        writer->error = error;
+    }
+}
+
+fn signature_writer_byte(writer: *SignatureWriter, value: u8) {
+    if (!signature_writer_is_active(writer)) {
+        return;
+    }
+    let appended: bytes::BufferResult = bytes::push(writer->output, value);
+    writer->output = appended.buffer;
+    writer->error = appended.error;
+}
+
+fn signature_writer_unsigned(writer: *SignatureWriter, value: u64, byte_count: usize) {
+    for (var index: usize = 0; index < byte_count && signature_writer_is_active(writer); index += 1) {
+        let shift: u64 = (index * SignatureFormat.bits_per_byte as usize) as u64;
+        signature_writer_byte(writer, ((value >> shift) & SignatureFormat.byte_mask as usize as u64) as u8);
+    }
+}
+
+fn signature_writer_u32(writer: *SignatureWriter, value: u32) {
+    signature_writer_unsigned(writer, value as u64, SignatureFormat.u32_byte_count as usize);
+}
+
+fn signature_writer_u64(writer: *SignatureWriter, value: u64) {
+    signature_writer_unsigned(writer, value, SignatureFormat.u64_byte_count as usize);
+}
+
+fn signature_writer_bytes(writer: *SignatureWriter, data: *const u8, length: usize) {
+    if (!signature_writer_is_active(writer)) {
+        return;
+    }
+    if (data == null || length == 0) {
+        signature_writer_fail(writer, runtime::Error.invalid_argument);
+        return;
+    }
+    let appended: bytes::BufferResult = bytes::append(writer->output, data, length);
+    writer->output = appended.buffer;
+    writer->error = appended.error;
+}
+
+fn signature_token_is_valid(unit: *const context::Unit, token: lexer::Token) -> bool {
+    if (unit == null) {
+        return false;
+    }
+    let length_is_valid: bool = token.span.length != 0 && token.span.length <= SignatureFormat.maximum_u32 as usize;
+    let range_is_valid: bool = checked::range_is_valid(token.span.offset, token.span.length, unit->source.length);
+    return length_is_valid && range_is_valid;
+}
+
+fn signature_source_bytes(context: *context::Context, writer: *SignatureWriter, unit_index: usize, token_index: usize) {
+    let unit: *const context::Unit = context::input_unit(context, unit_index);
+    let token: lexer::Token = context::token(context, unit_index, token_index);
+    if (!signature_token_is_valid(unit, token)) {
+        signature_writer_fail(writer, runtime::Error.invalid_argument);
+        return;
+    }
+    signature_writer_u32(writer, token.span.length as u32);
+    signature_writer_bytes(writer, &unit->source.data[token.span.offset], token.span.length);
+}
+
+fn signature_module_is_valid(context: *context::Context, module_id: usize) -> bool {
+    return module_id != context::no_id() && module_id < context->module_count;
+}
+
+fn signature_named_type(context: *context::Context, writer: *SignatureWriter, record: type_info::Record) {
+    let module_id: usize = names::unit_module(context, record.declaration_unit);
+    if (!signature_module_is_valid(context, module_id)) {
+        signature_writer_fail(writer, runtime::Error.invalid_argument);
+        return;
+    }
+    let modules: *const context::Module = context->modules.data as
+            *const context::Module;
+    let module_record: context::Module = modules[module_id];
+    let module_name: syntax::SyntaxNode = context::node(context, module_record.name_unit, module_record.name_node);
+    let component_count_is_valid: bool = module_name.child_count != 0 &&
+        module_name.child_count <= SignatureFormat.maximum_u32 as usize;
+    if (!component_count_is_valid) {
+        signature_writer_fail(writer, runtime::Error.invalid_argument);
+        return;
+    }
+    signature_writer_u32(writer, module_name.child_count as u32);
+    var child: usize = module_name.first_child;
+    for (var index: usize = 0; index < module_name.child_count && signature_writer_is_active(writer); index += 1) {
+        let segment: syntax::SyntaxNode = context::node(context, module_record.name_unit, child);
+        signature_source_bytes(context, writer, module_record.name_unit, segment.token_index);
+        child = segment.next_sibling;
+    }
+    signature_source_bytes(context, writer, record.declaration_unit, record.name_token);
+}
+
+fn signature_type_reference_is_valid(context: *context::Context, type_id: usize, depth: usize) -> bool {
+    return type_id < context->types.type_count && depth < context::Limit.maximum_type_depth as usize;
+}
+
+fn signature_encoded_flag(source_flags: usize, source_flag: usize, encoded_flag: u8) -> u8 {
+    return (source_flags & source_flag) != 0 ? encoded_flag : 0;
+}
+
+fn signature_pointer_qualifiers(record: type_info::Record) -> u8 {
+    let read_only: u8 = signature_encoded_flag(
+        record.flags, type_info::Flag.read_only as usize, SignatureTypeQualifier.read_only as usize as u8);
+    let volatile_pointee: u8 = signature_encoded_flag(
+        record.flags, type_info::Flag.volatile_pointee as usize,
+        SignatureTypeQualifier.volatile_pointee as usize as u8);
+    return read_only | volatile_pointee;
+}
+
+fn signature_type_tag(kind: type_info::Kind) -> u8 {
+    let invalid: u8 = SignatureTypeTag.invalid as usize as u8;
+    let tags: [SignatureTypeTagMap.kind_count]u8 = {
+        invalid, SignatureTypeTag.type_void as usize as u8, SignatureTypeTag.boolean as usize as u8,
+        SignatureTypeTag.signed_8 as usize as u8, SignatureTypeTag.signed_16 as usize as u8,
+        SignatureTypeTag.signed_32 as usize as u8, SignatureTypeTag.signed_64 as usize as u8,
+        SignatureTypeTag.signed_size as usize as u8, SignatureTypeTag.unsigned_8 as usize as u8,
+        SignatureTypeTag.unsigned_16 as usize as u8, SignatureTypeTag.unsigned_32 as usize as u8,
+        SignatureTypeTag.unsigned_64 as usize as u8, SignatureTypeTag.unsigned_size as usize as u8,
+        SignatureTypeTag.float_32 as usize as u8, SignatureTypeTag.float_64 as usize as u8,
+        SignatureTypeTag.pointer as usize as u8, SignatureTypeTag.array as usize as u8,
+        SignatureTypeTag.structure as usize as u8, SignatureTypeTag.record_union as usize as u8,
+        SignatureTypeTag.enumeration as usize as u8, invalid, SignatureTypeTag.function_pointer as usize as u8,
+        SignatureTypeTag.va_list_type as usize as u8,
+    };
+    let kind_index: usize = kind as usize;
+    if (kind_index >= SignatureTypeTagMap.kind_count as usize) {
+        return SignatureTypeTag.invalid as usize as u8;
+    }
+    return tags[kind_index];
+}
+
+fn signature_function_pointer(
+    context: *context::Context, writer: *SignatureWriter, record: type_info::Record, depth: usize) {
+    if (record.field_count > SignatureFormat.maximum_u32 as usize) {
+        signature_writer_fail(writer, runtime::Error.invalid_argument);
+        return;
+    }
+    signature_writer_byte(writer, SignatureCallingConvention.system_v as usize as u8);
+    signature_writer_u32(writer, record.field_count as u32);
+    let fields: *const type_info::Field = context->types.fields.data as
+            *const type_info::Field;
+    for (var index: usize = 0; index < record.field_count && signature_writer_is_active(writer); index += 1) {
+        signature_type(context, writer, fields[record.first_field + index].type_id, depth + 1);
+    }
+    signature_type(context, writer, record.element_type, depth + 1);
+}
+
+fn signature_type_payload(
+    context: *context::Context, writer: *SignatureWriter, record: type_info::Record, depth: usize) {
+    switch (record.kind) {
+    case type_info::Kind.pointer {
+        signature_writer_byte(writer, signature_pointer_qualifiers(record));
+        signature_type(context, writer, record.element_type, depth + 1);
+    }
+    case type_info::Kind.array {
+        signature_writer_u64(writer, record.element_count as u64);
+        signature_type(context, writer, record.element_type, depth + 1);
+    }
+    case type_info::Kind.structure, type_info::Kind.record_union, type_info::Kind.enumeration {
+        signature_named_type(context, writer, record);
+    }
+    case type_info::Kind.function_pointer {
+        signature_function_pointer(context, writer, record, depth);
+    }
+    default {
+    }
+    }
+}
+
+fn signature_type(context: *context::Context, writer: *SignatureWriter, type_id: usize, depth: usize) {
+    if (!signature_type_reference_is_valid(context, type_id, depth)) {
+        signature_writer_fail(writer, runtime::Error.invalid_argument);
+        return;
+    }
+    let records: *const type_info::Record = context->types.types.data as
+            *const type_info::Record;
+    let record: type_info::Record = records[type_id];
+    if (record.kind == type_info::Kind.invalid) {
+        signature_writer_fail(writer, runtime::Error.invalid_argument);
+        return;
+    }
+    if (record.kind == type_info::Kind.alias) {
+        signature_type(context, writer, record.element_type, depth + 1);
+        return;
+    }
+    let tag: u8 = signature_type_tag(record.kind);
+    if (tag == SignatureTypeTag.invalid as usize as u8) {
+        signature_writer_fail(writer, runtime::Error.invalid_argument);
+        return;
+    }
+    signature_writer_byte(writer, tag);
+    signature_type_payload(context, writer, record, depth);
+}
+
+fn function_signature_state_is_empty(function: context::Function) -> bool {
+    return function.signature_offset == context::no_id() && function.signature_length == 0;
+}
+
+fn function_signature_flags(function: context::Function) -> u8 {
+    let variadic: u8 = signature_encoded_flag(
+        function.flags, context::SymbolFlag.variadic as usize, SignatureFunctionFlag.variadic as usize as u8);
+    let no_return: u8 = signature_encoded_flag(
+        function.flags, context::SymbolFlag.no_return as usize, SignatureFunctionFlag.no_return as usize as u8);
+    let external: u8 = signature_encoded_flag(
+        function.flags, context::SymbolFlag.external as usize, SignatureFunctionFlag.external as usize as u8);
+    return variadic | no_return | external;
+}
+
+fn function_signature_input_is_valid(context: *context::Context, function_id: usize) -> bool {
+    if (function_id >= context->function_count) {
+        return false;
+    }
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    let function: context::Function = functions[function_id];
+    let parameter_count_is_valid: bool = function.parameter_count <= SignatureFormat.maximum_u32 as usize;
+    return function_signature_state_is_empty(function) && parameter_count_is_valid;
+}
+
+fn append_function_signature(context: *context::Context, function_id: usize) -> bool {
+    if (!function_signature_input_is_valid(context, function_id)) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    var functions: *context::Function = context->functions.data as
+            *context::Function;
+    let function: context::Function = functions[function_id];
+    let start: usize = context->callable_signatures.length;
+    var writer: SignatureWriter = signature_writer(context->callable_signatures);
+    signature_writer_byte(&writer, SignatureFormat.version as usize as u8);
+    signature_writer_byte(&writer, SignatureCallingConvention.system_v as usize as u8);
+    signature_writer_byte(&writer, SignatureCallableKind.free_function as usize as u8);
+    signature_writer_byte(&writer, SignatureOwnerKind.none as usize as u8);
+    signature_writer_byte(&writer, SignatureReceiverKind.none as usize as u8);
+    signature_writer_byte(&writer, function_signature_flags(function));
+    signature_writer_u32(&writer, function.parameter_count as u32);
+
+    let parameters: *const context::Parameter = context->parameters.data as
+            *const context::Parameter;
+    for (var index: usize = 0; index < function.parameter_count && signature_writer_is_active(&writer); index += 1) {
+        signature_type(context, &writer, parameters[function.first_parameter + index].type_id, 0);
+    }
+    signature_type(context, &writer, function.return_type, 0);
+    context->callable_signatures = writer.output;
+    context->error = writer.error;
+    if (writer.error != runtime::Error.none) {
+        return false;
+    }
+    functions = context->functions.data as
+        *context::Function;
+    functions[function_id].signature_offset = start;
+    functions[function_id].signature_length = context->callable_signatures.length - start;
+    return functions[function_id].signature_length != 0;
+}
+
+fn build_function_signatures(context: *context::Context) -> bool {
+    if (context->callable_signatures.length != 0) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    for (var function_id: usize = 0;
+        function_id < context->function_count && context->error == runtime::Error.none;
+        function_id += 1) {
+        append_function_signature(context, function_id);
+    }
+    return context->error == runtime::Error.none;
+}
+
+fn signature_range_is_valid(context: *context::Context, function: context::Function) -> bool {
+    let length_is_valid: bool = function.signature_length != 0;
+    let range_is_valid: bool = checked::range_is_valid(
+        function.signature_offset, function.signature_length, context->callable_signatures.length);
+    return length_is_valid && range_is_valid;
+}
+
+fn signature_is_before(context: *context::Context, left_function: usize, right_function: usize) -> bool {
+    let ids_are_valid: bool = left_function < context->function_count && right_function < context->function_count;
+    if (!ids_are_valid) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    let left: context::Function = functions[left_function];
+    let right: context::Function = functions[right_function];
+    let ranges_are_valid: bool = signature_range_is_valid(context, left) && signature_range_is_valid(context, right);
+    if (!ranges_are_valid) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let shared: usize = left.signature_length < right.signature_length ? left.signature_length : right.signature_length;
+    for (var index: usize = 0; index < shared; index += 1) {
+        let left_byte: u8 = context->callable_signatures.data[left.signature_offset + index];
+        let right_byte: u8 = context->callable_signatures.data[right.signature_offset + index];
+        if (left_byte != right_byte) {
+            return left_byte < right_byte;
+        }
+    }
+    return left.signature_length < right.signature_length;
+}

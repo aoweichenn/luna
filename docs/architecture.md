@@ -210,8 +210,10 @@ This source graph is the stage-1-and-later replacement for the archived
 stage-0 `.lmi` path.
 
 The current compiler emits assembly in `--library` or `--executable` mode.
-Ordinary Luna symbols encode the canonical module name and function name, not
-a compiled-interface fingerprint. The fixed-point build prevents stale object
+Ordinary Luna symbols encode the canonical module name, source function name
+and the versioned canonical ABI signature. This makes separately compiled
+caller/callee signature disagreements fail as unresolved symbols without a
+compiled-interface fingerprint. The fixed-point build prevents stale object
 combinations by rebuilding all module objects from the same registered source
 graph. The old `.lmi` byte layout remains documented only as an
 [m0 reconstruction artifact](module-metadata.md).
@@ -449,10 +451,11 @@ The current machine-IR consumer is correctness-first:
   comparisons, division, right shifts and widening conversions;
 - canonical `bool` values after both direct and indirect memory loads,
   including raw-pointer aliasing;
-- deterministic labels and collision-free module symbol mangling;
+- deterministic labels and collision-free module/name/canonical-signature
+  symbol mangling;
 - global definitions for exported Luna functions and unresolved declarations
-  for functions imported from `.lmi` metadata, with the exact module metadata
-  fingerprint retained in IR and encoded into both symbol names;
+  for interface-only dependencies, with canonical signature bytes retained in
+  IR and encoded identically at definitions and call sites;
 - exact, unmangled ELF names for external C functions, with `.extern`
   declarations and unresolved relocations left for the final linker;
 - C ABI sign extension for external `i8` and `i16` arguments and explicit

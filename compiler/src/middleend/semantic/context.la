@@ -176,47 +176,110 @@ fn result_release(result: Result) -> runtime::Error {
     return error;
 }
 
+enum ContextStorageCount: usize {
+    records = 17,
+}
+
+struct ContextStorageRecord {
+    buffer: bytes::Buffer;
+    count: usize;
+    record_size: usize;
+}
+
+struct ContextStorageValidator {
+    valid: bool;
+}
+
+fn context_storage_require(validator: *ContextStorageValidator, requirement: bool) {
+    validator->valid = validator->valid && requirement;
+}
+
+fn storage_record_is_valid(record: ContextStorageRecord) -> bool {
+    let shape_is_valid: bool = bytes::is_valid(record.buffer) && record.record_size != 0;
+    if (!shape_is_valid) {
+        return false;
+    }
+    let length_is_valid: bool = record.buffer.length % record.record_size == 0;
+    return length_is_valid && record.count == record.buffer.length / record.record_size;
+}
+
+fn storage_records_are_valid(records: *const ContextStorageRecord, count: usize) -> bool {
+    if (records == null) {
+        return false;
+    }
+    for (var index: usize = 0; index < count; index += 1) {
+        if (!storage_record_is_valid(records[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn context_record_storage_is_valid(context: *const Context) -> bool {
+    var records: [ContextStorageCount.records]ContextStorageRecord = {};
+    records[0] = {buffer = context->units, count = context->unit_count, record_size = sizeof(UnitInfo)};
+    records[1] = {buffer = context->modules, count = context->module_count, record_size = sizeof(Module)};
+    records[2] = {buffer = context->imports, count = context->import_count, record_size = sizeof(Import)};
+    records[3] = {buffer = context->symbols, count = context->symbol_count, record_size = sizeof(Symbol)};
+    records[4] = {buffer = context->functions, count = context->function_count, record_size = sizeof(Function)};
+    records[5] = {buffer = context->parameters, count = context->parameter_count, record_size = sizeof(Parameter)};
+    records[6] = {buffer = context->locals, count = context->local_count, record_size = sizeof(Local)};
+    records[7] = {
+        buffer = context->alignment_overrides, count = context->alignment_override_count,
+        record_size = sizeof(AlignmentOverride),
+    };
+    records[8] = {
+        buffer = context->bitfield_segments, count = context->bitfield_segment_count,
+        record_size = sizeof(BitfieldSegment),
+    };
+    records[9] = {
+        buffer = context->const_functions, count = context->const_function_count, record_size = sizeof(ConstFunction),
+    };
+    records[10] = {
+        buffer = context->const_locals, count = context->const_local_count, record_size = sizeof(ConstLocal),
+    };
+    records[11] = {
+        buffer = context->array_lengths, count = context->array_length_count, record_size = sizeof(ArrayLength),
+    };
+    records[12] = {buffer = context->labels, count = context->label_count, record_size = sizeof(Label)};
+    records[13] = {
+        buffer = context->pending_gotos, count = context->pending_goto_count, record_size = sizeof(PendingGoto),
+    };
+    records[14] = {
+        buffer = context->loop_labels, count = context->loop_label_count, record_size = sizeof(LoopLabel),
+    };
+    records[15] = {
+        buffer = context->label_locals, count = context->label_locals.length / sizeof(usize),
+        record_size = sizeof(usize),
+    };
+    records[16] = {
+        buffer = context->goto_locals, count = context->goto_locals.length / sizeof(usize), record_size = sizeof(usize),
+    };
+    return storage_records_are_valid(
+        (&records[0]) as *const ContextStorageRecord, ContextStorageCount.records as usize);
+}
+
 fn context_storage_is_valid(context: *Context) -> bool {
-    return context != null && bytes::is_valid(context->units) && context->units.length % sizeof(UnitInfo) == 0 &&
-        context->unit_count == context->units.length / sizeof(UnitInfo) && bytes::is_valid(context->modules) &&
-        context->modules.length % sizeof(Module) == 0 && context->module_count == context->modules.length /
-                sizeof(Module) && bytes::is_valid(context->imports) && context->imports.length % sizeof(Import) == 0 &&
-        context->import_count == context->imports.length / sizeof(Import) && bytes::is_valid(context->symbols) &&
-        context->symbols.length % sizeof(Symbol) == 0 && context->symbol_count == context->symbols.length /
-                sizeof(Symbol) && bytes::is_valid(context->functions) && context->functions.length %
-            sizeof(Function) == 0 && context->function_count == context->functions.length / sizeof(Function) &&
-        bytes::is_valid(context->parameters) && context->parameters.length % sizeof(Parameter) == 0 &&
-        context->parameter_count == context->parameters.length / sizeof(Parameter) &&
-        bytes::is_valid(context->locals) && context->locals.length % sizeof(Local) == 0 && context->local_count ==
-            context->locals.length / sizeof(Local) && bytes::is_valid(context->alignment_overrides) &&
-        context->alignment_overrides.length % sizeof(AlignmentOverride) == 0 && context->alignment_override_count ==
-            context->alignment_overrides.length / sizeof(AlignmentOverride) &&
-        bytes::is_valid(context->bitfield_segments) && context->bitfield_segments.length %
-            sizeof(BitfieldSegment) == 0 && context->bitfield_segment_count == context->bitfield_segments.length /
-                sizeof(BitfieldSegment) && bytes::is_valid(context->const_functions) &&
-        context->const_functions.length % sizeof(ConstFunction) == 0 && context->const_function_count ==
-            context->const_functions.length / sizeof(ConstFunction) && bytes::is_valid(context->const_locals) &&
-        context->const_locals.length % sizeof(ConstLocal) == 0 && context->const_local_count ==
-            context->const_locals.length / sizeof(ConstLocal) && bytes::is_valid(context->array_lengths) &&
-        context->array_lengths.length % sizeof(ArrayLength) == 0 && context->array_length_count ==
-            context->array_lengths.length / sizeof(ArrayLength) && bytes::is_valid(context->labels) &&
-        context->labels.length % sizeof(Label) == 0 && context->label_count == context->labels.length / sizeof(Label) &&
-        bytes::is_valid(context->label_locals) && context->label_locals.length % sizeof(usize) == 0 &&
-        bytes::is_valid(context->pending_gotos) && context->pending_gotos.length % sizeof(PendingGoto) == 0 &&
-        context->pending_goto_count == context->pending_gotos.length / sizeof(PendingGoto) &&
-        bytes::is_valid(context->goto_locals) && context->goto_locals.length % sizeof(usize) == 0 &&
-        bytes::is_valid(context->loop_labels) && context->loop_labels.length % sizeof(LoopLabel) == 0 &&
-        context->loop_label_count == context->loop_labels.length / sizeof(LoopLabel) && context->scope_depth <=
-            Limit.maximum_scope_depth as usize && context->type_depth <= Limit.maximum_type_depth as usize &&
-        diagnostics_storage_is_valid(context->diagnostics) &&
-        type_info::table_storage_is_valid(context->types) && ir::storage_is_valid(context->ir);
+    if (context == null) {
+        return false;
+    }
+    var validator: ContextStorageValidator = {valid = true};
+    context_storage_require(&validator, context_record_storage_is_valid(context as *const Context));
+    context_storage_require(&validator, bytes::is_valid(context->callable_signatures));
+    context_storage_require(&validator, context->scope_depth <= Limit.maximum_scope_depth as usize &&
+        context->type_depth <= Limit.maximum_type_depth as usize);
+    context_storage_require(&validator, diagnostics_storage_is_valid(context->diagnostics));
+    context_storage_require(&validator, type_info::table_storage_is_valid(context->types));
+    context_storage_require(&validator, ir::storage_is_valid(context->ir));
+    return validator.valid;
 }
 
 fn context_init(input: Input) -> Context {
     return {
         input = input, units = bytes::empty(), unit_count = 0, modules = bytes::empty(), module_count = 0,
         imports = bytes::empty(), import_count = 0, symbols = bytes::empty(), symbol_count = 0,
-        functions = bytes::empty(), function_count = 0, parameters = bytes::empty(), parameter_count = 0,
+        functions = bytes::empty(), function_count = 0, callable_signatures = bytes::empty(),
+        parameters = bytes::empty(), parameter_count = 0,
         locals = bytes::empty(), local_count = 0, alignment_overrides = bytes::empty(), alignment_override_count = 0,
         bitfield_segments = bytes::empty(), bitfield_segment_count = 0, const_functions = bytes::empty(),
         const_function_count = 0, const_locals = bytes::empty(), const_local_count = 0, array_lengths = bytes::empty(),
@@ -238,6 +301,7 @@ fn context_release_work(context: *Context) -> runtime::Error {
     error = release_error(error, bytes::release(context->imports));
     error = release_error(error, bytes::release(context->symbols));
     error = release_error(error, bytes::release(context->functions));
+    error = release_error(error, bytes::release(context->callable_signatures));
     error = release_error(error, bytes::release(context->parameters));
     error = release_error(error, bytes::release(context->locals));
     error = release_error(error, bytes::release(context->alignment_overrides));

@@ -265,8 +265,8 @@ fn shim_memcpy(dest: *void, src: *const void, count: usize) -> *void {
 ```
 
 The function is emitted under the literal name instead of the normal
-module-and-function mangled form, making it visible to external objects at
-link time. The reserved names `_start` and `_L`-prefixed forms are
+module/name/canonical-signature mangled form, making it visible to external
+objects at link time. The reserved names `_start` and `_L`-prefixed forms are
 rejected, as are duplicate export names. Luna code still calls the
 function by its declared name; the attribute changes only the emitted
 symbol.

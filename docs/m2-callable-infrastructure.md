@@ -74,7 +74,48 @@ Required properties:
 - named structure/union/enum identity uses canonical module name plus declared
   type name, not physical layout or source path.
 
-One possible byte grammar is:
+M2.0 freezes canonical signature format version 1. Multi-byte integers are
+little-endian. A free-function signature is:
+
+```text
+u8  version                 = 1
+u8  calling convention      = 0 (System V)
+u8  callable kind           = 0 (free function)
+u8  owner kind              = 0 (no owner)
+u8  receiver kind           = 0 (no receiver)
+u8  flags                   = variadic:1 | noreturn:2 | external:4
+u32 fixed parameter count
+CanonicalType parameters[parameter count]
+CanonicalType result
+```
+
+Owner and receiver discriminants are present in version 1 even though M2 emits
+only their zero forms. M3 can add payloads for nonzero discriminants without
+changing the position or meaning of existing fields.
+
+Canonical type tags are independent of semantic `TypeId` and `type_info::Kind`
+ordinals:
+
+| tag | type | payload |
+| ---: | --- | --- |
+| 1 | `void` | none |
+| 2 | `bool` | none |
+| 3..7 | `i8`, `i16`, `i32`, `i64`, `isize` | none |
+| 8..12 | `u8`, `u16`, `u32`, `u64`, `usize` | none |
+| 13..14 | `f32`, `f64` | none |
+| 15 | pointer | `u8` qualifier bits, then pointee type |
+| 16 | fixed array | `u64` element count, then element type |
+| 17..19 | structure, union, enum | canonical module and declared name |
+| 20 | function pointer | convention, `u32` parameter count, parameter types, result type |
+| 21 | `va_list` | none |
+
+Pointer qualifier bits are `const:1 | volatile:2`. A named identity is `u32`
+module-component count, then every component as `u32` byte length plus bytes,
+followed by the declared name in the same length-prefixed form. Transparent
+aliases emit only their resolved target encoding. Tag zero is reserved as an
+invalid sentinel and is never emitted.
+
+The corresponding conceptual grammar is:
 
 ```text
 V                         void
@@ -166,16 +207,16 @@ Ordinary Luna exports move from:
 _L <module hex> _ <name hex>
 ```
 
-to a length-delimited form conceptually equivalent to:
+to this exact version-1 spelling:
 
 ```text
-_L <module> _ <owner-or-empty> _ <name> __ <canonical ABI signature>
+_L <hex(canonical dotted module)> _ <hex(source name)> __ <hex(version-1 signature)>
 ```
 
-The exact format must be versioned in documentation and covered by byte-exact
-tests. Full canonical bytes are preferred over a short hash. If a hash is ever
-introduced for symbol-length control, the compiler must retain and compare
-full canonical signatures to detect collisions deterministically.
+The signature itself carries owner and receiver identity. Full canonical bytes
+are used rather than a short hash. If a hash is ever introduced for
+symbol-length control, the compiler must retain and compare full canonical
+signatures to detect collisions deterministically.
 
 Exceptions:
 

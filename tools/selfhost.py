@@ -6,7 +6,7 @@ built toolchain (the committed `anchor/`), then verifies the result by
 rebuilding itself and comparing every artifact byte-for-byte.
 
     python3 tools/selfhost.py build    # anchor -> out/stage-next
-    python3 tools/selfhost.py verify   # stage-next -> stage-fixed, byte compare
+    python3 tools/selfhost.py verify   # anchor -> transition -> next -> fixed
     python3 tools/selfhost.py test     # run tests/cases through stage-next
     python3 tools/selfhost.py audit    # read-only anchor/module/source checks
 """
@@ -136,6 +136,7 @@ LIBRARIES = {
         "luna.bootstrap.middleend.semantic.functions",
         "middleend/semantic/functions",
         "middleend/semantic/functions/const",
+        "middleend/semantic/functions/signature",
     ),
     "sem_funcs_ir": compiler_module(
         "luna.bootstrap.middleend.semantic.functions.ir",
@@ -748,6 +749,186 @@ def expectation_units(
     return units
 
 
+def test_command(
+    command: list[str | pathlib.Path],
+    *,
+    timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    printable = " ".join(str(part) for part in command)
+    print(f"  $ {printable}", flush=True)
+    return subprocess.run(
+        [str(part) for part in command],
+        timeout=timeout,
+        capture_output=True,
+        text=True,
+    )
+
+
+def require_test_success(
+    command: list[str | pathlib.Path],
+    *,
+    timeout: int,
+) -> None:
+    completed = test_command(command, timeout=timeout)
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"command returned {completed.returncode}: {completed.stderr.strip()}"
+        )
+
+
+def execute_callable_identity_tests(
+    stage_bin: pathlib.Path,
+    runner: tuple[str, ...],
+) -> tuple[int, list[str]]:
+    source_root = ROOT / "tests" / "callable_identity"
+    work = ROOT / "out" / "tests" / "callable-identity"
+    reset(work)
+    timeout = timeout_seconds(runner)
+    compiler = tool(stage_bin, "lunac", runner)
+    assembler = tool(stage_bin, "luna-as", runner)
+    linker = tool(stage_bin, "luna-link", runner)
+    passed = 0
+    failed: list[str] = []
+
+    name = "callable-signature-symbols"
+    try:
+        assembly = work / "signatures.s"
+        require_test_success(
+            [
+                *compiler,
+                "--library",
+                "-o",
+                assembly,
+                source_root / "signatures.la",
+            ],
+            timeout=timeout,
+        )
+        assembly_text = assembly.read_text(encoding="utf-8")
+        module_hex = "ci.s".encode().hex()
+        expectation_count = 0
+        for line in (source_root / "expectations.txt").read_text(
+            encoding="utf-8"
+        ).splitlines():
+            if not line.strip() or line.startswith("#"):
+                continue
+            function_name, signature_hex = line.split()
+            symbol = (
+                f"_L{module_hex}_{function_name.encode().hex()}__{signature_hex}:"
+            )
+            if symbol not in assembly_text:
+                raise AssertionError(f"missing exact symbol {symbol[:-1]}")
+            expectation_count += 1
+        passed += 1
+        print(f"PASS {name} ({expectation_count} exact symbols)")
+    except Exception as error:  # noqa: BLE001 - report and continue
+        failed.append(name)
+        print(f"FAIL {name}: {error}")
+
+    name = "callable-source-order"
+    try:
+        first_order = work / "order-first.s"
+        second_order = work / "order-second.s"
+        order_interface = source_root / "order.lh"
+        first_unit = source_root / "order" / "first.la"
+        second_unit = source_root / "order" / "second.la"
+        require_test_success(
+            [
+                *compiler,
+                "--library",
+                "-o",
+                first_order,
+                first_unit,
+                second_unit,
+                order_interface,
+            ],
+            timeout=timeout,
+        )
+        require_test_success(
+            [
+                *compiler,
+                "--library",
+                "-o",
+                second_order,
+                second_unit,
+                first_unit,
+                order_interface,
+            ],
+            timeout=timeout,
+        )
+        if first_order.read_bytes() != second_order.read_bytes():
+            raise AssertionError("assembly differs after implementation-unit permutation")
+        passed += 1
+        print(f"PASS {name} (byte-identical assembly)")
+    except Exception as error:  # noqa: BLE001 - report and continue
+        failed.append(name)
+        print(f"FAIL {name}: {error}")
+
+    name = "callable-link-identity"
+    try:
+        mismatch = source_root / "mismatch"
+        sources = {
+            "caller": ("--executable", mismatch / "caller.la", mismatch / "api_i32.lh"),
+            "matching": ("--library", mismatch / "callee_i32.la", mismatch / "api_i32.lh"),
+            "different": ("--library", mismatch / "callee_u32.la", mismatch / "api_u32.lh"),
+        }
+        objects: dict[str, pathlib.Path] = {}
+        for source_name, units in sources.items():
+            assembly = work / f"{source_name}.s"
+            object_file = work / f"{source_name}.lo"
+            require_test_success(
+                [*compiler, units[0], "-o", assembly, *units[1:]],
+                timeout=timeout,
+            )
+            require_test_success(
+                [*assembler, "-o", object_file, assembly],
+                timeout=timeout,
+            )
+            objects[source_name] = object_file
+        matching_executable = work / "matching"
+        require_test_success(
+            [
+                *linker,
+                "-o",
+                matching_executable,
+                objects["caller"],
+                objects["matching"],
+                syscall_object(stage_bin),
+            ],
+            timeout=timeout,
+        )
+        completed = test_command(
+            [*runner, matching_executable],
+            timeout=timeout,
+        )
+        if completed.returncode != 42:
+            raise AssertionError(
+                f"matching executable returned {completed.returncode}, expected 42"
+            )
+        different_executable = work / "different"
+        completed = test_command(
+            [
+                *linker,
+                "-o",
+                different_executable,
+                objects["caller"],
+                objects["different"],
+                syscall_object(stage_bin),
+            ],
+            timeout=timeout,
+        )
+        if completed.returncode != 3:
+            raise AssertionError(
+                f"mismatched link returned {completed.returncode}, expected 3"
+            )
+        passed += 1
+        print(f"PASS {name} (matching 42, mismatch link:3)")
+    except Exception as error:  # noqa: BLE001 - report and continue
+        failed.append(name)
+        print(f"FAIL {name}: {error}")
+
+    return passed, failed
+
+
 def syscall_object(stage_bin: pathlib.Path) -> pathlib.Path:
     """The luna.linux.syscall object from the build step, home of the
     luna_linux_syscallN asm fn stubs (test cases and FFI shims declare them
@@ -1006,6 +1187,12 @@ def execute_tests(stage_bin: pathlib.Path, runner: tuple[str, ...]) -> int:
         except Exception as error:  # noqa: BLE001 - report and continue
             failed.append(name)
             print(f"FAIL {name}: {error}")
+    identity_passed, identity_failed = execute_callable_identity_tests(
+        stage_bin,
+        runner,
+    )
+    passed += identity_passed
+    failed.extend(identity_failed)
     ffi_passed, ffi_failed, ffi_skipped = execute_ffi_tests(stage_bin, runner)
     passed += ffi_passed
     failed.extend(ffi_failed)
@@ -1035,7 +1222,7 @@ def main() -> None:
     verify_parser.add_argument(
         "--out",
         type=pathlib.Path,
-        help="output root containing stage-next and stage-fixed",
+        help="output root containing stage-transition, stage-next and stage-fixed",
     )
 
     test_parser = subparsers.add_parser("test", help="run behavior tests")
@@ -1068,11 +1255,14 @@ def main() -> None:
         build_stage(arguments.anchor, out, runner)
     elif arguments.command == "verify":
         verify_root = arguments.out or default_out
+        transition_out = verify_root / "stage-transition"
         next_out = verify_root / "stage-next"
         fixed_out = verify_root / "stage-fixed"
         verify_anchor(arguments.anchor)
-        build_stage(arguments.anchor, next_out, runner)
-        print("building the fixed-point stage from its own output")
+        build_stage(arguments.anchor, transition_out, runner)
+        print("building stage-next with the transition tools")
+        build_stage(transition_out / "bin", next_out, runner)
+        print("confirming the fixed point with stage-next")
         build_stage(next_out / "bin", fixed_out, runner)
         compare_stages(next_out, fixed_out)
         print("FIXED POINT: all artifacts byte-identical")

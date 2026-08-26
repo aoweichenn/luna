@@ -16,8 +16,8 @@ host is ever invoked.
 
 ```sh
 python3 tools/selfhost.py build    # anchor -> out/stage-next toolchain
-python3 tools/selfhost.py verify   # rebuild with stage-next; every artifact
-                                   # must be byte-identical (fixed point)
+python3 tools/selfhost.py verify   # anchor -> transition -> stage-next ->
+                                   # stage-fixed; next/fixed must be identical
 python3 tools/selfhost.py test     # compile+run tests/cases against
                                    # out/stage-next/bin, exact exit codes
 python3 tools/selfhost.py audit    # read-only static gate: anchor hashes,
@@ -54,11 +54,20 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
 
 ## Style
 
+- Prefer the highest-level, most expressive feature accepted by the current
+  Luna toolchain. Use `for` for bounded/indexed traversal, `switch` for kind
+  dispatch, and stateful abstractions for error propagation; do not simulate
+  them with manual `while` indices or serial `if` chains.
 - Column budget is 120; `tools/refmt.py` reflows sources to it
   (quote-aware splitting, breaking at commas and `&&`/`||` first) and
   must keep every file's whitespace-insensitive token stream identical.
 - Enumerative mappings (keywords, token-to-kind tables) are data tables
   plus a loop, never long if-chains.
+- Every `if`, loop condition or conditional expression may contain at most two
+  logical clauses. More complex validation must use named predicates, named
+  boolean values, early returns or a table-driven validator; formatter line
+  breaks and mechanically nested unnamed `if` statements do not satisfy this
+  rule.
 - A source file is a soft 2,000-line ceiling; split along pass
   boundaries. Additional `.la` files may implement the same module and share
   its private declarations/imports; use a new submodule only for a real
@@ -76,8 +85,9 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
   `functions` (+ `functions/ir`), `expr` (+ `expr/{base,numeric,
   strings,api,initializer,access,operators}`), `stmt` (+
   `stmt/{api,labels}`). The same-module files `types/layout.la`,
-  `consteval/engine/execute.la` and `functions/const.la` are implementation
-  splits, not additional dependency-graph modules.
+  `consteval/engine/execute.la`, `functions/const.la` and
+  `functions/signature.la` are implementation splits, not additional
+  dependency-graph modules.
 
 ## Layout
 

@@ -122,10 +122,12 @@ landed as m1.7 by explicit FFI decision, with declared-width arguments.
 
 ## Current M2 direction
 
-The next language phase is the shared callable foundation in
-[`m2-callable-infrastructure.md`](m2-callable-infrastructure.md): canonical
-signatures and mangling, deterministic overload sets, exact call/function-value
-resolution, default parameters and reusable value-category analysis.
+M2.0 has landed the versioned canonical type/signature encoding,
+signature-bearing Luna symbols, deterministic callable order and exact
+cross-object identity tests described in
+[`m2-callable-infrastructure.md`](m2-callable-infrastructure.md). M2.1 is next:
+explicit bindings, overload sets and declaration/definition matching by
+overload key.
 
 The ownership-free class system follows as M3 in
 [`m3-oop-design.md`](m3-oop-design.md). It consumes M2 for overloaded methods

@@ -247,7 +247,7 @@ above. The accepted design direction is tracked in
 [`m2-callable-infrastructure.md`](m2-callable-infrastructure.md).
 
 - [x] callable-infrastructure design draft
-- [ ] M2.0 canonical signatures, deterministic ordering and symbol mangling
+- [x] M2.0 canonical signatures, deterministic ordering and symbol mangling
 - [ ] M2.1 bindings, overload sets and declaration/definition matching
 - [ ] M2.2 exact overload calls and function-pointer selection
 - [ ] M2.3 default parameters

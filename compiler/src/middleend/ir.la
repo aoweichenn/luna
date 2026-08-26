@@ -18,7 +18,8 @@ fn invalid_function() -> Function {
         declaration_unit = none, declaration_node = none, name_token = none, linkage = Linkage.internal,
         return_type = none, first_parameter = none, parameter_count = 0, first_slot = none, slot_count = 0,
         first_block = none, block_count = 0, first_value = none, value_count = 0, has_body = false, variadic = false,
-        export_name_unit = none, export_name_token = none, asm_body_unit = none, asm_body_node = none,
+        signature_offset = none, signature_length = 0, export_name_unit = none, export_name_token = none,
+        asm_body_unit = none, asm_body_node = none,
     };
 }
 
@@ -43,7 +44,8 @@ fn invalid_instruction()
 fn empty() -> Store {
     return {
         globals = bytes::empty(), global_count = 0, global_bytes = bytes::empty(),
-        functions = bytes::empty(), function_count = 0, parameters = bytes::empty(),
+        functions = bytes::empty(), function_count = 0, callable_signatures = bytes::empty(),
+            parameters = bytes::empty(),
         parameter_count = 0, slots = bytes::empty(), slot_count = 0, values = bytes::empty(),
         value_count = 0, blocks = bytes::empty(), block_count = 0, instructions = bytes::empty(),
         instruction_count = 0, arguments = bytes::empty(), argument_count = 0,
@@ -52,19 +54,59 @@ fn empty() -> Store {
 }
 
 fn buffer_matches(buffer: bytes::Buffer, count: usize, record_size: usize) -> bool {
-    return bytes::is_valid(buffer) && record_size != 0 && buffer.length % record_size == 0 &&
-        count == buffer.length / record_size;
+    let storage_is_valid: bool = bytes::is_valid(buffer) && record_size != 0;
+    if (!storage_is_valid) {
+        return false;
+    }
+    let shape_is_valid: bool = buffer.length % record_size == 0;
+    return shape_is_valid && count == buffer.length / record_size;
+}
+
+struct StoreValidator {
+    valid: bool;
+}
+
+fn store_require(validator: *StoreValidator, requirement: bool) {
+    validator->valid = validator->valid && requirement;
+}
+
+fn function_signature_is_valid(function: Function, expected_offset: usize, signatures: bytes::Buffer) -> bool {
+    let position_is_valid: bool = function.signature_length != 0 && function.signature_offset == expected_offset;
+    let range_is_valid: bool = checked::range_is_valid(
+        function.signature_offset, function.signature_length, signatures.length);
+    return position_is_valid && range_is_valid;
+}
+
+fn function_signatures_are_valid(ir: Store) -> bool {
+    if (!bytes::is_valid(ir.callable_signatures) || !buffer_matches(ir.functions, ir.function_count,
+        sizeof(Function))) {
+        return false;
+    }
+    let functions: *const Function = ir.functions.data as *const Function;
+    var expected_offset: usize = 0;
+    for (var index: usize = 0; index < ir.function_count; index += 1) {
+        let function: Function = functions[index];
+        if (!function_signature_is_valid(function, expected_offset, ir.callable_signatures)) {
+            return false;
+        }
+        expected_offset += function.signature_length;
+    }
+    return expected_offset == ir.callable_signatures.length;
 }
 
 fn storage_is_valid(ir: Store) -> bool {
-    return buffer_matches(ir.globals, ir.global_count, sizeof(Global)) && bytes::is_valid(ir.global_bytes) &&
-        buffer_matches(ir.functions, ir.function_count, sizeof(Function)) &&
-        buffer_matches(ir.parameters, ir.parameter_count, sizeof(Parameter)) &&
-        buffer_matches(ir.slots, ir.slot_count, sizeof(Slot)) &&
-        buffer_matches(ir.values, ir.value_count, sizeof(Value)) &&
-        buffer_matches(ir.blocks, ir.block_count, sizeof(Block)) &&
-        buffer_matches(ir.instructions, ir.instruction_count, sizeof(Instruction)) &&
-        buffer_matches(ir.arguments, ir.argument_count, sizeof(Argument));
+    var validator: StoreValidator = {valid = true};
+    store_require(&validator, buffer_matches(ir.globals, ir.global_count, sizeof(Global)) &&
+        bytes::is_valid(ir.global_bytes));
+    store_require(&validator, buffer_matches(ir.functions, ir.function_count, sizeof(Function)) &&
+        bytes::is_valid(ir.callable_signatures));
+    store_require(&validator, buffer_matches(ir.parameters, ir.parameter_count, sizeof(Parameter)));
+    store_require(&validator, buffer_matches(ir.slots, ir.slot_count, sizeof(Slot)));
+    store_require(&validator, buffer_matches(ir.values, ir.value_count, sizeof(Value)));
+    store_require(&validator, buffer_matches(ir.blocks, ir.block_count, sizeof(Block)));
+    store_require(&validator, buffer_matches(ir.instructions, ir.instruction_count, sizeof(Instruction)));
+    store_require(&validator, buffer_matches(ir.arguments, ir.argument_count, sizeof(Argument)));
+    return validator.valid;
 }
 
 fn get_function(ir: Store, function_id: usize) -> FunctionResult {
@@ -122,6 +164,30 @@ fn set_error(ir: *Store, error: runtime::Error) -> bool {
     return false;
 }
 
+fn first_error(current: runtime::Error, next: runtime::Error) -> runtime::Error {
+    return current == runtime::Error.none ? next : current;
+}
+
+fn empty_function_shape_is_valid(function: Function) -> bool {
+    let none: usize = no_id();
+    var validator: StoreValidator = {valid = true};
+    store_require(&validator, function.declaration_unit != none && function.declaration_node != none);
+    store_require(&validator, function.name_token != none && function.return_type != none);
+    store_require(&validator, function.parameter_count == 0 && function.slot_count == 0);
+    store_require(&validator, function.block_count == 0 && function.value_count == 0);
+    store_require(&validator, function.signature_offset == none && function.signature_length == 0);
+    return validator.valid;
+}
+
+fn function_add_request_is_valid(
+    ir: *const Store, function: Function, signature: *const u8, signature_length: usize) -> bool {
+    var validator: StoreValidator = {valid = true};
+    store_require(&validator, ir->error == runtime::Error.none && storage_is_valid(*ir));
+    store_require(&validator, empty_function_shape_is_valid(function));
+    store_require(&validator, signature != null && signature_length != 0);
+    return validator.valid;
+}
+
 fn add_global(ir: *Store, bytes: *const u8, byte_count: usize, alignment_bytes: usize, read_only: bool) -> usize {
     let none: usize = no_id();
     if (ir == null || ir->error != runtime::Error.none || !storage_is_valid(*ir) ||
@@ -155,15 +221,13 @@ fn add_global(ir: *Store, bytes: *const u8, byte_count: usize, alignment_bytes: 
     return global_id;
 }
 
-fn add_function(ir: *Store, function: Function) -> usize {
+fn add_function(ir: *Store, function: Function, signature: *const u8, signature_length: usize) -> usize {
     let none: usize = no_id();
-    if (ir == null || ir->error != runtime::Error.none || !storage_is_valid(*ir) ||
-        function.declaration_unit == none || function.declaration_node == none || function.name_token == none ||
-        function.return_type == none || function.parameter_count != 0 || function.slot_count != 0 ||
-        function.block_count != 0 || function.value_count != 0) {
-        if (ir != null) {
-            set_error(ir, runtime::Error.invalid_argument);
-        }
+    if (ir == null) {
+        return none;
+    }
+    if (!function_add_request_is_valid(ir as *const Store, function, signature, signature_length)) {
+        set_error(ir, runtime::Error.invalid_argument);
         return none;
     }
     var record: Function = function;
@@ -171,10 +235,20 @@ fn add_function(ir: *Store, function: Function) -> usize {
     record.first_slot = none;
     record.first_block = none;
     record.first_value = none;
+    record.signature_offset = ir->callable_signatures.length;
+    record.signature_length = signature_length;
+    let appended_signature: bytes::BufferResult = bytes::append(ir->callable_signatures, signature, signature_length);
+    ir->callable_signatures = appended_signature.buffer;
+    if (appended_signature.error != runtime::Error.none) {
+        set_error(ir, appended_signature.error);
+        return none;
+    }
     let appended: bytes::BufferResult = append(
         ir->functions, (&record) as *const Function as *const u8, sizeof(Function));
     ir->functions = appended.buffer;
     if (appended.error != runtime::Error.none) {
+        let truncated: bytes::BufferResult = bytes::truncate(ir->callable_signatures, record.signature_offset);
+        ir->callable_signatures = truncated.buffer;
         set_error(ir, appended.error);
         return none;
     }
@@ -467,38 +541,14 @@ fn release(ir: Store) -> runtime::Error {
         return runtime::Error.invalid_argument;
     }
     var error: runtime::Error = bytes::release(ir.globals);
-    let global_bytes_error: runtime::Error = bytes::release(ir.global_bytes);
-    if (error == runtime::Error.none) {
-        error = global_bytes_error;
-    }
-    let function_error: runtime::Error = bytes::release(ir.functions);
-    if (error == runtime::Error.none) {
-        error = function_error;
-    }
-    let parameter_error: runtime::Error = bytes::release(ir.parameters);
-    if (error == runtime::Error.none) {
-        error = parameter_error;
-    }
-    let slot_error: runtime::Error = bytes::release(ir.slots);
-    if (error == runtime::Error.none) {
-        error = slot_error;
-    }
-    let value_error: runtime::Error = bytes::release(ir.values);
-    if (error == runtime::Error.none) {
-        error = value_error;
-    }
-    let block_error: runtime::Error = bytes::release(ir.blocks);
-    if (error == runtime::Error.none) {
-        error = block_error;
-    }
-    let instruction_error: runtime::Error = bytes::release(ir.instructions);
-    if (error == runtime::Error.none) {
-        error = instruction_error;
-    }
-    let argument_error: runtime::Error = bytes::release(ir.arguments);
-    if (error == runtime::Error.none) {
-        error = argument_error;
-    }
+    error = first_error(error, bytes::release(ir.global_bytes));
+    error = first_error(error, bytes::release(ir.functions));
+    error = first_error(error, bytes::release(ir.callable_signatures));
+    error = first_error(error, bytes::release(ir.parameters));
+    error = first_error(error, bytes::release(ir.slots));
+    error = first_error(error, bytes::release(ir.values));
+    error = first_error(error, bytes::release(ir.blocks));
+    error = first_error(error, bytes::release(ir.instructions));
+    error = first_error(error, bytes::release(ir.arguments));
     return error;
 }
-

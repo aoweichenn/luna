@@ -1,5 +1,13 @@
 module luna.bootstrap.backend.x86_64.codegen.support;
 
+enum SymbolFormat: usize {
+    hex_byte_digits = 2, quoted_prefix_bytes = 1, quoted_delimiter_bytes = 2, module_separator = 46,
+}
+
+enum SourceEncoding: usize {
+    raw, hexadecimal,
+}
+
 fn no_id() -> usize {
     return Limit.maximum_size as usize;
 }
@@ -43,6 +51,39 @@ fn hex(context: *Context, value: u64, digits: usize) -> bool {
             context->error = context->text.error;
         }
         return false;
+    }
+    return true;
+}
+
+fn text_error(context: *Context) -> runtime::Error {
+    return context->text.error == runtime::Error.none ? runtime::Error.invalid_argument : context->text.error;
+}
+
+fn source_range_is_valid(unit: *const context::Unit, span: lexer::SourceSpan) -> bool {
+    if (unit == null) {
+        return false;
+    }
+    return checked::range_is_valid(span.offset, span.length, unit->source.length);
+}
+
+fn append_source(context: *Context, data: *const u8, length: usize, encoding: SourceEncoding) -> bool {
+    let pointers_are_valid: bool = context != null && data != null;
+    let writer_is_active: bool = pointers_are_valid && context->error == runtime::Error.none;
+    let request_is_valid: bool = writer_is_active && length != 0;
+    if (!request_is_valid) {
+        return fail(context, runtime::Error.invalid_argument);
+    }
+    var appended: bool = false;
+    switch (encoding) {
+    case SourceEncoding.raw {
+        appended = asm_text::append(&context->text, data, length);
+    }
+    case SourceEncoding.hexadecimal {
+        appended = asm_text::append_hex_bytes(&context->text, data, length);
+    }
+    }
+    if (!appended) {
+        return fail(context, text_error(context));
     }
     return true;
 }
@@ -99,16 +140,11 @@ fn node(context: *Context, unit_id: usize, node_id: usize) -> syntax::SyntaxNode
 fn append_token_hex(context: *Context, unit_id: usize, token_id: usize) -> bool {
     let unit: *const context::Unit = unit(context, unit_id);
     let token: lexer::Token = token(context, unit_id, token_id);
-    if (unit == null || token.kind != lexer::TokenKind.identifier || token.span.offset > unit->source.length ||
-        token.span.length > unit->source.length - token.span.offset) {
+    let token_is_valid: bool = token.kind == lexer::TokenKind.identifier && source_range_is_valid(unit, token.span);
+    if (!token_is_valid) {
         return fail(context, runtime::Error.invalid_argument);
     }
-    if (!asm_text::append_hex_bytes(
-            &context->text, &unit->source.data[token.span.offset], token.span.length)) {
-        context->error = context->text.error;
-        return false;
-    }
-    return true;
+    return append_source(context, &unit->source.data[token.span.offset], token.span.length, SourceEncoding.hexadecimal);
 }
 
 fn append_module_hex(context: *Context, unit_id: usize) -> bool {
@@ -118,33 +154,75 @@ fn append_module_hex(context: *Context, unit_id: usize) -> bool {
     }
     let root: syntax::SyntaxNode = node(context, unit_id, unit->tree.root);
     let declaration: syntax::SyntaxNode = node(context, unit_id, root.first_child);
-    if (root.kind != syntax::SyntaxKind.program || declaration.kind != syntax::SyntaxKind.module_declaration ||
-        declaration.child_count == 0) {
+    let root_is_valid: bool = root.kind == syntax::SyntaxKind.program;
+    let declaration_is_valid: bool =
+        declaration.kind == syntax::SyntaxKind.module_declaration && declaration.child_count != 0;
+    if (!root_is_valid || !declaration_is_valid) {
         return fail(context, runtime::Error.invalid_argument);
     }
     var child: usize = declaration.first_child;
-    var index: usize = 0;
-    while (index < declaration.child_count) {
+    for (var index: usize = 0;
+        index < declaration.child_count && context->error == runtime::Error.none;
+        index += 1) {
         let name: syntax::SyntaxNode = node(context, unit_id, child);
-        if (name.kind != syntax::SyntaxKind.name_expression || (index != 0 &&
-                !hex(
-                    context, 46, 2)) ||
-            !append_token_hex(
-                context, unit_id, name.token_index)) {
-            return false;
+        if (name.kind != syntax::SyntaxKind.name_expression) {
+            return fail(context, runtime::Error.invalid_argument);
         }
+        if (index != 0) {
+            hex(context, SymbolFormat.module_separator as usize as u64, SymbolFormat.hex_byte_digits as usize);
+        }
+        append_token_hex(context, unit_id, name.token_index);
         child = name.next_sibling;
-        index += 1;
     }
-    return true;
+    return context->error == runtime::Error.none;
+}
+
+fn function_signature_is_valid(context: *Context, function: ir::Function) -> bool {
+    let length_is_valid: bool = function.signature_length != 0;
+    let range_is_valid: bool = checked::range_is_valid(
+        function.signature_offset, function.signature_length, context->ir.callable_signatures.length);
+    return length_is_valid && range_is_valid;
 }
 
 fn append_mangled_function_symbol(context: *Context, function_id: usize) -> bool {
     let functions: *const ir::Function = context->ir.functions.data as
             *const ir::Function;
     let function: ir::Function = functions[function_id];
-    return literal(context, "_L") && append_module_hex(context, function.declaration_unit) && literal(context, "_") &&
-        append_token_hex(context, function.declaration_unit, function.name_token);
+    if (!function_signature_is_valid(context, function)) {
+        return fail(context, runtime::Error.invalid_argument);
+    }
+    literal(context, "_L");
+    append_module_hex(context, function.declaration_unit);
+    literal(context, "_");
+    append_token_hex(context, function.declaration_unit, function.name_token);
+    literal(context, "__");
+    append_source(
+        context, (&context->ir.callable_signatures.data[function.signature_offset]) as *const u8,
+        function.signature_length, SourceEncoding.hexadecimal);
+    return context->error == runtime::Error.none;
+}
+
+fn append_export_name(context: *Context, function: ir::Function) -> bool {
+    let unit: *const context::Unit = unit(context, function.export_name_unit);
+    let token: lexer::Token = token(context, function.export_name_unit, function.export_name_token);
+    let length_is_valid: bool = token.span.length >= SymbolFormat.quoted_delimiter_bytes as usize;
+    let token_is_valid: bool = length_is_valid && source_range_is_valid(unit, token.span);
+    if (!token_is_valid) {
+        return fail(context, runtime::Error.invalid_argument);
+    }
+    let content_offset: usize = token.span.offset + SymbolFormat.quoted_prefix_bytes as usize;
+    let content_length: usize = token.span.length - SymbolFormat.quoted_delimiter_bytes as usize;
+    return append_source(context, &unit->source.data[content_offset], content_length, SourceEncoding.raw);
+}
+
+fn append_external_name(context: *Context, function: ir::Function) -> bool {
+    let unit: *const context::Unit = unit(context, function.declaration_unit);
+    let token: lexer::Token = token(context, function.declaration_unit, function.name_token);
+    let token_is_valid: bool = token.kind == lexer::TokenKind.identifier && source_range_is_valid(unit, token.span);
+    if (!token_is_valid) {
+        return fail(context, runtime::Error.invalid_argument);
+    }
+    return append_source(context, &unit->source.data[token.span.offset], token.span.length, SourceEncoding.raw);
 }
 
 fn append_function_symbol(context: *Context, function_id: usize) -> bool {
@@ -154,32 +232,17 @@ fn append_function_symbol(context: *Context, function_id: usize) -> bool {
     let functions: *const ir::Function = context->ir.functions.data as
             *const ir::Function;
     let function: ir::Function = functions[function_id];
-    // @export_name: the string literal's inner bytes are the symbol,
-    // verbatim (no _L mangling). Calls and the definition agree because
-    // both name the function through this routine.
     if (function.export_name_token != no_id()) {
-        let unit: *const context::Unit = unit(context, function.export_name_unit);
-        let token: lexer::Token = token(context, function.export_name_unit, function.export_name_token);
-        if (unit == null || token.span.length < 2 || token.span.offset > unit->source.length ||
-            token.span.length > unit->source.length - token.span.offset ||
-            !asm_text::append(
-                &context->text, &unit->source.data[token.span.offset + 1], token.span.length - 2)) {
-            return fail(context, runtime::Error.invalid_argument);
-        }
-        return true;
+        return append_export_name(context, function);
     }
-    if (function.linkage == ir::Linkage.external_c) {
-        let unit: *const context::Unit = unit(context, function.declaration_unit);
-        let token: lexer::Token = token(context, function.declaration_unit, function.name_token);
-        if (unit == null || token.kind != lexer::TokenKind.identifier || token.span.offset > unit->source.length ||
-            token.span.length > unit->source.length - token.span.offset ||
-            !asm_text::append(
-                &context->text, &unit->source.data[token.span.offset], token.span.length)) {
-            return fail(context, runtime::Error.invalid_argument);
-        }
-        return true;
+    switch (function.linkage) {
+    case ir::Linkage.external_c {
+        return append_external_name(context, function);
     }
-    return append_mangled_function_symbol(context, function_id);
+    default {
+        return append_mangled_function_symbol(context, function_id);
+    }
+    }
 }
 
 fn storage(context: *Context, kind: frame::StorageKind, source_id: usize) -> frame::Storage {
@@ -337,4 +400,3 @@ fn store_xmm(context: *Context, result: usize, record: *const type_info::Record,
         literal(context, " ") && literal(context, register_name) &&
         literal(context, ", ") && append_value(context, result) && literal(context, "\n");
 }
-

@@ -40,8 +40,8 @@ via `--runner`):
 
 ```sh
 python3 tools/selfhost.py audit    # read-only anchor, module-graph and style checks
-python3 tools/selfhost.py verify   # anchor builds the toolchain twice,
-                                   # every artifact must be byte-identical
+python3 tools/selfhost.py verify   # anchor -> transition -> stage-next ->
+                                   # stage-fixed; next/fixed are identical
 ```
 
 On a non-x86-64 development host, `--runner qemu-x86_64-static` prefixes both
@@ -52,8 +52,9 @@ is unavailable. Release validation runs all FFI cases on an x86-64 host.
 
 `build` stops after producing `out/stage-next/bin/{lunac,luna-as,luna-link}`.
 `test` compiles, links and executes every case in `tests/cases/` through the
-freshly built tools and checks each program's exit status against
-`tests/expectations.txt` (negative values are fatal signals such as traps).
+freshly built tools, checks exact callable-identity/linking invariants, and
+runs the ELF/host FFI matrix. Behavior cases use `tests/expectations.txt`;
+negative values are fatal signals such as traps.
 
 The build graph has a single module registry. Interface order, implementation
 order and each driver's transitive link closure are derived from source imports,
