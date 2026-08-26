@@ -519,3 +519,18 @@ be reopened with usage experience); slices (shelved; no accepted syntax may
 foreclose them); conditional compilation (shelved; the
 accepted candidate is const-driven dead-code folding, never a textual
 preprocessor).
+
+## Current M2 callable and planned M3 OOP design
+
+M2 first establishes canonical callable signatures, signature-based mangling,
+deterministic exact overload resolution, function-pointer selection and default
+parameters as specified in
+[`m2-callable-infrastructure.md`](m2-callable-infrastructure.md).
+
+M3 then builds the ownership-free class system in
+[`m3-oop-design.md`](m3-oop-design.md): overloaded constructors/methods, access
+control, single inheritance, opt-in virtual dispatch, restricted operators,
+non-owning bound methods and minimal RTTI. Automatic destruction, RAII, move
+semantics, multiple inheritance, ADL, exceptions and language-level composition
+remain outside these phases. Both designs follow the fixed-point and
+anchor-promotion discipline.

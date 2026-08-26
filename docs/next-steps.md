@@ -120,6 +120,18 @@ landed as m1.7 by explicit FFI decision, with declared-width arguments.
 - Threads/atomics (standard library per syntax-plan decision 6),
   `_BitInt(N)`, macros: remain out of scope per `syntax-plan.md`.
 
+## Current M2 direction
+
+The next language phase is the shared callable foundation in
+[`m2-callable-infrastructure.md`](m2-callable-infrastructure.md): canonical
+signatures and mangling, deterministic overload sets, exact call/function-value
+resolution, default parameters and reusable value-category analysis.
+
+The ownership-free class system follows as M3 in
+[`m3-oop-design.md`](m3-oop-design.md). It consumes M2 for overloaded methods
+and constructors before adding access control, single inheritance, virtual
+dispatch, restricted operators, non-owning bound methods and minimal RTTI.
+
 ## Discipline reminders
 
 Every slice: language documentation first, implementation behind green
