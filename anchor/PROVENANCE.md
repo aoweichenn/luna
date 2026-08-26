@@ -166,3 +166,16 @@ stage-fixed executables were copied here and `SHA256SUMS` refreshed. Production
 modules may now split one named module across multiple registered `.la`
 implementation units while retaining one shared private declaration/import
 scope.
+
+## 2026-08-26: promotion to the M2.0 callable-identity toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`5e344edd3831df0f5fbba00189dd80bb6893ff25`
+(`feat: add canonical callable identities`). Provenance chain: the previous
+anchor built `stage-transition`, those tools built `stage-next`, and
+`stage-next` rebuilt the complete graph into `stage-fixed`; remote x86-64
+verification on `caw` confirmed every stage-next/stage-fixed assembly, object
+and executable artifact byte-identical. The final test run passed 208/208,
+including exact version-1 signature symbols, implementation-unit order
+permutation and matching/mismatched separately compiled callable identities.
+The stage-fixed executables were copied here and `SHA256SUMS` refreshed.
