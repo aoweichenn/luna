@@ -284,6 +284,63 @@ The first implementation may use sorted buffers and bounded linear scans. M2
 does not require a general hash table; the representation, not average lookup
 complexity, is the compatibility boundary.
 
+### M2.1 storage model
+
+M2.1 keeps declaration identity and name binding as separate layers:
+
+```text
+Symbol                         one exact declaration/source identity
+Function                       one canonical overload candidate
+Binding                        one module-local callable name
+callable_candidates[]          function IDs in canonical global order
+Binding.first_candidate/count  one contiguous slice of that order
+```
+
+Every `Function` retains its own `Symbol`, so overload diagnostics and debug
+locations point at the exact declaration rather than at an arbitrary
+representative of the set. Each function also records its owning binding. The
+binding records one representative spelling only for lookup; it does not own
+the declarations or collapse their visibility flags.
+
+The candidate array is built once after canonical signatures are available.
+It is sorted by module, name and canonical signature, then partitioned into
+binding slices. IR construction and function-body lowering consume this same
+array; no downstream pass builds another function order. A boundary validator
+checks that slices are contiguous, cover every function exactly once, contain
+only one module/name identity and agree with every function's `binding_id`.
+
+Visibility is evaluated per candidate:
+
+- an implementation unit sees every candidate in its module-local binding;
+- an interface unit sees the candidates declared in that interface;
+- an importing module sees only exported candidates;
+- private implementation-only overloads therefore extend local resolution
+  without leaking into the imported overload set.
+
+M2.1 preserves the old lowering path only when exactly one visible candidate
+exists. A multi-candidate binding is never reduced to its first element. Until
+M2.2 installs exact argument probing and selection, attempting to call or take
+the value of such a set reports `invalid_call`; the dedicated M2.1 boundary
+test changes to successful resolution when M2.2 lands.
+
+Declaration collection uses a small classification state rather than mixing
+diagnostics with mutation:
+
+```text
+add_candidate
+attach_definition
+duplicate_overload
+contract_mismatch
+non_callable_conflict
+```
+
+The overload key compares parameter types/order, variadic state and the
+extern/calling-convention boundary. Result type and `@noreturn` are checked as
+the separate declaration contract. Parameter names, `@inline` and `asm fn`
+body form do not affect either identity. One bounded scan returns both the
+first same-name function and an exact overload-key match; no hash table or
+second declaration scan is introduced at this stage.
+
 ## Interface and implementation matching
 
 An interface overload set and all implementation units of the same module are

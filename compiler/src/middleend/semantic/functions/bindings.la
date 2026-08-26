@@ -1,0 +1,447 @@
+module luna.bootstrap.middleend.semantic.functions;
+
+fn append_binding(context: *context::Context, binding: context::Binding) -> usize {
+    let binding_id: usize = context->binding_count;
+    if (!names::append_record(
+            context, &context->bindings, (&binding) as
+                *const context::Binding as *const u8, sizeof(context::Binding))) {
+        return context::no_id();
+    }
+    context->binding_count += 1;
+    return binding_id;
+}
+
+fn source_span_is_valid(unit: *const context::Unit, span: lexer::SourceSpan) -> bool {
+    if (unit == null) {
+        return false;
+    }
+    return checked::range_is_valid(span.offset, span.length, unit->source.length);
+}
+
+fn text_is_before(
+    context: *context::Context, left_unit: usize, left_span: lexer::SourceSpan,
+    right_unit: usize, right_span: lexer::SourceSpan) -> bool {
+    let left: *const context::Unit = context::input_unit(context, left_unit);
+    let right: *const context::Unit = context::input_unit(context, right_unit);
+    let left_is_valid: bool = source_span_is_valid(left, left_span);
+    let right_is_valid: bool = source_span_is_valid(right, right_span);
+    if (!left_is_valid || !right_is_valid) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let shared_length: usize = left_span.length < right_span.length ? left_span.length : right_span.length;
+    for (var index: usize = 0; index < shared_length; index += 1) {
+        let left_byte: u8 = left->source.data[left_span.offset + index];
+        let right_byte: u8 = right->source.data[right_span.offset + index];
+        if (left_byte != right_byte) {
+            return left_byte < right_byte;
+        }
+    }
+    return left_span.length < right_span.length;
+}
+
+fn token_is_before(
+    context: *context::Context, left_unit: usize, left_token: usize, right_unit: usize, right_token: usize) -> bool {
+    return text_is_before(
+        context, left_unit, context::token(context, left_unit, left_token).span,
+        right_unit, context::token(context, right_unit, right_token).span);
+}
+
+fn module_name_is_before(context: *context::Context, left_module: usize, right_module: usize) -> bool {
+    let modules: *const context::Module = context->modules.data as
+            *const context::Module;
+    let left: context::Module = modules[left_module];
+    let right: context::Module = modules[right_module];
+    let left_name: syntax::SyntaxNode = context::node(context, left.name_unit, left.name_node);
+    let right_name: syntax::SyntaxNode = context::node(context, right.name_unit, right.name_node);
+    var left_child: usize = left_name.first_child;
+    var right_child: usize = right_name.first_child;
+    let shared_count: usize = left_name.child_count < right_name.child_count ?
+            left_name.child_count : right_name.child_count;
+    for (var index: usize = 0; index < shared_count; index += 1) {
+        let left_component: syntax::SyntaxNode = context::node(context, left.name_unit, left_child);
+        let right_component: syntax::SyntaxNode = context::node(context, right.name_unit, right_child);
+        if (!context::tokens_equal(
+                context, left.name_unit, left_component.token_index, right.name_unit, right_component.token_index)) {
+            return token_is_before(
+                context, left.name_unit, left_component.token_index, right.name_unit, right_component.token_index);
+        }
+        left_child = left_component.next_sibling;
+        right_child = right_component.next_sibling;
+    }
+    return left_name.child_count < right_name.child_count;
+}
+
+fn functions_share_binding(context: *context::Context, left_function: usize, right_function: usize) -> bool {
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    let left: context::Symbol = symbols[functions[left_function].symbol_id];
+    let right: context::Symbol = symbols[functions[right_function].symbol_id];
+    let modules_match: bool = left.module_id == right.module_id;
+    let names_match: bool = context::tokens_equal(
+        context, left.declaration_unit, left.name_token, right.declaration_unit, right.name_token);
+    return modules_match && names_match;
+}
+
+fn function_is_before(context: *context::Context, left_function: usize, right_function: usize) -> bool {
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    let left: context::Symbol = symbols[functions[left_function].symbol_id];
+    let right: context::Symbol = symbols[functions[right_function].symbol_id];
+    if (left.module_id != right.module_id) {
+        return module_name_is_before(context, left.module_id, right.module_id);
+    }
+    if (!context::tokens_equal(
+            context, left.declaration_unit, left.name_token, right.declaration_unit, right.name_token)) {
+        return token_is_before(
+            context, left.declaration_unit, left.name_token, right.declaration_unit, right.name_token);
+    }
+    return signature_is_before(context, left_function, right_function);
+}
+
+fn function_order_sift_down(context: *context::Context, ordered: *usize, start: usize, count: usize) -> bool {
+    if (ordered == null || start >= count) {
+        return false;
+    }
+    var root: usize = start;
+    while (root < count / 2 && context->error == runtime::Error.none) {
+        let left_child: usize = root * 2 + 1;
+        var selected: usize = root;
+        if (function_is_before(context, ordered[selected], ordered[left_child])) {
+            selected = left_child;
+        }
+        let right_child: usize = left_child + 1;
+        if (right_child < count && function_is_before(context, ordered[selected], ordered[right_child])) {
+            selected = right_child;
+        }
+        if (selected == root) {
+            return true;
+        }
+        let saved: usize = ordered[root];
+        ordered[root] = ordered[selected];
+        ordered[selected] = saved;
+        root = selected;
+    }
+    return context->error == runtime::Error.none;
+}
+
+fn function_order(context: *context::Context) -> bytes::Buffer {
+    var order: bytes::Buffer = bytes::empty();
+    for (var function_id: usize = 0;
+        function_id < context->function_count && context->error == runtime::Error.none;
+        function_id += 1) {
+        let appended: bytes::BufferResult =
+            bytes::append(order, (&function_id) as *const usize as *const u8, sizeof(usize));
+        order = appended.buffer;
+        context->error = appended.error;
+    }
+    let ordered: *usize = order.data as *usize;
+    for (var heap_index: usize = context->function_count / 2;
+        heap_index != 0 && context->error == runtime::Error.none;
+        heap_index -= 1) {
+        function_order_sift_down(context, ordered, heap_index - 1, context->function_count);
+    }
+    for (var remaining: usize = context->function_count;
+        remaining > 1 && context->error == runtime::Error.none;
+        remaining -= 1) {
+        let last: usize = remaining - 1;
+        let saved: usize = ordered[0];
+        ordered[0] = ordered[last];
+        ordered[last] = saved;
+        function_order_sift_down(context, ordered, 0, last);
+    }
+    return order;
+}
+
+fn begin_binding(context: *context::Context, function_id: usize, candidate_index: usize) -> usize {
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    let symbol: context::Symbol = symbols[functions[function_id].symbol_id];
+    return append_binding(
+        context, {
+            kind = context::BindingKind.callable_set, module_id = symbol.module_id,
+            declaration_unit = symbol.declaration_unit, declaration_node = symbol.declaration_node,
+            name_token = symbol.name_token, first_candidate = candidate_index, candidate_count = 1,
+        });
+}
+
+fn extend_binding(context: *context::Context, binding_id: usize) -> bool {
+    if (binding_id >= context->binding_count) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let bindings: *context::Binding = context->bindings.data as
+            *context::Binding;
+    bindings[binding_id].candidate_count += 1;
+    return true;
+}
+
+fn build_function_bindings(context: *context::Context) -> bool {
+    let state_is_empty: bool = context->binding_count == 0 && context->callable_candidate_count == 0;
+    let buffers_are_empty: bool = context->bindings.length == 0 && context->callable_candidates.length == 0;
+    if (!state_is_empty || !buffers_are_empty) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    context->callable_candidates = function_order(context);
+    context->callable_candidate_count = context->function_count;
+    let ordered: *const usize = context->callable_candidates.data as
+            *const usize;
+    var active_binding: usize = context::no_id();
+    for (var candidate_index: usize = 0;
+        candidate_index < context->callable_candidate_count && context->error == runtime::Error.none;
+        candidate_index += 1) {
+        let function_id: usize = ordered[candidate_index];
+        let starts_binding: bool = candidate_index == 0 ||
+            !functions_share_binding(context, ordered[candidate_index - 1], function_id);
+        if (starts_binding) {
+            active_binding = begin_binding(context, function_id, candidate_index);
+        } else {
+            extend_binding(context, active_binding);
+        }
+        let functions: *context::Function = context->functions.data as
+                *context::Function;
+        functions[function_id].binding_id = active_binding;
+    }
+    if (context->error != runtime::Error.none) {
+        return false;
+    }
+    if (!function_bindings_are_valid(context)) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    return true;
+}
+
+fn binding_range_is_valid(context: *context::Context, binding: context::Binding) -> bool {
+    let count_is_valid: bool = binding.candidate_count != 0;
+    let range_is_valid: bool = checked::range_is_valid(
+        binding.first_candidate, binding.candidate_count, context->callable_candidate_count);
+    return count_is_valid && range_is_valid;
+}
+
+fn binding_candidate_is_valid(
+    context: *context::Context, binding_id: usize, binding: context::Binding, candidate_index: usize) -> bool {
+    let candidates: *const usize = context->callable_candidates.data as
+            *const usize;
+    let function_id: usize = candidates[binding.first_candidate + candidate_index];
+    if (function_id >= context->function_count) {
+        return false;
+    }
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    let owner_matches: bool = functions[function_id].binding_id == binding_id;
+    let first_function: usize = candidates[binding.first_candidate];
+    let identity_matches: bool = functions_share_binding(context, first_function, function_id);
+    return owner_matches && identity_matches;
+}
+
+fn function_bindings_are_valid(context: *context::Context) -> bool {
+    if (context->callable_candidate_count != context->function_count) {
+        return false;
+    }
+    let bindings: *const context::Binding = context->bindings.data as
+            *const context::Binding;
+    var expected_candidate: usize = 0;
+    for (var binding_id: usize = 0; binding_id < context->binding_count; binding_id += 1) {
+        let binding: context::Binding = bindings[binding_id];
+        let kind_is_valid: bool = binding.kind == context::BindingKind.callable_set;
+        let position_is_valid: bool = binding.first_candidate == expected_candidate;
+        let shape_is_valid: bool = kind_is_valid && position_is_valid;
+        if (!shape_is_valid || !binding_range_is_valid(context, binding)) {
+            return false;
+        }
+        for (var candidate_index: usize = 0; candidate_index < binding.candidate_count; candidate_index += 1) {
+            if (!binding_candidate_is_valid(context, binding_id, binding, candidate_index)) {
+                return false;
+            }
+        }
+        expected_candidate += binding.candidate_count;
+    }
+    if (expected_candidate != context->callable_candidate_count) {
+        return false;
+    }
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    for (var function_id: usize = 0; function_id < context->function_count; function_id += 1) {
+        if (functions[function_id].binding_id >= context->binding_count) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn candidate_is_visible(
+    context: *context::Context, function_id: usize, unit_index: usize, binding_module: usize) -> bool {
+    let functions: *const context::Function = context->functions.data as
+            *const context::Function;
+    let symbols: *const context::Symbol = context->symbols.data as
+            *const context::Symbol;
+    let function: context::Function = functions[function_id];
+    let symbol: context::Symbol = symbols[function.symbol_id];
+    let owner_module: usize = names::unit_module(context, unit_index);
+    if (owner_module != binding_module) {
+        return (symbol.flags & (context::SymbolFlag.exported as usize)) != 0;
+    }
+    if (!names::unit_is_interface(context, unit_index)) {
+        return true;
+    }
+    return (symbol.flags & (context::SymbolFlag.interface_declaration as usize)) != 0;
+}
+
+fn binding_has_visible_candidate(context: *context::Context, binding: context::Binding, unit_index: usize) -> bool {
+    if (!binding_range_is_valid(context, binding)) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let candidates: *const usize = context->callable_candidates.data as
+            *const usize;
+    for (var index: usize = 0; index < binding.candidate_count; index += 1) {
+        let function_id: usize = candidates[binding.first_candidate + index];
+        if (candidate_is_visible(context, function_id, unit_index, binding.module_id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn find_module_binding(context: *context::Context, unit_index: usize, module_id: usize, name_token: usize) -> usize {
+    let bindings: *const context::Binding = context->bindings.data as
+            *const context::Binding;
+    for (var binding_id: usize = 0; binding_id < context->binding_count; binding_id += 1) {
+        let binding: context::Binding = bindings[binding_id];
+        let identity_matches: bool = binding.kind == context::BindingKind.callable_set &&
+            binding.module_id == module_id;
+        let name_matches: bool = context::tokens_equal(
+            context, unit_index, name_token, binding.declaration_unit, binding.name_token);
+        let binding_matches: bool = identity_matches && name_matches;
+        if (binding_matches && binding_has_visible_candidate(context, binding, unit_index)) {
+            return binding_id;
+        }
+    }
+    return context::no_id();
+}
+
+fn find_imported_binding(context: *context::Context, unit_index: usize, name_token: usize) -> usize {
+    let none: usize = context::no_id();
+    let module_id: usize = names::unit_module(context, unit_index);
+    let interface_scope: bool = names::unit_is_interface(context, unit_index);
+    let modules: *const context::Module = context->modules.data as
+            *const context::Module;
+    let imports: *const context::Import = context->imports.data as
+            *const context::Import;
+    var found: usize = none;
+    for (var import_index: usize = 0; import_index < modules[module_id].import_count; import_index += 1) {
+        let import_record: context::Import = imports[modules[module_id].first_import + import_index];
+        let import_is_visible: bool = !interface_scope || import_record.interface_import;
+        let name_is_bound: bool = names::import_binds_name(context, import_record, unit_index, name_token);
+        if (import_is_visible && name_is_bound) {
+            let binding_id: usize = find_module_binding(context, unit_index, import_record.target_module, name_token);
+            let binding_conflicts: bool = found != none && found != binding_id;
+            if (binding_id != none && binding_conflicts) {
+                let bindings: *const context::Binding = context->bindings.data as
+                        *const context::Binding;
+                context::add_diagnostic(
+                    context, context::DiagnosticKind.ambiguous_import, unit_index,
+                    context::token(context, unit_index, name_token).span, bindings[found].declaration_unit,
+                    context::token(context, bindings[found].declaration_unit, bindings[found].name_token).span,
+                    binding_id);
+                return none;
+            }
+            if (binding_id != none) {
+                found = binding_id;
+            }
+        }
+    }
+    return found;
+}
+
+fn lookup_callable_binding(context: *context::Context, unit_index: usize, name_token: usize) -> usize {
+    let module_id: usize = names::unit_module(context, unit_index);
+    let local: usize = find_module_binding(context, unit_index, module_id, name_token);
+    if (local != context::no_id()) {
+        return local;
+    }
+    return find_imported_binding(context, unit_index, name_token);
+}
+
+fn lookup_qualified_callable_binding(
+    context: *context::Context, unit_index: usize, path: syntax::SyntaxNode, diagnose: bool) -> usize {
+    let none: usize = context::no_id();
+    if (path.child_count == 0) {
+        return lookup_callable_binding(context, unit_index, path.token_index);
+    }
+    if (path.child_count > 1) {
+        if (diagnose) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.invalid_qualified_path, unit_index, path.span,
+                none, context::empty_span(), path.token_index);
+        }
+        return none;
+    }
+    let qualifier: syntax::SyntaxNode = context::node(context, unit_index, path.first_child);
+    var ambiguous: bool = false;
+    let target: usize = diagnose ? names::resolve_module_qualifier(
+            context, unit_index, qualifier.token_index, qualifier.span) :
+        names::find_qualifier_target(context, unit_index, qualifier.token_index, &ambiguous);
+    if (target == none) {
+        return none;
+    }
+    let binding_id: usize = find_module_binding(context, unit_index, target, path.token_index);
+    if (binding_id == none && diagnose) {
+        let modules: *const context::Module = context->modules.data as
+                *const context::Module;
+        context::add_diagnostic(
+            context, context::DiagnosticKind.unknown_qualified_name, unit_index, path.span, modules[target].name_unit,
+            context::node(context, modules[target].name_unit, modules[target].name_node).span, path.token_index);
+    }
+    return binding_id;
+}
+
+fn binding_single_function(context: *context::Context, binding_id: usize, unit_index: usize) -> usize {
+    if (binding_id >= context->binding_count) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    let bindings: *const context::Binding = context->bindings.data as
+            *const context::Binding;
+    let binding: context::Binding = bindings[binding_id];
+    if (!binding_range_is_valid(context, binding)) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    let candidates: *const usize = context->callable_candidates.data as
+            *const usize;
+    var found: usize = context::no_id();
+    for (var index: usize = 0; index < binding.candidate_count; index += 1) {
+        let function_id: usize = candidates[binding.first_candidate + index];
+        if (candidate_is_visible(context, function_id, unit_index, binding.module_id)) {
+            if (found != context::no_id()) {
+                return context::no_id();
+            }
+            found = function_id;
+        }
+    }
+    return found;
+}
+
+fn ordered_function_id(context: *context::Context, index: usize) -> usize {
+    if (index >= context->callable_candidate_count) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    let candidates: *const usize = context->callable_candidates.data as
+            *const usize;
+    let function_id: usize = candidates[index];
+    if (function_id >= context->function_count) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    return function_id;
+}

@@ -183,24 +183,6 @@ fn validate_external_signature(context: *context::Context, function_id: usize) -
     return context->error == runtime::Error.none;
 }
 
-fn find_module_function(context: *context::Context, module_id: usize, unit_index: usize, name_token: usize) -> usize {
-    let functions: *const context::Function = context->functions.data as
-            *const context::Function;
-    let symbols: *const context::Symbol = context->symbols.data as
-            *const context::Symbol;
-    var index: usize = 0;
-    while (index < context->function_count) {
-        let symbol: context::Symbol = symbols[functions[index].symbol_id];
-        if (symbol.module_id == module_id &&
-            context::tokens_equal(
-                context, unit_index, name_token, symbol.declaration_unit, symbol.name_token)) {
-            return index;
-        }
-        index += 1;
-    }
-    return context::no_id();
-}
-
 // An `asm fn` is an implementation-unit definition whose entire body is
 // one or more adjacent string literals (m1.4 concatenation included) and
 // nothing else, carried as one string_expression of plain-width literals.
@@ -248,6 +230,37 @@ fn validate_asm_function(
     return context->error == runtime::Error.none;
 }
 
+fn validate_function_declaration_form(
+    context: *context::Context, unit_index: usize, declaration: syntax::SyntaxNode, interface_unit: bool) -> bool {
+    let none: usize = context::no_id();
+    var parameter_count: usize = 0;
+    var return_node: usize = none;
+    var body_node: usize = none;
+    if (!function_parts(
+            context, unit_index, declaration, &parameter_count, &return_node, &body_node)) {
+        return false;
+    }
+    let external: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.external);
+    let exported: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.exported);
+    let bodyless: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.bodyless);
+    let visibility_is_invalid: bool = !interface_unit && exported;
+    let external_body_is_invalid: bool = external && !bodyless;
+    let interface_body_is_invalid: bool = interface_unit && !bodyless;
+    let body_is_invalid: bool = external_body_is_invalid || interface_body_is_invalid;
+    if (visibility_is_invalid || body_is_invalid) {
+        let kind: context::DiagnosticKind = visibility_is_invalid ? context::DiagnosticKind.invalid_export :
+            context::DiagnosticKind.invalid_external;
+        context::add_diagnostic(context, kind, unit_index, declaration.span, none, context::empty_span(), 0);
+    }
+    let variadic: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.variadic);
+    if (variadic && parameter_count == 0) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_variadic, unit_index, declaration.span, none,
+            context::empty_span(), 0);
+    }
+    return context->error == runtime::Error.none;
+}
+
 fn add_function_declaration(
     context: *context::Context, module_id: usize, unit_index: usize, declaration_id: usize,
     declaration: syntax::SyntaxNode, interface_unit: bool) -> usize {
@@ -261,21 +274,10 @@ fn add_function_declaration(
     }
     let external: bool = (declaration.flags & (syntax::SyntaxFlag.external as usize)) != 0;
     let exported: bool = (declaration.flags & (syntax::SyntaxFlag.exported as usize)) != 0;
-    let bodyless: bool = (declaration.flags & (syntax::SyntaxFlag.bodyless as usize)) != 0;
     // A `...` tail requires at least one named parameter; it is legal both
     // on extern declarations and on Luna-defined variadic functions (their
     // prologue builds the System V register save area for va_start/va_arg).
     let variadic: bool = (declaration.flags & (syntax::SyntaxFlag.variadic as usize)) != 0;
-    if ((!interface_unit && exported) || (external && !bodyless) || (interface_unit && !bodyless)) {
-        context::add_diagnostic(
-            context, (!interface_unit && exported) ? context::DiagnosticKind.invalid_export :
-                context::DiagnosticKind.invalid_external, unit_index, declaration.span, none, context::empty_span(), 0);
-    }
-    if (variadic && parameter_count == 0) {
-        context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_variadic, unit_index, declaration.span, none,
-            context::empty_span(), 0);
-    }
     var flags: usize = context::SymbolFlag.none as usize;
     if (exported) {
         flags |= context::SymbolFlag.exported as usize;
@@ -311,7 +313,7 @@ fn add_function_declaration(
     }
     let function_id: usize = append_function(
         context, {
-            symbol_id = symbol_id, interface_unit = interface_unit ? unit_index : none,
+            symbol_id = symbol_id, binding_id = none, interface_unit = interface_unit ? unit_index : none,
             interface_node = interface_unit ? declaration_id : none, implementation_unit = interface_unit ?
                 none : unit_index, implementation_node = interface_unit ? none : declaration_id,
             return_type = type_info::BuiltinType.type_void as usize, first_parameter = none, parameter_count = 0,
@@ -339,57 +341,6 @@ fn add_function_declaration(
     return function_id;
 }
 
-fn function_signature_matches(
-    context: *context::Context, function_id: usize, unit_index: usize, declaration: syntax::SyntaxNode) -> bool {
-    let none: usize = context::no_id();
-    var parameter_count: usize = 0;
-    var return_node: usize = none;
-    var body_node: usize = none;
-    if (!function_parts(
-            context, unit_index, declaration, &parameter_count, &return_node, &body_node)) {
-        return false;
-    }
-    let functions: *const context::Function = context->functions.data as
-            *const context::Function;
-    let function: context::Function = functions[function_id];
-    if (parameter_count != function.parameter_count) {
-        return false;
-    }
-    let variadic: bool = (declaration.flags & (syntax::SyntaxFlag.variadic as usize)) != 0;
-    if (variadic != ((function.flags & (context::SymbolFlag.variadic as usize)) != 0)) {
-        return false;
-    }
-    let actual_return: usize = return_node == none ? type_info::BuiltinType.type_void as usize :
-        types::resolve_type_node(context, unit_index, return_node);
-    if (actual_return != function.return_type) {
-        return false;
-    }
-    let parameters: *const context::Parameter = context->parameters.data as
-            *const context::Parameter;
-    var child: usize = declaration.first_child;
-    var index: usize = 0;
-    while (index < parameter_count) {
-        let parameter_node: syntax::SyntaxNode = context::node(context, unit_index, child);
-        let actual_type: usize = types::resolve_type_node(context, unit_index, parameter_node.first_child);
-        if (actual_type != parameters[function.first_parameter + index].type_id) {
-            return false;
-        }
-        child = parameter_node.next_sibling;
-        index += 1;
-    }
-    return true;
-}
-
-// ---------------------------------------------------------------------------
-// const fn collection and body validation
-// // A `const fn` exists only for the constant evaluator: it registers a
-// const_function symbol (never a runtime function, so a runtime call
-// resolves to unknown_name) plus a context::ConstFunction record
-// whose parameters reuse the shared parameter buffer with function_id set
-// to no-id so regular duplicate detection never matches them. Bodies are
-// restricted to the statement subset the interpreter walks; anything else
-// is invalid_const_function.
-
 fn collect_functions_in_unit(
     context: *context::Context, module_id: usize, unit_index: usize, interface_unit: bool) -> bool {
     let none: usize = context::no_id();
@@ -402,58 +353,33 @@ fn collect_functions_in_unit(
         if (declaration.kind == syntax::SyntaxKind.function_declaration && (declaration.flags &
                 (syntax::SyntaxFlag.const_function as usize)) == 0) {
             validate_asm_function(context, unit_index, declaration, interface_unit);
+            validate_function_declaration_form(context, unit_index, declaration, interface_unit);
             let duplicate_name: usize =
                 names::find_any_local_symbol(context, module_id, unit_index, declaration.token_index);
-            let existing_function: usize =
-                find_module_function(context, module_id, unit_index, declaration.token_index);
-            if (!interface_unit && existing_function != none) {
-                if ((declaration.flags & (syntax::SyntaxFlag.exported as usize)) != 0) {
-                    context::add_diagnostic(
-                        context, context::DiagnosticKind.invalid_export, unit_index, declaration.span, none,
-                        context::empty_span(), existing_function);
-                }
-                var functions: *context::Function = context->functions.data as
-                        *context::Function;
-                let existing: context::Function = functions[existing_function];
-                if (existing.implementation_unit != none || (existing.flags & (context::SymbolFlag
-                            .external as usize)) != 0) {
-                    let symbols: *const context::Symbol = context->symbols.data as
-                            *const context::Symbol;
-                    context::add_diagnostic(
-                        context, context::DiagnosticKind.duplicate_function, unit_index, declaration.span,
-                        symbols[existing.symbol_id].declaration_unit,
-                        context::node(
-                            context, symbols[existing.symbol_id].declaration_unit, symbols[existing.symbol_id]
-                                .declaration_node).span, existing_function);
-                } else if (!function_signature_matches(
-                        context, existing_function, unit_index, declaration)) {
-                    context::add_diagnostic(
-                        context, context::DiagnosticKind.signature_mismatch, unit_index, declaration.span,
-                        existing.interface_unit,
-                        context::node(context, existing.interface_unit, existing.interface_node).span,
-                        existing_function);
-                } else {
-                    functions = context->functions.data as
-                            *context::Function;
-                    functions[existing_function].implementation_unit = unit_index;
-                    functions[existing_function].implementation_node = declaration_id;
-                    // The interface declaration was collected without the
-                    // asm flag; the implementation carries it.
-                    if ((declaration.flags & (syntax::SyntaxFlag.asm_function as usize)) != 0) {
-                        functions[existing_function].flags |= context::SymbolFlag.asm_function as usize;
-                    }
-                }
-            } else if (duplicate_name != none) {
-                let symbols: *const context::Symbol = context->symbols.data as
-                        *const context::Symbol;
-                context::add_diagnostic(
-                    context, context::DiagnosticKind.duplicate_name, unit_index, declaration.span,
-                    symbols[duplicate_name].declaration_unit,
-                    context::node(
-                        context, symbols[duplicate_name].declaration_unit, symbols[duplicate_name].declaration_node
-                    ).span, duplicate_name);
-            } else {
+            let lookup: FunctionDeclarationLookup =
+                lookup_function_declaration(context, module_id, unit_index, declaration);
+            let match: FunctionDeclarationMatch = classify_function_declaration(
+                context, unit_index, declaration, interface_unit, duplicate_name,
+                lookup.named_function, lookup.overload);
+            switch (match.action) {
+            case FunctionDeclarationAction.add_candidate {
                 add_function_declaration(context, module_id, unit_index, declaration_id, declaration, interface_unit);
+            }
+            case FunctionDeclarationAction.attach_definition {
+                attach_function_definition(context, match.related_id, unit_index, declaration_id, declaration);
+            }
+            case FunctionDeclarationAction.duplicate_overload {
+                report_function_declaration_conflict(
+                    context, context::DiagnosticKind.duplicate_function, unit_index, declaration, match.related_id);
+            }
+            case FunctionDeclarationAction.contract_mismatch {
+                report_function_declaration_conflict(
+                    context, context::DiagnosticKind.signature_mismatch, unit_index, declaration, match.related_id);
+            }
+            case FunctionDeclarationAction.non_callable_conflict {
+                report_function_declaration_conflict(
+                    context, context::DiagnosticKind.duplicate_name, unit_index, declaration, match.related_id);
+            }
             }
         }
         declaration_id = declaration.next_sibling;
@@ -550,7 +476,7 @@ fn collect_functions(context: *context::Context) -> bool {
         }
         outer += 1;
     }
-    return build_function_signatures(context);
+    return build_function_signatures(context) && build_function_bindings(context);
 }
 
 fn function_export_name_token(context: *context::Context, function: context::Function) -> usize {

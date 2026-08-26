@@ -1,6 +1,5 @@
 module luna.bootstrap.middleend.semantic.functions.ir;
 
-import luna.bootstrap.frontend.lexer as lexer;
 import luna.bootstrap.frontend.syntax as syntax;
 import luna.bootstrap.middleend.ir as ir;
 import luna.bootstrap.middleend.semantic.functions as functions;
@@ -46,142 +45,6 @@ fn ir_function_record(context: *context::Context, function_id: usize) -> ir::Fun
     };
 }
 
-fn source_span_is_valid(unit: *const context::Unit, span: lexer::SourceSpan) -> bool {
-    if (unit == null) {
-        return false;
-    }
-    return checked::range_is_valid(span.offset, span.length, unit->source.length);
-}
-
-fn text_is_before(
-    context: *context::Context, left_unit: usize, left_span: lexer::SourceSpan,
-    right_unit: usize, right_span: lexer::SourceSpan) -> bool {
-    let left: *const context::Unit = context::input_unit(context, left_unit);
-    let right: *const context::Unit = context::input_unit(context, right_unit);
-    let left_is_valid: bool = source_span_is_valid(left, left_span);
-    let right_is_valid: bool = source_span_is_valid(right, right_span);
-    if (!left_is_valid || !right_is_valid) {
-        context->error = runtime::Error.invalid_argument;
-        return false;
-    }
-    let shared_length: usize = left_span.length < right_span.length ? left_span.length : right_span.length;
-    for (var index: usize = 0; index < shared_length; index += 1) {
-        let left_byte: u8 = left->source.data[left_span.offset + index];
-        let right_byte: u8 = right->source.data[right_span.offset + index];
-        if (left_byte != right_byte) {
-            return left_byte < right_byte;
-        }
-    }
-    return left_span.length < right_span.length;
-}
-
-fn token_is_before(
-    context: *context::Context, left_unit: usize, left_token: usize, right_unit: usize, right_token: usize) -> bool {
-    return text_is_before(
-        context, left_unit, context::token(context, left_unit, left_token).span, right_unit,
-        context::token(context, right_unit, right_token).span);
-}
-
-fn module_name_is_before(context: *context::Context, left_module: usize, right_module: usize) -> bool {
-    let modules: *const context::Module = context->modules.data as
-            *const context::Module;
-    let left: context::Module = modules[left_module];
-    let right: context::Module = modules[right_module];
-    let left_name: syntax::SyntaxNode = context::node(context, left.name_unit, left.name_node);
-    let right_name: syntax::SyntaxNode = context::node(context, right.name_unit, right.name_node);
-    var left_child: usize = left_name.first_child;
-    var right_child: usize = right_name.first_child;
-    let shared_count: usize = left_name.child_count < right_name.child_count ?
-            left_name.child_count : right_name.child_count;
-    for (var index: usize = 0; index < shared_count; index += 1) {
-        let left_component: syntax::SyntaxNode = context::node(context, left.name_unit, left_child);
-        let right_component: syntax::SyntaxNode = context::node(context, right.name_unit, right_child);
-        if (!context::tokens_equal(
-                context, left.name_unit, left_component.token_index, right.name_unit, right_component.token_index)) {
-            return token_is_before(
-                context, left.name_unit, left_component.token_index, right.name_unit, right_component.token_index);
-        }
-        left_child = left_component.next_sibling;
-        right_child = right_component.next_sibling;
-    }
-    return left_name.child_count < right_name.child_count;
-}
-
-fn function_is_before(context: *context::Context, left_function: usize, right_function: usize) -> bool {
-    let functions: *const context::Function = context->functions.data as
-            *const context::Function;
-    let symbols: *const context::Symbol = context->symbols.data as
-            *const context::Symbol;
-    let left: context::Symbol = symbols[functions[left_function].symbol_id];
-    let right: context::Symbol = symbols[functions[right_function].symbol_id];
-    if (left.module_id != right.module_id) {
-        return module_name_is_before(context, left.module_id, right.module_id);
-    }
-    if (!context::tokens_equal(
-            context, left.declaration_unit, left.name_token, right.declaration_unit, right.name_token)) {
-        return token_is_before(context, left.declaration_unit, left.name_token, right.declaration_unit,
-            right.name_token);
-    }
-    return functions::signature_is_before(context, left_function, right_function);
-}
-
-fn function_order_sift_down(context: *context::Context, ordered: *usize, start: usize, count: usize) -> bool {
-    if (ordered == null || start >= count) {
-        return false;
-    }
-    var root: usize = start;
-    while (root < count / 2 && context->error == runtime::Error.none) {
-        let left_child: usize = root * 2 + 1;
-        var selected: usize = root;
-        if (function_is_before(
-                context, ordered[selected], ordered[left_child])) {
-            selected = left_child;
-        }
-        let right_child: usize = left_child + 1;
-        if (right_child < count &&
-            function_is_before(
-                context, ordered[selected], ordered[right_child])) {
-            selected = right_child;
-        }
-        if (selected == root) {
-            return true;
-        }
-        let saved: usize = ordered[root];
-        ordered[root] = ordered[selected];
-        ordered[selected] = saved;
-        root = selected;
-    }
-    return context->error == runtime::Error.none;
-}
-
-fn function_order(context: *context::Context) -> bytes::Buffer {
-    var order: bytes::Buffer = bytes::empty();
-    for (var function_id: usize = 0;
-        function_id < context->function_count && context->error == runtime::Error.none;
-        function_id += 1) {
-        let appended: bytes::BufferResult =
-            bytes::append(order, (&function_id) as *const usize as *const u8, sizeof(usize));
-        order = appended.buffer;
-        context->error = appended.error;
-    }
-    let ordered: *usize = order.data as *usize;
-    for (var heap_index: usize = context->function_count / 2;
-        heap_index != 0 && context->error == runtime::Error.none;
-        heap_index -= 1) {
-        function_order_sift_down(context, ordered, heap_index - 1, context->function_count);
-    }
-    for (var remaining: usize = context->function_count;
-        remaining > 1 && context->error == runtime::Error.none;
-        remaining -= 1) {
-        let last: usize = remaining - 1;
-        let saved: usize = ordered[0];
-        ordered[0] = ordered[last];
-        ordered[last] = saved;
-        function_order_sift_down(context, ordered, 0, last);
-    }
-    return order;
-}
-
 fn semantic_signature_is_valid(context: *context::Context, function: context::Function) -> bool {
     let length_is_valid: bool = function.signature_length != 0;
     let range_is_valid: bool = checked::range_is_valid(
@@ -219,12 +82,10 @@ fn create_ir_parameter(context: *context::Context, function: context::Function, 
 }
 
 fn create_ir_functions(context: *context::Context) -> bool {
-    let order: bytes::Buffer = function_order(context);
-    let ordered: *const usize = order.data as *const usize;
     for (var order_index: usize = 0;
-        order_index < context->function_count && context->error == runtime::Error.none;
+        order_index < context->callable_candidate_count && context->error == runtime::Error.none;
         order_index += 1) {
-        create_ir_function(context, ordered[order_index]);
+        create_ir_function(context, functions::ordered_function_id(context, order_index));
     }
 
     let functions: *const context::Function = context->functions.data as
@@ -232,9 +93,9 @@ fn create_ir_functions(context: *context::Context) -> bool {
     let parameters: *const context::Parameter = context->parameters.data as
             *const context::Parameter;
     for (var order_index: usize = 0;
-        order_index < context->function_count && context->error == runtime::Error.none;
+        order_index < context->callable_candidate_count && context->error == runtime::Error.none;
         order_index += 1) {
-        let function_id: usize = ordered[order_index];
+        let function_id: usize = functions::ordered_function_id(context, order_index);
         let function: context::Function = functions[function_id];
         for (var index: usize = 0;
             index < function.parameter_count && context->error == runtime::Error.none;
@@ -242,10 +103,6 @@ fn create_ir_functions(context: *context::Context) -> bool {
             let parameter: context::Parameter = parameters[function.first_parameter + index];
             create_ir_parameter(context, function, parameter);
         }
-    }
-    let release_error: runtime::Error = bytes::release(order);
-    if (context->error == runtime::Error.none) {
-        context->error = release_error;
     }
     return context->error == runtime::Error.none;
 }

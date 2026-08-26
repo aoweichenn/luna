@@ -187,20 +187,25 @@ identity and the build driver owns path mapping. Every supplied implementation
 must satisfy its matching interface, while an interface-only dependency is
 resolved by a separately linked module object.
 
-The self-hosted middle end orders IR functions by complete module name and
-function name with an iterative heap sort. Function, parameter, slot, block
-and global construction therefore remains deterministic when source units are
-supplied in a different order, without introducing recursive sorting or
-quadratic behavior on large inputs.
+The self-hosted middle end builds explicit callable bindings after canonical
+signatures are available. An iterative heap sort orders function IDs by
+complete module name, source name and signature; adjacent equal module/name
+identities become one binding with a contiguous candidate slice. IR function
+construction and statement lowering consume that same sequence rather than
+sorting independently. Function, parameter, slot, block and global
+construction therefore remains deterministic when source units are supplied
+in a different order, without recursive sorting or downstream order drift.
 
 All modules in one invocation share canonical named-type and function records.
-This preserves type identity across module boundaries, rejects ambiguous
-unqualified imports and lets compatible repeated external declarations share
-one IR symbol while rejecting conflicting signatures. The interface type
-graph is resolved before implementation-private types are collected, making
-the interface independently valid. Function matching uses canonical semantic
-types, so nested arrays, named-type identity and pointer read-only qualifiers
-cannot match accidentally by spelling or layout.
+This preserves type identity across module boundaries and rejects ambiguous
+unqualified imports. Function overload keys use canonical parameter types,
+variadic state and the extern/calling-convention boundary; result type and
+`@noreturn` form a separately checked declaration contract. Interface and
+implementation candidates merge by that key, while distinct implementation
+keys extend the module-private overload set. The interface type graph is
+resolved before implementation-private types are collected, making the
+interface independently valid. Nested arrays, named-type identity and pointer
+qualifiers therefore cannot match accidentally by spelling or layout.
 
 Separate compilation is source-interface based. Each library invocation
 receives all of the selected module's implementation units, its interface and

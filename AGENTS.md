@@ -85,8 +85,9 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
   `functions` (+ `functions/ir`), `expr` (+ `expr/{base,numeric,
   strings,api,initializer,access,operators}`), `stmt` (+
   `stmt/{api,labels}`). The same-module files `types/layout.la`,
-  `consteval/engine/execute.la`, `functions/const.la` and
-  `functions/signature.la` are implementation splits, not additional
+  `consteval/engine/execute.la`, `functions/const.la`,
+  `functions/signature.la`, `functions/overloads.la` and
+  `functions/bindings.la` are implementation splits, not additional
   dependency-graph modules.
 
 ## Layout

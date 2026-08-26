@@ -9,17 +9,17 @@ import luna.bootstrap.middleend.semantic.context.lookup as names;
 import luna.bootstrap.frontend.lexer as lexer;
 import luna.bootstrap.middleend.ir as ir;
 import luna.bootstrap.middleend.semantic.expr.base as base;
+import luna.bootstrap.middleend.semantic.functions as functions;
 import luna.bootstrap.middleend.semantic.types as types;
 import luna.bootstrap.middleend.type as type_info;
 import luna.runtime as runtime;
 import luna.std.bytes as bytes;
 
-fn function_value(context: *context::Context, node: syntax::SyntaxNode, symbol_id: usize) -> context::Expression {
+fn function_value(context: *context::Context, node: syntax::SyntaxNode, function_id: usize) -> context::Expression {
     let none: usize = context::no_id();
-    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
-    let function: context::Function = functions[symbols[symbol_id].function_id];
+    let function: context::Function = functions[function_id];
     var parameter_types: bytes::Buffer = bytes::empty();
     var index: usize = 0;
     while (index < function.parameter_count && context->error == runtime::Error.none) {
@@ -57,6 +57,18 @@ fn function_value(context: *context::Context, node: syntax::SyntaxNode, symbol_i
         lvalue = false, mutable_lvalue = false, volatile_lvalue = false, valid = value_id != none,
         bitfield_segment = context::no_id(),
     };
+}
+
+fn function_binding_value(
+    context: *context::Context, node: syntax::SyntaxNode, binding_id: usize) -> context::Expression {
+    let function_id: usize = functions::binding_single_function(context, binding_id, context->current_unit);
+    if (function_id == context::no_id()) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_call, context->current_unit, node.span,
+            context::no_id(), context::empty_span(), binding_id);
+        return base::invalid_expression();
+    }
+    return function_value(context, node, function_id);
 }
 
 // Emits the resolved value of a module-level constant symbol (flat or
@@ -125,10 +137,9 @@ fn lower_qualified_name(context: *context::Context, node: syntax::SyntaxNode) ->
     if (symbol_id != none) {
         return emit_symbol_constant(context, node, symbol_id);
     }
-    symbol_id = names::lookup_qualified_symbol(
-        context, context->current_unit, node, context::SymbolKind.function, false);
-    if (symbol_id != none) {
-        return function_value(context, node, symbol_id);
+    let binding_id: usize = functions::lookup_qualified_callable_binding(context, context->current_unit, node, false);
+    if (binding_id != none) {
+        return function_binding_value(context, node, binding_id);
     }
     names::lookup_qualified_symbol(context, context->current_unit, node, context::SymbolKind.constant, true);
     return base::invalid_expression();
@@ -144,10 +155,9 @@ fn lower_name(context: *context::Context, node: syntax::SyntaxNode) -> context::
     }
     let local_id: usize = builder::find_local(context, context->current_unit, node.token_index);
     if (local_id == context::no_id()) {
-        let function_symbol: usize =
-            names::lookup_symbol(context, context->current_unit, node.token_index, context::SymbolKind.function);
-        if (function_symbol != context::no_id()) {
-            return function_value(context, node, function_symbol);
+        let binding_id: usize = functions::lookup_callable_binding(context, context->current_unit, node.token_index);
+        if (binding_id != context::no_id()) {
+            return function_binding_value(context, node, binding_id);
         }
         context::add_diagnostic(
             context, context::DiagnosticKind.unknown_name, context->current_unit, node.span, context::no_id(),
@@ -528,22 +538,28 @@ fn lower_call(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
         return base::invalid_expression();
     }
     let callee_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-    var direct_symbol: usize = none;
+    var direct_binding: usize = none;
+    var direct_function: usize = none;
     var callee_value: usize = none;
     if (callee_node.kind == syntax::SyntaxKind.name_expression && callee_node.child_count != 0) {
-        // A qualified callee names a function of the qualifier's module;
-        // the lookup diagnoses unknown qualifiers and names itself.
-        direct_symbol =
-            names::lookup_qualified_symbol(
-                context, context->current_unit, callee_node, context::SymbolKind.function, true);
-        if (direct_symbol == none) {
+        direct_binding = functions::lookup_qualified_callable_binding(
+            context, context->current_unit, callee_node, true);
+        if (direct_binding == none) {
             return base::invalid_expression();
         }
     } else if (callee_node.kind == syntax::SyntaxKind.name_expression &&
         builder::find_local(
             context, context->current_unit, callee_node.token_index) == none) {
-        direct_symbol = names::lookup_symbol(
-            context, context->current_unit, callee_node.token_index, context::SymbolKind.function);
+        direct_binding = functions::lookup_callable_binding(context, context->current_unit, callee_node.token_index);
+    }
+    if (direct_binding != none) {
+        direct_function = functions::binding_single_function(context, direct_binding, context->current_unit);
+        if (direct_function == none) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.invalid_call, context->current_unit, node.span,
+                none, context::empty_span(), direct_binding);
+            return base::invalid_expression();
+        }
     }
     var return_type: usize = none;
     var ir_callee: usize = none;
@@ -556,8 +572,8 @@ fn lower_call(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
             *const context::Symbol;
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
-    if (direct_symbol != none) {
-        let function: context::Function = functions[symbols[direct_symbol].function_id];
+    if (direct_function != none) {
+        let function: context::Function = functions[direct_function];
         return_type = function.return_type;
         ir_callee = function.ir_function;
         parameter_count = function.parameter_count;
@@ -585,9 +601,11 @@ fn lower_call(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
     let argument_total: usize = node.child_count - 1;
     if ((!callee_variadic && argument_total != parameter_count) ||
         (callee_variadic && argument_total < parameter_count)) {
+        let related_unit: usize = direct_function == none ? none :
+            symbols[functions[direct_function].symbol_id].declaration_unit;
         context::add_diagnostic(
-            context, context::DiagnosticKind.argument_count, context->current_unit, node.span, direct_symbol != none ?
-                symbols[direct_symbol].declaration_unit : none, context::empty_span(), parameter_count);
+            context, context::DiagnosticKind.argument_count, context->current_unit, node.span,
+            related_unit, context::empty_span(), parameter_count);
         return base::invalid_expression();
     }
     let parameters: *const context::Parameter = context->parameters.data as
@@ -654,8 +672,8 @@ fn lower_call(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
         index += 1;
     }
     var instruction: ir::Instruction =
-        builder::instruction(direct_symbol != none ? ir::Opcode.call : ir::Opcode.call_indirect, node);
-    if (direct_symbol != none) {
+        builder::instruction(direct_function != none ? ir::Opcode.call : ir::Opcode.call_indirect, node);
+    if (direct_function != none) {
         instruction.auxiliary = ir_callee;
     } else {
         var check: ir::Instruction = builder::instruction(ir::Opcode.null_check, node);
@@ -700,4 +718,3 @@ fn lower_call(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
         bitfield_segment = context::no_id(),
     };
 }
-
