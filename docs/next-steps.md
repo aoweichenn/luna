@@ -15,9 +15,10 @@ implementation status is tracked in `roadmap.md`.
 | m1.3 kernel UAPI layout package | landed; 122/122 cases; verify fixed point |
 | Refactor R0-R4 (formatting, module graph, service/pass decoupling) | landed; every `.la` below 1,000 lines |
 | C23 disposition review | landed in `syntax-plan.md`; m1.2-m1.10 sequenced |
-| `anchor/` | promoted to the m1.1 stage-fixed toolchain (0.2 done) |
+| `anchor/` | promoted to the M3.6 stage-fixed toolchain |
 | Negative tests | `FAIL <diagnostic-kind>` harness landed (0.3 done) |
-| M3.0 direct classes / M3.1 inheritance | implemented; fixed-point promotion remains a separate release step |
+| M3.0-M3.6 object model and class-value composition | implemented and promoted; 383/383 cases |
+| M4 native generics | design opened; implementation not started |
 
 ## Step 0 — close m1.1 completely
 
@@ -151,9 +152,17 @@ bootstrap object and ELF64 paths, and are covered by deterministic,
 malformed-input and executable-link tests. M3.3 now adds one vptr only to
 polymorphic hierarchies, concrete final-overrider tables, virtual pointer calls
 through `call_indirect`, exact-value/final devirtualization and most-derived
-construction dispatch. The next class-system milestone is M3.4 operators,
-bound methods, RTTI and friendship. None of these later milestones changes M3.0 ownership semantics:
-there is still no automatic lifetime or resource management.
+construction dispatch. M3.4 adds restricted operators, bound methods, RTTI and
+friendship; M3.5 adds optional opaque classes; M3.6 completes embedded
+class-value composition and ordered member initialization. None of these
+milestones changes M3.0 ownership semantics: there is still no automatic
+lifetime or resource management.
+
+The next independent phase is M4 native generics, specified in
+[`m4-generics-design.md`](m4-generics-design.md). It establishes exact static
+inference, canonical monomorphization, generic data/class types and
+cross-module interface definitions before references or object lifetime are
+introduced.
 
 ## Discipline reminders
 

@@ -266,12 +266,28 @@ M3 consumes the completed M2 callable foundation. Its design is tracked in
 - [x] M3.1 single inheritance and explicit override contracts
 - [x] M3.2 read-only global function-address relocations
 - [x] M3.3 virtual/abstract dispatch
-- [ ] M3.4 restricted operators, bound methods, RTTI and friendship
-- [ ] M3.5 optional opaque classes
+- [x] M3.4 restricted operators, bound methods, RTTI and friendship
+- [x] M3.5 optional opaque classes
+- [x] M3.6 class-value composition and ordered member initialization
+
+## Current M4: native generics
+
+M4 follows the completed M3 object model. Its accepted design is tracked in
+[`m4-generics-design.md`](m4-generics-design.md). This phase is distinct from
+the archived Luna 0 self-hosting milestone named `M4` above.
+
+- [x] native-generics design draft
+- [ ] M4.0 syntax, generic patterns, substitution and canonical instance
+      identity
+- [ ] M4.1 generic free functions, exact inference and monomorphization
+- [ ] M4.2 generic structures, unions and transparent aliases
+- [ ] M4.3 generic classes, methods and concrete M3 interaction
+- [ ] M4.4 standard-library proving ground and anchor promotion
 
 ## Explicitly deferred
 
-Optimization beyond local x86-64 improvements, general metaprogramming,
+Optimization beyond local x86-64 improvements, general metaprogramming beyond
+the bounded M4 generic model,
 parallel compilation, incremental compilation, package management, language
 server work and non-x86-64 backends are outside the bootstrap path.
 Using libc to implement the target runtime or standard library is also outside

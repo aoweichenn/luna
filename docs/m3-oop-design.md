@@ -862,7 +862,7 @@ Every slice needs positive, negative and determinism coverage:
 | RTTI | minimal, opt-in, non-throwing pointer checks |
 | exceptions | removed |
 | pointer-to-member | replaced by non-owning two-word bound methods |
-| templates/concepts | separate future design |
+| templates/concepts | replaced by the separate M4 native-generics design |
 | module partitions/header units | not part of the OOP model |
 
 The intended result is a small, deterministic, zero-cost class system: familiar

@@ -121,7 +121,7 @@ is deliberate.
 | comma operator, `++`/`--`, assignment as expression | rejected | statements stay statements |
 | `?:` conditional | kept | `bool` condition, one exact result type |
 | `sizeof(expression)` | rejected | type-only `sizeof`/`alignof`/`offsetof` |
-| `_Generic` | rejected | native generics if ever |
+| `_Generic` | rejected | native static generics are designed separately in M4 |
 | `<stdckdint.h>` checked arithmetic | modernized | `@add_overflow` and kin, built-ins package |
 | compound literals | modernized | context-directed `{}` initialization |
 | designated initializers | adopted | named fields done; array lists in m1.4 |
@@ -510,8 +510,8 @@ mechanism that let m1.13 retire the manual `std_text_`-style prefixes.
 ## Explicitly out of scope
 
 Implicit conversions in any form; assignment/`++`/comma as expressions;
-the preprocessor and textual macros; `_Generic` (generics, if ever, will be
-designed natively instead); K&R declarations; VLAs; threads and atomics in
+the preprocessor and textual macros; C `_Generic` selection (native static
+generics are the separate M4 design); K&R declarations; VLAs; threads and atomics in
 the language surface (atomics arrive as standard-library code per decision
 6); `long double`, `_Decimal*`, `_BitInt`, `_Complex`; multi-character
 constants; `sizeof` on expressions; `fenv`; `setjmp`/`longjmp`; GNU-style
@@ -522,7 +522,7 @@ foreclose them); conditional compilation (shelved; the
 accepted candidate is const-driven dead-code folding, never a textual
 preprocessor).
 
-## Completed M2 callable and current M3 OOP design
+## Completed M2/M3 foundations and current M4 generics design
 
 M2 first establishes canonical callable signatures, signature-based mangling,
 deterministic exact overload resolution, function-pointer selection and default
@@ -533,14 +533,21 @@ M3.0 now provides the direct, ownership-free class foundation in
 [`m3-oop-design.md`](m3-oop-design.md): overloaded constructors/methods,
 `pub`/`prot`/`priv` access, implicit `this`, non-polymorphic layout and exact
 class values.
-M3.1-M3.5 add single inheritance, opt-in virtual dispatch, restricted
-operators, non-owning bound methods, minimal RTTI and friendship in that order.
+M3.1-M3.6 add single inheritance, opt-in virtual dispatch, restricted
+operators, non-owning bound methods, minimal RTTI, friendship, opaque classes
+and embedded class-value composition in that order.
 Automatic destruction, RAII, move semantics, multiple inheritance, ADL,
-exceptions and language-level composition remain outside these phases. Both
-designs follow the fixed-point and anchor-promotion discipline.
+exceptions, delegation and automatic forwarding remain outside these phases.
+Every phase follows the fixed-point and anchor-promotion discipline.
 
 M3.1 is implemented through `class Derived : Base`, `final class`,
 `virtual`/`abstract`/`override final` method contracts and direct
 `super.method(...)`/`super.init(...)` calls. It records deterministic slots but
 M3.2 supplies relocation data and M3.3 now emits vtables, initializes vptrs and
 performs dynamic dispatch through pointer receivers.
+
+M4 is the independent native-generics phase specified in
+[`m4-generics-design.md`](m4-generics-design.md). It uses exact structural
+inference and canonical static instances, with no specialization, SFINAE,
+dependent lookup or runtime dictionaries. Reference types and object
+copy/move/destruction remain later consumers rather than part of M4.
