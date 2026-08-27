@@ -300,6 +300,14 @@ fn emit_call_register_argument(
             width < 32);
 }
 
+fn emit_stack_address(context: *support::Context, storage: frame::Storage, suffix: *const u8) -> bool {
+    if (context->error != runtime::Error.none) {
+        return false;
+    }
+    return support::literal(context, "    leaq ") && support::append_stack(context, storage) &&
+        support::literal(context, suffix);
+}
+
 fn emit_call_result(context: *support::Context, instruction: ir::Instruction, function_abi: abi::Function) -> bool {
     let record: *const type_info::Record = support::type(context, instruction.type_id);
     if (record == null || record->kind == type_info::Kind.type_void) {
@@ -316,13 +324,19 @@ fn emit_call_result(context: *support::Context, instruction: ir::Instruction, fu
         }
         return support::store_rax(context, instruction.result, record);
     }
-    let destination: frame::Storage = support::storage(context, frame::StorageKind.aggregate_call_result,
-        instruction.result);
-    if (context->error != runtime::Error.none || !support::literal(context, "    leaq ") ||
-        !support::append_stack(context, destination) ||
-        !support::literal(
-            context, ", %r11\n")) {
-        return false;
+    let direct_destination: bool = instruction.right != support::no_id();
+    if (direct_destination) {
+        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+        let pointer: *const type_info::Record = support::type(context, values[instruction.right].type_id);
+        if (pointer == null || !support::load_integer(context, instruction.right, pointer, "%r11d", "%r11", false)) {
+            return false;
+        }
+    } else {
+        let destination: frame::Storage = support::storage(
+            context, frame::StorageKind.aggregate_call_result, instruction.result);
+        if (!emit_stack_address(context, destination, ", %r11\n")) {
+            return false;
+        }
     }
     if (!function_abi.hidden_return_pointer) {
         let pieces: *const abi::Piece = context->abi.pieces.data as
@@ -351,9 +365,29 @@ fn emit_call_result(context: *support::Context, instruction: ir::Instruction, fu
             index += 1;
         }
     }
-    return support::literal(context, "    leaq ") && support::append_stack(context, destination) &&
-        support::literal(context, ", %rax\n    movq %rax, ") && support::append_value(context, instruction.result) &&
-        support::literal(context, "\n");
+    if (direct_destination) {
+        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+        let pointer: *const type_info::Record = support::type(context, values[instruction.right].type_id);
+        return pointer != null && support::load_rax(context, instruction.right, pointer) &&
+            support::literal(context, "    movq %rax, ") && support::append_value(context, instruction.result) &&
+            support::literal(context, "\n");
+    }
+    let destination: frame::Storage = support::storage(
+        context, frame::StorageKind.aggregate_call_result, instruction.result);
+    return emit_stack_address(context, destination, ", %rax\n    movq %rax, ") &&
+        support::append_value(context, instruction.result) && support::literal(context, "\n");
+}
+
+fn emit_hidden_return_argument(context: *support::Context, instruction: ir::Instruction) -> bool {
+    if (instruction.right != support::no_id()) {
+        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+        let pointer: *const type_info::Record = support::type(context, values[instruction.right].type_id);
+        return pointer != null && support::load_rax(context, instruction.right, pointer) &&
+            support::literal(context, "    movq %rax, %rdi\n");
+    }
+    let destination: frame::Storage = support::storage(
+        context, frame::StorageKind.aggregate_call_result, instruction.result);
+    return emit_stack_address(context, destination, ", %rdi\n");
 }
 
 fn function_pointer_abi_index(context: *support::Context, type_id: usize) -> usize {
@@ -400,12 +434,7 @@ fn emit_call_indirect(context: *support::Context, instruction: ir::Instruction, 
         index += 1;
     }
     if (function_abi.hidden_return_pointer) {
-        let destination: frame::Storage =
-            support::storage(context, frame::StorageKind.aggregate_call_result, instruction.result);
-        if (context->error != runtime::Error.none || !support::literal(context, "    leaq ") ||
-            !support::append_stack(context, destination) ||
-            !support::literal(
-                context, ", %rdi\n")) {
+        if (!emit_hidden_return_argument(context, instruction)) {
             return false;
         }
     }
@@ -513,12 +542,7 @@ fn emit_call(context: *support::Context, instruction: ir::Instruction, instructi
         }
     }
     if (function_abi.hidden_return_pointer) {
-        let destination: frame::Storage =
-            support::storage(context, frame::StorageKind.aggregate_call_result, instruction.result);
-        if (context->error != runtime::Error.none || !support::literal(context, "    leaq ") ||
-            !support::append_stack(context, destination) ||
-            !support::literal(
-                context, ", %rdi\n")) {
+        if (!emit_hidden_return_argument(context, instruction)) {
             return false;
         }
     }
@@ -860,4 +884,3 @@ fn emit_return(context: *support::Context, instruction: ir::Instruction) -> bool
     }
     return support::literal(context, "    jmp ") && support::return_label(context) && support::literal(context, "\n");
 }
-

@@ -13,6 +13,7 @@ import luna.bootstrap.middleend.semantic.classes as classes;
 import luna.bootstrap.middleend.semantic.classes.model as class_model;
 import luna.bootstrap.middleend.semantic.expr.base as base;
 import luna.bootstrap.middleend.semantic.functions as functions;
+import luna.bootstrap.middleend.semantic.lifetime as lifetime;
 import luna.bootstrap.middleend.semantic.types as types;
 import luna.bootstrap.middleend.semantic.value as category;
 import luna.bootstrap.middleend.type as type_info;
@@ -205,7 +206,22 @@ fn lower_name(context: *context::Context, node: syntax::SyntaxNode, expected_typ
         has_constant = false, category = category::lvalue(local.mutable_binding, local.volatile_binding),
         valid = address_id != context::no_id(), bitfield_segment = context::no_id(),
     };
-    return builder::load_lvalue(context, node, expression);
+    let loaded: context::Expression = builder::load_lvalue(context, node, expression);
+    let local_type: type_info::Record = context::type_record(context, local.type_id);
+    if (local_type.kind != type_info::Kind.reference || !loaded.valid) {
+        return loaded;
+    }
+    let read_only: bool = (local_type.flags & (type_info::Flag.read_only as usize)) != 0;
+    let rvalue: bool = (local_type.flags & (type_info::Flag.rvalue_reference as usize)) != 0;
+    let address_type: usize = pointer_type(context, local_type.element_type, read_only);
+    let target_address: usize = convert_value(context, node, loaded.value_id, address_type);
+    let result: context::Expression = {
+        type_id = local_type.element_type, value_id = context::no_id(), address_id = target_address,
+        constant_value = 0, has_constant = false,
+        category = rvalue ? category::xvalue(read_only) : category::lvalue(!read_only, false),
+        valid = target_address != context::no_id(), bitfield_segment = context::no_id(),
+    };
+    return builder::load_lvalue(context, node, result);
 }
 
 fn lower_this(context: *context::Context, node: syntax::SyntaxNode) -> context::Expression {
@@ -732,6 +748,28 @@ fn call_argument_value(context: *context::Context, node: syntax::SyntaxNode, arg
     if (!snapshot_is_valid) {
         return context::no_id();
     }
+    let class_argument: bool = argument_type.kind == type_info::Kind.class_type;
+    let nontrivial_argument: bool = !functions::type_is_trivially_copyable(context, argument.type_id);
+    let semantic_argument: bool = class_argument || nontrivial_argument;
+    if (semantic_argument && !builder::zero_slot(context, node, snapshot_slot, argument.type_id)) {
+        return context::no_id();
+    }
+    if (argument_type.kind == type_info::Kind.class_type) {
+        let constructed: context::Expression = lower_special_construction(
+            context, node, snapshot_address, argument.type_id, argument);
+        if (!constructed.valid) {
+            return context::no_id();
+        }
+        if (constructed.address_id == snapshot_address) {
+            return snapshot_address;
+        }
+    }
+    if (!functions::type_is_trivially_copyable(context, argument.type_id)) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_initializer, context->current_unit, node.span,
+            context::no_id(), context::empty_span(), argument.type_id);
+        return context::no_id();
+    }
     return builder::store_to_address(context, node, snapshot_address, argument.type_id, argument) ?
         snapshot_address : context::no_id();
 }
@@ -739,6 +777,24 @@ fn call_argument_value(context: *context::Context, node: syntax::SyntaxNode, arg
 fn collect_fixed_call_argument(
     context: *context::Context, node: syntax::SyntaxNode, argument: context::Expression,
     parameter_type: usize, values: *bytes::Buffer) {
+    let parameter: type_info::Record = context::type_record(context, parameter_type);
+    if (parameter.kind == type_info::Kind.reference) {
+        let binding_rank: usize = category::reference_binding_rank(parameter, argument.category);
+        let type_matches: bool = argument.valid && argument.type_id == parameter.element_type;
+        if (!type_matches || binding_rank == type_info::no_id()) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span,
+                context::no_id(), context::empty_span(), parameter_type);
+            return;
+        }
+        let value: usize = convert_value(context, node, argument.address_id, parameter_type);
+        if (value == context::no_id()) {
+            context->error = runtime::Error.invalid_argument;
+            return;
+        }
+        append_call_argument(context, values, value);
+        return;
+    }
     if (!argument.valid || argument.type_id != parameter_type) {
         context::add_diagnostic(
             context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span,
@@ -1029,7 +1085,10 @@ fn constructor_receiver(
     if (!initialize_class_vptr(context, node, owner_type, address_id)) {
         return context::no_id();
     }
-    return append_call_argument(context, values, address_id) ? address_id : context::no_id();
+    if (!append_call_argument(context, values, address_id)) {
+        return context::no_id();
+    }
+    return lifetime::register_temporary(context, owner_type, address_id) ? address_id : context::no_id();
 }
 
 fn receiver_storage_address(
@@ -1132,6 +1191,13 @@ fn collect_direct_receiver(
         return constructor_receiver(context, node, target.owner_type, values);
     }
     case probe::ReceiverSource.expression {
+        if (construction_address != context::no_id()) {
+            let adjusted: usize = convert_value(context, node, construction_address, receiver_type);
+            if (adjusted == context::no_id()) {
+                return context::no_id();
+            }
+            return append_call_argument(context, values, adjusted) ? adjusted : context::no_id();
+        }
         return instance_receiver(context, node, target, receiver_type, lowerer, values);
     }
     case probe::ReceiverSource.current_object {
@@ -1145,7 +1211,8 @@ fn collect_direct_receiver(
 
 fn lower_target_call_with_receiver(
     context: *context::Context, node_id: usize, node: syntax::SyntaxNode,
-    target: probe::CallTarget, construction_address: usize, lowerer: api::Lowerer) -> context::Expression {
+    target: probe::CallTarget, receiver_address: usize,
+    result_address: usize, expected_result: usize, lowerer: api::Lowerer) -> context::Expression {
     let none: usize = context::no_id();
     if (node.child_count == 0) {
         context->error = runtime::Error.invalid_argument;
@@ -1231,6 +1298,12 @@ fn lower_target_call_with_receiver(
         first_parameter = callee_record.first_field;
         parameters_from_fields = true;
     }
+    if (result_address != none && return_type != expected_result) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span,
+            none, context::empty_span(), expected_result);
+        return base::invalid_expression();
+    }
     let argument_total: usize = node.child_count - 1;
     let arity_is_valid: bool = selected_function == none ? argument_total == parameter_count :
         functions::function_accepts_arity(context, selected_function, argument_total);
@@ -1255,7 +1328,7 @@ fn lower_target_call_with_receiver(
     if (selected_function != none && target_has_receiver) {
         let receiver_type: usize = functions::function_receiver_type(context, functions[selected_function]);
         constructed_address = collect_direct_receiver(
-            context, node, target, receiver_type, construction_address, lowerer, &argument_values);
+            context, node, target, receiver_type, receiver_address, lowerer, &argument_values);
         if (constructed_address == none) {
             bytes::release(argument_values);
             return base::invalid_expression();
@@ -1276,7 +1349,14 @@ fn lower_target_call_with_receiver(
         let variadic_extra: bool = index >= parameter_count;
         let parameter_type: usize = variadic_extra ? none :
             call_parameter_type(parameters, type_fields, first_parameter, index, parameters_from_fields);
-        let argument: context::Expression = api::invoke(lowerer, context, child, parameter_type);
+        var expected_type: usize = parameter_type;
+        if (!variadic_extra) {
+            let parameter_record: type_info::Record = context::type_record(context, parameter_type);
+            if (parameter_record.kind == type_info::Kind.reference) {
+                expected_type = parameter_record.element_type;
+            }
+        }
+        let argument: context::Expression = api::invoke(lowerer, context, child, expected_type);
         let argument_node: syntax::SyntaxNode = context::node(context, context->current_unit, child);
         if (variadic_extra) {
             collect_variadic_call_argument(context, argument_node, argument, &argument_values);
@@ -1302,6 +1382,12 @@ fn lower_target_call_with_receiver(
         instruction.left = callee_value;
     }
     let return_record: type_info::Record = context::type_record(context, return_type);
+    if (result_address != none && !type_info::is_memory(return_record.kind)) {
+        context->error = runtime::Error.invalid_argument;
+        bytes::release(argument_values);
+        return base::invalid_expression();
+    }
+    instruction.right = result_address;
     let has_result: bool = return_record.kind != type_info::Kind.type_void;
     var result_value: usize = none;
     var instruction_id: usize = none;
@@ -1336,11 +1422,33 @@ fn lower_target_call_with_receiver(
             valid = true, bitfield_segment = none,
         };
     }
+    if (return_record.kind == type_info::Kind.reference && result_value != none) {
+        let read_only: bool = (return_record.flags & (type_info::Flag.read_only as usize)) != 0;
+        let rvalue: bool = (return_record.flags & (type_info::Flag.rvalue_reference as usize)) != 0;
+        let address_type: usize = pointer_type(context, return_record.element_type, read_only);
+        let result_address: usize = convert_value(context, node, result_value, address_type);
+        let result_category: category::Category = rvalue ?
+            category::xvalue(read_only) : category::lvalue(!read_only, false);
+        let result: context::Expression = {
+            type_id = return_record.element_type, value_id = none, address_id = result_address,
+            constant_value = 0, has_constant = false, category = result_category,
+            valid = result_address != none, bitfield_segment = context::no_id(),
+        };
+        return builder::load_lvalue(context, node, result);
+    }
+    let temporary_result: bool = type_info::is_memory(return_record.kind) && result_value != none;
+    if (temporary_result && result_address == none) {
+        if (!lifetime::register_temporary(context, return_type, result_value)) {
+            return base::invalid_expression();
+        }
+    }
     let result_category: category::Category = type_info::is_memory(return_record.kind) ?
         category::Category.temporary : category::Category.rvalue;
+    let memory_address: usize = result_address != none ? result_address : result_value;
     return {
-        type_id = return_type, value_id = type_info::is_memory(return_record.kind) ? none : result_value, address_id =
-            type_info::is_memory(return_record.kind) ? result_value : none, constant_value = 0, has_constant = false,
+        type_id = return_type, value_id = type_info::is_memory(return_record.kind) ? none : result_value,
+        address_id = type_info::is_memory(return_record.kind) ? memory_address : none,
+        constant_value = 0, has_constant = false,
         category = result_category, valid = instruction_id != none, bitfield_segment = context::no_id(),
     };
 }
@@ -1348,7 +1456,15 @@ fn lower_target_call_with_receiver(
 fn lower_target_call(
     context: *context::Context, node_id: usize, node: syntax::SyntaxNode,
     target: probe::CallTarget, lowerer: api::Lowerer) -> context::Expression {
-    return lower_target_call_with_receiver(context, node_id, node, target, context::no_id(), lowerer);
+    return lower_target_call_with_receiver(
+        context, node_id, node, target, context::no_id(), context::no_id(), context::no_id(), lowerer);
+}
+
+fn lower_target_call_at(
+    context: *context::Context, node_id: usize, node: syntax::SyntaxNode,
+    target: probe::CallTarget, receiver_address: usize, lowerer: api::Lowerer) -> context::Expression {
+    return lower_target_call_with_receiver(
+        context, node_id, node, target, receiver_address, context::no_id(), context::no_id(), lowerer);
 }
 
 fn lower_call_into(
@@ -1356,15 +1472,69 @@ fn lower_call_into(
     destination: usize, expected_type: usize, lowerer: api::Lowerer) -> context::Expression {
     let target: probe::CallTarget = probe::direct_call_target(context, node);
     let constructor: bool = target.receiver_source == probe::ReceiverSource.construction;
-    let target_matches: bool = target.owner_type == expected_type;
-    let target_is_valid: bool = target.valid && constructor;
-    if (!target_is_valid || !target_matches) {
+    if (constructor) {
+        let target_matches: bool = target.owner_type == expected_type;
+        if (!target_matches) {
+            return base::invalid_expression();
+        }
+        if (!target.valid) {
+            return lower_target_call_with_receiver(
+                context, node_id, node, target, destination, context::no_id(), context::no_id(), lowerer);
+        }
+        if (!initialize_class_vptr(context, node, expected_type, destination)) {
+            return base::invalid_expression();
+        }
+        return lower_target_call_with_receiver(
+            context, node_id, node, target, destination, context::no_id(), context::no_id(), lowerer);
+    }
+    return lower_target_call_with_receiver(
+        context, node_id, node, target, context::no_id(), destination, expected_type, lowerer);
+}
+
+fn lower_special_construction(
+    context: *context::Context, node: syntax::SyntaxNode,
+    destination: usize, expected_type: usize, source: context::Expression) -> context::Expression {
+    let none: usize = context::no_id();
+    let resolution: functions::SpecialMemberResolution = functions::resolve_special_constructor(
+        context, expected_type, source.type_id, source.category);
+    if (resolution.status == functions::SpecialMemberStatus.trivial) {
+        return source;
+    }
+    if (resolution.status != functions::SpecialMemberStatus.selected) {
+        let binding_id: usize = functions::lookup_constructor_binding(context, expected_type);
+        let diagnostic: context::DiagnosticKind = resolution.status == functions::SpecialMemberStatus.ambiguous ?
+            context::DiagnosticKind.ambiguous_call : context::DiagnosticKind.no_matching_overload;
+        add_callable_diagnostic(context, diagnostic, node, binding_id);
         return base::invalid_expression();
     }
-    if (!initialize_class_vptr(context, node, expected_type, destination)) {
+    let function_data: *const context::Function = context->functions.data as *const context::Function;
+    let parameters: *const context::Parameter = context->parameters.data as *const context::Parameter;
+    let function: context::Function = function_data[resolution.function_id];
+    let receiver_type: usize = functions::function_receiver_type(context, function);
+    let receiver: usize = convert_value(context, node, destination, receiver_type);
+    if (receiver == none || !initialize_class_vptr(context, node, expected_type, destination)) {
         return base::invalid_expression();
     }
-    return lower_target_call_with_receiver(context, node_id, node, target, destination, lowerer);
+    var arguments: bytes::Buffer = bytes::empty();
+    append_call_argument(context, &arguments, receiver);
+    collect_fixed_call_argument(context, node, source, parameters[function.first_parameter].type_id, &arguments);
+    var call: ir::Instruction = builder::instruction(ir::Opcode.call, node);
+    call.type_id = type_info::BuiltinType.type_void as usize;
+    call.auxiliary = function.ir_function;
+    let instruction_id: usize = context->error == runtime::Error.none ? builder::emit_void(context, call) : none;
+    let values: *const usize = arguments.data as *const usize;
+    for (var index: usize = 0; index < arguments.length / sizeof(usize); index += 1) {
+        ir::add_argument(&context->ir, instruction_id, values[index]);
+    }
+    let release_error: runtime::Error = bytes::release(arguments);
+    if (context->error == runtime::Error.none) {
+        context->error = release_error;
+    }
+    return {
+        type_id = expected_type, value_id = none, address_id = destination,
+        constant_value = 0, has_constant = false, category = category::Category.temporary,
+        valid = instruction_id != none && context->error == runtime::Error.none, bitfield_segment = none,
+    };
 }
 
 fn lower_call(

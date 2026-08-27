@@ -82,12 +82,12 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
   this order: `callable`, `value`, `classes/model`, `context` (+ `context/{lookup,builder}`),
   `attributes`, `modules`, `types` (+ `types/{lookup,visibility}`),
   `classes`, `consteval` (+ `consteval/{model,engine}`), `intrinsics`,
-  `functions` (+ `functions/ir`), `expr` (+ `expr/{base,numeric,
+  `functions` (+ `functions/ir`), `lifetime`, `expr` (+ `expr/{base,numeric,
   strings,api,probe,initializer,access,operators}`), `stmt` (+
   `stmt/{api,labels}`). The same-module files `types/layout.la`,
   `consteval/engine/execute.la`, `functions/const.la`,
   `functions/signature.la`, `functions/overloads.la` and
-  `functions/{bindings,defaults}.la`, plus
+  `functions/{bindings,defaults,special}.la`, plus
   `expr/probe/{operators,call}.la`, are implementation splits, not
   additional dependency-graph modules.
 

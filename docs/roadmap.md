@@ -293,6 +293,16 @@ the archived Luna 0 self-hosting milestone named `M4` above.
 - [x] unified-tool fixed point and full test suite
 - [x] unified-tool anchor promotion
 
+## Current M5: references and object lifetime
+
+- [x] M5 design contract
+- [x] M5.0 references, xvalues and binding-aware overloads
+- [x] M5.1 deterministic destruction and control-flow cleanup
+- [x] M5.2 copy/move construction and assignment
+- [x] M5.3 temporaries, lifetime extension and copy elision
+- [x] M5.4 `utility::move` and generic/resource proving ground
+- [x] M5.5 fixed point and anchor promotion
+
 ## Explicitly deferred
 
 Optimization beyond local x86-64 improvements, general metaprogramming beyond

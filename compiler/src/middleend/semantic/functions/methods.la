@@ -38,9 +38,11 @@ fn method_identity(
     declaration: syntax::SyntaxNode) -> IdentityResult {
     let static_method: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.static_method);
     let constructor: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.constructor);
+    let destructor: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.destructor);
     let operator_method: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.operator_method);
     if (static_method) {
-        if (constructor || receiver_is_qualified(declaration)) {
+        let invalid_lifecycle: bool = constructor || destructor;
+        if (invalid_lifecycle || receiver_is_qualified(declaration)) {
             method_diagnostic(context, context::DiagnosticKind.invalid_receiver, unit_index, declaration, owner_type);
             return {identity = callable::free_function(), valid = false};
         }
@@ -50,15 +52,17 @@ fn method_identity(
             }, valid = true,
         };
     }
-    if (constructor && receiver_is_qualified(declaration)) {
+    let lifecycle_method: bool = constructor || destructor;
+    if (lifecycle_method && receiver_is_qualified(declaration)) {
         method_diagnostic(context, context::DiagnosticKind.invalid_receiver, unit_index, declaration, owner_type);
         return {identity = callable::free_function(), valid = false};
     }
     return {
         identity = {
-            kind = constructor ? callable::Kind.constructor : (operator_method ?
-                    callable::Kind.operator_method : callable::Kind.instance_method), owner_type = owner_type,
-            receiver = constructor ? callable::ReceiverKind.writable : receiver_kind(declaration),
+            kind = constructor ? callable::Kind.constructor : destructor ? callable::Kind.destructor :
+                (operator_method ? callable::Kind.operator_method : callable::Kind.instance_method),
+            owner_type = owner_type, receiver = lifecycle_method ?
+                callable::ReceiverKind.writable : receiver_kind(declaration),
         }, valid = true,
     };
 }
@@ -79,6 +83,52 @@ fn constructor_return_is_valid(
     }
     method_diagnostic(context, context::DiagnosticKind.invalid_method, unit_index, declaration, owner_type);
     return false;
+}
+
+fn node_contains_return(context: *context::Context, unit_index: usize, node_id: usize, depth: usize) -> bool {
+    if (depth >= context::Limit.maximum_type_depth as usize) {
+        return true;
+    }
+    let node: syntax::SyntaxNode = context::node(context, unit_index, node_id);
+    if (node.kind == syntax::SyntaxKind.return_statement) {
+        return true;
+    }
+    for (var child: usize = node.first_child; child != context::no_id();
+        child = context::node(context, unit_index, child).next_sibling) {
+        if (node_contains_return(context, unit_index, child, depth + 1)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn destructor_contract_is_valid(
+    context: *context::Context, owner_type: usize, unit_index: usize, declaration: syntax::SyntaxNode) -> bool {
+    if (!declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.destructor)) {
+        return true;
+    }
+    var parameter_count: usize = 0;
+    var return_node: usize = context::no_id();
+    var body_node: usize = context::no_id();
+    let parts_are_valid: bool = function_parts(
+        context, unit_index, declaration, &parameter_count, &return_node, &body_node);
+    let generic: bool = generics::is_generic(context, unit_index, declaration);
+    let defaults: bool = method_has_defaults(context, unit_index, declaration);
+    let virtual_flags: usize = (syntax::SyntaxFlag.virtual_method as usize) |
+        (syntax::SyntaxFlag.abstract_method as usize) | (syntax::SyntaxFlag.override_method as usize) |
+        (syntax::SyntaxFlag.final_method as usize);
+    let direct: bool = (declaration.flags & virtual_flags) == 0;
+    let signature_is_valid: bool = parameter_count == 0 && return_node == context::no_id();
+    let body_is_valid: bool = body_node == context::no_id() || !node_contains_return(context, unit_index, body_node, 0);
+    let contract_is_valid: bool = parts_are_valid && signature_is_valid;
+    let surface_is_valid: bool = !generic && !defaults;
+    let declaration_is_valid: bool = contract_is_valid && surface_is_valid;
+    let implementation_is_valid: bool = body_is_valid && direct;
+    if (!declaration_is_valid || !implementation_is_valid) {
+        method_diagnostic(context, context::DiagnosticKind.invalid_destructor, unit_index, declaration, owner_type);
+        return false;
+    }
+    return true;
 }
 
 fn node_is_super_init_call(context: *context::Context, unit_index: usize, node_id: usize) -> bool {
@@ -194,7 +244,7 @@ fn binary_operator_is_valid(kind: lexer::TokenKind) -> bool {
     case lexer::TokenKind.plus, lexer::TokenKind.minus,
         lexer::TokenKind.star, lexer::TokenKind.slash, lexer::TokenKind.percent,
         lexer::TokenKind.ampersand, lexer::TokenKind.pipe, lexer::TokenKind.caret,
-        lexer::TokenKind.shift_left, lexer::TokenKind.shift_right {
+        lexer::TokenKind.shift_left, lexer::TokenKind.shift_right, lexer::TokenKind.equal {
         return true;
     }
     default {
@@ -218,16 +268,21 @@ fn operator_method_is_valid(
     let parts_are_valid: bool = function_parts(
         context, unit_index, declaration, &parameter_count, &return_node, &body_node);
     let operator_kind: lexer::TokenKind = context::token(context, unit_index, declaration.token_index).kind;
+    let assignment: bool = operator_kind == lexer::TokenKind.equal;
     let arity_is_valid: bool = parameter_count == 0 ? unary_operator_is_valid(operator_kind) :
         parameter_count == 1 && binary_operator_is_valid(operator_kind);
     let form_is_valid: bool = parts_are_valid && (declaration.flags & forbidden_flags) == 0;
     let defaults_are_absent: bool = !method_has_defaults(context, unit_index, declaration);
     let declaration_is_valid: bool = form_is_valid && arity_is_valid;
-    let signature_is_valid: bool = defaults_are_absent && return_node != context::no_id();
+    let return_is_valid: bool = assignment ? return_node == context::no_id() : return_node != context::no_id();
+    let signature_is_valid: bool = defaults_are_absent && return_is_valid;
     if (!declaration_is_valid || !signature_is_valid) {
         method_diagnostic(
             context, context::DiagnosticKind.invalid_operator_method, unit_index, declaration, owner_type);
         return false;
+    }
+    if (assignment) {
+        return true;
     }
     let result_type: usize = types::resolve_type_node(context, unit_index, return_node);
     let requires_boolean: bool = operator_kind == lexer::TokenKind.bang || operator_is_comparison(operator_kind);
@@ -403,7 +458,9 @@ fn collect_declared_method(
         return;
     }
     let identity: IdentityResult = method_identity(context, owner_type, unit_index, declaration);
-    if (!identity.valid || !constructor_return_is_valid(context, owner_type, unit_index, declaration)) {
+    let lifecycle_is_valid: bool = constructor_return_is_valid(context, owner_type, unit_index, declaration) &&
+        destructor_contract_is_valid(context, owner_type, unit_index, declaration);
+    if (!identity.valid || !lifecycle_is_valid) {
         return;
     }
     collect_function_declaration(
@@ -467,7 +524,9 @@ fn collect_defined_method(
     let identity: IdentityResult = method_identity(context, owner_type, unit_index, declaration);
     let constructor_is_valid: bool = constructor_return_is_valid(context, owner_type, unit_index, declaration) &&
         base_constructor_call_is_valid(context, owner_type, unit_index, declaration);
-    if (!identity.valid || !constructor_is_valid) {
+    let lifecycle_is_valid: bool = constructor_is_valid &&
+        destructor_contract_is_valid(context, owner_type, unit_index, declaration);
+    if (!identity.valid || !lifecycle_is_valid) {
         return;
     }
     let lookup: FunctionDeclarationLookup =
@@ -645,6 +704,17 @@ fn instantiate_generic_class(context: *context::Context, type_id: usize) -> bool
     }
     let restored: bool = generics::restore_active_bindings(context, mark);
     return restored && context->error == runtime::Error.none;
+}
+
+fn destructor(context: *context::Context, owner_type: usize) -> usize {
+    let functions_data: *const context::Function = context->functions.data as *const context::Function;
+    for (var function_id: usize = 0; function_id < context->function_count; function_id += 1) {
+        let identity: callable::Identity = functions_data[function_id].identity;
+        if (identity.kind == callable::Kind.destructor && identity.owner_type == owner_type) {
+            return function_id;
+        }
+    }
+    return context::no_id();
 }
 
 fn collect_impl_blocks_in_unit(context: *context::Context, module_id: usize, unit_index: usize) {

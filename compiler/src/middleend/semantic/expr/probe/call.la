@@ -477,37 +477,64 @@ fn candidate_target_is_compatible(context: *context::Context, function: context:
     return receiver_is_compatible(function.identity.receiver, target.receiver_category);
 }
 
+enum BindingRank: usize {
+    exact = 0, qualified = 1, temporary = 2, value = 3, no_match = 18446744073709551615,
+}
+
+struct CandidateMatch {
+    status: Status;
+    rank: usize;
+}
+
+fn probe_parameter_argument(context: *context::Context, node_id: usize, parameter_type: usize) -> CandidateMatch {
+    let parameter: type_info::Record = context::type_record(context, parameter_type);
+    let expected_type: usize = parameter.kind == type_info::Kind.reference ? parameter.element_type : parameter_type;
+    let argument: Result = expression(context, node_id, expected_type);
+    if (argument.status != Status.compatible) {
+        return {status = argument.status, rank = BindingRank.no_match as usize};
+    }
+    if (parameter.kind != type_info::Kind.reference) {
+        return {status = Status.compatible, rank = BindingRank.value as usize};
+    }
+    let rank: usize = category::reference_binding_rank(parameter, argument.category);
+    return rank == type_info::no_id() ? {status = Status.incompatible, rank = BindingRank.no_match as usize} :
+        {status = Status.compatible, rank = rank};
+}
+
 fn candidate_call_status(
-    context: *context::Context, node: syntax::SyntaxNode, function_id: usize, target: CallTarget) -> Status {
+    context: *context::Context, node: syntax::SyntaxNode, function_id: usize, target: CallTarget) -> CandidateMatch {
     if (function_id >= context->function_count || node.child_count == 0) {
-        return Status.invalid;
+        return {status = Status.invalid, rank = BindingRank.no_match as usize};
     }
     let functions_data: *const context::Function = context->functions.data as
             *const context::Function;
     let function: context::Function = functions_data[function_id];
     if (!candidate_target_is_compatible(context, function, target)) {
-        return Status.incompatible;
+        return {status = Status.incompatible, rank = BindingRank.no_match as usize};
     }
     let variadic: bool = (function.flags & (context::SymbolFlag.variadic as usize)) != 0;
     let parameter_count: usize = functions::function_argument_parameter_count(function);
     let first_parameter: usize = functions::function_first_argument_parameter(function);
     let argument_count: usize = node.child_count - 1;
     if (!functions::function_accepts_arity(context, function_id, argument_count)) {
-        return Status.incompatible;
+        return {status = Status.incompatible, rank = BindingRank.no_match as usize};
     }
     let parameters: *const context::Parameter = context->parameters.data as
             *const context::Parameter;
     let callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
     var child: usize = callee.next_sibling;
     var candidate_status: Status = Status.compatible;
+    var candidate_rank: usize = 0;
     for (var argument_index: usize = 0; argument_index < argument_count; argument_index += 1) {
         let variadic_extra: bool = argument_index >= parameter_count;
         let expected_type: usize = variadic_extra ? context::no_id() :
             parameters[first_parameter + argument_index].type_id;
-        let argument: Result = expression(context, child, expected_type);
-        switch (argument.status) {
+        let match: CandidateMatch = variadic_extra ?
+            {status = expression(context, child, expected_type).status, rank = BindingRank.value as usize} :
+            probe_parameter_argument(context, child, expected_type);
+        switch (match.status) {
         case Status.incompatible {
-            return Status.incompatible;
+            return match;
         }
         case Status.ambiguous {
             candidate_status = Status.ambiguous;
@@ -519,36 +546,45 @@ fn candidate_call_status(
         }
         default {}
         }
-        if (variadic_extra && argument.status == Status.compatible) {
+        if (match.status == Status.compatible) {
+            candidate_rank += match.rank;
+        }
+        if (variadic_extra && match.status == Status.compatible) {
+            let argument: Result = expression(context, child, context::no_id());
             let argument_record: type_info::Record = context::type_record(context, argument.type_id);
             if (!type_info::is_scalar(argument_record.kind)) {
-                return Status.incompatible;
+                return {status = Status.incompatible, rank = BindingRank.no_match as usize};
             }
         }
         child = context::node(context, context->current_unit, child).next_sibling;
     }
-    return candidate_status;
+    return {status = candidate_status, rank = candidate_rank};
 }
 
 struct CandidateResolution {
     selected_function: usize;
     compatible_count: usize;
+    best_rank: usize;
     deferred_status: ResolutionStatus;
 }
 
 fn candidate_resolution() -> CandidateResolution {
     return {
-        selected_function = context::no_id(), compatible_count = 0, deferred_status = ResolutionStatus.no_match,
+        selected_function = context::no_id(), compatible_count = 0,
+        best_rank = BindingRank.no_match as usize, deferred_status = ResolutionStatus.no_match,
     };
 }
 
-fn consider_candidate(resolution: *CandidateResolution, function_id: usize, status: Status) {
-    switch (status) {
+fn consider_candidate(resolution: *CandidateResolution, function_id: usize, match: CandidateMatch) {
+    switch (match.status) {
     case Status.compatible {
-        if (resolution->compatible_count == 0) {
+        if (match.rank < resolution->best_rank) {
             resolution->selected_function = function_id;
+            resolution->compatible_count = 1;
+            resolution->best_rank = match.rank;
+        } else if (match.rank == resolution->best_rank) {
+            resolution->compatible_count += 1;
         }
-        resolution->compatible_count += 1;
     }
     case Status.ambiguous {
         resolution->deferred_status = ResolutionStatus.ambiguous;
@@ -774,8 +810,8 @@ fn resolve_call_target(
             context, target.binding_id, node, explicit_arguments, generic_argument_type);
         switch (generic.status) {
         case functions::GenericResolutionStatus.selected {
-            let status: Status = candidate_call_status(context, node, generic.function_id, target);
-            if (status == Status.compatible && function_ir::create_ir_function_instance(
+            let match: CandidateMatch = candidate_call_status(context, node, generic.function_id, target);
+            if (match.status == Status.compatible && function_ir::create_ir_function_instance(
                     context, generic.function_id)) {
                 resolution = {status = ResolutionStatus.selected, function_id = generic.function_id};
             } else {
@@ -861,6 +897,14 @@ fn probe_indirect_call(
         }
         child = context::node(context, context->current_unit, child).next_sibling;
     }
+    let result_type: type_info::Record = context::type_record(context, function_type.element_type);
+    if (result_type.kind == type_info::Kind.reference) {
+        var result: Result = type_result(expected_type, result_type.element_type);
+        let read_only: bool = (result_type.flags & (type_info::Flag.read_only as usize)) != 0;
+        let rvalue: bool = (result_type.flags & (type_info::Flag.rvalue_reference as usize)) != 0;
+        result.category = rvalue ? category::xvalue(read_only) : category::lvalue(!read_only, false);
+        return result;
+    }
     return materialized_result(context, expected_type, function_type.element_type);
 }
 
@@ -887,7 +931,15 @@ fn probe_call(context: *context::Context, node_id: usize, node: syntax::SyntaxNo
             *const context::Function;
     let result_type: usize = target.receiver_source == ReceiverSource.construction ? target.owner_type :
         functions_data[resolution.function_id].return_type;
-    var call_result: Result = materialized_result(context, expected_type, result_type);
+    let result_record: type_info::Record = context::type_record(context, result_type);
+    var call_result: Result = result_record.kind == type_info::Kind.reference ?
+        type_result(expected_type, result_record.element_type) : materialized_result(context, expected_type,
+            result_type);
+    if (result_record.kind == type_info::Kind.reference) {
+        let read_only: bool = (result_record.flags & (type_info::Flag.read_only as usize)) != 0;
+        let rvalue: bool = (result_record.flags & (type_info::Flag.rvalue_reference as usize)) != 0;
+        call_result.category = rvalue ? category::xvalue(read_only) : category::lvalue(!read_only, false);
+    }
     call_result.function_id = resolution.function_id;
     return call_result;
 }

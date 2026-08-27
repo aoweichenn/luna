@@ -297,3 +297,25 @@ promoted stage-fixed executable passed 416/416 tests, including root and
 command CLI contracts, all language behavior, relocation determinism and the
 ELF/host FFI matrix. The three previous anchor executables were replaced by
 this one file and `SHA256SUMS` was reduced to its single hash.
+
+## 2026-08-27: promotion to the M5 lifetime toolchain
+
+The anchor now contains the stage-fixed `luna` executable built from the M5
+source snapshot accompanying this provenance note. Starting from the unified
+M4 anchor, the transition toolchain added C++-shaped references and xvalues,
+binding-aware overload ranking, deterministic RAII, explicit copy/move special
+members, full-expression temporaries, reference lifetime extension and
+destination-based construction and aggregate return.
+
+Remote x86-64 recovery on `caw` used the preceding trusted unified anchor to
+build the final M5 source snapshot before any library source adopted reference
+syntax. The recovered toolchain then compiled the registered
+`luna.std.utility` module and passed 432/432 tests, including control-flow
+cleanup, arrays/fields/bases, inaccessible destruction, move-only resources,
+short-circuit temporaries, copy elision, rejected incomplete nontrivial
+aggregates and the complete ELF/host FFI matrix. Compiler and library sources
+may now adopt M5 reference syntax under the normal fixed-point discipline.
+The recovered compiler built the complete 77-module graph through
+`stage-transition`, `stage-next` and `stage-fixed`; every next/fixed assembly,
+object and executable artifact was byte-identical before the final stage-fixed
+executable was copied here and `SHA256SUMS` refreshed.

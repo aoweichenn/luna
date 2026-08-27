@@ -282,13 +282,65 @@ fn parser_parse_generic_arguments(state: *state::State) -> usize {
     return arguments;
 }
 
-fn parser_parse_type(state: *state::State) -> usize {
+fn parser_finish_type(state: *state::State, base: usize, leading_const: bool, allow_reference: bool) -> usize {
+    let none: usize = syntax::syntax_no_index();
+    if (base == none) {
+        return none;
+    }
+    if (!allow_reference) {
+        return base;
+    }
+    let base_node: *syntax::SyntaxNode = state::parser_node_pointer(state, base);
+    if (base_node == null) {
+        return none;
+    }
+    var suffix_offset: usize = base_node->span.offset + base_node->span.length;
+    var read_only: bool = leading_const;
+    if (state::parser_match(state, lexer::TokenKind.keyword_const)) {
+        if (read_only) {
+            state::parser_add_diagnostic(
+                state, lexer::DiagnosticKind.expected_type, state->previous.span,
+                lexer::TokenKind.ampersand, lexer::TokenKind.keyword_const, 0);
+        }
+        read_only = true;
+        suffix_offset = state->previous.span.offset + state->previous.span.length;
+    }
+    let lvalue_reference: bool = state->current.kind == lexer::TokenKind.ampersand;
+    let rvalue_reference: bool = state->current.kind == lexer::TokenKind.logical_and;
+    let reference_token: bool = lvalue_reference || rvalue_reference;
+    let adjacent: bool = state->current.span.offset == suffix_offset;
+    if (!reference_token || !adjacent) {
+        if (read_only) {
+            state::parser_add_diagnostic(
+                state, lexer::DiagnosticKind.expected_type, state->current.span,
+                lexer::TokenKind.ampersand, state->current.kind, 0);
+        }
+        return base;
+    }
+    let operation: lexer::Token = state->current;
+    let operation_index: usize = state->current_index;
+    state::parser_advance(state);
+    let reference: usize = state::parser_new_node(
+        state, syntax::SyntaxKind.type_reference,
+        state::parser_join_spans(base_node->span, operation.span), operation_index);
+    if (read_only) {
+        state::parser_add_node_flags(state, reference, syntax::SyntaxFlag.read_only as usize);
+    }
+    if (rvalue_reference) {
+        state::parser_add_node_flags(state, reference, syntax::SyntaxFlag.rvalue_reference as usize);
+    }
+    state::parser_add_child(state, reference, base);
+    return reference;
+}
+
+fn parser_parse_type_active(state: *state::State, allow_reference: bool) -> usize {
     let none: usize = syntax::syntax_no_index();
     let start: lexer::Token = state->current;
     let start_index: usize = state->current_index;
     if (!state::parser_enter_nesting(state, start.span)) {
         return none;
     }
+    let leading_const: bool = state::parser_match(state, lexer::TokenKind.keyword_const);
 
     var callable_kind: syntax::SyntaxKind = syntax::SyntaxKind.invalid;
     if (state::parser_match(state, lexer::TokenKind.keyword_method)) {
@@ -328,8 +380,9 @@ fn parser_parse_type(state: *state::State) -> usize {
                 state::parser_add_child(state, node, return_type);
             }
         }
+        let result: usize = parser_finish_type(state, node, leading_const, allow_reference);
         state::parser_leave_nesting(state);
-        return node;
+        return result;
     }
 
     if (state::parser_match(state, lexer::TokenKind.star)) {
@@ -364,7 +417,7 @@ fn parser_parse_type(state: *state::State) -> usize {
                 qualifiers_done = true;
             }
         }
-        let pointee: usize = parser_parse_type(state);
+        let pointee: usize = parser_parse_type_active(state, false);
         if (pointee != none) {
             state::parser_add_child(state, node, pointee);
             let pointee_node: *syntax::SyntaxNode = state::parser_node_pointer(state, pointee);
@@ -372,8 +425,9 @@ fn parser_parse_type(state: *state::State) -> usize {
                 state::parser_set_node_span(state, node, state::parser_join_spans(start.span, pointee_node->span));
             }
         }
+        let result: usize = parser_finish_type(state, node, leading_const, allow_reference);
         state::parser_leave_nesting(state);
-        return node;
+        return result;
     }
 
     if (state::parser_match(
@@ -389,7 +443,7 @@ fn parser_parse_type(state: *state::State) -> usize {
             }
         }
         state::parser_expect(state, lexer::TokenKind.right_bracket);
-        let element: usize = parser_parse_type(state);
+        let element: usize = parser_parse_type_active(state, false);
         if (element != none) {
             state::parser_add_child(state, node, element);
             let element_node: *syntax::SyntaxNode = state::parser_node_pointer(state, element);
@@ -397,8 +451,9 @@ fn parser_parse_type(state: *state::State) -> usize {
                 state::parser_set_node_span(state, node, state::parser_join_spans(start.span, element_node->span));
             }
         }
+        let result: usize = parser_finish_type(state, node, leading_const, allow_reference);
         state::parser_leave_nesting(state);
-        return node;
+        return result;
     }
 
     var kind: syntax::SyntaxKind = syntax::SyntaxKind.invalid;
@@ -440,17 +495,24 @@ fn parser_parse_type(state: *state::State) -> usize {
             state::parser_add_child(state, generic, arguments);
             state::parser_set_node_span(
                 state, generic, state::parser_join_spans(named_value.span, arguments_value.span));
+            let result: usize = parser_finish_type(state, generic, leading_const, allow_reference);
             state::parser_leave_nesting(state);
-            return generic;
+            return result;
         }
+        let result: usize = parser_finish_type(state, named_node, leading_const, allow_reference);
         state::parser_leave_nesting(state);
-        return named_node;
+        return result;
     }
 
     let node: usize = state::parser_new_node(state, kind, state->current.span, state->current_index);
     state::parser_advance(state);
+    let result: usize = parser_finish_type(state, node, leading_const, allow_reference);
     state::parser_leave_nesting(state);
-    return node;
+    return result;
+}
+
+fn parser_parse_type(state: *state::State) -> usize {
+    return parser_parse_type_active(state, true);
 }
 
 fn parser_parse_expression(state: *state::State) -> usize {

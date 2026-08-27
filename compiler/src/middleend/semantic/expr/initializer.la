@@ -10,6 +10,8 @@ import luna.bootstrap.middleend.semantic.consteval as consteval;
 import luna.bootstrap.middleend.semantic.consteval.engine as const_engine;
 import luna.bootstrap.middleend.semantic.consteval.model as const_model;
 import luna.bootstrap.middleend.semantic.expr.base as base;
+import luna.bootstrap.middleend.semantic.functions as functions;
+import luna.bootstrap.middleend.semantic.lifetime as lifetime;
 import luna.bootstrap.middleend.semantic.types as types;
 import luna.bootstrap.middleend.semantic.value as category;
 import luna.bootstrap.middleend.type as type_info;
@@ -40,6 +42,16 @@ fn lower_scalar_zero_initializer(
         has_constant = false, category = category::Category.rvalue,
         valid = value_id != context::no_id(), bitfield_segment = context::no_id(),
     };
+}
+
+fn id_buffer_contains(buffer: bytes::Buffer, value: usize) -> bool {
+    let values: *const usize = buffer.data as *const usize;
+    for (var index: usize = 0; index < buffer.length / sizeof(usize); index += 1) {
+        if (values[index] == value) {
+            return true;
+        }
+    }
+    return false;
 }
 
 fn validate_initializer_fields(
@@ -105,6 +117,21 @@ fn validate_initializer_fields(
             }
         }
         child = initializer.next_sibling;
+    }
+    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    if (valid && type_record.kind == type_info::Kind.structure) {
+        for (var index: usize = 0; index < type_record.field_count; index += 1) {
+            let field_id: usize = type_record.first_field + index;
+            let requires_value: bool = functions::type_requires_explicit_initialization(
+                context, fields[field_id].type_id);
+            if (requires_value && !id_buffer_contains(seen_fields, field_id)) {
+                context::add_diagnostic(
+                    context, context::DiagnosticKind.invalid_initializer, context->current_unit, node.span,
+                    none, context::empty_span(), field_id);
+                valid = false;
+                break;
+            }
+        }
     }
     let release_error: runtime::Error = bytes::release(seen_fields);
     if (context->error == runtime::Error.none) {
@@ -210,10 +237,18 @@ fn lower_array_initializer(
                 context, context::DiagnosticKind.type_mismatch, context->current_unit, element.span, none,
                 context::empty_span(), element_type);
             valid = false;
-        } else {
+        } else if (value.address_id != element_address) {
             builder::store_to_address(context, element, element_address, element_type, value);
         }
         child = element.next_sibling;
+    }
+    let requires_every_element: bool = functions::type_requires_explicit_initialization(context, element_type);
+    let initialized_count: usize = seen_indices.length / sizeof(usize);
+    if (requires_every_element && initialized_count != element_count) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_initializer, context->current_unit, node.span,
+            none, context::empty_span(), expected_type);
+        valid = false;
     }
     let release_error: runtime::Error = bytes::release(seen_indices);
     if (context->error == runtime::Error.none) {
@@ -222,11 +257,29 @@ fn lower_array_initializer(
     return valid && context->error == runtime::Error.none;
 }
 
-fn lower_initializer(context: *context::Context, node_id: usize, expected_type: usize,
-    lowerer: api::IntoLowerer) -> context::Expression {
+fn lower_initializer_at(
+    context: *context::Context, node_id: usize, expected_type: usize,
+    destination: usize, lowerer: api::IntoLowerer) -> context::Expression {
     let none: usize = context::no_id();
     let node: syntax::SyntaxNode = context::node(context, context->current_unit, node_id);
     let type_record: type_info::Record = context::type_record(context, expected_type);
+    let nontrivial_union: bool = type_record.kind == type_info::Kind.record_union &&
+        functions::type_requires_explicit_initialization(context, expected_type);
+    if (nontrivial_union) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_initializer, context->current_unit, node.span,
+            none, context::empty_span(), expected_type);
+        return base::invalid_expression();
+    }
+    let composite: bool = type_record.kind == type_info::Kind.structure || type_record.kind == type_info::Kind.array;
+    let requires_aggregate: bool = composite && functions::type_requires_explicit_initialization(
+        context, expected_type);
+    if (requires_aggregate && node.kind != syntax::SyntaxKind.aggregate_initializer) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_initializer, context->current_unit, node.span,
+            none, context::empty_span(), expected_type);
+        return base::invalid_expression();
+    }
     if (type_record.kind == type_info::Kind.class_type) {
         context::add_diagnostic(
             context, context::DiagnosticKind.invalid_class_initialization, context->current_unit, node.span, none,
@@ -257,13 +310,16 @@ fn lower_initializer(context: *context::Context, node_id: usize, expected_type: 
             context::empty_span(), expected_type);
         return base::invalid_expression();
     }
-    let slot_id: usize = ir::add_slot(
-        &context->ir, builder::current_ir_function(context), expected_type, true, false, 0);
-    let address_id: usize = builder::address_of_slot(context, node, slot_id, expected_type, false, false);
-    if (slot_id == none || address_id == none ||
-        !builder::zero_slot(
-            context, node, slot_id, expected_type)) {
-        return base::invalid_expression();
+    let owns_destination: bool = destination != none;
+    var slot_id: usize = none;
+    var address_id: usize = destination;
+    if (!owns_destination) {
+        slot_id = ir::add_slot(&context->ir, builder::current_ir_function(context), expected_type, true, false, 0);
+        address_id = builder::address_of_slot(context, node, slot_id, expected_type, false, false);
+        let storage_is_valid: bool = slot_id != none && address_id != none;
+        if (!storage_is_valid || !builder::zero_slot(context, node, slot_id, expected_type)) {
+            return base::invalid_expression();
+        }
     }
     if (node.kind == syntax::SyntaxKind.aggregate_initializer && type_record.kind == type_info::Kind.array) {
         if (!lower_array_initializer(
@@ -324,7 +380,7 @@ fn lower_initializer(context: *context::Context, node_id: usize, expected_type: 
                         context::add_diagnostic(
                             context, context::DiagnosticKind.type_mismatch, context->current_unit, initializer.span,
                             none, context::empty_span(), field.type_id);
-                    } else {
+                    } else if (value.address_id != field_address) {
                         builder::store_to_address(context, initializer, field_address, field.type_id, value);
                     }
                     initializer_count += 1;
@@ -337,8 +393,23 @@ fn lower_initializer(context: *context::Context, node_id: usize, expected_type: 
             context->error = release_error;
         }
     }
+    let temporary_result: bool = !owns_destination && lifetime::type_needs_cleanup(context, expected_type);
+    if (temporary_result && !lifetime::register_temporary(context, expected_type, address_id)) {
+        return base::invalid_expression();
+    }
     return {
         type_id = expected_type, value_id = none, address_id = address_id, constant_value = 0, has_constant = false,
         category = category::Category.temporary, valid = address_id != none, bitfield_segment = context::no_id(),
     };
+}
+
+fn lower_initializer(context: *context::Context, node_id: usize, expected_type: usize,
+    lowerer: api::IntoLowerer) -> context::Expression {
+    return lower_initializer_at(context, node_id, expected_type, context::no_id(), lowerer);
+}
+
+fn lower_initializer_into(
+    context: *context::Context, node_id: usize, expected_type: usize,
+    destination: usize, lowerer: api::IntoLowerer) -> context::Expression {
+    return lower_initializer_at(context, node_id, expected_type, destination, lowerer);
 }

@@ -11,7 +11,9 @@ import luna.bootstrap.middleend.semantic.expr.numeric as numeric;
 import luna.bootstrap.middleend.semantic.expr.operators as operators;
 import luna.bootstrap.middleend.semantic.expr.probe as probe;
 import luna.bootstrap.middleend.semantic.expr.strings as strings;
+import luna.bootstrap.middleend.semantic.functions as functions;
 import luna.bootstrap.middleend.semantic.intrinsics as intrinsics;
+import luna.bootstrap.middleend.semantic.value as category;
 import luna.bootstrap.middleend.type as type_info;
 
 fn lower_into_destination(
@@ -116,7 +118,7 @@ fn lower_expression(context: *context::Context, node_id: usize, expected_type: u
         return operators::lower_binary(context, node_id, node, expected_type, lower_into);
     }
     if (node.kind == syntax::SyntaxKind.conditional_expression) {
-        return operators::lower_conditional(context, node, expected_type, lower_into);
+        return operators::lower_conditional(context, node, expected_type, lower_into, lower_into_destination);
     }
     if (node.kind == syntax::SyntaxKind.zero_initializer || node.kind == syntax::SyntaxKind.aggregate_initializer) {
         return initializer::lower_initializer(context, node_id, expected_type, lower_into_destination);
@@ -137,14 +139,42 @@ fn lower_expression(context: *context::Context, node_id: usize, expected_type: u
 fn lower_expression_into(
     context: *context::Context, node_id: usize, expected_type: usize, destination: usize) -> context::Expression {
     let node: syntax::SyntaxNode = context::node(context, context->current_unit, node_id);
+    let expected: type_info::Record = context::type_record(context, expected_type);
+    let class_result: bool = expected.kind == type_info::Kind.class_type;
+    let nontrivial_result: bool = !functions::type_is_trivially_copyable(context, expected_type);
+    let semantic_object: bool = class_result || nontrivial_result;
     if (node.kind == syntax::SyntaxKind.call_expression) {
-        let target: probe::CallTarget = probe::direct_call_target(context, node);
-        let constructor: bool = target.receiver_source == probe::ReceiverSource.construction;
-        if (constructor && target.owner_type == expected_type) {
+        let result: probe::Result = probe::expression(context, node_id, expected_type);
+        let type_matches: bool = result.status == probe::Status.compatible && result.type_id == expected_type;
+        let direct_result: bool = type_matches && category::is_temporary(result.category);
+        if (direct_result && semantic_object) {
             return access::lower_call_into(context, node_id, node, destination, expected_type, lower_into);
         }
     }
-    return lower_expression(context, node_id, expected_type);
+    if (node.kind == syntax::SyntaxKind.conditional_expression && semantic_object) {
+        return operators::lower_conditional_into(
+            context, node, expected_type, destination, lower_into, lower_into_destination);
+    }
+    let initializer: bool = node.kind == syntax::SyntaxKind.zero_initializer ||
+        node.kind == syntax::SyntaxKind.aggregate_initializer;
+    if (initializer && semantic_object) {
+        return initializer::lower_initializer_into(
+            context, node_id, expected_type, destination, lower_into_destination);
+    }
+    let source: context::Expression = lower_expression(context, node_id, expected_type);
+    if (!source.valid || source.type_id != expected_type) {
+        return source;
+    }
+    if (expected.kind == type_info::Kind.class_type) {
+        return access::lower_special_construction(context, node, destination, expected_type, source);
+    }
+    if (type_info::is_memory(expected.kind) && nontrivial_result) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_initializer, context->current_unit, node.span,
+            context::no_id(), context::empty_span(), expected_type);
+        return base::invalid_expression();
+    }
+    return source;
 }
 
 fn lower_into(context: *context::Context, node_id: usize, expected_type: usize, result: *context::Expression) -> void {

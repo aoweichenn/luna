@@ -1,0 +1,258 @@
+module luna.bootstrap.middleend.semantic.lifetime;
+
+import luna.bootstrap.middleend.ir as ir;
+import luna.bootstrap.middleend.semantic.classes as classes;
+import luna.bootstrap.middleend.semantic.context.builder as builder;
+import luna.bootstrap.middleend.semantic.functions as functions;
+import luna.bootstrap.middleend.type as type_info;
+import luna.runtime as runtime;
+import luna.std.bytes as bytes;
+
+fn type_requires_destruction(context: *context::Context, type_id: usize, depth: usize) -> bool {
+    if (type_id >= context->types.type_count || depth >= context::Limit.maximum_type_depth as usize) {
+        return false;
+    }
+    let record: type_info::Record = context::type_record(context, type_id);
+    if (record.kind == type_info::Kind.array) {
+        return type_requires_destruction(context, record.element_type, depth + 1);
+    }
+    if (record.kind != type_info::Kind.class_type && record.kind != type_info::Kind.structure) {
+        return false;
+    }
+    if (record.kind == type_info::Kind.class_type && functions::destructor(context, type_id) != context::no_id()) {
+        return true;
+    }
+    if (record.base_type != context::no_id() && type_requires_destruction(context, record.base_type, depth + 1)) {
+        return true;
+    }
+    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    for (var index: usize = 0; index < record.field_count; index += 1) {
+        if (type_requires_destruction(context, fields[record.first_field + index].type_id, depth + 1)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn type_needs_cleanup(context: *context::Context, type_id: usize) -> bool {
+    return type_requires_destruction(context, type_id, 0);
+}
+
+fn convert_object_address(
+    context: *context::Context, node: syntax::SyntaxNode, address_id: usize, target_type: usize) -> usize {
+    let pointer: type_info::IdResult = type_info::table_pointer(&context->types, target_type, false, false);
+    context->error = pointer.error;
+    if (pointer.error != runtime::Error.none || address_id == context::no_id()) {
+        return context::no_id();
+    }
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    if (values[address_id].type_id == pointer.type_id) {
+        return address_id;
+    }
+    var conversion: ir::Instruction = builder::instruction(ir::Opcode.convert, node);
+    conversion.left = address_id;
+    conversion.auxiliary = values[address_id].type_id;
+    return builder::emit_value(context, conversion, pointer.type_id);
+}
+
+fn subobject_address(
+    context: *context::Context, node: syntax::SyntaxNode, object_address: usize, field: type_info::Field) -> usize {
+    let pointer: type_info::IdResult = type_info::table_pointer(&context->types, field.type_id, false, false);
+    context->error = pointer.error;
+    if (pointer.error != runtime::Error.none) {
+        return context::no_id();
+    }
+    var address: ir::Instruction = builder::instruction(ir::Opcode.member_address, node);
+    address.left = object_address;
+    address.auxiliary = field.offset_bytes;
+    return builder::emit_value(context, address, pointer.type_id);
+}
+
+fn array_element_address(
+    context: *context::Context, node: syntax::SyntaxNode,
+    array_address: usize, element_type: usize, index: usize) -> usize {
+    let element_pointer: usize = convert_object_address(context, node, array_address, element_type);
+    let offset: context::Expression = builder::emit_integer_constant(
+        context, node, type_info::BuiltinType.unsigned_size as usize, index as u64);
+    if (element_pointer == context::no_id() || !offset.valid) {
+        return context::no_id();
+    }
+    var instruction: ir::Instruction = builder::instruction(ir::Opcode.pointer_offset, node);
+    instruction.left = element_pointer;
+    instruction.right = offset.value_id;
+    instruction.auxiliary = context::type_record(context, element_type).size_bytes;
+    let pointer_type: type_info::IdResult = type_info::table_pointer(&context->types, element_type, false, false);
+    context->error = pointer_type.error;
+    return pointer_type.error == runtime::Error.none ?
+        builder::emit_value(context, instruction, pointer_type.type_id) : context::no_id();
+}
+
+fn emit_destructor_call(
+    context: *context::Context, node: syntax::SyntaxNode, function_id: usize, object_address: usize) -> bool {
+    if (function_id >= context->function_count || object_address == context::no_id()) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let function_records: *const context::Function = context->functions.data as *const context::Function;
+    let function: context::Function = function_records[function_id];
+    if (!classes::method_is_accessible(context, function_id)) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.inaccessible_member, context->current_unit, node.span,
+            function.interface_unit,
+            context::node(context, function.interface_unit, function.interface_node).span, function_id);
+        return false;
+    }
+    if (function.ir_function == context::no_id()) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    var call: ir::Instruction = builder::instruction(ir::Opcode.call, node);
+    call.type_id = type_info::BuiltinType.type_void as usize;
+    call.auxiliary = function.ir_function;
+    let instruction_id: usize = builder::emit_void(context, call);
+    return instruction_id != context::no_id() && ir::add_argument(&context->ir, instruction_id, object_address);
+}
+
+fn emit_destroy_fields(
+    context: *context::Context, node: syntax::SyntaxNode,
+    record: type_info::Record, address_id: usize, depth: usize) -> bool {
+    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    for (var remaining: usize = record.field_count; remaining != 0; remaining -= 1) {
+        let field: type_info::Field = fields[record.first_field + remaining - 1];
+        if (!type_requires_destruction(context, field.type_id, depth + 1)) {
+            continue;
+        }
+        let address: usize = subobject_address(context, node, address_id, field);
+        if (!emit_destroy_object(context, node, field.type_id, address, depth + 1)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn emit_destroy_subobjects(
+    context: *context::Context, node: syntax::SyntaxNode, type_id: usize, address_id: usize, depth: usize) -> bool {
+    let record: type_info::Record = context::type_record(context, type_id);
+    if (!emit_destroy_fields(context, node, record, address_id, depth)) {
+        return false;
+    }
+    if (record.base_type == context::no_id()) {
+        return true;
+    }
+    let base_address: usize = convert_object_address(context, node, address_id, record.base_type);
+    return emit_destroy_object(context, node, record.base_type, base_address, depth + 1);
+}
+
+fn emit_destroy_object(
+    context: *context::Context, node: syntax::SyntaxNode, type_id: usize, address_id: usize, depth: usize) -> bool {
+    if (depth >= context::Limit.maximum_type_depth as usize || address_id == context::no_id()) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let record: type_info::Record = context::type_record(context, type_id);
+    if (record.kind == type_info::Kind.array) {
+        for (var remaining: usize = record.element_count; remaining != 0; remaining -= 1) {
+            let element_address: usize = array_element_address(
+                context, node, address_id, record.element_type, remaining - 1);
+            if (!emit_destroy_object(context, node, record.element_type, element_address, depth + 1)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (record.kind == type_info::Kind.class_type) {
+        let destructor_id: usize = functions::destructor(context, type_id);
+        if (destructor_id != context::no_id()) {
+            return emit_destructor_call(context, node, destructor_id, address_id);
+        }
+        return emit_destroy_subobjects(context, node, type_id, address_id, depth);
+    }
+    if (record.kind == type_info::Kind.structure) {
+        return emit_destroy_fields(context, node, record, address_id, depth);
+    }
+    return true;
+}
+
+fn emit_scope_cleanup(context: *context::Context, local_start: usize, node: syntax::SyntaxNode) -> bool {
+    if (local_start > context->local_count) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let locals: *const context::Local = context->locals.data as *const context::Local;
+    for (var remaining: usize = context->local_count; remaining > local_start; remaining -= 1) {
+        let local: context::Local = locals[remaining - 1];
+        if (local.cleanup_type_id == context::no_id()) {
+            continue;
+        }
+        if (!type_requires_destruction(context, local.cleanup_type_id, 0)) {
+            continue;
+        }
+        let address: usize = local.cleanup_address != context::no_id() ? local.cleanup_address :
+            builder::address_of_slot(
+                context, node, local.slot_id, local.cleanup_type_id, false, local.volatile_binding);
+        if (!emit_destroy_object(context, node, local.cleanup_type_id, address, 0)) {
+            return false;
+        }
+    }
+    return context->error == runtime::Error.none;
+}
+
+fn register_temporary(context: *context::Context, type_id: usize, address_id: usize) -> bool {
+    if (type_id >= context->types.type_count || address_id == context::no_id()) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let temporary: context::Temporary = {
+        type_id = type_id, address_id = address_id, active = true,
+    };
+    return builder::append_temporary(context, temporary) != context::no_id();
+}
+
+fn adopt_temporary(
+    context: *context::Context, first: usize, address_id: usize, type_id: *usize, owned_address: *usize) -> bool {
+    let outputs_are_valid: bool = type_id != null && owned_address != null;
+    if (!outputs_are_valid || first > context->temporary_count) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let temporaries: *context::Temporary = context->temporaries.data as *context::Temporary;
+    for (var remaining: usize = context->temporary_count; remaining > first; remaining -= 1) {
+        let index: usize = remaining - 1;
+        if (temporaries[index].active && temporaries[index].address_id == address_id) {
+            temporaries[index].active = false;
+            *type_id = temporaries[index].type_id;
+            *owned_address = temporaries[index].address_id;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn emit_temporary_cleanup(context: *context::Context, first: usize, node: syntax::SyntaxNode) -> bool {
+    if (first > context->temporary_count) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let temporaries: *const context::Temporary = context->temporaries.data as *const context::Temporary;
+    for (var remaining: usize = context->temporary_count; remaining > first; remaining -= 1) {
+        let temporary: context::Temporary = temporaries[remaining - 1];
+        if (!temporary.active || !type_requires_destruction(context, temporary.type_id, 0)) {
+            continue;
+        }
+        if (!emit_destroy_object(context, node, temporary.type_id, temporary.address_id, 0)) {
+            return false;
+        }
+    }
+    let truncated: bytes::BufferResult = bytes::truncate(context->temporaries, first * sizeof(context::Temporary));
+    context->temporaries = truncated.buffer;
+    context->error = truncated.error;
+    context->temporary_count = first;
+    return context->error == runtime::Error.none;
+}
+
+fn complete_full_expression(context: *context::Context, first: usize, node: syntax::SyntaxNode, lowered: bool) -> bool {
+    if (!lowered) {
+        return false;
+    }
+    return emit_temporary_cleanup(context, first, node);
+}

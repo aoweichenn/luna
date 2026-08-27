@@ -56,8 +56,37 @@ fn probe_cast(context: *context::Context, node: syntax::SyntaxNode, expected_typ
         return invalid_result();
     }
     let target: type_info::Record = context::type_record(context, target_type);
-    let operand_expected: usize = operand_node.kind == syntax::SyntaxKind.null_expression ?
-        target_type : context::no_id();
+    if (target.kind == type_info::Kind.reference) {
+        let operand: Result = expression(context, node.first_child, target.element_type);
+        if (operand.status != Status.compatible) {
+            return failure_result(operand);
+        }
+        let read_only: bool = (target.flags & (type_info::Flag.read_only as usize)) != 0;
+        let rvalue: bool = (target.flags & (type_info::Flag.rvalue_reference as usize)) != 0;
+        let stored: bool = category::has_storage(operand.category);
+        let writable: bool = read_only || category::is_writable(operand.category);
+        let category_is_valid: bool = rvalue ? stored : category::is_lvalue(operand.category);
+        if (!writable || !category_is_valid) {
+            return incompatible_result();
+        }
+        var result: Result = type_result(expected_type, target.element_type);
+        result.category = rvalue ? category::xvalue(read_only) : category::lvalue(!read_only, false);
+        return result;
+    }
+    let target_storage: usize = target.kind == type_info::Kind.enumeration ? target.element_type : target_type;
+    let storage: type_info::Record = context::type_record(context, target_storage);
+    let integer_literal: bool = operand_node.kind == syntax::SyntaxKind.integer_expression &&
+        type_info::is_integer(storage.kind);
+    let floating_literal: bool = operand_node.kind == syntax::SyntaxKind.floating_expression &&
+        type_info::is_float(storage.kind);
+    let null_literal: bool = operand_node.kind == syntax::SyntaxKind.null_expression &&
+        target.kind == type_info::Kind.pointer;
+    var operand_expected: usize = context::no_id();
+    if (integer_literal) {
+        operand_expected = target_storage;
+    } else if (floating_literal || null_literal) {
+        operand_expected = target_type;
+    }
     let operand: Result = expression(context, node.first_child, operand_expected);
     if (operand.status != Status.compatible) {
         return failure_result(operand);

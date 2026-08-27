@@ -7,6 +7,10 @@ fn lvalue(writable: bool, volatile_access: bool) -> Category {
     return writable ? Category.writable_lvalue : Category.read_only_lvalue;
 }
 
+fn xvalue(read_only: bool) -> Category {
+    return read_only ? Category.read_only_xvalue : Category.xvalue;
+}
+
 fn pointee(pointer: type_info::Record) -> Category {
     if (pointer.kind != type_info::Kind.pointer) {
         return Category.rvalue;
@@ -33,6 +37,9 @@ fn project(source: Category) -> Category {
     case Category.writable_volatile_lvalue, Category.writable_volatile_bitfield {
         return Category.writable_volatile_lvalue;
     }
+    case Category.xvalue, Category.read_only_xvalue {
+        return source;
+    }
     default {
         return Category.rvalue;
     }
@@ -56,6 +63,9 @@ fn as_bitfield(source: Category) -> Category {
     case Category.temporary, Category.temporary_bitfield {
         return Category.temporary_bitfield;
     }
+    case Category.xvalue, Category.read_only_xvalue {
+        return Category.temporary_bitfield;
+    }
     default {
         return Category.rvalue;
     }
@@ -76,6 +86,14 @@ fn is_lvalue(category: Category) -> bool {
     }
 }
 
+fn is_xvalue(category: Category) -> bool {
+    return category == Category.xvalue || category == Category.read_only_xvalue;
+}
+
+fn is_expiring(category: Category) -> bool {
+    return is_xvalue(category) || is_temporary(category);
+}
+
 fn has_storage(category: Category) -> bool {
     return category != Category.rvalue;
 }
@@ -83,7 +101,7 @@ fn has_storage(category: Category) -> bool {
 fn is_addressable(category: Category) -> bool {
     switch (category) {
     case Category.read_only_lvalue, Category.writable_lvalue,
-        Category.volatile_lvalue, Category.writable_volatile_lvalue {
+        Category.volatile_lvalue, Category.writable_volatile_lvalue, Category.xvalue, Category.read_only_xvalue {
         return true;
     }
     default {
@@ -95,7 +113,7 @@ fn is_addressable(category: Category) -> bool {
 fn is_assignable(category: Category) -> bool {
     switch (category) {
     case Category.writable_lvalue, Category.writable_volatile_lvalue,
-        Category.writable_bitfield, Category.writable_volatile_bitfield {
+        Category.writable_bitfield, Category.writable_volatile_bitfield, Category.xvalue {
         return true;
     }
     default {
@@ -122,4 +140,25 @@ fn is_volatile(category: Category) -> bool {
 
 fn is_temporary(category: Category) -> bool {
     return category == Category.temporary || category == Category.temporary_bitfield;
+}
+
+fn reference_binding_rank(reference: type_info::Record, actual: Category) -> usize {
+    if (reference.kind != type_info::Kind.reference) {
+        return type_info::no_id();
+    }
+    let read_only: bool = (reference.flags & (type_info::Flag.read_only as usize)) != 0;
+    let rvalue: bool = (reference.flags & (type_info::Flag.rvalue_reference as usize)) != 0;
+    if (rvalue) {
+        if (!is_expiring(actual)) {
+            return type_info::no_id();
+        }
+        return read_only ? ReferenceRank.qualified as usize : ReferenceRank.exact as usize;
+    }
+    if (is_lvalue(actual)) {
+        if (!read_only && !is_writable(actual)) {
+            return type_info::no_id();
+        }
+        return read_only && is_writable(actual) ? ReferenceRank.qualified as usize : ReferenceRank.exact as usize;
+    }
+    return read_only && is_expiring(actual) ? ReferenceRank.temporary as usize : type_info::no_id();
 }

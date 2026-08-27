@@ -88,6 +88,7 @@ def driver_module(name: str, *implementation_stems: str) -> RegisteredModule:
 LIBRARIES = {
     "ascii": library_module("luna.std.ascii", "std/ascii"),
     "checked": library_module("luna.std.checked", "std/checked"),
+    "utility": library_module("luna.std.utility", "std/utility"),
     "syscall": library_module("luna.linux.syscall", "linux/syscall"),
     "runtime": library_module("luna.runtime", "runtime"),
     "memory": library_module("luna.std.memory", "std/memory"),
@@ -166,10 +167,15 @@ LIBRARIES = {
         "middleend/semantic/functions/defaults",
         "middleend/semantic/functions/generics",
         "middleend/semantic/functions/methods",
+        "middleend/semantic/functions/special",
     ),
     "sem_funcs_ir": compiler_module(
         "luna.bootstrap.middleend.semantic.functions.ir",
         "middleend/semantic/functions/ir",
+    ),
+    "sem_lifetime": compiler_module(
+        "luna.bootstrap.middleend.semantic.lifetime",
+        "middleend/semantic/lifetime",
     ),
     "sem_expr_base": compiler_module("luna.bootstrap.middleend.semantic.expr.base", "middleend/semantic/expr/base"),
     "sem_expr_numeric": compiler_module(

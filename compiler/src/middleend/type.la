@@ -312,6 +312,50 @@ fn table_pointer(table: *Table, element_type: usize, read_only: bool, volatile_p
     };
 }
 
+fn table_reference(table: *Table, element_type: usize, read_only: bool, rvalue: bool) -> IdResult {
+    let table_is_available: bool = table != null && table_storage_is_valid(*table);
+    if (!table_is_available || element_type >= table->type_count) {
+        return {type_id = no_id(), error = runtime::Error.invalid_argument};
+    }
+    let records: *const Record = table->types.data as *const Record;
+    var target_type: usize = element_type;
+    var target_read_only: bool = read_only;
+    var target_rvalue: bool = rvalue;
+    if (records[target_type].kind == Kind.reference) {
+        target_read_only = target_read_only || (records[target_type].flags & (Flag.read_only as usize)) != 0;
+        target_rvalue = target_rvalue && (records[target_type].flags & (Flag.rvalue_reference as usize)) != 0;
+        target_type = records[target_type].element_type;
+    }
+    if (records[target_type].kind == Kind.invalid || records[target_type].kind == Kind.type_void) {
+        return {type_id = no_id(), error = runtime::Error.invalid_argument};
+    }
+    for (var index: usize = BuiltinType.count as usize; index < table->type_count; index += 1) {
+        let record: Record = records[index];
+        let record_read_only: bool = (record.flags & (Flag.read_only as usize)) != 0;
+        let record_rvalue: bool = (record.flags & (Flag.rvalue_reference as usize)) != 0;
+        let identity_matches: bool = record.kind == Kind.reference && record.element_type == target_type;
+        if (identity_matches && record_read_only == target_read_only && record_rvalue == target_rvalue) {
+            return {type_id = index, error = runtime::Error.none};
+        }
+    }
+    var record: Record = invalid_record();
+    record.kind = Kind.reference;
+    record.element_type = target_type;
+    record.size_bytes = Limit.target_pointer_bytes as usize;
+    record.alignment_bytes = Limit.target_pointer_alignment as usize;
+    record.flags = Flag.complete as usize;
+    if (target_read_only) {
+        record.flags |= Flag.read_only as usize;
+    }
+    if (target_rvalue) {
+        record.flags |= Flag.rvalue_reference as usize;
+    }
+    let type_id: usize = table->type_count;
+    let added: TableResult = append_record(*table, record);
+    *table = added.table;
+    return {type_id = added.error == runtime::Error.none ? type_id : no_id(), error = added.error};
+}
+
 fn table_array(table: *Table, element_type: usize, element_count: usize) -> IdResult {
     if (table == null || !table_storage_is_valid(*table) || element_type >= table->type_count || element_count == 0) {
         return {
@@ -320,8 +364,13 @@ fn table_array(table: *Table, element_type: usize, element_count: usize) -> IdRe
     }
     let records: *const Record = table->types.data as *const Record;
     let element: Record = records[element_type];
-    if ((element.flags & (Flag.complete as usize)) == 0 || element.size_bytes == 0 || element_count >
-            (Limit.maximum_size as usize) / element.size_bytes) {
+    let element_is_complete: bool = (element.flags & (Flag.complete as usize)) != 0 && element.size_bytes != 0;
+    if (element.kind == Kind.reference || !element_is_complete) {
+        return {
+            type_id = no_id(), error = runtime::Error.invalid_argument,
+        };
+    }
+    if (element_count > (Limit.maximum_size as usize) / element.size_bytes) {
         return {
             type_id = no_id(), error = runtime::Error.invalid_argument,
         };
@@ -735,7 +784,7 @@ fn is_float(kind: Kind) -> bool {
 
 fn is_scalar(kind: Kind) -> bool {
     switch (kind) {
-    case Kind.boolean, Kind.pointer, Kind.enumeration, Kind.function_pointer {
+    case Kind.boolean, Kind.pointer, Kind.enumeration, Kind.function_pointer, Kind.reference {
         return true;
     }
     default {
@@ -775,7 +824,7 @@ fn bit_width(kind: Kind) -> usize {
         return 32;
     }
     case Kind.signed_64, Kind.signed_size, Kind.unsigned_64, Kind.unsigned_size,
-        Kind.float_64, Kind.pointer, Kind.function_pointer {
+        Kind.float_64, Kind.pointer, Kind.function_pointer, Kind.reference {
         return 64;
     }
     default {
@@ -852,17 +901,38 @@ fn opaque_state_is_valid(record: Record, complete: bool, require_complete: bool)
     return !complete && !require_complete;
 }
 
+fn reference_record_is_valid(record: Record, records: *const Record, type_count: usize) -> bool {
+    if (record.element_type >= type_count) {
+        return false;
+    }
+    let element_kind: Kind = records[record.element_type].kind;
+    let element_is_valid: bool = element_kind != Kind.invalid && element_kind != Kind.type_void;
+    let identity_is_empty: bool = record.element_count == 0 && record.declaration_unit == no_id();
+    let declaration_is_empty: bool = record.declaration_node == no_id() && record.name_token == no_id();
+    let fields_are_empty: bool = record.first_field == no_id() && record.field_count == 0;
+    let layout_is_valid: bool = record.size_bytes == 8 && record.alignment_bytes == 8;
+    let complete: bool = (record.flags & (Flag.complete as usize)) != 0;
+    let qualifier_mask: usize = (Flag.read_only as usize) | (Flag.rvalue_reference as usize);
+    let flags_are_valid: bool = (record.flags & ~(qualifier_mask | (Flag.complete as usize))) == 0;
+    let identity_is_valid: bool = identity_is_empty && declaration_is_empty;
+    let representation_is_valid: bool = fields_are_empty && layout_is_valid;
+    let type_is_valid: bool = element_is_valid && identity_is_valid;
+    let storage_is_valid: bool = representation_is_valid && complete;
+    let record_is_valid: bool = type_is_valid && storage_is_valid;
+    return record_is_valid && flags_are_valid;
+}
+
 fn table_is_valid(table: Table, require_complete: bool) -> bool {
     if (!table_storage_is_valid(table) || table.type_count < BuiltinType.count as usize) {
         return false;
     }
     let records: *const Record = table.types.data as *const Record;
     let fields: *const Field = table.fields.data as *const Field;
-    let maximum_flags: usize = (Flag.opaque_definition as usize) * 2 - 1;
+    let maximum_flags: usize = (Flag.rvalue_reference as usize) * 2 - 1;
     var index: usize = 0;
     while (index < table.type_count) {
         let record: Record = records[index];
-        if ((record.kind as usize) > (Kind.bound_method as usize) || record.flags > maximum_flags) {
+        if ((record.kind as usize) > (Kind.reference as usize) || record.flags > maximum_flags) {
             return false;
         }
         let has_base: bool = record.base_type != no_id();
@@ -912,6 +982,18 @@ fn table_is_valid(table: Table, require_complete: bool) -> bool {
                     return false;
                 }
                 previous += 1;
+            }
+        } else if (record.kind == Kind.reference) {
+            if (!reference_record_is_valid(record, records, table.type_count)) {
+                return false;
+            }
+            for (var previous: usize = BuiltinType.count as usize; previous < index; previous += 1) {
+                let identity_matches: bool = records[previous].kind == Kind.reference &&
+                    records[previous].element_type == record.element_type;
+                let qualifier_mask: usize = (Flag.read_only as usize) | (Flag.rvalue_reference as usize);
+                if (identity_matches && (records[previous].flags & qualifier_mask) == (record.flags & qualifier_mask)) {
+                    return false;
+                }
             }
         } else if (record.kind == Kind.array) {
             // A flexible array is the type of a trailing [?]T member: no

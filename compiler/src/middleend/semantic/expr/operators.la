@@ -12,6 +12,7 @@ import luna.bootstrap.middleend.semantic.expr.base as base;
 import luna.bootstrap.middleend.semantic.expr.numeric as numeric;
 import luna.bootstrap.middleend.semantic.expr.probe as probe;
 import luna.bootstrap.middleend.semantic.functions as functions;
+import luna.bootstrap.middleend.semantic.lifetime as lifetime;
 import luna.bootstrap.middleend.semantic.types as types;
 import luna.bootstrap.middleend.semantic.value as category;
 import luna.bootstrap.middleend.type as type_info;
@@ -366,6 +367,23 @@ fn lower_cast(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
         return base::invalid_expression();
     }
     let target_record: type_info::Record = context::type_record(context, target_type);
+    if (target_record.kind == type_info::Kind.reference) {
+        let operand: context::Expression = api::invoke(lowerer, context, node.first_child, target_record.element_type);
+        let read_only: bool = (target_record.flags & (type_info::Flag.read_only as usize)) != 0;
+        let rvalue: bool = (target_record.flags & (type_info::Flag.rvalue_reference as usize)) != 0;
+        let stored: bool = operand.valid && category::has_storage(operand.category);
+        let writable: bool = read_only || category::is_writable(operand.category);
+        let category_is_valid: bool = rvalue ? stored : category::is_lvalue(operand.category);
+        if (!writable || !category_is_valid) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.invalid_cast, context->current_unit, node.span, context::no_id(),
+                context::empty_span(), target_type);
+            return base::invalid_expression();
+        }
+        var result: context::Expression = operand;
+        result.category = rvalue ? category::xvalue(read_only) : category::lvalue(!read_only, false);
+        return result;
+    }
     let target_storage: usize = target_record.kind == type_info::Kind.enumeration ?
             target_record.element_type : target_type;
     let target_storage_record: type_info::Record = context::type_record(context, target_storage);
@@ -433,6 +451,7 @@ fn lower_short_circuit(
         lowerer: api::Lowerer) -> context::Expression {
     let none: usize = context::no_id();
     let left_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let left_temporary_start: usize = context->temporary_count;
     let left: context::Expression = api::invoke(lowerer, context, node.first_child,
         type_info::BuiltinType.boolean as usize);
     if (!left.valid || left.type_id != type_info::BuiltinType.boolean as usize) {
@@ -443,6 +462,9 @@ fn lower_short_circuit(
     let address: usize = builder::address_of_slot(
         context, node, slot_id, type_info::BuiltinType.boolean as usize, false, false);
     builder::store_to_address(context, node, address, type_info::BuiltinType.boolean as usize, left);
+    if (!lifetime::emit_temporary_cleanup(context, left_temporary_start, left_node)) {
+        return base::invalid_expression();
+    }
     let right_block: usize = builder::add_current_block(context);
     let merge_block: usize = builder::add_current_block(context);
     if (operation == lexer::TokenKind.logical_and) {
@@ -451,6 +473,7 @@ fn lower_short_circuit(
         builder::emit_branch(context, node, left.value_id, merge_block, right_block);
     }
     context->current_block = right_block;
+    let right_temporary_start: usize = context->temporary_count;
     let right: context::Expression = api::invoke(lowerer, context, left_node.next_sibling,
         type_info::BuiltinType.boolean as usize);
     if (!right.valid || right.type_id != type_info::BuiltinType.boolean as usize) {
@@ -460,6 +483,9 @@ fn lower_short_circuit(
         return base::invalid_expression();
     }
     builder::store_to_address(context, node, address, type_info::BuiltinType.boolean as usize, right);
+    if (!lifetime::emit_temporary_cleanup(context, right_temporary_start, node)) {
+        return base::invalid_expression();
+    }
     builder::emit_jump(context, node, merge_block);
     context->current_block = merge_block;
     let source: context::Expression = {
@@ -659,21 +685,22 @@ fn lower_binary(context: *context::Context, node_id: usize, node: syntax::Syntax
     };
 }
 
-fn lower_conditional(
-    context: *context::Context, node: syntax::SyntaxNode, expected_type: usize,
-        lowerer: api::Lowerer) -> context::Expression {
+fn lower_scalar_conditional(
+    context: *context::Context, node: syntax::SyntaxNode,
+    expected_type: usize, lowerer: api::Lowerer) -> context::Expression {
     let none: usize = context::no_id();
-    if (node.child_count != 3) {
-        return base::invalid_expression();
-    }
     let condition_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
     let then_node: syntax::SyntaxNode = context::node(context, context->current_unit, condition_node.next_sibling);
-    let condition: context::Expression = api::invoke(lowerer, context, node.first_child,
-        type_info::BuiltinType.boolean as usize);
+    let condition_temporary_start: usize = context->temporary_count;
+    let condition: context::Expression = api::invoke(
+        lowerer, context, node.first_child, type_info::BuiltinType.boolean as usize);
     if (!condition.valid || condition.type_id != type_info::BuiltinType.boolean as usize) {
         context::add_diagnostic(
             context, context::DiagnosticKind.invalid_condition, context->current_unit, condition_node.span, none,
             context::empty_span(), condition.type_id);
+        return base::invalid_expression();
+    }
+    if (!lifetime::emit_temporary_cleanup(context, condition_temporary_start, condition_node)) {
         return base::invalid_expression();
     }
     let then_block: usize = builder::add_current_block(context);
@@ -681,6 +708,7 @@ fn lower_conditional(
     let merge_block: usize = builder::add_current_block(context);
     builder::emit_branch(context, node, condition.value_id, then_block, else_block);
     context->current_block = then_block;
+    let then_temporary_start: usize = context->temporary_count;
     let then_value: context::Expression = api::invoke(lowerer, context, condition_node.next_sibling, expected_type);
     if (!then_value.valid) {
         return then_value;
@@ -689,8 +717,12 @@ fn lower_conditional(
         &context->ir, builder::current_ir_function(context), then_value.type_id, true, false, 0);
     let then_address: usize = builder::address_of_slot(context, node, result_slot, then_value.type_id, false, false);
     builder::store_to_address(context, node, then_address, then_value.type_id, then_value);
+    if (!lifetime::emit_temporary_cleanup(context, then_temporary_start, then_node)) {
+        return base::invalid_expression();
+    }
     builder::emit_jump(context, node, merge_block);
     context->current_block = else_block;
+    let else_temporary_start: usize = context->temporary_count;
     let else_value: context::Expression = api::invoke(lowerer, context, then_node.next_sibling, then_value.type_id);
     if (!else_value.valid || else_value.type_id != then_value.type_id) {
         context::add_diagnostic(
@@ -700,17 +732,12 @@ fn lower_conditional(
     }
     let else_address: usize = builder::address_of_slot(context, node, result_slot, then_value.type_id, false, false);
     builder::store_to_address(context, node, else_address, then_value.type_id, else_value);
+    if (!lifetime::emit_temporary_cleanup(context, else_temporary_start, node)) {
+        return base::invalid_expression();
+    }
     builder::emit_jump(context, node, merge_block);
     context->current_block = merge_block;
     let result_address: usize = builder::address_of_slot(context, node, result_slot, then_value.type_id, false, false);
-    let type_record: type_info::Record = context::type_record(context, then_value.type_id);
-    if (type_info::is_memory(type_record.kind)) {
-        return {
-            type_id = then_value.type_id, value_id = none, address_id = result_address, constant_value = 0,
-            has_constant = false, category = category::Category.temporary, valid = true,
-                bitfield_segment = context::no_id(),
-        };
-    }
     let source: context::Expression = {
         type_id = then_value.type_id, value_id = none, address_id = result_address, constant_value = 0,
         has_constant = false, category = category::lvalue(false, false), valid = true,
@@ -720,6 +747,132 @@ fn lower_conditional(
     var final_result: context::Expression = result;
     final_result.category = category::Category.rvalue;
     return final_result;
+}
+
+fn lower_conditional_at(
+    context: *context::Context, node: syntax::SyntaxNode, expected_type: usize,
+    destination: usize, owns_destination: bool,
+    lowerer: api::Lowerer, into_lowerer: api::IntoLowerer) -> context::Expression {
+    let none: usize = context::no_id();
+    if (node.child_count != 3) {
+        return base::invalid_expression();
+    }
+    let condition_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let then_node: syntax::SyntaxNode = context::node(context, context->current_unit, condition_node.next_sibling);
+    let condition_temporary_start: usize = context->temporary_count;
+    let condition: context::Expression = api::invoke(lowerer, context, node.first_child,
+        type_info::BuiltinType.boolean as usize);
+    if (!condition.valid || condition.type_id != type_info::BuiltinType.boolean as usize) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_condition, context->current_unit, condition_node.span, none,
+            context::empty_span(), condition.type_id);
+        return base::invalid_expression();
+    }
+    if (!lifetime::emit_temporary_cleanup(context, condition_temporary_start, condition_node)) {
+        return base::invalid_expression();
+    }
+    var result_type: usize = expected_type;
+    if (result_type == none) {
+        let then_probe: probe::Result = probe::expression(context, condition_node.next_sibling, none);
+        if (then_probe.status != probe::Status.compatible) {
+            return base::invalid_expression();
+        }
+        result_type = then_probe.type_id;
+    }
+    let type_record: type_info::Record = context::type_record(context, result_type);
+    let memory_result: bool = type_info::is_memory(type_record.kind);
+    var result_slot: usize = none;
+    var result_address: usize = destination;
+    if (result_address == none) {
+        result_slot = ir::add_slot(&context->ir, builder::current_ir_function(context), result_type, true, false, 0);
+        result_address = builder::address_of_slot(context, node, result_slot, result_type, false, false);
+        if (memory_result && !builder::zero_slot(context, node, result_slot, result_type)) {
+            return base::invalid_expression();
+        }
+    }
+    let then_block: usize = builder::add_current_block(context);
+    let else_block: usize = builder::add_current_block(context);
+    let merge_block: usize = builder::add_current_block(context);
+    builder::emit_branch(context, node, condition.value_id, then_block, else_block);
+    context->current_block = then_block;
+    let then_temporary_start: usize = context->temporary_count;
+    let then_value: context::Expression = memory_result ? api::invoke_into(
+        into_lowerer, context, condition_node.next_sibling, result_type, result_address) :
+        api::invoke(lowerer, context, condition_node.next_sibling, result_type);
+    if (!then_value.valid) {
+        return then_value;
+    }
+    let then_is_in_place: bool = memory_result && then_value.address_id == result_address;
+    if (!then_is_in_place && !builder::store_to_address(context, node, result_address, result_type, then_value)) {
+        return base::invalid_expression();
+    }
+    if (!lifetime::emit_temporary_cleanup(context, then_temporary_start, then_node)) {
+        return base::invalid_expression();
+    }
+    builder::emit_jump(context, node, merge_block);
+    context->current_block = else_block;
+    let else_temporary_start: usize = context->temporary_count;
+    let else_value: context::Expression = memory_result ? api::invoke_into(
+        into_lowerer, context, then_node.next_sibling, result_type, result_address) :
+        api::invoke(lowerer, context, then_node.next_sibling, result_type);
+    if (!else_value.valid || else_value.type_id != result_type) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span, none,
+            context::empty_span(), result_type);
+        return base::invalid_expression();
+    }
+    let else_is_in_place: bool = memory_result && else_value.address_id == result_address;
+    if (!else_is_in_place && !builder::store_to_address(context, node, result_address, result_type, else_value)) {
+        return base::invalid_expression();
+    }
+    if (!lifetime::emit_temporary_cleanup(context, else_temporary_start, node)) {
+        return base::invalid_expression();
+    }
+    builder::emit_jump(context, node, merge_block);
+    context->current_block = merge_block;
+    if (memory_result) {
+        if (!owns_destination && !lifetime::register_temporary(context, result_type, result_address)) {
+            return base::invalid_expression();
+        }
+        return {
+            type_id = result_type, value_id = none, address_id = result_address, constant_value = 0,
+            has_constant = false, category = category::Category.temporary, valid = true,
+                bitfield_segment = context::no_id(),
+        };
+    }
+    let source: context::Expression = {
+        type_id = result_type, value_id = none, address_id = result_address, constant_value = 0,
+        has_constant = false, category = category::lvalue(false, false), valid = true,
+        bitfield_segment = context::no_id(),
+    };
+    let result: context::Expression = builder::load_lvalue(context, node, source);
+    var final_result: context::Expression = result;
+    final_result.category = category::Category.rvalue;
+    return final_result;
+}
+
+fn lower_conditional(
+    context: *context::Context, node: syntax::SyntaxNode, expected_type: usize,
+    lowerer: api::Lowerer, into_lowerer: api::IntoLowerer) -> context::Expression {
+    var result_type: usize = expected_type;
+    if (result_type == context::no_id()) {
+        let condition: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+        let result: probe::Result = probe::expression(context, condition.next_sibling, context::no_id());
+        if (result.status == probe::Status.compatible) {
+            result_type = result.type_id;
+        }
+    }
+    if (result_type < context->types.type_count &&
+        !type_info::is_memory(context::type_record(context, result_type).kind)) {
+        return lower_scalar_conditional(context, node, expected_type, lowerer);
+    }
+    return lower_conditional_at(context, node, expected_type, context::no_id(), false, lowerer, into_lowerer);
+}
+
+fn lower_conditional_into(
+    context: *context::Context, node: syntax::SyntaxNode, expected_type: usize, destination: usize,
+    lowerer: api::Lowerer, into_lowerer: api::IntoLowerer) -> context::Expression {
+    return lower_conditional_at(context, node, expected_type, destination, true, lowerer, into_lowerer);
 }
 
 fn lower_va_arg(context: *context::Context, node: syntax::SyntaxNode, lowerer: api::Lowerer) -> context::Expression {
