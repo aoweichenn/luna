@@ -243,3 +243,21 @@ member/index overload probing and rejected temporary address/assignment cases.
 The stage-fixed executables were copied here and `SHA256SUMS` refreshed. M2 is
 complete with this anchor; M3 may consume the shared callable and receiver
 foundations.
+
+## 2026-08-27: promotion to the M3.6 class-system toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`3511b490cf1c1114805ba00b36a0878fa94afb2f`
+(`feat: add class value composition`). Starting from the previous M2.4 anchor,
+the transition toolchain implemented the complete M3.0-M3.6 class system:
+direct classes and constructors, single inheritance, virtual/abstract dispatch,
+restricted operators, non-owning bound methods, descriptor-chain RTTI,
+same-module friendship, pointer-only opaque classes and declaration-order class
+value composition with in-place member construction.
+
+Remote x86-64 verification on `caw` built `stage-transition`, `stage-next` and
+`stage-fixed`; every stage-next/stage-fixed assembly, object and executable
+artifact was byte-identical. The final verified-toolchain test run passed
+383/383, including direct, inherited, polymorphic, imported, opaque-internal
+and nested-array composition plus negative initialization diagnostics. The
+stage-fixed executables were copied here and `SHA256SUMS` refreshed.
