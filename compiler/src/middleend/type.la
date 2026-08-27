@@ -2,7 +2,7 @@ module luna.bootstrap.middleend.type;
 
 enum Limit: usize {
     maximum_size = 18446744073709551615, target_pointer_bytes = 8, target_pointer_alignment = 8,
-    maximum_alignment = 4096,
+    bound_method_bytes = 16, maximum_alignment = 4096,
 }
 
 fn no_id() -> usize {
@@ -207,8 +207,9 @@ fn kind_is_declared(kind: Kind) -> bool {
 fn table_add_named(
     table: Table, kind: Kind, declaration_unit: usize, declaration_node: usize,
     name_token: usize, exported: bool) -> TableResult {
-    if (!kind_is_declared(kind) || declaration_unit == no_id() ||
-        declaration_node == no_id() || name_token == no_id()) {
+    let declaration_exists: bool = declaration_unit != no_id() && declaration_node != no_id();
+    let declaration_is_valid: bool = declaration_exists && name_token != no_id();
+    if (!kind_is_declared(kind) || !declaration_is_valid) {
         return {
             table = table, error = runtime::Error.invalid_argument,
         };
@@ -222,6 +223,47 @@ fn table_add_named(
         record.flags = Flag.exported as usize;
     }
     return append_record(table, record);
+}
+
+fn table_add_opaque_class(
+    table: Table, declaration_unit: usize, declaration_node: usize, name_token: usize, exported: bool) -> TableResult {
+    let added: TableResult = table_add_named(
+        table, Kind.class_type, declaration_unit, declaration_node, name_token, exported);
+    if (added.error != runtime::Error.none) {
+        return added;
+    }
+    var result: Table = added.table;
+    let records: *Record = result.types.data as *Record;
+    records[result.type_count - 1].flags |= Flag.opaque_class as usize;
+    return {table = result, error = runtime::Error.none};
+}
+
+fn table_define_opaque_class(
+    table: Table, type_id: usize, definition_unit: usize, definition_node: usize, name_token: usize) -> runtime::Error {
+    if (!table_storage_is_valid(table) || type_id >= table.type_count) {
+        return runtime::Error.invalid_argument;
+    }
+    let none: usize = no_id();
+    let definition_exists: bool = definition_unit != none && definition_node != none;
+    if (!definition_exists || name_token == none) {
+        return runtime::Error.invalid_argument;
+    }
+    let records: *Record = table.types.data as *Record;
+    let record: Record = records[type_id];
+    let opaque_class: bool = is_opaque_class(record);
+    let definition_is_missing: bool = !has_opaque_definition(record);
+    let incomplete: bool = (record.flags & (Flag.complete as usize)) == 0;
+    if (!opaque_class || !definition_is_missing) {
+        return runtime::Error.invalid_argument;
+    }
+    if (!incomplete || (record.flags & (Flag.resolving as usize)) != 0) {
+        return runtime::Error.invalid_argument;
+    }
+    records[type_id].declaration_unit = definition_unit;
+    records[type_id].declaration_node = definition_node;
+    records[type_id].name_token = name_token;
+    records[type_id].flags |= Flag.opaque_definition as usize;
+    return runtime::Error.none;
 }
 
 fn table_pointer(table: *Table, element_type: usize, read_only: bool, volatile_pointee: bool) -> IdResult {
@@ -404,30 +446,66 @@ fn table_add_field(table: Table, field: Field) -> TableResult {
     };
 }
 
-fn table_add_function_pointer(table: Table, return_type: usize) -> TableResult {
+fn table_add_callable_value(table: Table, kind: Kind, return_type: usize, size_bytes: usize) -> TableResult {
     if (!table_storage_is_valid(table) || return_type >= table.type_count) {
-        return {
-            table = table, error = runtime::Error.invalid_argument,
-        };
+        return {table = table, error = runtime::Error.invalid_argument};
+    }
+    if (kind != Kind.function_pointer && kind != Kind.bound_method) {
+        return {table = table, error = runtime::Error.invalid_argument};
     }
     let records: *const Record = table.types.data as *const Record;
-    let return_record: Record = records[return_type];
-    if (return_record.kind == Kind.invalid || return_record.kind == Kind.alias ||
-        return_record.kind == Kind.array || (return_record.flags & (Flag.complete as usize)) == 0) {
-        return {
-            table = table, error = runtime::Error.invalid_argument,
-        };
+    let result: Record = records[return_type];
+    let result_kind_is_valid: bool = result.kind != Kind.invalid && result.kind != Kind.alias;
+    let result_shape_is_valid: bool = result.kind != Kind.array && (result.flags & (Flag.complete as usize)) != 0;
+    if (!result_kind_is_valid || !result_shape_is_valid) {
+        return {table = table, error = runtime::Error.invalid_argument};
     }
     var record: Record = invalid_record();
-    record.kind = Kind.function_pointer;
+    record.kind = kind;
     record.element_type = return_type;
-    record.size_bytes = Limit.target_pointer_bytes as usize;
+    record.size_bytes = size_bytes;
     record.alignment_bytes = Limit.target_pointer_alignment as usize;
     return append_record(table, record);
 }
 
+fn table_add_function_pointer(table: Table, return_type: usize) -> TableResult {
+    return table_add_callable_value(table, Kind.function_pointer, return_type, Limit.target_pointer_bytes as usize);
+}
+
+fn table_add_bound_method(table: Table, return_type: usize) -> TableResult {
+    return table_add_callable_value(table, Kind.bound_method, return_type, Limit.bound_method_bytes as usize);
+}
+
+fn callable_owner_is_appendable(owner: Record, next_field: usize) -> bool {
+    let callable: bool = owner.kind == Kind.function_pointer || owner.kind == Kind.bound_method;
+    let incomplete: bool = (owner.flags & (Flag.complete as usize)) == 0;
+    if (!callable || !incomplete) {
+        return false;
+    }
+    if (owner.field_count == 0) {
+        return owner.first_field == no_id();
+    }
+    return owner.first_field + owner.field_count == next_field;
+}
+
+fn callable_parameter_is_valid(parameter: Record) -> bool {
+    switch (parameter.kind) {
+    case Kind.invalid, Kind.type_void, Kind.alias, Kind.array {
+        return false;
+    }
+    default {}
+    }
+    let complete: bool = (parameter.flags & (Flag.complete as usize)) != 0;
+    return complete && parameter.size_bytes != 0;
+}
+
 fn table_add_parameter(table: Table, owner_type: usize, parameter_type: usize) -> TableResult {
-    if (!table_storage_is_valid(table) || owner_type >= table.type_count || parameter_type >= table.type_count) {
+    if (!table_storage_is_valid(table) || owner_type >= table.type_count) {
+        return {
+            table = table, error = runtime::Error.invalid_argument,
+        };
+    }
+    if (parameter_type >= table.type_count) {
         return {
             table = table, error = runtime::Error.invalid_argument,
         };
@@ -435,13 +513,14 @@ fn table_add_parameter(table: Table, owner_type: usize, parameter_type: usize) -
     let records: *Record = table.types.data as *Record;
     let owner: Record = records[owner_type];
     let parameter: Record = records[parameter_type];
-    if (owner.kind != Kind.function_pointer || (owner.flags &
-            (Flag.complete as usize)) != 0 || (owner.field_count == 0 && owner.first_field !=
-            no_id()) || (owner.field_count != 0 && owner.first_field + owner.field_count !=
-                table.field_count) || parameter.kind == Kind.invalid ||
-        parameter.kind == Kind.type_void || parameter.kind == Kind.alias ||
-        parameter.kind == Kind.array || (parameter.flags & (Flag.complete as usize)) == 0 ||
-        parameter.size_bytes == 0 || owner.field_count == Limit.maximum_size as usize) {
+    let owner_is_valid: bool = callable_owner_is_appendable(owner, table.field_count);
+    let parameter_is_valid: bool = callable_parameter_is_valid(parameter);
+    if (!owner_is_valid || !parameter_is_valid) {
+        return {
+            table = table, error = runtime::Error.invalid_argument,
+        };
+    }
+    if (owner.field_count == Limit.maximum_size as usize) {
         return {
             table = table, error = runtime::Error.invalid_argument,
         };
@@ -472,13 +551,19 @@ fn table_add_parameter(table: Table, owner_type: usize, parameter_type: usize) -
 }
 
 fn layout_parameters_are_valid(record: Record, size_bytes: usize, alignment_bytes: usize) -> bool {
-    let declared: bool = kind_is_declared(record.kind) || record.kind == Kind.function_pointer;
-    if (!declared || (record.flags & (Flag.complete as usize)) != 0 || size_bytes == 0 || alignment_bytes == 0 ||
-        alignment_bytes > (Limit.maximum_alignment as usize) ||
-        (alignment_bytes & (alignment_bytes - 1)) != 0 || size_bytes % alignment_bytes != 0) {
+    let callable: bool = record.kind == Kind.function_pointer || record.kind == Kind.bound_method;
+    let declared: bool = kind_is_declared(record.kind) || callable;
+    let incomplete: bool = (record.flags & (Flag.complete as usize)) == 0;
+    if (!declared || !incomplete) {
         return false;
     }
-    return true;
+    if (size_bytes == 0 || alignment_bytes == 0) {
+        return false;
+    }
+    let alignment_is_bounded: bool = alignment_bytes <= Limit.maximum_alignment as usize;
+    let alignment_is_power_of_two: bool = (alignment_bytes & (alignment_bytes - 1)) == 0;
+    let alignment_is_valid: bool = alignment_is_bounded && alignment_is_power_of_two;
+    return alignment_is_valid && size_bytes % alignment_bytes == 0;
 }
 
 fn table_set_layout(table: Table, type_id: usize, size_bytes: usize, alignment_bytes: usize) -> runtime::Error {
@@ -661,13 +746,21 @@ fn is_scalar(kind: Kind) -> bool {
 
 fn is_memory(kind: Kind) -> bool {
     switch (kind) {
-    case Kind.array, Kind.structure, Kind.record_union, Kind.va_list_type, Kind.class_type {
+    case Kind.array, Kind.structure, Kind.record_union, Kind.va_list_type, Kind.class_type, Kind.bound_method {
         return true;
     }
     default {
         return false;
     }
     }
+}
+
+fn is_opaque_class(record: Record) -> bool {
+    return record.kind == Kind.class_type && (record.flags & (Flag.opaque_class as usize)) != 0;
+}
+
+fn has_opaque_definition(record: Record) -> bool {
+    return is_opaque_class(record) && (record.flags & (Flag.opaque_definition as usize)) != 0;
 }
 
 fn bit_width(kind: Kind) -> usize {
@@ -691,16 +784,85 @@ fn bit_width(kind: Kind) -> usize {
     }
 }
 
+fn callable_record_is_valid(table: Table, records: *const Record, record: Record, expected_size: usize) -> bool {
+    let complete: bool = (record.flags & (Flag.complete as usize)) != 0;
+    let result_is_valid: bool = record.element_type < table.type_count &&
+        records[record.element_type].kind != Kind.invalid;
+    if (!complete || !result_is_valid) {
+        return false;
+    }
+    let count_and_unit_are_empty: bool = record.element_count == 0 && record.declaration_unit == no_id();
+    let node_and_name_are_empty: bool = record.declaration_node == no_id() && record.name_token == no_id();
+    if (!count_and_unit_are_empty || !node_and_name_are_empty) {
+        return false;
+    }
+    let size_is_valid: bool = record.size_bytes == expected_size;
+    let alignment_is_valid: bool = record.alignment_bytes == Limit.target_pointer_alignment as usize;
+    return size_is_valid && alignment_is_valid;
+}
+
+fn field_record_is_valid(table: Table, records: *const Record, field: Field) -> bool {
+    if (field.owner_type >= table.type_count || field.type_id >= table.type_count) {
+        return false;
+    }
+    let owner: Record = records[field.owner_type];
+    let value: Record = records[field.type_id];
+    let parameter_owner: bool = owner.kind == Kind.function_pointer || owner.kind == Kind.bound_method;
+    let owner_accepts_fields: bool = parameter_owner || is_memory(owner.kind);
+    if (!owner_accepts_fields || value.kind == Kind.invalid) {
+        return false;
+    }
+    if (value.kind == Kind.type_void) {
+        return false;
+    }
+    if (!parameter_owner) {
+        let declaration_exists: bool = field.declaration_unit != no_id() && field.declaration_node != no_id();
+        if (!declaration_exists || field.name_token == no_id()) {
+            return false;
+        }
+    }
+    if (field.offset_bytes > owner.size_bytes) {
+        return false;
+    }
+    let value_is_complete: bool = (value.flags & (Flag.complete as usize)) != 0;
+    let flexible_zero_size: bool = (value.flags & (Flag.flexible as usize)) != 0;
+    let invalid_zero_size: bool = value.size_bytes == 0 && !flexible_zero_size;
+    if (!value_is_complete || invalid_zero_size) {
+        return false;
+    }
+    if (parameter_owner) {
+        return true;
+    }
+    return value.size_bytes <= owner.size_bytes - field.offset_bytes;
+}
+
+fn opaque_state_is_valid(record: Record, complete: bool, require_complete: bool) -> bool {
+    let opaque_class: bool = is_opaque_class(record);
+    let definition_flag: bool = (record.flags & (Flag.opaque_definition as usize)) != 0;
+    if (!opaque_class) {
+        return !definition_flag;
+    }
+    let exported: bool = (record.flags & (Flag.exported as usize)) != 0;
+    if (record.kind != Kind.class_type || !exported) {
+        return false;
+    }
+    if (definition_flag) {
+        return true;
+    }
+    return !complete && !require_complete;
+}
+
 fn table_is_valid(table: Table, require_complete: bool) -> bool {
     if (!table_storage_is_valid(table) || table.type_count < BuiltinType.count as usize) {
         return false;
     }
     let records: *const Record = table.types.data as *const Record;
     let fields: *const Field = table.fields.data as *const Field;
+    let maximum_flags: usize = (Flag.opaque_definition as usize) * 2 - 1;
     var index: usize = 0;
     while (index < table.type_count) {
         let record: Record = records[index];
-        if ((record.kind as usize) > (Kind.class_type as usize) || record.flags > 255) {
+        if ((record.kind as usize) > (Kind.bound_method as usize) || record.flags > maximum_flags) {
             return false;
         }
         let has_base: bool = record.base_type != no_id();
@@ -789,18 +951,19 @@ fn table_is_valid(table: Table, require_complete: bool) -> bool {
                 }
                 previous += 1;
             }
-        } else if (record.kind == Kind.function_pointer) {
-            if ((record.flags & (Flag.complete as usize)) == 0 ||
-                record.element_type >= table.type_count || record.element_count != 0 || record.declaration_unit !=
-                    no_id() || record.declaration_node != no_id() ||
-                record.name_token != no_id() || record.size_bytes != 8 || record.alignment_bytes != 8 ||
-                records[record.element_type].kind == Kind.invalid) {
+        } else if (record.kind == Kind.function_pointer || record.kind == Kind.bound_method) {
+            let expected_size: usize = record.kind == Kind.function_pointer ?
+                Limit.target_pointer_bytes as usize : Limit.bound_method_bytes as usize;
+            if (!callable_record_is_valid(table, records, record, expected_size)) {
                 return false;
             }
             var previous: usize = BuiltinType.count as usize;
             while (previous < index) {
-                if (records[previous].kind == Kind.function_pointer && records[previous].element_type ==
-                        record.element_type && records[previous].field_count == record.field_count) {
+                let candidate_identity_matches: bool = records[previous].kind == record.kind &&
+                    records[previous].element_type == record.element_type;
+                let candidate_shape_matches: bool = candidate_identity_matches &&
+                    records[previous].field_count == record.field_count;
+                if (candidate_shape_matches) {
                     var parameter_index: usize = 0;
                     var same: bool = true;
                     while (parameter_index < record.field_count && same) {
@@ -838,6 +1001,9 @@ fn table_is_valid(table: Table, require_complete: bool) -> bool {
             }
         } else if (is_named(record.kind)) {
             let complete: bool = (record.flags & (Flag.complete as usize)) != 0;
+            if (!opaque_state_is_valid(record, complete, require_complete)) {
+                return false;
+            }
             if (record.declaration_unit == no_id() ||
                 record.declaration_node == no_id() || record.name_token == no_id() ||
                 record.element_count != 0 || (require_complete && !complete) || (complete && (record.size_bytes == 0 ||
@@ -873,22 +1039,16 @@ fn table_is_valid(table: Table, require_complete: bool) -> bool {
     index = 0;
     while (index < table.field_count) {
         let field: Field = fields[index];
-        let owner_kind: Kind = records[field.owner_type].kind;
-        let parameter_owner: bool = owner_kind == Kind.function_pointer;
-        if (!(parameter_owner || is_memory(owner_kind)) || field.type_id >= table.type_count ||
-            records[field.type_id].kind == Kind.invalid || records[field.type_id].kind ==
-                Kind.type_void || (!parameter_owner && field.declaration_unit == no_id()) ||
-            (!parameter_owner && field.declaration_node == no_id()) || (!parameter_owner &&
-                field.name_token == no_id()) || field.offset_bytes >
-                records[field.owner_type].size_bytes || (records[field.type_id].flags &
-                (Flag.complete as usize)) == 0 || (records[field.type_id].size_bytes == 0 &&
-                (records[field.type_id].flags & (Flag.flexible as usize)) == 0) ||
-            (!parameter_owner && records[field.type_id].size_bytes > records[field.owner_type].size_bytes -
-                        field.offset_bytes)) {
+        if (!field_record_is_valid(table, records, field)) {
             return false;
         }
         let owner: Record = records[field.owner_type];
-        if (owner.field_count == 0 || index < owner.first_field || index >= owner.first_field + owner.field_count) {
+        if (owner.field_count == 0) {
+            return false;
+        }
+        let precedes_slice: bool = index < owner.first_field;
+        let follows_slice: bool = index >= owner.first_field + owner.field_count;
+        if (precedes_slice || follows_slice) {
             return false;
         }
         index += 1;

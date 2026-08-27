@@ -44,7 +44,7 @@ fn invalid_instruction()
 fn empty() -> Store {
     return {
         globals = bytes::empty(), global_count = 0, global_bytes = bytes::empty(),
-        global_function_references = bytes::empty(), global_function_reference_count = 0,
+        global_references = bytes::empty(), global_reference_count = 0,
         functions = bytes::empty(), function_count = 0, callable_signatures = bytes::empty(),
             parameters = bytes::empty(),
         parameter_count = 0, slots = bytes::empty(), slot_count = 0, values = bytes::empty(),
@@ -100,7 +100,7 @@ fn storage_is_valid(ir: Store) -> bool {
     store_require(&validator, buffer_matches(ir.globals, ir.global_count, sizeof(Global)) &&
         bytes::is_valid(ir.global_bytes));
     store_require(&validator, buffer_matches(
-        ir.global_function_references, ir.global_function_reference_count, sizeof(GlobalFunctionReference)));
+        ir.global_references, ir.global_reference_count, sizeof(GlobalReference)));
     store_require(&validator, buffer_matches(ir.functions, ir.function_count, sizeof(Function)) &&
         bytes::is_valid(ir.callable_signatures));
     store_require(&validator, buffer_matches(ir.parameters, ir.parameter_count, sizeof(Parameter)));
@@ -222,7 +222,7 @@ fn add_global(ir: *Store, data: *const u8, byte_count: usize, alignment_bytes: u
     }
     let global: Global = {
         byte_offset = byte_offset, byte_count = byte_count, alignment_bytes = alignment_bytes,
-        first_function_reference = none, function_reference_count = 0, read_only = read_only,
+        first_reference = none, reference_count = 0, read_only = read_only,
     };
     let appended: bytes::BufferResult = append(ir->globals, (&global) as *const Global as *const u8, sizeof(Global));
     ir->globals = appended.buffer;
@@ -237,7 +237,7 @@ fn add_global(ir: *Store, data: *const u8, byte_count: usize, alignment_bytes: u
     return global_id;
 }
 
-fn global_function_reference_range_is_valid(global: Global, byte_offset: usize) -> bool {
+fn global_reference_range_is_valid(global: Global, byte_offset: usize) -> bool {
     let address_bytes: usize = Limit.function_address_bytes as usize;
     let placeholder_fits: bool = checked::range_is_valid(byte_offset, address_bytes, global.byte_count);
     let placeholder_is_aligned: bool = global.alignment_bytes == address_bytes &&
@@ -245,7 +245,7 @@ fn global_function_reference_range_is_valid(global: Global, byte_offset: usize) 
     return placeholder_fits && placeholder_is_aligned;
 }
 
-fn global_function_reference_bytes_are_zero(ir: *const Store, global: Global, byte_offset: usize) -> bool {
+fn global_reference_bytes_are_zero(ir: *const Store, global: Global, byte_offset: usize) -> bool {
     var storage_offset: usize = 0;
     let address_bytes: usize = Limit.function_address_bytes as usize;
     let offset_is_valid: bool = checked::add(global.byte_offset, byte_offset, &storage_offset);
@@ -262,21 +262,19 @@ fn global_function_reference_bytes_are_zero(ir: *const Store, global: Global, by
     return true;
 }
 
-fn global_function_reference_extends_slice(
-    ir: *const Store, global: Global, global_id: usize, byte_offset: usize) -> bool {
-    if (global.function_reference_count == 0) {
-        return global.first_function_reference == no_id();
+fn global_reference_extends_slice(ir: *const Store, global: Global, global_id: usize, byte_offset: usize) -> bool {
+    if (global.reference_count == 0) {
+        return global.first_reference == no_id();
     }
     var expected_next: usize = 0;
-    if (!checked::add(global.first_function_reference, global.function_reference_count, &expected_next)) {
+    if (!checked::add(global.first_reference, global.reference_count, &expected_next)) {
         return false;
     }
-    if (expected_next != ir->global_function_reference_count) {
+    if (expected_next != ir->global_reference_count) {
         return false;
     }
-    let references: *const GlobalFunctionReference = ir->global_function_references.data as
-            *const GlobalFunctionReference;
-    let previous: GlobalFunctionReference = references[expected_next - 1];
+    let references: *const GlobalReference = ir->global_references.data as *const GlobalReference;
+    let previous: GlobalReference = references[expected_next - 1];
     var previous_end: usize = 0;
     if (!checked::add(previous.byte_offset, Limit.function_address_bytes as usize, &previous_end)) {
         return false;
@@ -286,47 +284,69 @@ fn global_function_reference_extends_slice(
     return same_global && follows_previous;
 }
 
-fn global_function_reference_request_is_valid(
-    ir: *const Store, global_id: usize, byte_offset: usize, function_id: usize) -> bool {
+fn global_reference_target_is_valid(ir: *const Store, kind: GlobalReferenceKind, target_id: usize) -> bool {
+    switch (kind) {
+    case GlobalReferenceKind.function {
+        return target_id < ir->function_count;
+    }
+    case GlobalReferenceKind.global {
+        return target_id < ir->global_count;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn global_reference_request_is_valid(
+    ir: *const Store, global_id: usize, byte_offset: usize, kind: GlobalReferenceKind, target_id: usize) -> bool {
     var validator: StoreValidator = {valid = true};
     store_require(&validator, ir->error == runtime::Error.none && storage_is_valid(*ir));
-    store_require(&validator, global_id < ir->global_count && function_id < ir->function_count);
+    store_require(&validator, global_id < ir->global_count && global_reference_target_is_valid(ir, kind, target_id));
     if (!validator.valid) {
         return false;
     }
     let globals: *const Global = ir->globals.data as *const Global;
     let global: Global = globals[global_id];
-    store_require(&validator, global.read_only && global_function_reference_range_is_valid(global, byte_offset));
-    store_require(&validator, global_function_reference_bytes_are_zero(ir, global, byte_offset));
-    store_require(&validator, global_function_reference_extends_slice(ir, global, global_id, byte_offset));
+    store_require(&validator, global.read_only && global_reference_range_is_valid(global, byte_offset));
+    store_require(&validator, global_reference_bytes_are_zero(ir, global, byte_offset));
+    store_require(&validator, global_reference_extends_slice(ir, global, global_id, byte_offset));
     return validator.valid;
 }
 
-fn add_global_function_reference(ir: *Store, global_id: usize, byte_offset: usize, function_id: usize) -> bool {
+fn add_global_reference_kind(
+    ir: *Store, global_id: usize, byte_offset: usize, kind: GlobalReferenceKind, target_id: usize) -> bool {
     if (ir == null) {
         return false;
     }
-    if (!global_function_reference_request_is_valid(
-            ir as *const Store, global_id, byte_offset, function_id)) {
+    if (!global_reference_request_is_valid(
+            ir as *const Store, global_id, byte_offset, kind, target_id)) {
         return set_error(ir, runtime::Error.invalid_argument);
     }
-    let reference: GlobalFunctionReference = {
-        global_id = global_id, byte_offset = byte_offset, function_id = function_id,
+    let reference: GlobalReference = {
+        global_id = global_id, byte_offset = byte_offset, kind = kind, target_id = target_id,
     };
     let appended: bytes::BufferResult = append(
-        ir->global_function_references, (&reference) as *const GlobalFunctionReference as *const u8,
-        sizeof(GlobalFunctionReference));
-    ir->global_function_references = appended.buffer;
+        ir->global_references, (&reference) as *const GlobalReference as *const u8, sizeof(GlobalReference));
+    ir->global_references = appended.buffer;
     if (appended.error != runtime::Error.none) {
         return set_error(ir, appended.error);
     }
     let globals: *Global = ir->globals.data as *Global;
-    if (globals[global_id].function_reference_count == 0) {
-        globals[global_id].first_function_reference = ir->global_function_reference_count;
+    if (globals[global_id].reference_count == 0) {
+        globals[global_id].first_reference = ir->global_reference_count;
     }
-    globals[global_id].function_reference_count += 1;
-    ir->global_function_reference_count += 1;
+    globals[global_id].reference_count += 1;
+    ir->global_reference_count += 1;
     return true;
+}
+
+fn add_global_reference(ir: *Store, global_id: usize, byte_offset: usize, target_global_id: usize) -> bool {
+    return add_global_reference_kind(ir, global_id, byte_offset, GlobalReferenceKind.global, target_global_id);
+}
+
+fn add_global_function_reference(ir: *Store, global_id: usize, byte_offset: usize, function_id: usize) -> bool {
+    return add_global_reference_kind(ir, global_id, byte_offset, GlobalReferenceKind.function, function_id);
 }
 
 fn add_function(ir: *Store, function: Function, signature: *const u8, signature_length: usize) -> usize {
@@ -650,7 +670,7 @@ fn release(ir: Store) -> runtime::Error {
     }
     var error: runtime::Error = bytes::release(ir.globals);
     error = first_error(error, bytes::release(ir.global_bytes));
-    error = first_error(error, bytes::release(ir.global_function_references));
+    error = first_error(error, bytes::release(ir.global_references));
     error = first_error(error, bytes::release(ir.functions));
     error = first_error(error, bytes::release(ir.callable_signatures));
     error = first_error(error, bytes::release(ir.parameters));

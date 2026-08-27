@@ -7,7 +7,7 @@ enum Limit: usize {
 fn empty() -> Store {
     return {
         records = bytes::empty(), record_count = 0, fields = bytes::empty(), field_count = 0,
-        methods = bytes::empty(), method_count = 0,
+        methods = bytes::empty(), method_count = 0, friends = bytes::empty(), friend_count = 0,
     };
 }
 
@@ -24,8 +24,10 @@ fn storage_is_valid(store: Store) -> bool {
     let records_are_valid: bool = buffer_matches(store.records, store.record_count, sizeof(Record));
     let fields_are_valid: bool = buffer_matches(store.fields, store.field_count, sizeof(Field));
     let methods_are_valid: bool = buffer_matches(store.methods, store.method_count, sizeof(Method));
+    let friends_are_valid: bool = buffer_matches(store.friends, store.friend_count, sizeof(Friend));
     let members_are_valid: bool = fields_are_valid && methods_are_valid;
-    return records_are_valid && members_are_valid;
+    let policies_are_valid: bool = members_are_valid && friends_are_valid;
+    return records_are_valid && policies_are_valid;
 }
 
 fn append_record(store: *Store, record: Record) -> runtime::Error {
@@ -74,7 +76,7 @@ fn append_field(store: *Store, record_id: usize, field: Field) -> runtime::Error
     return appended.error;
 }
 
-fn append_method(store: *Store, record_id: usize, method: Method) -> runtime::Error {
+fn append_method(store: *Store, record_id: usize, method_record: Method) -> runtime::Error {
     if (store == null || !storage_is_valid(*store)) {
         return runtime::Error.invalid_argument;
     }
@@ -87,7 +89,7 @@ fn append_method(store: *Store, record_id: usize, method: Method) -> runtime::Er
         return runtime::Error.invalid_argument;
     }
     let appended: bytes::BufferResult = bytes::append(
-        store->methods, (&method) as *const Method as *const u8, sizeof(Method));
+        store->methods, (&method_record) as *const Method as *const u8, sizeof(Method));
     store->methods = appended.buffer;
     if (appended.error == runtime::Error.none) {
         records = store->records.data as *Record;
@@ -96,6 +98,32 @@ fn append_method(store: *Store, record_id: usize, method: Method) -> runtime::Er
         }
         records[record_id].method_count += 1;
         store->method_count += 1;
+    }
+    return appended.error;
+}
+
+fn append_friend(store: *Store, record_id: usize, friend_record: Friend) -> runtime::Error {
+    if (store == null || !storage_is_valid(*store)) {
+        return runtime::Error.invalid_argument;
+    }
+    if (record_id >= store->record_count) {
+        return runtime::Error.invalid_argument;
+    }
+    var records: *Record = store->records.data as *Record;
+    if (!class_slice_is_appendable(
+            records[record_id].first_friend, records[record_id].friend_count, store->friend_count)) {
+        return runtime::Error.invalid_argument;
+    }
+    let appended: bytes::BufferResult = bytes::append(
+        store->friends, (&friend_record) as *const Friend as *const u8, sizeof(Friend));
+    store->friends = appended.buffer;
+    if (appended.error == runtime::Error.none) {
+        records = store->records.data as *Record;
+        if (records[record_id].friend_count == 0) {
+            records[record_id].first_friend = store->friend_count;
+        }
+        records[record_id].friend_count += 1;
+        store->friend_count += 1;
     }
     return appended.error;
 }
@@ -111,5 +139,6 @@ fn release(store: Store) -> runtime::Error {
     var error: runtime::Error = bytes::release(store.records);
     error = first_error(error, bytes::release(store.fields));
     error = first_error(error, bytes::release(store.methods));
+    error = first_error(error, bytes::release(store.friends));
     return error;
 }

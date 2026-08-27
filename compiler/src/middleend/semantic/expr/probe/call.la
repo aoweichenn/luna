@@ -39,7 +39,9 @@ fn function_matches_type(context: *context::Context, function_id: usize, target_
         return false;
     }
     let target: type_info::Record = context::type_record(context, target_type);
-    if (target.kind != type_info::Kind.function_pointer) {
+    let callable_value: bool = target.kind == type_info::Kind.function_pointer ||
+        target.kind == type_info::Kind.bound_method;
+    if (!callable_value) {
         return false;
     }
     let functions_data: *const context::Function = context->functions.data as
@@ -129,28 +131,8 @@ fn invalid_call_target() -> CallTarget {
     };
 }
 
-fn named_class_type(context: *context::Context, node: syntax::SyntaxNode) -> usize {
-    if (node.kind != syntax::SyntaxKind.name_expression) {
-        return context::no_id();
-    }
-    let symbol_id: usize = node.child_count == 0 ? names::lookup_symbol(
-            context, context->current_unit, node.token_index, context::SymbolKind.named_type) :
-        names::lookup_qualified_symbol(context, context->current_unit, node, context::SymbolKind.named_type, false);
-    if (symbol_id == context::no_id()) {
-        return context::no_id();
-    }
-    let symbols: *const context::Symbol = context->symbols.data as
-            *const context::Symbol;
-    var type_id: usize = symbols[symbol_id].type_id;
-    let record: type_info::Record = context::type_record(context, type_id);
-    if (record.kind == type_info::Kind.alias) {
-        type_id = record.element_type;
-    }
-    return context::type_record(context, type_id).kind == type_info::Kind.class_type ? type_id : context::no_id();
-}
-
 fn constructor_call_target(context: *context::Context, callee: syntax::SyntaxNode) -> CallTarget {
-    let owner_type: usize = named_class_type(context, callee);
+    let owner_type: usize = types::resolve_class_expression(context, context->current_unit, callee);
     if (owner_type == context::no_id()) {
         return invalid_call_target();
     }
@@ -181,7 +163,7 @@ fn lookup_member_binding(context: *context::Context, owner_type: usize, name_tok
 }
 
 fn static_call_target(context: *context::Context, base: syntax::SyntaxNode, member: syntax::SyntaxNode) -> CallTarget {
-    let owner_type: usize = named_class_type(context, base);
+    let owner_type: usize = types::resolve_class_expression(context, context->current_unit, base);
     if (owner_type == context::no_id()) {
         return invalid_call_target();
     }
@@ -310,6 +292,50 @@ fn member_call_target(context: *context::Context, callee: syntax::SyntaxNode) ->
     return instance_call_target(context, callee, base, member);
 }
 
+fn member_value_target(context: *context::Context, node: syntax::SyntaxNode) -> CallTarget {
+    return member_call_target(context, node);
+}
+
+fn resolve_bound_method(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Resolution {
+    if (!type_is_valid(context, expected_type) ||
+        context::type_record(context, expected_type).kind != type_info::Kind.bound_method) {
+        return {status = ResolutionStatus.no_match, function_id = context::no_id()};
+    }
+    let target: CallTarget = member_value_target(context, node);
+    if (!target.valid || target.kind != callable::Kind.instance_method) {
+        return {status = ResolutionStatus.no_match, function_id = context::no_id()};
+    }
+    var selected: usize = context::no_id();
+    var owner_type: usize = target.owner_type;
+    let functions_data: *const context::Function = context->functions.data as
+            *const context::Function;
+    for (var depth: usize = 0; depth < context::Limit.maximum_type_depth as usize; depth += 1) {
+        let binding_id: usize = target_binding(context, target, owner_type);
+        if (binding_id != context::no_id()) {
+            let bindings: *const context::Binding = context->bindings.data as *const context::Binding;
+            for (var index: usize = 0; index < bindings[binding_id].candidate_count; index += 1) {
+                let function_id: usize = functions::binding_candidate(context, binding_id, index);
+                let receiver_matches: bool = candidate_target_is_compatible(
+                    context, functions_data[function_id], target);
+                let visible: bool = receiver_matches && target_candidate_is_visible(context, target, function_id);
+                let matches: bool = visible && function_matches_type(context, function_id, expected_type);
+                if (matches) {
+                    if (selected != context::no_id()) {
+                        return {status = ResolutionStatus.ambiguous, function_id = context::no_id()};
+                    }
+                    selected = function_id;
+                }
+            }
+        }
+        owner_type = classes::base_type(context, owner_type);
+        if (owner_type == context::no_id()) {
+            break;
+        }
+    }
+    return selected == context::no_id() ? {status = ResolutionStatus.no_match, function_id = context::no_id()} :
+        {status = ResolutionStatus.selected, function_id = selected};
+}
+
 fn direct_call_target(context: *context::Context, node: syntax::SyntaxNode) -> CallTarget {
     if (node.child_count == 0) {
         return invalid_call_target();
@@ -331,6 +357,30 @@ fn direct_call_target(context: *context::Context, node: syntax::SyntaxNode) -> C
         receiver_category = category::Category.rvalue, receiver_source = ReceiverSource.none,
         name_token = context::no_id(), valid = binding_id != context::no_id(),
     };
+}
+
+fn operator_call_target(context: *context::Context, node: syntax::SyntaxNode) -> CallTarget {
+    var target: CallTarget = invalid_call_target();
+    target.kind = callable::Kind.operator_method;
+    target.receiver_source = ReceiverSource.expression;
+    target.receiver_node = node.first_child;
+    target.name_token = node.token_index;
+    if (node.child_count == 0) {
+        return target;
+    }
+    let receiver: Result = expression(context, node.first_child, context::no_id());
+    if (receiver.status != Status.compatible) {
+        return target;
+    }
+    if (context::type_record(context, receiver.type_id).kind != type_info::Kind.class_type) {
+        return target;
+    }
+    target.owner_type = receiver.type_id;
+    target.receiver_type = receiver.type_id;
+    target.receiver_category = receiver.category;
+    target.binding_id = lookup_member_binding(context, receiver.type_id, node.token_index);
+    target.valid = target.binding_id != context::no_id();
+    return target;
 }
 
 fn receiver_is_compatible(required: callable::ReceiverKind, actual: category::Category) -> bool {
@@ -367,7 +417,7 @@ fn candidate_target_is_compatible(context: *context::Context, function: context:
     if (!candidate_owner_is_compatible(context, function, target)) {
         return false;
     }
-    if (target.kind != callable::Kind.instance_method) {
+    if (!callable::has_receiver(function.identity)) {
         return true;
     }
     return receiver_is_compatible(function.identity.receiver, target.receiver_category);
@@ -696,7 +746,9 @@ fn probe_indirect_call(
         return invalid_result();
     }
     let function_type: type_info::Record = context::type_record(context, callee.type_id);
-    if (function_type.kind != type_info::Kind.function_pointer) {
+    let callable_value: bool = function_type.kind == type_info::Kind.function_pointer ||
+        function_type.kind == type_info::Kind.bound_method;
+    if (!callable_value) {
         return incompatible_result();
     }
     let argument_count: usize = node.child_count - 1;
@@ -784,6 +836,44 @@ fn probe_source_intrinsic(
     return pointer.error == runtime::Error.none ? type_result(expected_type, pointer.type_id) : invalid_result();
 }
 
+fn probe_rtti_intrinsic(
+    context: *context::Context, node: syntax::SyntaxNode,
+    entry: intrinsics::IntrinsicEntry, expected_type: usize) -> Result {
+    let source_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let source: Result = expression(context, node.first_child, context::no_id());
+    if (source.status != Status.compatible || !type_is_valid(context, source.type_id)) {
+        return failure_result(source);
+    }
+    let pointer: type_info::Record = context::type_record(context, source.type_id);
+    if (pointer.kind != type_info::Kind.pointer || !type_is_valid(context, pointer.element_type)) {
+        return incompatible_result();
+    }
+    let source_class: usize = pointer.element_type;
+    let source_is_class: bool = context::type_record(context, source_class).kind == type_info::Kind.class_type;
+    if (!source_is_class || !classes::rtti_is_enabled(context, source_class)) {
+        return incompatible_result();
+    }
+    let target_node: syntax::SyntaxNode = context::node(context, context->current_unit, source_node.next_sibling);
+    let target_class: usize = types::resolve_class_expression(context, context->current_unit, target_node);
+    if (target_class == context::no_id() || !classes::rtti_is_enabled(context, target_class)) {
+        return incompatible_result();
+    }
+    let source_is_base: bool = classes::is_base_of(context, source_class, target_class);
+    let target_is_base: bool = classes::is_base_of(context, target_class, source_class);
+    if (!source_is_base && !target_is_base) {
+        return incompatible_result();
+    }
+    if (entry.lowering == intrinsics::IntrinsicLowering.type_is) {
+        return type_result(expected_type, type_info::BuiltinType.boolean as usize);
+    }
+    let read_only: bool = (pointer.flags & (type_info::Flag.read_only as usize)) != 0;
+    let volatile_pointee: bool = (pointer.flags & (type_info::Flag.volatile_pointee as usize)) != 0;
+    let result: type_info::IdResult = type_info::table_pointer(
+        &context->types, target_class, read_only, volatile_pointee);
+    context->error = result.error;
+    return result.error == runtime::Error.none ? type_result(expected_type, result.type_id) : invalid_result();
+}
+
 fn probe_intrinsic(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
     let index: usize = intrinsic_index(context, node);
     if (index == context::no_id()) {
@@ -798,6 +888,9 @@ fn probe_intrinsic(context: *context::Context, node: syntax::SyntaxNode, expecte
     }
     if (entry.operand_class == intrinsics::IntrinsicOperandClass.embedded_file) {
         return invalid_result();
+    }
+    if (entry.operand_class == intrinsics::IntrinsicOperandClass.rtti) {
+        return probe_rtti_intrinsic(context, node, entry, expected_type);
     }
     let first_expected: usize = entry.operand_class == intrinsics::IntrinsicOperandClass.integer_overflow ?
         context::no_id() : expected_type;

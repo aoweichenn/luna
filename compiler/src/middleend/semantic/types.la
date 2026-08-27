@@ -29,18 +29,120 @@ fn declaration_type_kind(kind: syntax::SyntaxKind) -> type_info::Kind {
     }
 }
 
+fn declaration_has_flag(declaration: syntax::SyntaxNode, flag: syntax::SyntaxFlag) -> bool {
+    return (declaration.flags & (flag as usize)) != 0;
+}
+
+fn report_opaque_class(
+    context: *context::Context, unit_index: usize, declaration: syntax::SyntaxNode, related: usize, detail: usize) {
+    var related_unit: usize = context::no_id();
+    var related_span: lexer::SourceSpan = context::empty_span();
+    if (related != context::no_id()) {
+        let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+        related_unit = symbols[related].declaration_unit;
+        related_span = context::node(context, related_unit, symbols[related].declaration_node).span;
+    }
+    context::add_diagnostic(
+        context, context::DiagnosticKind.invalid_opaque_class, unit_index, declaration.span,
+        related_unit, related_span, detail);
+}
+
+fn opaque_declaration_is_valid(
+    context: *context::Context, unit_index: usize, declaration: syntax::SyntaxNode, interface_unit: bool) -> bool {
+    let exported: bool = declaration_has_flag(declaration, syntax::SyntaxFlag.exported);
+    let external: bool = declaration_has_flag(declaration, syntax::SyntaxFlag.external);
+    let attributes_are_absent: bool = attributes::count_attribute_children(context, unit_index, declaration) == 0;
+    let location_is_valid: bool = interface_unit && exported;
+    let shape_is_valid: bool = declaration.child_count == 0 && attributes_are_absent;
+    let declaration_is_valid: bool = location_is_valid && shape_is_valid;
+    return declaration_is_valid && !external;
+}
+
+fn opaque_definition_is_valid(
+    context: *context::Context, unit_index: usize, declaration: syntax::SyntaxNode, interface_unit: bool) -> bool {
+    let invalid_flags: usize = (syntax::SyntaxFlag.exported as usize) |
+        (syntax::SyntaxFlag.external as usize) | (syntax::SyntaxFlag.opaque_class as usize) |
+        (syntax::SyntaxFlag.has_base as usize);
+    let attributes_are_absent: bool = attributes::count_attribute_children(context, unit_index, declaration) == 0;
+    let location_and_flags_are_valid: bool = !interface_unit && (declaration.flags & invalid_flags) == 0;
+    return location_and_flags_are_valid && attributes_are_absent;
+}
+
+fn try_define_opaque_class(
+    context: *context::Context, unit_index: usize, declaration_id: usize,
+    declaration: syntax::SyntaxNode, duplicate: usize, interface_unit: bool) -> bool {
+    if (duplicate == context::no_id()) {
+        return false;
+    }
+    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let symbol: context::Symbol = symbols[duplicate];
+    if (symbol.kind != context::SymbolKind.named_type) {
+        return false;
+    }
+    let record: type_info::Record = context::type_record(context, symbol.type_id);
+    if (!type_info::is_opaque_class(record)) {
+        return false;
+    }
+    let class_definition: bool = declaration.kind == syntax::SyntaxKind.class_declaration &&
+        !declaration_has_flag(declaration, syntax::SyntaxFlag.opaque_class);
+    let definition_is_valid: bool = class_definition && opaque_definition_is_valid(
+        context, unit_index, declaration, interface_unit);
+    let definition_is_missing: bool = !type_info::has_opaque_definition(record);
+    if (!definition_is_valid || !definition_is_missing) {
+        report_opaque_class(context, unit_index, declaration, duplicate, symbol.type_id);
+        return true;
+    }
+    context->error = type_info::table_define_opaque_class(
+        context->types, symbol.type_id, unit_index, declaration_id, declaration.token_index);
+    return true;
+}
+
+fn append_named_type(
+    context: *context::Context, module_id: usize, unit_index: usize,
+    declaration_id: usize, declaration: syntax::SyntaxNode, type_kind: type_info::Kind, interface_unit: bool) {
+    let opaque_class: bool = declaration_has_flag(declaration, syntax::SyntaxFlag.opaque_class);
+    let exported: bool = declaration_has_flag(declaration, syntax::SyntaxFlag.exported);
+    if (opaque_class && !opaque_declaration_is_valid(context, unit_index, declaration, interface_unit)) {
+        report_opaque_class(context, unit_index, declaration, context::no_id(), context::no_id());
+    }
+    let type_id: usize = context->types.type_count;
+    let added: type_info::TableResult = opaque_class ? type_info::table_add_opaque_class(
+            context->types, unit_index, declaration_id, declaration.token_index, exported) :
+        type_info::table_add_named(
+            context->types, type_kind, unit_index, declaration_id, declaration.token_index, exported);
+    context->types = added.table;
+    context->error = added.error;
+    if (added.error != runtime::Error.none) {
+        return;
+    }
+    var flags: usize = context::SymbolFlag.none as usize;
+    if (exported) {
+        flags |= context::SymbolFlag.exported as usize;
+    }
+    if (interface_unit) {
+        flags |= context::SymbolFlag.interface_declaration as usize;
+    }
+    names::append_symbol(
+        context, {
+            kind = context::SymbolKind.named_type, module_id = module_id, declaration_unit = unit_index,
+            declaration_node = declaration_id, name_token = declaration.token_index, type_id = type_id,
+            function_id = context::no_id(), integer_value = 0, flags = flags,
+        });
+}
+
 fn collect_types_in_unit(context: *context::Context, module_id: usize, unit_index: usize) -> bool {
     let none: usize = context::no_id();
     if (unit_index == none) {
         return true;
     }
     let interface_unit: bool = names::unit_is_interface(context, unit_index);
-    var declaration_id: usize = names::first_declaration(context, unit_index);
-    while (declaration_id != none && context->error == runtime::Error.none) {
+    for (var declaration_id: usize = names::first_declaration(context, unit_index);
+        declaration_id != none && context->error == runtime::Error.none;
+        declaration_id = context::node(context, unit_index, declaration_id).next_sibling) {
         let declaration: syntax::SyntaxNode = context::node(context, unit_index, declaration_id);
         let type_kind: type_info::Kind = declaration_type_kind(declaration.kind);
         if (type_kind != type_info::Kind.invalid) {
-            let exported: bool = (declaration.flags & (syntax::SyntaxFlag.exported as usize)) != 0;
+            let exported: bool = declaration_has_flag(declaration, syntax::SyntaxFlag.exported);
             if (!interface_unit && exported) {
                 context::add_diagnostic(
                     context, context::DiagnosticKind.invalid_export, unit_index, declaration.span, none,
@@ -48,7 +150,9 @@ fn collect_types_in_unit(context: *context::Context, module_id: usize, unit_inde
             }
             let duplicate: usize =
                 names::find_any_local_symbol(context, module_id, unit_index, declaration.token_index);
-            if (duplicate != none) {
+            let opaque_definition: bool = try_define_opaque_class(
+                context, unit_index, declaration_id, declaration, duplicate, interface_unit);
+            if (duplicate != none && !opaque_definition) {
                 let symbols: *const context::Symbol = context->symbols.data as
                         *const context::Symbol;
                 context::add_diagnostic(
@@ -57,48 +161,43 @@ fn collect_types_in_unit(context: *context::Context, module_id: usize, unit_inde
                     symbols[duplicate].declaration_unit,
                     context::token(context, symbols[duplicate].declaration_unit, symbols[duplicate].name_token).span,
                     duplicate);
-            } else {
-                let type_id: usize = context->types.type_count;
-                let added: type_info::TableResult =
-                    type_info::table_add_named(
-                        context->types, type_kind, unit_index, declaration_id, declaration.token_index, exported);
-                context->types = added.table;
-                context->error = added.error;
-                if (added.error == runtime::Error.none) {
-                    var flags: usize = context::SymbolFlag.none as usize;
-                    if (exported) {
-                        flags |= context::SymbolFlag.exported as usize;
-                    }
-                    if (interface_unit) {
-                        flags |= context::SymbolFlag.interface_declaration as usize;
-                    }
-                    names::append_symbol(
-                        context, {
-                            kind = context::SymbolKind.named_type, module_id = module_id, declaration_unit = unit_index,
-                            declaration_node = declaration_id, name_token = declaration.token_index, type_id = type_id,
-                            function_id = none, integer_value = 0, flags = flags,
-                        });
-                }
+            } else if (duplicate == none) {
+                append_named_type(
+                    context, module_id, unit_index, declaration_id, declaration, type_kind, interface_unit);
             }
         }
-        declaration_id = declaration.next_sibling;
     }
     return context->error == runtime::Error.none;
+}
+
+fn validate_opaque_definitions(context: *context::Context) {
+    let records: *const type_info::Record = context->types.types.data as *const type_info::Record;
+    for (var type_id: usize = type_info::BuiltinType.count as usize; type_id < context->types.type_count;
+        type_id += 1) {
+        let record: type_info::Record = records[type_id];
+        if (!type_info::is_opaque_class(record) || type_info::has_opaque_definition(record)) {
+            continue;
+        }
+        let declaration: syntax::SyntaxNode = context::node(context, record.declaration_unit, record.declaration_node);
+        report_opaque_class(context, record.declaration_unit, declaration, context::no_id(), type_id);
+    }
 }
 
 fn collect_named_types(context: *context::Context) -> bool {
     let created: type_info::TableResult = type_info::table_create();
     context->types = created.table;
     context->error = created.error;
-    var module_id: usize = 0;
-    while (module_id < context->module_count && context->error == runtime::Error.none) {
+    for (var module_id: usize = 0;
+        module_id < context->module_count && context->error == runtime::Error.none;
+        module_id += 1) {
         let modules: *const context::Module = context->modules.data as
                 *const context::Module;
         if (!collect_types_in_unit(context, module_id, modules[module_id].interface_unit)) {
             return false;
         }
-        var implementation_index: usize = 0;
-        while (implementation_index < modules[module_id].implementation_count) {
+        for (var implementation_index: usize = 0;
+            implementation_index < modules[module_id].implementation_count;
+            implementation_index += 1) {
             let implementation_unit: usize =
                 names::module_implementation_unit(context, module_id, implementation_index);
             if (implementation_unit == context::no_id() ||
@@ -106,10 +205,9 @@ fn collect_named_types(context: *context::Context) -> bool {
                     context, module_id, implementation_unit)) {
                 return false;
             }
-            implementation_index += 1;
         }
-        module_id += 1;
     }
+    validate_opaque_definitions(context);
     return context->error == runtime::Error.none;
 }
 
@@ -202,7 +300,7 @@ fn resolve_type_node(context: *context::Context, unit_index: usize, node_index: 
             }
             return type_id;
         }
-    } else if (node.kind == syntax::SyntaxKind.type_function) {
+    } else if (node.kind == syntax::SyntaxKind.type_function || node.kind == syntax::SyntaxKind.type_method_function) {
         // A `...` tail is legal only on function declarations; on a
         // fn-pointer type it is rejected here.
         if ((node.flags & (syntax::SyntaxFlag.variadic as usize)) != 0) {
@@ -219,9 +317,14 @@ fn resolve_type_node(context: *context::Context, unit_index: usize, node_index: 
         var failed: bool = false;
         while (!failed && index < parameter_count && context->error == runtime::Error.none) {
             let parameter_type: usize = resolve_type_node(context, unit_index, child);
-            if (parameter_type == none ||
-                !require_complete_type(
-                    context, parameter_type)) {
+            let parameter_node: syntax::SyntaxNode = context::node(context, unit_index, child);
+            if (parameter_type == none) {
+                failed = true;
+                break;
+            }
+            let value_access: bool = require_opaque_value_access(
+                context, parameter_type, unit_index, parameter_node.span);
+            if (!value_access || !require_complete_type(context, parameter_type)) {
                 failed = true;
                 break;
             }
@@ -245,9 +348,13 @@ fn resolve_type_node(context: *context::Context, unit_index: usize, node_index: 
             var return_type: usize = type_info::BuiltinType.type_void as usize;
             if (has_return) {
                 let resolved: usize = resolve_type_node(context, unit_index, child);
-                if (resolved == none ||
-                    !require_complete_type(
-                        context, resolved)) {
+                let return_node: syntax::SyntaxNode = context::node(context, unit_index, child);
+                if (resolved == none) {
+                    failed = true;
+                } else if (!require_opaque_value_access(
+                        context, resolved, unit_index, return_node.span)) {
+                    failed = true;
+                } else if (!require_complete_type(context, resolved)) {
                     failed = true;
                 } else if ((context::type_record(context, resolved).flags &
                         ((type_info::Flag.header as usize) | (type_info::Flag.flexible as usize))) != 0) {
@@ -261,9 +368,10 @@ fn resolve_type_node(context: *context::Context, unit_index: usize, node_index: 
             }
             if (!failed && context->error == runtime::Error.none) {
                 let parameters: *const usize = parameter_types.data as *const usize;
-                let type_id: usize =
-                    context::function_pointer_type(
-                        context, return_type, parameters, parameter_types.length / sizeof(usize));
+                let parameter_count: usize = parameter_types.length / sizeof(usize);
+                let type_id: usize = node.kind == syntax::SyntaxKind.type_function ?
+                    context::function_pointer_type(context, return_type, parameters, parameter_count) :
+                    context::bound_method_type(context, return_type, parameters, parameter_count);
                 let release_error: runtime::Error = bytes::release(parameter_types);
                 if (context->error == runtime::Error.none) {
                     context->error = release_error;
@@ -292,9 +400,10 @@ fn resolve_type_node(context: *context::Context, unit_index: usize, node_index: 
         let flexible: bool = (node.flags & (syntax::SyntaxFlag.flexible as usize)) != 0;
         if (flexible && node.child_count == 1) {
             let flexible_element: usize = resolve_type_node(context, unit_index, node.first_child);
-            if (flexible_element != none &&
-                require_complete_type(
-                    context, flexible_element)) {
+            let element_span: lexer::SourceSpan = context::node(context, unit_index, node.first_child).span;
+            let value_access: bool = flexible_element != none && require_opaque_value_access(
+                context, flexible_element, unit_index, element_span);
+            if (value_access && require_complete_type(context, flexible_element)) {
                 let flexible_record: type_info::Record = context::type_record(context, flexible_element);
                 if (flexible_record.kind == type_info::Kind.type_void || flexible_record.size_bytes == 0 ||
                     (flexible_record.flags & ((type_info::Flag.header as usize) | (type_info::Flag.flexible as
@@ -355,9 +464,14 @@ fn resolve_type_node(context: *context::Context, unit_index: usize, node_index: 
                 return none;
             }
             let element_type: usize = resolve_type_node(context, unit_index, count_node.next_sibling);
-            if (element_node.kind != syntax::SyntaxKind.invalid && element_type != none &&
-                require_complete_type(context, element_type) && element_count <= context::Limit.maximum_size
-                        as usize as u64) {
+            if (element_node.kind == syntax::SyntaxKind.invalid || element_type == none) {
+                return none;
+            }
+            let value_access: bool = require_opaque_value_access(context, element_type, unit_index, element_node.span);
+            if (!value_access || !require_complete_type(context, element_type)) {
+                return none;
+            }
+            if (element_count <= context::Limit.maximum_size as usize as u64) {
                 let element_record: type_info::Record = context::type_record(context, element_type);
                 if ((element_record.flags & ((type_info::Flag.header as usize) | (type_info::Flag.flexible as
                                 usize))) != 0) {
@@ -388,4 +502,58 @@ fn resolve_type_node(context: *context::Context, unit_index: usize, node_index: 
     context::add_diagnostic(
         context, context::DiagnosticKind.unknown_type, unit_index, node.span, none, context::empty_span(), node_index);
     return none;
+}
+
+fn resolve_class_expression(context: *context::Context, unit_index: usize, node: syntax::SyntaxNode) -> usize {
+    if (node.kind != syntax::SyntaxKind.name_expression) {
+        return context::no_id();
+    }
+    let symbol_id: usize = node.child_count == 0 ?
+        names::lookup_symbol(context, unit_index, node.token_index, context::SymbolKind.named_type) :
+        names::lookup_qualified_symbol(context, unit_index, node, context::SymbolKind.named_type, false);
+    if (symbol_id == context::no_id()) {
+        return context::no_id();
+    }
+    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    var type_id: usize = symbols[symbol_id].type_id;
+    for (var depth: usize = 0; depth < context::Limit.maximum_type_depth as usize; depth += 1) {
+        let record: type_info::Record = context::type_record(context, type_id);
+        if (record.kind != type_info::Kind.alias) {
+            return record.kind == type_info::Kind.class_type ? type_id : context::no_id();
+        }
+        type_id = record.element_type;
+    }
+    return context::no_id();
+}
+
+fn opaque_value_is_available(context: *context::Context, type_id: usize, unit_index: usize) -> bool {
+    if (type_id >= context->types.type_count || unit_index >= context->input.unit_count) {
+        return false;
+    }
+    let record: type_info::Record = context::type_record(context, type_id);
+    if (!type_info::is_opaque_class(record)) {
+        return true;
+    }
+    let defining_module: usize = names::unit_module(context, record.declaration_unit);
+    let using_module: usize = names::unit_module(context, unit_index);
+    let implementation_unit: bool = !names::unit_is_interface(context, unit_index);
+    return defining_module == using_module && implementation_unit;
+}
+
+fn require_opaque_value_access(
+    context: *context::Context, type_id: usize, unit_index: usize, span: lexer::SourceSpan) -> bool {
+    if (opaque_value_is_available(context, type_id, unit_index)) {
+        return true;
+    }
+    let symbol_id: usize = find_type_symbol(context, type_id);
+    var related_unit: usize = context::no_id();
+    var related_span: lexer::SourceSpan = context::empty_span();
+    if (symbol_id != context::no_id()) {
+        let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+        related_unit = symbols[symbol_id].declaration_unit;
+        related_span = context::node(context, related_unit, symbols[symbol_id].declaration_node).span;
+    }
+    context::add_diagnostic(
+        context, context::DiagnosticKind.invalid_opaque_use, unit_index, span, related_unit, related_span, type_id);
+    return false;
 }

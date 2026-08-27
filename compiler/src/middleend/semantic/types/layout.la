@@ -192,7 +192,10 @@ fn resolve_record_field_types(context: *context::Context, record: type_info::Rec
         }
         let class_method: bool = record.kind == type_info::Kind.class_type &&
             field_declaration.kind == syntax::SyntaxKind.function_declaration;
-        if (field_declaration.kind == syntax::SyntaxKind.attribute || class_method) {
+        let class_policy: bool = record.kind == type_info::Kind.class_type &&
+            field_declaration.kind == syntax::SyntaxKind.friend_declaration;
+        let class_metadata: bool = class_method || class_policy;
+        if (field_declaration.kind == syntax::SyntaxKind.attribute || class_metadata) {
             field_node = field_declaration.next_sibling;
             continue;
         }
@@ -204,7 +207,11 @@ fn resolve_record_field_types(context: *context::Context, record: type_info::Rec
         }
         let field_type: usize = resolve_type_node(context, record.declaration_unit, field_declaration.first_child);
         if (field_type != context::no_id()) {
-            require_complete_type(context, field_type);
+            let value_access: bool = require_opaque_value_access(
+                context, field_type, record.declaration_unit, field_declaration.span);
+            if (value_access) {
+                require_complete_type(context, field_type);
+            }
         }
         field_node = field_declaration.next_sibling;
     }
@@ -251,7 +258,10 @@ fn resolve_record_layout(context: *context::Context, type_id: usize, record: typ
         }
         let class_method: bool = record.kind == type_info::Kind.class_type &&
             field_declaration.kind == syntax::SyntaxKind.function_declaration;
-        if (field_declaration.kind == syntax::SyntaxKind.attribute || class_method) {
+        let class_policy: bool = record.kind == type_info::Kind.class_type &&
+            field_declaration.kind == syntax::SyntaxKind.friend_declaration;
+        let class_metadata: bool = class_method || class_policy;
+        if (field_declaration.kind == syntax::SyntaxKind.attribute || class_metadata) {
             field_node = field_declaration.next_sibling;
             continue;
         }
@@ -277,9 +287,13 @@ fn resolve_record_layout(context: *context::Context, type_id: usize, record: typ
             continue;
         }
         let field_type: usize = resolve_type_node(context, record.declaration_unit, field_declaration.first_child);
-        if (field_type == context::no_id() ||
-            !require_complete_type(
-                context, field_type)) {
+        if (field_type == context::no_id()) {
+            field_node = field_declaration.next_sibling;
+            continue;
+        }
+        let value_access: bool = require_opaque_value_access(
+            context, field_type, record.declaration_unit, field_declaration.span);
+        if (!value_access || !require_complete_type(context, field_type)) {
             field_node = field_declaration.next_sibling;
             continue;
         }
@@ -518,9 +532,13 @@ fn resolve_alias(context: *context::Context, type_id: usize, record: type_info::
         return false;
     }
     let target_type: usize = resolve_type_node(context, record.declaration_unit, declaration.first_child);
-    if (target_type == none ||
-        !require_complete_type(
-            context, target_type)) {
+    if (target_type == none) {
+        return false;
+    }
+    let value_access: bool = require_opaque_value_access(
+        context, target_type, record.declaration_unit,
+        context::node(context, record.declaration_unit, declaration.first_child).span);
+    if (!value_access || !require_complete_type(context, target_type)) {
         return false;
     }
     let target: type_info::Record = context::type_record(context, target_type);

@@ -551,8 +551,9 @@ fn decode_character(context: *Context, unit_index: usize, token_index: usize, va
     return true;
 }
 
-fn function_pointer_type(
-    context: *Context, return_type: usize, parameter_types: *const usize, parameter_count: usize) -> usize {
+fn callable_value_type(
+    context: *Context, kind: type_info::Kind, return_type: usize,
+    parameter_types: *const usize, parameter_count: usize) -> usize {
     let none: usize = no_id();
     if (parameter_count != 0 && parameter_types == null) {
         context->error = runtime::Error.invalid_argument;
@@ -562,34 +563,34 @@ fn function_pointer_type(
             *const type_info::Record;
     let fields: *const type_info::Field = context->types.fields.data as
             *const type_info::Field;
-    var candidate: usize = type_info::BuiltinType.count as usize;
-    while (candidate < context->types.type_count) {
+    for (var candidate: usize = type_info::BuiltinType.count as usize;
+        candidate < context->types.type_count;
+        candidate += 1) {
         let record: type_info::Record = records[candidate];
-        if (record.kind == type_info::Kind.function_pointer && record.element_type == return_type &&
-            record.field_count == parameter_count) {
-            var index: usize = 0;
+        let identity_matches: bool = record.kind == kind && record.element_type == return_type;
+        let shape_matches: bool = identity_matches && record.field_count == parameter_count;
+        if (shape_matches) {
             var same: bool = true;
-            while (index < parameter_count && same) {
+            for (var index: usize = 0; index < parameter_count && same; index += 1) {
                 if (fields[record.first_field + index].type_id != parameter_types[index]) {
                     same = false;
                 }
-                index += 1;
             }
             if (same) {
                 return candidate;
             }
         }
-        candidate += 1;
     }
     let type_id: usize = context->types.type_count;
-    let created: type_info::TableResult = type_info::table_add_function_pointer(context->types, return_type);
+    let created: type_info::TableResult = kind == type_info::Kind.function_pointer ?
+        type_info::table_add_function_pointer(context->types, return_type) :
+        type_info::table_add_bound_method(context->types, return_type);
     context->types = created.table;
     if (created.error != runtime::Error.none) {
         context->error = created.error;
         return none;
     }
-    var index: usize = 0;
-    while (index < parameter_count) {
+    for (var index: usize = 0; index < parameter_count; index += 1) {
         let added: type_info::TableResult =
             type_info::table_add_parameter(context->types, type_id, parameter_types[index]);
         context->types = added.table;
@@ -599,13 +600,24 @@ fn function_pointer_type(
                 parameter_types[index]);
             return none;
         }
-        index += 1;
     }
-    context->error = type_info::table_set_layout(context->types, type_id, 8, 8);
+    let size_bytes: usize = kind == type_info::Kind.function_pointer ? sizeof(usize) : sizeof(usize) * 2;
+    context->error = type_info::table_set_layout(context->types, type_id, size_bytes, alignof(usize));
     if (context->error != runtime::Error.none) {
         return none;
     }
     return type_id;
+}
+
+fn function_pointer_type(
+    context: *Context, return_type: usize, parameter_types: *const usize, parameter_count: usize) -> usize {
+    return callable_value_type(
+        context, type_info::Kind.function_pointer, return_type, parameter_types, parameter_count);
+}
+
+fn bound_method_type(
+    context: *Context, return_type: usize, parameter_types: *const usize, parameter_count: usize) -> usize {
+    return callable_value_type(context, type_info::Kind.bound_method, return_type, parameter_types, parameter_count);
 }
 
 fn align_up(value: usize, alignment: usize, result: *usize) -> bool {

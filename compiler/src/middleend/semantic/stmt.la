@@ -25,6 +25,22 @@ import luna.bootstrap.middleend.type as type_info;
 import luna.runtime as runtime;
 import luna.std.bytes as bytes;
 
+fn memory_initializer_kind_is_valid(kind: syntax::SyntaxKind) -> bool {
+    switch (kind) {
+    case syntax::SyntaxKind.zero_initializer, syntax::SyntaxKind.aggregate_initializer,
+        syntax::SyntaxKind.name_expression, syntax::SyntaxKind.member_expression,
+        syntax::SyntaxKind.index_expression, syntax::SyntaxKind.call_expression,
+        syntax::SyntaxKind.intrinsic_expression, syntax::SyntaxKind.conditional_expression,
+        syntax::SyntaxKind.parenthesized_expression, syntax::SyntaxKind.unary_expression,
+        syntax::SyntaxKind.binary_expression {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
 fn lower_variable(context: *context::Context, node_id: usize, node: syntax::SyntaxNode) -> bool {
     let none: usize = context::no_id();
     let inferred: bool = (node.flags & (syntax::SyntaxFlag.inferred_type as usize)) != 0;
@@ -86,6 +102,9 @@ fn lower_variable(context: *context::Context, node_id: usize, node: syntax::Synt
             return false;
         }
     }
+    if (!types::require_opaque_value_access(context, type_id, context->current_unit, node.span)) {
+        return false;
+    }
     let type_record: type_info::Record = context::type_record(context, type_id);
     if (classes::class_is_abstract(context, type_id)) {
         context::add_diagnostic(
@@ -104,14 +123,8 @@ fn lower_variable(context: *context::Context, node_id: usize, node: syntax::Synt
         let type_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
         let initializer_node: syntax::SyntaxNode =
             context::node(context, context->current_unit, type_node.next_sibling);
-        if (type_info::is_memory(type_record.kind) && initializer_node.kind != syntax::SyntaxKind.zero_initializer &&
-            initializer_node.kind != syntax::SyntaxKind.aggregate_initializer && initializer_node.kind !=
-                syntax::SyntaxKind.name_expression && initializer_node.kind != syntax::SyntaxKind.member_expression &&
-            initializer_node.kind != syntax::SyntaxKind.index_expression && initializer_node.kind !=
-                syntax::SyntaxKind.call_expression && initializer_node.kind !=
-                syntax::SyntaxKind.intrinsic_expression && initializer_node.kind !=
-                syntax::SyntaxKind.conditional_expression && initializer_node.kind !=
-                syntax::SyntaxKind.parenthesized_expression) {
+        let initializer_kind_is_valid: bool = memory_initializer_kind_is_valid(initializer_node.kind);
+        if (type_info::is_memory(type_record.kind) && !initializer_kind_is_valid) {
             context::add_diagnostic(
                 context, context::DiagnosticKind.invalid_initializer, context->current_unit, initializer_node.span,
                 none, context::empty_span(), type_id);
@@ -167,6 +180,9 @@ fn lower_constant(context: *context::Context, node_id: usize, node: syntax::Synt
     }
     let type_id: usize = types::resolve_type_node(context, context->current_unit, node.first_child);
     if (type_id == none) {
+        return false;
+    }
+    if (!types::require_opaque_value_access(context, type_id, context->current_unit, node.span)) {
         return false;
     }
     let type_record: type_info::Record = context::type_record(context, type_id);

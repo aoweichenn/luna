@@ -12,7 +12,6 @@ import luna.bootstrap.middleend.semantic.callable as callable;
 import luna.bootstrap.middleend.semantic.classes as classes;
 import luna.bootstrap.middleend.semantic.classes.model as class_model;
 import luna.bootstrap.middleend.semantic.expr.base as base;
-import luna.bootstrap.middleend.semantic.expr.probe as probe;
 import luna.bootstrap.middleend.semantic.functions as functions;
 import luna.bootstrap.middleend.semantic.types as types;
 import luna.bootstrap.middleend.semantic.value as category;
@@ -427,10 +426,94 @@ fn store_bitfield(
     return builder::emit_void(context, store_instruction) != none;
 }
 
-fn lower_member(context: *context::Context, node: syntax::SyntaxNode, lowerer: api::Lowerer) -> context::Expression {
+fn bound_method_entry(
+    context: *context::Context, node: syntax::SyntaxNode, target: probe::CallTarget,
+    function_id: usize, receiver_address: usize) -> usize {
+    let functions_data: *const context::Function = context->functions.data as *const context::Function;
+    let function: context::Function = functions_data[function_id];
+    let plan: class_model::DispatchPlan = classes::dispatch_plan(
+        context, target.owner_type, function_id, call_has_exact_dynamic_type(context, target));
+    if (plan.kind == class_model::CallDispatch.virtual_call) {
+        return load_virtual_callee(context, node, plan, function, receiver_address);
+    }
+    if (classes::method_is_abstract(context, function_id)) {
+        return context::no_id();
+    }
+    let function_type: usize = virtual_function_type(context, function);
+    if (function_type == context::no_id()) {
+        return context::no_id();
+    }
+    var address: ir::Instruction = builder::instruction(ir::Opcode.function_address, node);
+    address.auxiliary = function.ir_function;
+    return builder::emit_value(context, address, function_type);
+}
+
+fn store_bound_word(
+    context: *context::Context, node: syntax::SyntaxNode,
+    bound_address: usize, byte_offset: usize, value_id: usize) -> bool {
+    let bytes_type: usize = byte_pointer_type(context, false);
+    let word_storage_type: usize = pointer_type(context, type_info::BuiltinType.unsigned_size as usize, false);
+    let bound_bytes: usize = convert_value(context, node, bound_address, bytes_type);
+    let word_bytes: usize = offset_byte_pointer(context, node, bound_bytes, bytes_type, byte_offset);
+    let word_storage: usize = convert_value(context, node, word_bytes, word_storage_type);
+    let word_value: usize = convert_value(context, node, value_id, type_info::BuiltinType.unsigned_size as usize);
+    let value: context::Expression = {
+        type_id = type_info::BuiltinType.unsigned_size as usize, value_id = word_value,
+        address_id = context::no_id(), constant_value = 0, has_constant = false,
+        category = category::Category.rvalue, valid = word_value != context::no_id(),
+        bitfield_segment = context::no_id(),
+    };
+    return builder::store_to_address(context, node, word_storage, type_info::BuiltinType.unsigned_size as usize, value);
+}
+
+fn lower_bound_method(
+    context: *context::Context, node: syntax::SyntaxNode,
+    expected_type: usize, lowerer: api::Lowerer) -> context::Expression {
+    let none: usize = context::no_id();
+    let target: probe::CallTarget = probe::member_value_target(context, node);
+    let resolution: probe::Resolution = probe::resolve_bound_method(context, node, expected_type);
+    if (!target.valid || resolution.status != probe::ResolutionStatus.selected) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_bound_method, context->current_unit, node.span,
+            none, context::empty_span(), expected_type);
+        return base::invalid_expression();
+    }
+    let functions_data: *const context::Function = context->functions.data as *const context::Function;
+    let function: context::Function = functions_data[resolution.function_id];
+    let receiver_type: usize = functions::function_receiver_type(context, function);
+    let receiver_address: usize = instance_receiver_address(context, node, target, receiver_type, lowerer);
+    let entry: usize = bound_method_entry(context, node, target, resolution.function_id, receiver_address);
+    if (receiver_address == none || entry == none) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_bound_method, context->current_unit, node.span,
+            none, context::empty_span(), resolution.function_id);
+        return base::invalid_expression();
+    }
+    let slot_id: usize = ir::add_slot(
+        &context->ir, builder::current_ir_function(context), expected_type, true, false, 0);
+    let bound_address: usize = builder::address_of_slot(context, node, slot_id, expected_type, false, false);
+    let word_bytes: usize = sizeof(usize);
+    let receiver_is_stored: bool = store_bound_word(context, node, bound_address, 0, receiver_address);
+    let entry_is_stored: bool = store_bound_word(context, node, bound_address, word_bytes, entry);
+    if (!receiver_is_stored || !entry_is_stored) {
+        return base::invalid_expression();
+    }
+    return {
+        type_id = expected_type, value_id = none, address_id = bound_address, constant_value = 0,
+        has_constant = false, category = category::Category.temporary, valid = true, bitfield_segment = none,
+    };
+}
+
+fn lower_member(
+    context: *context::Context, node: syntax::SyntaxNode,
+    expected_type: usize, lowerer: api::Lowerer) -> context::Expression {
     let enum_member: context::Expression = lower_enum_member(context, node);
     if (enum_member.valid) {
         return enum_member;
+    }
+    if (expected_type < context->types.type_count &&
+        context::type_record(context, expected_type).kind == type_info::Kind.bound_method) {
+        return lower_bound_method(context, node, expected_type, lowerer);
     }
     if (node.child_count != 2) {
         return base::invalid_expression();
@@ -470,6 +553,10 @@ fn lower_member(context: *context::Context, node: syntax::SyntaxNode, lowerer: a
         context::add_diagnostic(
             context, context::DiagnosticKind.invalid_member, context->current_unit, node.span, context::no_id(),
             context::empty_span(), owner_type);
+        return base::invalid_expression();
+    }
+    if (!types::require_opaque_value_access(
+            context, owner_type, context->current_unit, name_node.span)) {
         return base::invalid_expression();
     }
     let lookup: types::FieldLookup =
@@ -585,6 +672,10 @@ fn lower_index(context: *context::Context, node: syntax::SyntaxNode, lowerer: ap
         context::add_diagnostic(
             context, context::DiagnosticKind.invalid_index, context->current_unit, node.span, context::no_id(),
             context::empty_span(), base.type_id);
+        return base::invalid_expression();
+    }
+    if (!types::require_opaque_value_access(
+            context, element_type, context->current_unit, node.span)) {
         return base::invalid_expression();
     }
     let element_record: type_info::Record = context::type_record(context, element_type);
@@ -785,6 +876,48 @@ fn load_indirect_value(
     return builder::emit_value(context, instruction, value_type);
 }
 
+fn load_bound_word(
+    context: *context::Context, node: syntax::SyntaxNode, bound_address: usize, byte_offset: usize) -> usize {
+    let bytes_type: usize = byte_pointer_type(context, true);
+    let word_storage_type: usize = pointer_type(context, type_info::BuiltinType.unsigned_size as usize, true);
+    let bound_bytes: usize = convert_value(context, node, bound_address, bytes_type);
+    let word_bytes: usize = offset_byte_pointer(context, node, bound_bytes, bytes_type, byte_offset);
+    let word_storage: usize = convert_value(context, node, word_bytes, word_storage_type);
+    return load_indirect_value(context, node, word_storage, type_info::BuiltinType.unsigned_size as usize);
+}
+
+fn bound_call_type(context: *context::Context, bound_type: usize) -> usize {
+    let record: type_info::Record = context::type_record(context, bound_type);
+    if (record.kind != type_info::Kind.bound_method) {
+        return context::no_id();
+    }
+    var parameter_types: bytes::Buffer = bytes::empty();
+    let receiver_type: usize = type_info::BuiltinType.unsigned_size as usize;
+    let receiver: bytes::BufferResult = bytes::append(
+        parameter_types, (&receiver_type) as *const usize as *const u8, sizeof(usize));
+    parameter_types = receiver.buffer;
+    context->error = receiver.error;
+    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    for (var index: usize = 0;
+        index < record.field_count && context->error == runtime::Error.none;
+        index += 1) {
+        let parameter_type: usize = fields[record.first_field + index].type_id;
+        let appended: bytes::BufferResult = bytes::append(
+            parameter_types, (&parameter_type) as *const usize as *const u8, sizeof(usize));
+        parameter_types = appended.buffer;
+        context->error = appended.error;
+    }
+    let parameters: *const usize = parameter_types.data as *const usize;
+    let parameter_count: usize = parameter_types.length / sizeof(usize);
+    let result: usize = context->error == runtime::Error.none ?
+        context::function_pointer_type(context, record.element_type, parameters, parameter_count) : context::no_id();
+    let release_error: runtime::Error = bytes::release(parameter_types);
+    if (context->error == runtime::Error.none) {
+        context->error = release_error;
+    }
+    return context->error == runtime::Error.none ? result : context::no_id();
+}
+
 fn initialize_class_vptr(
     context: *context::Context, node: syntax::SyntaxNode, owner_type: usize, object_address: usize) -> bool {
     let global_id: usize = classes::vtable_global(context, owner_type);
@@ -800,7 +933,9 @@ fn initialize_class_vptr(
     }
     var global_address: ir::Instruction = builder::instruction(ir::Opcode.global_address, node);
     global_address.auxiliary = global_id;
-    let table_address: usize = builder::emit_value(context, global_address, table_pointer);
+    let global_start: usize = builder::emit_value(context, global_address, table_pointer);
+    let table_address: usize = offset_byte_pointer(
+        context, node, global_start, table_pointer, classes::vtable_slot_offset(context, owner_type));
     let object_bytes: usize = convert_value(context, node, object_address, object_bytes_type);
     let vptr_offset: usize = classes::vptr_offset(context, owner_type);
     let addresses_are_valid: bool = table_address != context::no_id() && object_bytes != context::no_id();
@@ -922,15 +1057,16 @@ fn receiver_storage_address(
         address_id : context::no_id();
 }
 
-fn instance_receiver(
+fn instance_receiver_address(
     context: *context::Context, node: syntax::SyntaxNode, target: probe::CallTarget,
-    receiver_type: usize, lowerer: api::Lowerer, values: *bytes::Buffer) -> usize {
+    receiver_type: usize, lowerer: api::Lowerer) -> usize {
     let receiver: context::Expression = api::invoke(lowerer, context, target.receiver_node, context::no_id());
     if (!receiver.valid) {
         return context::no_id();
     }
-    let callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-    let operation: lexer::TokenKind = context::token(context, context->current_unit, callee.token_index).kind;
+    let access_node: syntax::SyntaxNode = node.kind == syntax::SyntaxKind.call_expression ?
+        context::node(context, context->current_unit, node.first_child) : node;
+    let operation: lexer::TokenKind = context::token(context, context->current_unit, access_node.token_index).kind;
     var address_id: usize = context::no_id();
     if (operation == lexer::TokenKind.arrow) {
         address_id = receiver.value_id;
@@ -951,6 +1087,16 @@ fn instance_receiver(
         conversion.left = address_id;
         conversion.auxiliary = source_type;
         address_id = builder::emit_value(context, conversion, receiver_type);
+    }
+    return address_id;
+}
+
+fn instance_receiver(
+    context: *context::Context, node: syntax::SyntaxNode, target: probe::CallTarget,
+    receiver_type: usize, lowerer: api::Lowerer, values: *bytes::Buffer) -> usize {
+    let address_id: usize = instance_receiver_address(context, node, target, receiver_type, lowerer);
+    if (address_id == context::no_id()) {
+        return address_id;
     }
     return append_call_argument(context, values, address_id) ? address_id : context::no_id();
 }
@@ -993,16 +1139,15 @@ fn collect_direct_receiver(
     }
 }
 
-fn lower_call(
+fn lower_target_call(
     context: *context::Context, node_id: usize, node: syntax::SyntaxNode,
-    lowerer: api::Lowerer) -> context::Expression {
+    target: probe::CallTarget, lowerer: api::Lowerer) -> context::Expression {
     let none: usize = context::no_id();
     if (node.child_count == 0) {
         context->error = runtime::Error.invalid_argument;
         return base::invalid_expression();
     }
     let callee_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-    let target: probe::CallTarget = probe::direct_call_target(context, node);
     var selected_function: usize = none;
     var callee_value: usize = none;
     var call_dispatch: class_model::DispatchPlan = {
@@ -1042,6 +1187,7 @@ fn lower_call(
     var first_parameter: usize = none;
     var parameters_from_fields: bool = false;
     var callee_no_return: bool = false;
+    var bound_receiver: usize = none;
     let symbols: *const context::Symbol = context->symbols.data as
             *const context::Symbol;
     let functions: *const context::Function = context->functions.data as
@@ -1060,13 +1206,21 @@ fn lower_call(
             return callee;
         }
         let callee_record: type_info::Record = context::type_record(context, callee.type_id);
-        if (callee_record.kind != type_info::Kind.function_pointer) {
+        let ordinary_pointer: bool = callee_record.kind == type_info::Kind.function_pointer;
+        let bound_method: bool = callee_record.kind == type_info::Kind.bound_method;
+        if (!ordinary_pointer && !bound_method) {
             context::add_diagnostic(
                 context, context::DiagnosticKind.invalid_call, context->current_unit, node.span, none,
                 context::empty_span(), callee.type_id);
             return base::invalid_expression();
         }
-        callee_value = callee.value_id;
+        if (ordinary_pointer) {
+            callee_value = callee.value_id;
+        } else {
+            bound_receiver = load_bound_word(context, node, callee.address_id, 0);
+            let entry_word: usize = load_bound_word(context, node, callee.address_id, sizeof(usize));
+            callee_value = convert_value(context, node, entry_word, bound_call_type(context, callee.type_id));
+        }
         return_type = callee_record.element_type;
         parameter_count = callee_record.field_count;
         required_parameter_count = parameter_count;
@@ -1089,6 +1243,9 @@ fn lower_call(
     let type_fields: *const type_info::Field = context->types.fields.data as
             *const type_info::Field;
     var argument_values: bytes::Buffer = bytes::empty();
+    if (bound_receiver != none) {
+        append_call_argument(context, &argument_values, bound_receiver);
+    }
     var constructed_address: usize = none;
     let target_has_receiver: bool = target.receiver_source != probe::ReceiverSource.none;
     if (selected_function != none && target_has_receiver) {
@@ -1181,4 +1338,10 @@ fn lower_call(
             type_info::is_memory(return_record.kind) ? result_value : none, constant_value = 0, has_constant = false,
         category = result_category, valid = instruction_id != none, bitfield_segment = context::no_id(),
     };
+}
+
+fn lower_call(
+    context: *context::Context, node_id: usize, node: syntax::SyntaxNode,
+    lowerer: api::Lowerer) -> context::Expression {
+    return lower_target_call(context, node_id, node, probe::direct_call_target(context, node), lowerer);
 }

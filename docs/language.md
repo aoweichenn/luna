@@ -404,7 +404,21 @@ and unions. Passing or returning a class by value through `extern fn` is
 rejected, while a raw class pointer retains the ordinary C pointer ABI.
 
 M3.0 adds no ownership, lifetime, allocation or automatic cleanup semantics.
-Operators, bound methods, RTTI and friendship belong to later M3 milestones.
+M3.4 adds restricted left-class operator methods, non-owning two-word
+`method fn` values, root-opt-in `@rtti` with `@type_is`/`@type_cast`, and
+directional same-module `friend class` access. These facilities do not add
+ownership, closures, exceptions, ADL or implicit conversion.
+
+M3.5 adds pointer-only opaque class identities. An interface may declare
+`export opaque class Handle;`; exactly one implementation unit of that module
+must provide the complete non-exported `class Handle { ... }` declaration.
+Other modules may name qualified raw pointers such as `*const api::Handle`,
+pass and return those pointers, compare them with null and cast pointer forms.
+They cannot create or copy a `Handle` value, reveal its layout, access members,
+dereference or index its pointer, perform pointer arithmetic, embed it in
+another value or derive from it. The defining module implementation retains
+ordinary class operations and layout access. Opaque classes add no allocation,
+ownership or destruction semantics.
 
 M3.1 adds public single inheritance and static polymorphism contracts:
 

@@ -19,17 +19,16 @@ fn global_shape_is_valid(
     let alignment_is_bounded: bool = global.alignment_bytes != 0 && global.alignment_bytes <= 8;
     let alignment_is_valid: bool = alignment_is_bounded && (global.alignment_bytes & (global.alignment_bytes - 1)) == 0;
     let reference_range_is_valid: bool = range_is_valid(
-        global.first_function_reference, global.function_reference_count, reference_count);
-    let reference_position_is_valid: bool = global.function_reference_count == 0 ?
-            global.first_function_reference == model::no_id() : global.first_function_reference == expected_reference;
+        global.first_reference, global.reference_count, reference_count);
+    let reference_position_is_valid: bool = global.reference_count == 0 ?
+            global.first_reference == model::no_id() : global.first_reference == expected_reference;
     let byte_shape_is_valid: bool = byte_position_is_valid && byte_range_is_valid;
     let reference_shape_is_valid: bool = reference_range_is_valid && reference_position_is_valid;
     let storage_shape_is_valid: bool = byte_shape_is_valid && alignment_is_valid;
     return storage_shape_is_valid && reference_shape_is_valid;
 }
 
-fn global_reference_bytes_are_zero(
-    ir: model::Store, global: model::Global, reference: model::GlobalFunctionReference) -> bool {
+fn global_reference_bytes_are_zero(ir: model::Store, global: model::Global, reference: model::GlobalReference) -> bool {
     let address_bytes: usize = model::Limit.function_address_bytes as usize;
     let storage_offset: usize = global.byte_offset + reference.byte_offset;
     for (var index: usize = 0; index < address_bytes; index += 1) {
@@ -40,16 +39,29 @@ fn global_reference_bytes_are_zero(
     return true;
 }
 
+fn global_reference_target_is_valid(ir: model::Store, reference: model::GlobalReference) -> bool {
+    switch (reference.kind) {
+    case model::GlobalReferenceKind.function {
+        return reference.target_id < ir.function_count;
+    }
+    case model::GlobalReferenceKind.global {
+        return reference.target_id < ir.global_count;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
 fn global_references_are_valid(
-    ir: model::Store, global: model::Global, global_id: usize,
-    references: *const model::GlobalFunctionReference) -> bool {
+    ir: model::Store, global: model::Global, global_id: usize, references: *const model::GlobalReference) -> bool {
     var previous_end: usize = 0;
     let address_bytes: usize = model::Limit.function_address_bytes as usize;
-    let reference_end: usize = global.first_function_reference + global.function_reference_count;
-    for (var index: usize = global.first_function_reference; index < reference_end; index += 1) {
-        let reference: model::GlobalFunctionReference = references[index];
-        let owner_and_target_are_valid: bool = reference.global_id == global_id &&
-            reference.function_id < ir.function_count;
+    let reference_end: usize = global.first_reference + global.reference_count;
+    for (var index: usize = global.first_reference; index < reference_end; index += 1) {
+        let reference: model::GlobalReference = references[index];
+        let owner_is_valid: bool = reference.global_id == global_id;
+        let owner_and_target_are_valid: bool = owner_is_valid && global_reference_target_is_valid(ir, reference);
         let range_is_valid: bool = checked::range_is_valid(reference.byte_offset, address_bytes, global.byte_count);
         let alignment_is_valid: bool = global.alignment_bytes == address_bytes &&
             (reference.byte_offset & (address_bytes - 1)) == 0;
@@ -441,8 +453,8 @@ fn is_valid(ir: model::Store, types: type_info::Table) -> bool {
         return false;
     }
     let globals: *const model::Global = ir.globals.data as *const model::Global;
-    let global_function_references: *const model::GlobalFunctionReference = ir.global_function_references.data as
-            *const model::GlobalFunctionReference;
+    let global_references: *const model::GlobalReference = ir.global_references.data as
+            *const model::GlobalReference;
     let functions: *const model::Function = ir.functions.data as *const model::Function;
     let parameters: *const model::Parameter = ir.parameters.data as *const model::Parameter;
     let slots: *const model::Slot = ir.slots.data as *const model::Slot;
@@ -458,21 +470,21 @@ fn is_valid(ir: model::Store, types: type_info::Table) -> bool {
         let global: model::Global = globals[index];
         if (!global_shape_is_valid(
                 global, expected_global_offset, ir.global_bytes.length,
-                expected_global_reference, ir.global_function_reference_count)) {
+                expected_global_reference, ir.global_reference_count)) {
             return false;
         }
-        if (global.function_reference_count != 0 && !global.read_only) {
+        if (global.reference_count != 0 && !global.read_only) {
             return false;
         }
-        if (global.function_reference_count != 0 && !global_references_are_valid(
-                ir, global, index, global_function_references)) {
+        if (global.reference_count != 0 && !global_references_are_valid(
+                ir, global, index, global_references)) {
             return false;
         }
         expected_global_offset += global.byte_count;
-        expected_global_reference += global.function_reference_count;
+        expected_global_reference += global.reference_count;
     }
     let all_global_bytes_are_owned: bool = expected_global_offset == ir.global_bytes.length;
-    let all_global_references_are_owned: bool = expected_global_reference == ir.global_function_reference_count;
+    let all_global_references_are_owned: bool = expected_global_reference == ir.global_reference_count;
     if (!all_global_bytes_are_owned || !all_global_references_are_owned) {
         return false;
     }

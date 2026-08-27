@@ -4,6 +4,8 @@ import luna.bootstrap.middleend.semantic.context.builder as builder;
 
 import luna.bootstrap.frontend.lexer as lexer;
 import luna.bootstrap.middleend.ir as ir;
+import luna.bootstrap.middleend.semantic.classes as classes;
+import luna.bootstrap.middleend.semantic.types as types;
 import luna.bootstrap.middleend.semantic.value as category;
 import luna.bootstrap.middleend.type as type_info;
 import luna.runtime as runtime;
@@ -113,6 +115,14 @@ fn intrinsic_entry(index: usize) -> IntrinsicEntry {
     table[19] = {
         name = "embed", name_length = 5, arity = 1, operand_class = IntrinsicOperandClass.embedded_file,
         lowering = IntrinsicLowering.embed,
+    };
+    table[20] = {
+        name = "type_is", name_length = 7, arity = 2, operand_class = IntrinsicOperandClass.rtti,
+        lowering = IntrinsicLowering.type_is,
+    };
+    table[21] = {
+        name = "type_cast", name_length = 9, arity = 2, operand_class = IntrinsicOperandClass.rtti,
+        lowering = IntrinsicLowering.type_cast,
     };
     return table[index];
 }
@@ -598,6 +608,238 @@ fn lower_source_intrinsic(
     };
 }
 
+struct RttiTypes {
+    source_class: usize;
+    target_class: usize;
+    result_type: usize;
+    valid: bool;
+}
+
+fn invalid_rtti_types() -> RttiTypes {
+    let none: usize = context::no_id();
+    return {source_class = none, target_class = none, result_type = none, valid = false};
+}
+
+fn resolve_rtti_types(
+    context: *context::Context, node: syntax::SyntaxNode,
+    entry: IntrinsicEntry, source: context::Expression) -> RttiTypes {
+    if (!source.valid || source.type_id >= context->types.type_count) {
+        return invalid_rtti_types();
+    }
+    let source_pointer: type_info::Record = context::type_record(context, source.type_id);
+    if (source_pointer.kind != type_info::Kind.pointer) {
+        return invalid_rtti_types();
+    }
+    let source_class: usize = source_pointer.element_type;
+    let source_is_class: bool = context::type_record(context, source_class).kind == type_info::Kind.class_type;
+    let source_has_rtti: bool = source_is_class && classes::rtti_is_enabled(context, source_class);
+    if (!source_has_rtti || node.child_count != entry.arity) {
+        return invalid_rtti_types();
+    }
+    let source_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let target_node: syntax::SyntaxNode = context::node(context, context->current_unit, source_node.next_sibling);
+    let target_class: usize = types::resolve_class_expression(context, context->current_unit, target_node);
+    if (target_class == context::no_id() || !classes::rtti_is_enabled(context, target_class)) {
+        return invalid_rtti_types();
+    }
+    let source_is_base: bool = classes::is_base_of(context, source_class, target_class);
+    let target_is_base: bool = classes::is_base_of(context, target_class, source_class);
+    if (!source_is_base && !target_is_base) {
+        return invalid_rtti_types();
+    }
+    var result_type: usize = type_info::BuiltinType.boolean as usize;
+    if (entry.lowering == IntrinsicLowering.type_cast) {
+        let read_only: bool = (source_pointer.flags & (type_info::Flag.read_only as usize)) != 0;
+        let volatile_pointee: bool = (source_pointer.flags & (type_info::Flag.volatile_pointee as usize)) != 0;
+        let result: type_info::IdResult = type_info::table_pointer(
+            &context->types, target_class, read_only, volatile_pointee);
+        context->error = result.error;
+        result_type = result.type_id;
+    }
+    return {
+        source_class = source_class, target_class = target_class,
+        result_type = result_type, valid = context->error == runtime::Error.none,
+    };
+}
+
+fn intrinsic_pointer_type(context: *context::Context, element_type: usize, read_only: bool) -> usize {
+    let result: type_info::IdResult = type_info::table_pointer(&context->types, element_type, read_only, false);
+    context->error = result.error;
+    return result.error == runtime::Error.none ? result.type_id : context::no_id();
+}
+
+fn intrinsic_pointer_offset(
+    context: *context::Context, node: syntax::SyntaxNode,
+    pointer_value: usize, pointer_type: usize, byte_offset: usize) -> usize {
+    if (byte_offset == 0) {
+        return pointer_value;
+    }
+    let offset: usize = intrinsic_constant(
+        context, node, type_info::BuiltinType.unsigned_size as usize, byte_offset as u64);
+    var instruction: ir::Instruction = builder::instruction(ir::Opcode.pointer_offset, node);
+    instruction.left = pointer_value;
+    instruction.right = offset;
+    instruction.auxiliary = 1;
+    return builder::emit_value(context, instruction, pointer_type);
+}
+
+fn intrinsic_load(context: *context::Context, node: syntax::SyntaxNode, address: usize, type_id: usize) -> usize {
+    var instruction: ir::Instruction = builder::instruction(ir::Opcode.load_indirect, node);
+    instruction.left = address;
+    return builder::emit_value(context, instruction, type_id);
+}
+
+fn intrinsic_compare(
+    context: *context::Context, node: syntax::SyntaxNode,
+    operation: lexer::TokenKind, left: usize, right: usize) -> usize {
+    var instruction: ir::Instruction = builder::instruction(ir::Opcode.compare, node);
+    instruction.operation = operation;
+    instruction.left = left;
+    instruction.right = right;
+    return builder::emit_value(context, instruction, type_info::BuiltinType.boolean as usize);
+}
+
+fn intrinsic_rvalue(type_id: usize, value_id: usize) -> context::Expression {
+    return {
+        type_id = type_id, value_id = value_id, address_id = context::no_id(), constant_value = 0,
+        has_constant = false, category = category::Category.rvalue,
+        valid = value_id != context::no_id(), bitfield_segment = context::no_id(),
+    };
+}
+
+fn store_rtti_value(
+    context: *context::Context, node: syntax::SyntaxNode, address: usize, type_id: usize, value_id: usize) -> bool {
+    return builder::store_to_address(context, node, address, type_id, intrinsic_rvalue(type_id, value_id));
+}
+
+fn descriptor_from_object(
+    context: *context::Context, node: syntax::SyntaxNode,
+    source: context::Expression, source_class: usize, byte_pointer: usize, pointer_storage: usize) -> usize {
+    let object_bytes: usize = intrinsic_convert(context, node, source.value_id, source.type_id, byte_pointer);
+    let vptr_bytes: usize = intrinsic_pointer_offset(
+        context, node, object_bytes, byte_pointer, classes::vptr_offset(context, source_class));
+    let vptr_storage: usize = intrinsic_convert(context, node, vptr_bytes, byte_pointer, pointer_storage);
+    let vtable: usize = intrinsic_load(context, node, vptr_storage, byte_pointer);
+    let address_type: usize = type_info::BuiltinType.unsigned_size as usize;
+    let vtable_address: usize = intrinsic_convert(context, node, vtable, byte_pointer, address_type);
+    let prefix_bytes: usize = ir::Limit.function_address_bytes as usize;
+    let prefix: usize = intrinsic_constant(context, node, address_type, prefix_bytes as u64);
+    let descriptor_storage_address: usize = intrinsic_binary(
+        context, node, lexer::TokenKind.minus, address_type, vtable_address, prefix);
+    let descriptor_storage: usize = intrinsic_convert(
+        context, node, descriptor_storage_address, address_type, pointer_storage);
+    return intrinsic_load(context, node, descriptor_storage, byte_pointer);
+}
+
+fn descriptor_base(
+    context: *context::Context, node: syntax::SyntaxNode,
+    descriptor: usize, byte_pointer: usize, pointer_storage: usize) -> usize {
+    let storage: usize = intrinsic_convert(context, node, descriptor, byte_pointer, pointer_storage);
+    return intrinsic_load(context, node, storage, byte_pointer);
+}
+
+fn descriptor_global_address(
+    context: *context::Context, node: syntax::SyntaxNode, target_class: usize, byte_pointer: usize) -> usize {
+    let global_id: usize = classes::descriptor_global(context, target_class);
+    if (global_id == context::no_id()) {
+        return context::no_id();
+    }
+    var instruction: ir::Instruction = builder::instruction(ir::Opcode.global_address, node);
+    instruction.auxiliary = global_id;
+    return builder::emit_value(context, instruction, byte_pointer);
+}
+
+fn rtti_success_value(
+    context: *context::Context, node: syntax::SyntaxNode,
+    entry: IntrinsicEntry, source: context::Expression, result_type: usize) -> usize {
+    if (entry.lowering == IntrinsicLowering.type_is) {
+        return builder::emit_boolean_constant(context, node, true).value_id;
+    }
+    return intrinsic_convert(context, node, source.value_id, source.type_id, result_type);
+}
+
+fn rtti_failure_value(
+    context: *context::Context, node: syntax::SyntaxNode, entry: IntrinsicEntry, result_type: usize) -> usize {
+    return entry.lowering == IntrinsicLowering.type_is ? builder::emit_boolean_constant(context, node, false).value_id :
+        builder::emit_null_constant(context, node, result_type).value_id;
+}
+
+fn lower_rtti_intrinsic(
+    context: *context::Context, node: syntax::SyntaxNode,
+    intrinsic_index: usize, source: context::Expression) -> context::Expression {
+    let entry: IntrinsicEntry = intrinsic_entry(intrinsic_index);
+    let resolved: RttiTypes = resolve_rtti_types(context, node, entry, source);
+    if (!resolved.valid) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_rtti, context->current_unit, node.span,
+            context::no_id(), context::empty_span(), source.type_id);
+        return intrinsic_invalid_expression();
+    }
+    let byte_pointer: usize = intrinsic_pointer_type(context, type_info::BuiltinType.unsigned_8 as usize, true);
+    let pointer_storage: usize = intrinsic_pointer_type(context, byte_pointer, true);
+    let state_slot: usize = ir::add_slot(
+        &context->ir, builder::current_ir_function(context), byte_pointer, true, false, 0);
+    let result_slot: usize = ir::add_slot(
+        &context->ir, builder::current_ir_function(context), resolved.result_type, true, false, 0);
+    let state_address: usize = builder::address_of_slot(context, node, state_slot, byte_pointer, false, false);
+    let result_address: usize = builder::address_of_slot(
+        context, node, result_slot, resolved.result_type, false, false);
+    let storage_is_valid: bool = state_address != context::no_id() && result_address != context::no_id();
+    if (!storage_is_valid || pointer_storage == context::no_id()) {
+        return intrinsic_invalid_expression();
+    }
+
+    let setup_block: usize = builder::add_current_block(context);
+    let compare_block: usize = builder::add_current_block(context);
+    let advance_block: usize = builder::add_current_block(context);
+    let continue_block: usize = builder::add_current_block(context);
+    let success_block: usize = builder::add_current_block(context);
+    let failure_block: usize = builder::add_current_block(context);
+    let merge_block: usize = builder::add_current_block(context);
+    let null_source: usize = builder::emit_null_constant(context, node, source.type_id).value_id;
+    let source_exists: usize = intrinsic_compare(
+        context, node, lexer::TokenKind.bang_equal, source.value_id, null_source);
+    builder::emit_branch(context, node, source_exists, setup_block, failure_block);
+
+    context->current_block = setup_block;
+    let descriptor: usize = descriptor_from_object(
+        context, node, source, resolved.source_class, byte_pointer, pointer_storage);
+    store_rtti_value(context, node, state_address, byte_pointer, descriptor);
+    builder::emit_jump(context, node, compare_block);
+
+    context->current_block = compare_block;
+    let current_descriptor: usize = intrinsic_load(context, node, state_address, byte_pointer);
+    let target_descriptor: usize = descriptor_global_address(context, node, resolved.target_class, byte_pointer);
+    let matches: usize = intrinsic_compare(
+        context, node, lexer::TokenKind.equal_equal, current_descriptor, target_descriptor);
+    builder::emit_branch(context, node, matches, success_block, advance_block);
+
+    context->current_block = advance_block;
+    let base_descriptor: usize = descriptor_base(context, node, current_descriptor, byte_pointer, pointer_storage);
+    let null_descriptor: usize = builder::emit_null_constant(context, node, byte_pointer).value_id;
+    let has_base: usize = intrinsic_compare(
+        context, node, lexer::TokenKind.bang_equal, base_descriptor, null_descriptor);
+    builder::emit_branch(context, node, has_base, continue_block, failure_block);
+
+    context->current_block = continue_block;
+    store_rtti_value(context, node, state_address, byte_pointer, base_descriptor);
+    builder::emit_jump(context, node, compare_block);
+
+    context->current_block = success_block;
+    let success_value: usize = rtti_success_value(context, node, entry, source, resolved.result_type);
+    store_rtti_value(context, node, result_address, resolved.result_type, success_value);
+    builder::emit_jump(context, node, merge_block);
+
+    context->current_block = failure_block;
+    let failure_value: usize = rtti_failure_value(context, node, entry, resolved.result_type);
+    store_rtti_value(context, node, result_address, resolved.result_type, failure_value);
+    builder::emit_jump(context, node, merge_block);
+
+    context->current_block = merge_block;
+    let result: usize = intrinsic_load(context, node, result_address, resolved.result_type);
+    return intrinsic_rvalue(resolved.result_type, result);
+}
+
 fn lower_intrinsic(
     context: *context::Context, node: syntax::SyntaxNode, intrinsic_index: usize,
     operand: context::Expression, count: context::Expression, destination: context::Expression) -> context::Expression {
@@ -610,7 +852,8 @@ fn lower_intrinsic(
     if (entry.operand_class == IntrinsicOperandClass.none) {
         return lower_source_intrinsic(context, node, entry);
     }
-    if (entry.operand_class == IntrinsicOperandClass.embedded_file) {
+    if (entry.operand_class == IntrinsicOperandClass.embedded_file ||
+        entry.operand_class == IntrinsicOperandClass.rtti) {
         // @embed is intercepted in expr::lower_expression and lowered by
         // expr_literals::lower_embed (expr.la), which owns the string decoding helpers.
         return intrinsic_invalid_expression();

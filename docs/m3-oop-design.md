@@ -2,10 +2,12 @@
 
 ## Status and scope
 
-This is the accepted design for the M3 phase. M3.0 direct classes, M3.1 single
-inheritance/contracts, M3.2 relocation data and M3.3 dynamic dispatch are implemented; M3.4-M3.5 remain planned. The design consumes the
-canonical signature, overload, default-parameter and value-category foundation
-delivered by [`m2-callable-infrastructure.md`](m2-callable-infrastructure.md).
+This is the accepted and implemented design for the M3 phase. M3.0 direct
+classes, M3.1 single inheritance/contracts, M3.2 relocation data, M3.3 dynamic
+dispatch, M3.4 advanced callable class features and M3.5 opaque classes are
+implemented. The design consumes the canonical signature, overload,
+default-parameter and value-category foundation delivered by
+[`m2-callable-infrastructure.md`](m2-callable-infrastructure.md).
 The older uppercase M2/M3 headings in `roadmap.md` belong to archived Luna 0
 bootstrap milestones.
 
@@ -68,6 +70,8 @@ The proposed declaration grammar is intentionally small:
 ```text
 ClassDeclaration ::= [ "export" ] [ "final" ] "class" Identifier
                      [ ":" QualifiedType ] "{" ClassMember* "}"
+
+OpaqueClassDeclaration ::= "export" "opaque" "class" Identifier ";"
 
 ClassMember      ::= Access FieldDeclaration
                    | ExposedAccess MethodDeclaration
@@ -297,8 +301,37 @@ class for access checks.
 
 Public and protected members of an exported class are interface contract.
 Private fields must initially remain in the source interface because complete
-by-value layout is required. A later opaque-class slice can hide representation
-for pointer-only APIs without importing C++ header layout baggage.
+by-value layout is required. An opaque class instead exposes only a nominal
+pointer identity; its full declaration belongs to one implementation unit and
+none of its fields or methods become interface members.
+
+An opaque class has one stable type ID across both declarations:
+
+```luna
+// interface
+export opaque class Handle;
+export fn valid(value: *const Handle) -> bool;
+
+// implementation of the same module
+class Handle {
+    priv state: u64;
+}
+```
+
+The interface declaration must be exported, bodyless, attribute-free and have
+exactly one complete non-exported definition in the same module. The definition
+cannot have a base or opt into RTTI, and no class may derive from the opaque
+identity. Multiple implementation units may refer to the completed class, but
+only one may provide its layout.
+
+Outside the defining module implementation units, only pointer forms are
+available. Qualified pointers retain the ordinary raw-pointer ABI and support
+null, equality and explicit pointer casts. Direct values, arrays of the class,
+fields or aliases containing it, dereference/indexing, pointer arithmetic,
+layout queries, member access, construction and inheritance are rejected.
+Inside the defining implementation units, the completed class uses the normal
+class layout, constructor, method and by-value rules. Even a `pub` member in the
+private definition is not exported as a callable contract.
 
 ## Single inheritance
 
@@ -479,25 +512,25 @@ M3.2 models this without teaching raw bytes about class policy:
 ```text
 Global {
     byte_offset / byte_count / alignment
-    first_function_reference / function_reference_count
+    first_reference / reference_count
     read_only
 }
 
-GlobalFunctionReference {
+GlobalReference {
     global_id
     byte_offset
-    function_id
+    kind
+    target_id
 }
 ```
 
 References form one contiguous, offset-ordered slice per global. Each reference
-occupies one aligned, zero-filled eight-byte placeholder and targets the
-canonical IR function identity selected by M2; defaults, overload sets, access
-and virtual policy never enter this layer. The IR builder accepts references
-only in read-only globals and the verifier independently recomputes the slices,
-ranges, ordering, placeholder bytes and target bounds. This keeps ordinary
-class storage and future dispatch capability metadata separate: M3.3 consumes
-the record but owns vtable construction.
+occupies one aligned, zero-filled eight-byte placeholder and identifies either
+a canonical IR function or another global. Defaults, overload sets, access and
+virtual policy never enter this layer. The IR builder accepts references only
+in read-only globals and the verifier independently recomputes the slices,
+ranges, ordering, placeholder bytes, kinds and target bounds. M3.3 uses function
+references for vtable slots; M3.4 uses global references for descriptor chains.
 
 Code generation replaces each placeholder with exactly one `.quad <symbol>`
 line. `luna-as` accepts this form only in `.rodata`, always preserves it as an
@@ -513,6 +546,24 @@ Operators reuse M2 method overload sets and exact candidate resolution. The
 first supported set is unary `-`, `!`, `~` and binary arithmetic, bitwise and
 comparison operators. An operator is a non-virtual instance method of the left
 operand class; lookup never searches the right operand, another module or ADL.
+
+The canonical spellings are:
+
+```luna
+pub operator -( ) const -> Vector;
+pub operator +(right: Vector) const -> Vector;
+pub operator ==(right: Vector) const -> bool;
+
+impl Vector {
+    operator +(right: Vector) const -> Vector { ... }
+}
+```
+
+Unary declarations have no explicit parameter and binary declarations have
+exactly one. `!` and every comparison return `bool`; defaults, `static`,
+`virtual`, `abstract`, `override` and `final` are invalid on operators. The
+operator token is the callable's owner-scoped name, so declaration matching,
+source-order canonicalization and mangling reuse M2 unchanged.
 
 Assignment/compound assignment, `&&`, `||`, comma, address, conversion,
 allocation and call/index operators are excluded initially. There is no global
@@ -541,17 +592,45 @@ current final entry from the vtable at bind time. Copying the bound method copie
 two words; calling it after the receiver ceases to exist is a program error.
 There are no additional captures and therefore no general closure feature.
 
+`method fn(P...) -> R` contains only the explicit parameter/result contract;
+receiver qualification is checked while binding. A member expression without
+an immediate call is legal only when such an expected type is available:
+
+```luna
+let callback: method fn(i32) -> i32 = object.transform;
+let result: i32 = callback(42);
+```
+
+The representation is a memory value with INTEGER/INTEGER System V
+classification. Binding a direct method stores its function address; binding a
+virtual method snapshots the current vtable entry. Later overrides or object
+copies do not retarget an already-bound value. Null bound methods have no
+literal form, equality is not provided, and calling a stale receiver remains
+an unchecked raw-lifetime error.
+
 ## Minimal opt-in RTTI
 
-RTTI is available only to polymorphic hierarchies explicitly marked `@rtti`.
-Their vtables reference a descriptor containing canonical class identity and
-one base-descriptor link. Single inheritance and offset-zero bases make checked
+RTTI is available only to a polymorphic hierarchy whose root is marked
+`@rtti`. The marker propagates to every descendant; applying it below a
+non-RTTI base or to a non-polymorphic class is invalid. Their vtables carry one
+descriptor prefix immediately before slot zero. A descriptor's own address is
+the canonical class identity and its sole field points to the base descriptor
+or is zero at the root. Single inheritance and offset-zero bases make checked
 pointer downcasts a descriptor-chain walk with no pointer adjustment.
 
-M3 exposes a boolean type test and a non-throwing pointer cast whose failure is
-`null`. Exact surface spelling is selected before implementation; it must not
-introduce C++ `typeid`, implementation-defined name strings, reference casts,
-exceptions or general reflection.
+M3.4 exposes two non-throwing intrinsics:
+
+```luna
+if (@type_is(shape, Circle)) { ... }
+let circle: *const Circle = @type_cast(shape, Circle);
+```
+
+The first operand must be a pointer to an RTTI-enabled polymorphic class. The
+second argument is a class name in the same inheritance chain, not a value.
+`@type_is` returns false for null; `@type_cast` returns null on failure and
+preserves the source pointer's `const`/`volatile` pointee qualification. No
+reference cast, name string, numeric public type ID, exception or general
+reflection API is introduced.
 
 ## Restricted friendship
 
@@ -560,6 +639,12 @@ same module. Friendship grants private access to methods of the named class; it
 does not inject names, grant transitive friendship or apply to free functions.
 Cross-module friendship is rejected, keeping module interfaces and dependency
 direction explicit.
+
+Friendship is directional: `class Owner { friend class Inspector; }` lets
+`Inspector` methods access `Owner` private members, not the reverse. Duplicate,
+self and qualified/cross-module friend declarations are rejected. A friend
+declaration contributes no field, callable binding, inheritance relation or
+exported name.
 
 ## Diagnostics
 
@@ -663,12 +748,18 @@ devirtualization, relocation and source-order coverage.
 
 ### M3.4: advanced callable class features
 
+Status: implemented with executable, negative-diagnostic, relocation and
+fixed-point coverage.
+
 - restricted left-class operators through M2 overload resolution;
 - non-owning two-word bound methods;
 - opt-in descriptor-chain RTTI and non-throwing checked pointer casts;
 - same-module `friend class` without name injection.
 
 ### M3.5: optional opaque classes
+
+Status: implemented with pointer-ABI, private-layout, cross-module rejection,
+source-order and fixed-point coverage.
 
 - `export opaque class Handle;` pointer-only public identity;
 - complete private definition in module implementation units;
@@ -699,6 +790,8 @@ Every slice needs positive, negative and determinism coverage:
 - bound-method overload selection, virtual binding and stale receiver behavior;
 - opt-in RTTI positive/negative downcasts and non-RTTI rejection;
 - same-module friendship and rejected cross-module/free-function friendship;
+- opaque pointer ABI, private definition source order and rejected external
+  value/layout/member/inheritance use;
 - fixed-point rebuild before compiler sources adopt each slice.
 
 ## C++ features retained and removed

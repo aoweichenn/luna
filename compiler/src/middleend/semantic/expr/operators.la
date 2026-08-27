@@ -10,6 +10,7 @@ import luna.bootstrap.middleend.ir as ir;
 import luna.bootstrap.middleend.semantic.expr.access as access;
 import luna.bootstrap.middleend.semantic.expr.base as base;
 import luna.bootstrap.middleend.semantic.expr.numeric as numeric;
+import luna.bootstrap.middleend.semantic.expr.probe as probe;
 import luna.bootstrap.middleend.semantic.functions as functions;
 import luna.bootstrap.middleend.semantic.types as types;
 import luna.bootstrap.middleend.semantic.value as category;
@@ -119,7 +120,7 @@ fn address_is_aligned(context: *context::Context, node_id: usize, alignment: usi
     return address_chain_gcd(offset, stride) % alignment == 0;
 }
 
-fn lower_unary(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize,
+fn lower_unary(context: *context::Context, node_id: usize, node: syntax::SyntaxNode, expected_type: usize,
     lowerer: api::Lowerer) -> context::Expression {
     if (node.child_count != 1) {
         return base::invalid_expression();
@@ -132,6 +133,14 @@ fn lower_unary(context: *context::Context, node: syntax::SyntaxNode, expected_ty
         type_info::is_signed_integer(
             expected_record.kind)) {
         return numeric::lower_negative_integer_literal(context, node, operand_node, expected_type);
+    }
+    let arithmetic_or_logical: bool = operation == lexer::TokenKind.minus || operation == lexer::TokenKind.bang;
+    let overloadable: bool = arithmetic_or_logical || operation == lexer::TokenKind.tilde;
+    if (overloadable) {
+        let operator_target: probe::CallTarget = probe::operator_call_target(context, node);
+        if (operator_target.owner_type != context::no_id()) {
+            return access::lower_target_call(context, node_id, node, operator_target, lowerer);
+        }
     }
     if (operation == lexer::TokenKind.ampersand && operand_node.kind == syntax::SyntaxKind.name_expression) {
         var binding_id: usize = context::no_id();
@@ -191,6 +200,10 @@ fn lower_unary(context: *context::Context, node: syntax::SyntaxNode, expected_ty
             context::add_diagnostic(
                 context, context::DiagnosticKind.invalid_operator, context->current_unit, node.span, context::no_id(),
                 context::empty_span(), operand.type_id);
+            return base::invalid_expression();
+        }
+        if (!types::require_opaque_value_access(
+                context, operand_record.element_type, context->current_unit, node.span)) {
             return base::invalid_expression();
         }
         var check: ir::Instruction = builder::instruction(ir::Opcode.null_check, node);
@@ -474,8 +487,12 @@ fn pointer_arithmetic_is_allowed(context: *context::Context, pointer_type: usize
         return false;
     }
     let element: type_info::Record = context::type_record(context, record.element_type);
-    return element.kind != type_info::Kind.type_void && element.kind != type_info::Kind.array &&
-        element.size_bytes != 0;
+    let element_kind_is_valid: bool = element.kind != type_info::Kind.type_void &&
+        element.kind != type_info::Kind.array;
+    let layout_is_available: bool = types::opaque_value_is_available(
+        context, record.element_type, context->current_unit);
+    let element_is_sized: bool = layout_is_available && element.size_bytes != 0;
+    return element_kind_is_valid && element_is_sized;
 }
 
 fn emit_negated_usize(context: *context::Context, node: syntax::SyntaxNode, value_id: usize) -> usize {
@@ -500,7 +517,7 @@ fn emit_pointer_offset(
     return builder::emit_value(context, instruction, pointer_type);
 }
 
-fn lower_binary(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize,
+fn lower_binary(context: *context::Context, node_id: usize, node: syntax::SyntaxNode, expected_type: usize,
     lowerer: api::Lowerer) -> context::Expression {
     if (node.child_count != 2) {
         return base::invalid_expression();
@@ -509,6 +526,10 @@ fn lower_binary(context: *context::Context, node: syntax::SyntaxNode, expected_t
     let operation: lexer::TokenKind = context::token(context, context->current_unit, node.token_index).kind;
     if (operation == lexer::TokenKind.logical_and || operation == lexer::TokenKind.logical_or) {
         return lower_short_circuit(context, node, operation, lowerer);
+    }
+    let operator_target: probe::CallTarget = probe::operator_call_target(context, node);
+    if (operator_target.owner_type != context::no_id()) {
+        return access::lower_target_call(context, node_id, node, operator_target, lowerer);
     }
     let operand_expected: usize = binary_is_comparison(operation) ? context::no_id() : expected_type;
     let left: context::Expression = api::invoke(lowerer, context, node.first_child, operand_expected);
@@ -765,9 +786,14 @@ fn lower_layout_query(context: *context::Context, node: syntax::SyntaxNode,
     } else {
         type_id = types::resolve_type_node(context, context->current_unit, node.first_child);
     }
-    if (type_id == context::no_id() ||
-        !types::require_complete_type(
-            context, type_id)) {
+    if (type_id == context::no_id()) {
+        return base::invalid_expression();
+    }
+    if (!types::require_opaque_value_access(
+            context, type_id, context->current_unit, node.span)) {
+        return base::invalid_expression();
+    }
+    if (!types::require_complete_type(context, type_id)) {
         return base::invalid_expression();
     }
     let record: type_info::Record = context::type_record(context, type_id);

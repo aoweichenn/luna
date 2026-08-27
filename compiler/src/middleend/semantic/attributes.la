@@ -16,8 +16,12 @@ struct AttributeMountEntry {
     mount: usize;
 }
 
+enum AttributeLimit: usize {
+    entries = 7, mount_entries = 8,
+}
+
 fn attribute_entry(index: usize) -> AttributeEntry {
-    var table: [6]AttributeEntry = {};
+    var table: [AttributeLimit.entries]AttributeEntry = {};
     table[0] = {
         name = "inline", name_length = 6, mounts = AttributeMount.function as usize,
         arguments = AttributeArgumentPolicy.none,
@@ -42,12 +46,16 @@ fn attribute_entry(index: usize) -> AttributeEntry {
         name = "export_name", name_length = 11, mounts = AttributeMount.function as usize,
         arguments = AttributeArgumentPolicy.one_string_literal,
     };
+    table[6] = {
+        name = "rtti", name_length = 4, mounts = AttributeMount.class_type as usize,
+        arguments = AttributeArgumentPolicy.none,
+    };
     let entry: AttributeEntry = table[index];
     return entry;
 }
 
 fn attribute_mount_for(kind: syntax::SyntaxKind) -> usize {
-    var table: [7]AttributeMountEntry = {};
+    var table: [AttributeLimit.mount_entries]AttributeMountEntry = {};
     table[0] = {
         kind = syntax::SyntaxKind.function_declaration, mount = AttributeMount.function as usize,
     };
@@ -70,27 +78,43 @@ fn attribute_mount_for(kind: syntax::SyntaxKind) -> usize {
     table[6] = {
         kind = syntax::SyntaxKind.type_alias_declaration, mount = AttributeMount.alias as usize,
     };
-    var index: usize = 0;
-    while (index < 7) {
+    table[7] = {
+        kind = syntax::SyntaxKind.class_declaration, mount = AttributeMount.class_type as usize,
+    };
+    for (var index: usize = 0; index < AttributeLimit.mount_entries as usize; index += 1) {
         if (table[index].kind == kind) {
             return table[index].mount;
         }
-        index += 1;
     }
     return AttributeMount.none as usize;
 }
 
 fn find_attribute(context: *context::Context, unit_index: usize, name_token: usize) -> usize {
-    var index: usize = 0;
-    while (index < 6) {
+    for (var index: usize = 0; index < AttributeLimit.entries as usize; index += 1) {
         let entry: AttributeEntry = attribute_entry(index);
         if (context::token_equals_bytes(
                 context, unit_index, name_token, entry.name, entry.name_length)) {
             return index;
         }
-        index += 1;
     }
     return context::no_id();
+}
+
+fn attribute_arguments_are_valid(entry: AttributeEntry, has_arguments: bool, child_count: usize) -> bool {
+    switch (entry.arguments) {
+    case AttributeArgumentPolicy.none {
+        return !has_arguments;
+    }
+    case AttributeArgumentPolicy.one_constant_integer, AttributeArgumentPolicy.one_string_literal {
+        return has_arguments && child_count == 1;
+    }
+    case AttributeArgumentPolicy.named_bitfields {
+        return has_arguments && child_count != 0;
+    }
+    default {
+        return false;
+    }
+    }
 }
 
 fn count_attribute_children(context: *context::Context, unit_index: usize, declaration: syntax::SyntaxNode) -> usize {
@@ -211,11 +235,9 @@ fn validate_attribute(context: *context::Context, unit_index: usize, node: synta
     }
     let entry: AttributeEntry = attribute_entry(table_index);
     let has_arguments: bool = (node.flags & (syntax::SyntaxFlag.has_arguments as usize)) != 0;
-    if (mount == (AttributeMount.none as usize) || (entry.mounts & mount) == 0 || (entry.arguments ==
-                AttributeArgumentPolicy.none && has_arguments) || (entry.arguments == AttributeArgumentPolicy
-                    .one_constant_integer && (!has_arguments || node.child_count != 1)) || (entry.arguments ==
-                AttributeArgumentPolicy.named_bitfields && (!has_arguments || node.child_count == 0)) ||
-        (entry.arguments == AttributeArgumentPolicy.one_string_literal && (!has_arguments || node.child_count != 1))) {
+    let mount_is_valid: bool = mount != AttributeMount.none as usize && (entry.mounts & mount) != 0;
+    let arguments_are_valid: bool = attribute_arguments_are_valid(entry, has_arguments, node.child_count);
+    if (!mount_is_valid || !arguments_are_valid) {
         return context::add_diagnostic(
             context, context::DiagnosticKind.invalid_attribute, unit_index, node.span, none, context::empty_span(),
             table_index);

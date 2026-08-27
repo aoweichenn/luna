@@ -38,6 +38,7 @@ fn method_identity(
     declaration: syntax::SyntaxNode) -> IdentityResult {
     let static_method: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.static_method);
     let constructor: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.constructor);
+    let operator_method: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.operator_method);
     if (static_method) {
         if (constructor || receiver_is_qualified(declaration)) {
             method_diagnostic(context, context::DiagnosticKind.invalid_receiver, unit_index, declaration, owner_type);
@@ -55,7 +56,8 @@ fn method_identity(
     }
     return {
         identity = {
-            kind = constructor ? callable::Kind.constructor : callable::Kind.instance_method, owner_type = owner_type,
+            kind = constructor ? callable::Kind.constructor : (operator_method ?
+                    callable::Kind.operator_method : callable::Kind.instance_method), owner_type = owner_type,
             receiver = constructor ? callable::ReceiverKind.writable : receiver_kind(declaration),
         }, valid = true,
     };
@@ -164,6 +166,79 @@ fn method_has_defaults(context: *context::Context, unit_index: usize, declaratio
     return false;
 }
 
+fn operator_is_comparison(kind: lexer::TokenKind) -> bool {
+    switch (kind) {
+    case lexer::TokenKind.equal_equal, lexer::TokenKind.bang_equal, lexer::TokenKind.less, lexer::TokenKind.less_equal,
+        lexer::TokenKind.greater, lexer::TokenKind.greater_equal {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn unary_operator_is_valid(kind: lexer::TokenKind) -> bool {
+    switch (kind) {
+    case lexer::TokenKind.minus, lexer::TokenKind.bang, lexer::TokenKind.tilde {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn binary_operator_is_valid(kind: lexer::TokenKind) -> bool {
+    switch (kind) {
+    case lexer::TokenKind.plus, lexer::TokenKind.minus,
+        lexer::TokenKind.star, lexer::TokenKind.slash, lexer::TokenKind.percent,
+        lexer::TokenKind.ampersand, lexer::TokenKind.pipe, lexer::TokenKind.caret,
+        lexer::TokenKind.shift_left, lexer::TokenKind.shift_right {
+        return true;
+    }
+    default {
+        return operator_is_comparison(kind);
+    }
+    }
+}
+
+fn operator_method_is_valid(
+    context: *context::Context, owner_type: usize, unit_index: usize, declaration: syntax::SyntaxNode) -> bool {
+    if (!declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.operator_method)) {
+        return true;
+    }
+    let forbidden_flags: usize = (syntax::SyntaxFlag.static_method as usize) |
+        (syntax::SyntaxFlag.constructor as usize) | (syntax::SyntaxFlag.virtual_method as usize) |
+        (syntax::SyntaxFlag.abstract_method as usize) | (syntax::SyntaxFlag.override_method as usize) |
+        (syntax::SyntaxFlag.final_method as usize) | (syntax::SyntaxFlag.private_access as usize);
+    var parameter_count: usize = 0;
+    var return_node: usize = context::no_id();
+    var body_node: usize = context::no_id();
+    let parts_are_valid: bool = function_parts(
+        context, unit_index, declaration, &parameter_count, &return_node, &body_node);
+    let operator_kind: lexer::TokenKind = context::token(context, unit_index, declaration.token_index).kind;
+    let arity_is_valid: bool = parameter_count == 0 ? unary_operator_is_valid(operator_kind) :
+        parameter_count == 1 && binary_operator_is_valid(operator_kind);
+    let form_is_valid: bool = parts_are_valid && (declaration.flags & forbidden_flags) == 0;
+    let defaults_are_absent: bool = !method_has_defaults(context, unit_index, declaration);
+    let declaration_is_valid: bool = form_is_valid && arity_is_valid;
+    let signature_is_valid: bool = defaults_are_absent && return_node != context::no_id();
+    if (!declaration_is_valid || !signature_is_valid) {
+        method_diagnostic(
+            context, context::DiagnosticKind.invalid_operator_method, unit_index, declaration, owner_type);
+        return false;
+    }
+    let result_type: usize = types::resolve_type_node(context, unit_index, return_node);
+    let requires_boolean: bool = operator_kind == lexer::TokenKind.bang || operator_is_comparison(operator_kind);
+    if (requires_boolean && result_type != type_info::BuiltinType.boolean as usize) {
+        method_diagnostic(
+            context, context::DiagnosticKind.invalid_operator_method, unit_index, declaration, owner_type);
+        return false;
+    }
+    return true;
+}
+
 fn method_form_is_valid(
     context: *context::Context, owner_type: usize, unit_index: usize, declaration: syntax::SyntaxNode) -> bool {
     let variadic: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.variadic);
@@ -175,7 +250,7 @@ fn method_form_is_valid(
         method_diagnostic(context, context::DiagnosticKind.invalid_method, unit_index, declaration, owner_type);
         return false;
     }
-    return true;
+    return operator_method_is_valid(context, owner_type, unit_index, declaration);
 }
 
 fn mark_member_exported(context: *context::Context, function_id: usize) {
@@ -209,7 +284,8 @@ fn collect_declared_method(
     collect_function_declaration(
         context, identity.identity, module_id, unit_index, declaration_id, declaration, true, context::no_id());
     let owner: type_info::Record = context::type_record(context, owner_type);
-    if ((owner.flags & (type_info::Flag.exported as usize)) != 0) {
+    let exported_owner: bool = (owner.flags & (type_info::Flag.exported as usize)) != 0;
+    if (exported_owner && !type_info::is_opaque_class(owner)) {
         let lookup: FunctionDeclarationLookup =
             lookup_function_declaration(context, identity.identity, module_id, unit_index, declaration);
         mark_member_exported(context, lookup.overload);
@@ -253,6 +329,9 @@ fn collect_defined_method(
     if (declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.bodyless)) {
         method_diagnostic(context, context::DiagnosticKind.invalid_method_definition, unit_index, declaration,
             owner_type);
+        return;
+    }
+    if (!method_form_is_valid(context, owner_type, unit_index, declaration)) {
         return;
     }
     let identity: IdentityResult = method_identity(context, owner_type, unit_index, declaration);
@@ -307,9 +386,9 @@ fn collect_impl_methods(
     let owner_node: syntax::SyntaxNode = context::node(context, unit_index, declaration.first_child);
     for (var child: usize = owner_node.next_sibling; child != context::no_id();
         child = context::node(context, unit_index, child).next_sibling) {
-        let method: syntax::SyntaxNode = context::node(context, unit_index, child);
-        if (method.kind == syntax::SyntaxKind.function_declaration) {
-            collect_defined_method(context, module_id, owner_type, unit_index, child, method);
+        let method_node: syntax::SyntaxNode = context::node(context, unit_index, child);
+        if (method_node.kind == syntax::SyntaxKind.function_declaration) {
+            collect_defined_method(context, module_id, owner_type, unit_index, child, method_node);
         }
     }
 }
