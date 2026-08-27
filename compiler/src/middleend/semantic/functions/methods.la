@@ -424,6 +424,11 @@ fn collect_class_declaration_methods(
         child = context::node(context, record.declaration_unit, child).next_sibling) {
         let member: syntax::SyntaxNode = context::node(context, record.declaration_unit, child);
         if (member.kind == syntax::SyntaxKind.function_declaration) {
+            if (generics::is_generic(context, record.declaration_unit, member)) {
+                method_diagnostic(
+                    context, context::DiagnosticKind.invalid_generic_use, record.declaration_unit, member, owner_type);
+                continue;
+            }
             collect_declared_method(context, module_id, owner_type, record.declaration_unit, child, member);
         }
     }
@@ -499,6 +504,24 @@ fn collect_impl_methods(
     context: *context::Context, module_id: usize, unit_index: usize, declaration: syntax::SyntaxNode) {
     let invalid_flags: usize = (syntax::SyntaxFlag.exported as usize) | (syntax::SyntaxFlag.external as usize);
     let declaration_is_invalid: bool = (declaration.flags & invalid_flags) != 0;
+    if (declaration.child_count != 0) {
+        let generic_node: syntax::SyntaxNode = context::node(context, unit_index, declaration.first_child);
+        let generic_owner: usize = names::lookup_qualified_symbol(
+            context, unit_index, generic_node, context::SymbolKind.generic_type, false);
+        if (generic_owner != context::no_id()) {
+            for (var child: usize = generic_node.next_sibling; child != context::no_id();
+                child = context::node(context, unit_index, child).next_sibling) {
+                let method_node: syntax::SyntaxNode = context::node(context, unit_index, child);
+                let generic_method: bool = method_node.kind == syntax::SyntaxKind.function_declaration &&
+                    generics::is_generic(context, unit_index, method_node);
+                if (generic_method) {
+                    method_diagnostic(
+                        context, context::DiagnosticKind.invalid_generic_use, unit_index, method_node, generic_owner);
+                }
+            }
+            return;
+        }
+    }
     if (names::unit_is_interface(context, unit_index) || declaration_is_invalid) {
         method_diagnostic(context, context::DiagnosticKind.invalid_method_definition, unit_index, declaration,
             context::no_id());
@@ -516,6 +539,112 @@ fn collect_impl_methods(
             collect_defined_method(context, module_id, owner_type, unit_index, child, method_node);
         }
     }
+}
+
+fn generic_impl_matches(
+    context: *context::Context, generic_id: usize, unit_index: usize, declaration: syntax::SyntaxNode) -> bool {
+    if (declaration.kind != syntax::SyntaxKind.impl_declaration || declaration.child_count == 0) {
+        return false;
+    }
+    let owner: syntax::SyntaxNode = context::node(context, unit_index, declaration.first_child);
+    let symbol_id: usize = names::lookup_qualified_symbol(
+        context, unit_index, owner, context::SymbolKind.generic_type, false);
+    if (symbol_id == context::no_id()) {
+        return false;
+    }
+    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    return symbols[symbol_id].type_id == generic_id;
+}
+
+fn collect_generic_impl(
+    context: *context::Context, generic_id: usize, module_id: usize,
+    owner_type: usize, unit_index: usize, declaration: syntax::SyntaxNode) {
+    if (!generic_impl_matches(context, generic_id, unit_index, declaration)) {
+        return;
+    }
+    let owner: syntax::SyntaxNode = context::node(context, unit_index, declaration.first_child);
+    for (var child: usize = owner.next_sibling; child != context::no_id();
+        child = context::node(context, unit_index, child).next_sibling) {
+        let method_node: syntax::SyntaxNode = context::node(context, unit_index, child);
+        if (method_node.kind != syntax::SyntaxKind.function_declaration) {
+            continue;
+        }
+        if (generics::is_generic(context, unit_index, method_node)) {
+            method_diagnostic(
+                context, context::DiagnosticKind.invalid_generic_use, unit_index, method_node, owner_type);
+            continue;
+        }
+        collect_defined_method(context, module_id, owner_type, unit_index, child, method_node);
+    }
+}
+
+fn collect_generic_impls_in_unit(
+    context: *context::Context, generic_id: usize, module_id: usize, owner_type: usize, unit_index: usize) {
+    if (unit_index == context::no_id()) {
+        return;
+    }
+    for (var declaration_id: usize = names::first_declaration(context, unit_index);
+        declaration_id != context::no_id() && context->error == runtime::Error.none;
+        declaration_id = context::node(context, unit_index, declaration_id).next_sibling) {
+        let declaration: syntax::SyntaxNode = context::node(context, unit_index, declaration_id);
+        collect_generic_impl(context, generic_id, module_id, owner_type, unit_index, declaration);
+    }
+}
+
+fn instantiate_generic_class(context: *context::Context, type_id: usize) -> bool {
+    let instance_id: usize = generic_model::instance_for_type(context->generics, type_id);
+    if (instance_id == context::no_id()) {
+        return true;
+    }
+    let existing_functions: *const context::Function = context->functions.data as *const context::Function;
+    for (var function_id: usize = 0; function_id < context->function_count; function_id += 1) {
+        if (existing_functions[function_id].identity.owner_type == type_id) {
+            return true;
+        }
+    }
+    if (!classes::prepare_generic_class(context, type_id)) {
+        return false;
+    }
+    let mark: usize = generics::activate_instance(context, instance_id);
+    if (mark == context::no_id()) {
+        return false;
+    }
+    let instances: *const generic_model::Instance = context->generics.instances.data as
+            *const generic_model::Instance;
+    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
+            *const generic_model::Declaration;
+    let declaration: generic_model::Declaration = declarations[instances[instance_id].declaration_id];
+    let generic_id: usize = instances[instance_id].declaration_id;
+    let module_id: usize = declaration.module_id;
+    let type_record: type_info::Record = context::type_record(context, type_id);
+    let first_function: usize = context->function_count;
+    collect_class_declaration_methods(context, module_id, type_id, type_record);
+    let modules: *const context::Module = context->modules.data as *const context::Module;
+    collect_generic_impls_in_unit(context, generic_id, module_id, type_id, modules[module_id].interface_unit);
+    for (var index: usize = 0; index < modules[module_id].implementation_count; index += 1) {
+        collect_generic_impls_in_unit(
+            context, generic_id, module_id, type_id, names::module_implementation_unit(context, module_id, index));
+    }
+    for (var function_id: usize = first_function;
+        function_id < context->function_count && context->error == runtime::Error.none;
+        function_id += 1) {
+        let functions_data: *const context::Function = context->functions.data as *const context::Function;
+        if (functions_data[function_id].identity.owner_type != type_id) {
+            continue;
+        }
+        context->error = generic_model::map_function_instance(&context->generics, function_id, instance_id);
+        if (context->error == runtime::Error.none) {
+            build_instance_signature(context, function_id);
+        }
+    }
+    if (context->error == runtime::Error.none) {
+        bind_function_instances(context, first_function, type_id);
+    }
+    if (context->error == runtime::Error.none) {
+        classes::collect_generic_methods(context, type_id);
+    }
+    let restored: bool = generics::restore_active_bindings(context, mark);
+    return restored && context->error == runtime::Error.none;
 }
 
 fn collect_impl_blocks_in_unit(context: *context::Context, module_id: usize, unit_index: usize) {

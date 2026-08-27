@@ -227,6 +227,17 @@ time, so class-record order and global function order are never accidentally
 coupled. The validator checks those slices, explicit access, dispatch policy,
 the single-base relation, absence of vptrs and class-value composition.
 
+M4 generic metadata follows the same split. The dependency-root
+`semantic.generics.model` module owns declaration parameters, concrete
+argument slices, instance states, direct TypeId/FunctionId maps and an
+open-addressed instance index whose full key remains the equality authority.
+`semantic.generics` validates declarations and manages immutable active
+substitution views below type resolution. Type layout and callable inference
+consume those views; only the uniquely selected callable is materialized into
+ordinary typed IR. Statement lowering processes canonical ordinary roots first
+and then a bounded concrete-instance worklist, so recursive instantiation does
+not require a generic backend representation.
+
 M3.1 adds one canonical `base_type` field to the semantic type record. The class
 metadata record mirrors that relation, but layout, field lookup, IR member
 verification and x86-64 ABI classification all consume the type relation rather

@@ -430,6 +430,51 @@ another value or derive from it. The defining module implementation retains
 ordinary class operations and layout access. Opaque classes add no allocation,
 ownership or destruction semantics.
 
+M4 adds native static generics. Type parameters follow the declaration name;
+uses and explicit calls use the same angle-bracket form:
+
+```luna
+export fn identity<Value>(value: Value) -> Value {
+    return value;
+}
+
+export struct Pair<First, Second> {
+    first: First;
+    second: Second;
+}
+
+let inferred: i32 = identity(42);
+let explicit: i64 = identity<i64>(42);
+let pair: Pair<i32, bool> = {first = 42, second = true};
+```
+
+Function inference uses supplied argument types only. Repeated occurrences of
+one parameter must infer one exact type; no conversion ranking is introduced.
+An ordinary exact overload wins before inferred generic candidates are
+considered. Explicit `<...>` selects generic declarations only, defaults are
+inserted after selection, and expected result types validate but never infer a
+missing parameter. A context-typed `&name` may infer a generic function from
+the function pointer's parameter types.
+
+Structures, unions, transparent aliases and direct classes may have type
+parameters. `impl Cell` reopens `class Cell<Value>` and brings `Value` into
+scope without repeating the parameter list. Concrete class fields,
+constructors, ordinary methods, embedded composition and bound methods reuse
+the M3 rules after substitution.
+
+Every selected declaration is monomorphized to ordinary concrete types and
+Typed IR. There is no runtime dictionary, boxed universal value or generic IR
+opcode. Exported generic function bodies and exported generic-class `impl`
+blocks live in the interface because consumers instantiate them from source;
+each consuming module emits private concrete callable copies.
+
+M4 has no specializations, SFINAE, partial ordering, ADL, dependent caller
+lookup, CTAD, default/non-type/variadic parameters, concepts, generic `const
+fn`, method-local type parameters or generic C ABI. Generic inheritance,
+virtual methods, RTTI, opaque classes and friendship are also rejected; these
+cross-products are not prerequisites for reusable containers or the later
+standard-library `move`.
+
 M3.1 adds public single inheritance and static polymorphism contracts:
 
 ```luna
@@ -1282,8 +1327,10 @@ always from scratch, so there is no stale-embed hazard.
 
 The compile-time surface in Luna 0 consists of typed constants, enum values
 and the type-only `sizeof`, `alignof` and `offsetof` layout queries. There is
-no preprocessor, textual macro system, conditional compilation, generic
-selection, general type reflection or user-defined attribute syntax.
+no preprocessor, textual macro system, conditional compilation, C-style
+generic selection, general type reflection or user-defined attribute syntax.
+M4 static generics are declaration substitution and monomorphization, not a
+general compile-time execution or reflection facility.
 
 `assert(expression);` is a compile-time assertion, legal both at module
 scope and as a function-body statement:

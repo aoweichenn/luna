@@ -1,0 +1,670 @@
+module luna.bootstrap.middleend.semantic.functions;
+
+enum InferenceStatus: usize {
+    no_match, match,
+}
+
+struct Inference {
+    arguments: [context::Limit.maximum_generic_parameters]usize;
+    count: usize;
+    status: InferenceStatus;
+}
+
+fn empty_inference(count: usize) -> Inference {
+    var result: Inference = {arguments = {}, count = count, status = InferenceStatus.match};
+    for (var index: usize = 0; index < count; index += 1) {
+        result.arguments[index] = context::no_id();
+    }
+    return result;
+}
+
+fn generic_parameter_position(
+    context: *context::Context, declaration: generic_model::Declaration,
+    unit_index: usize, name_token: usize) -> usize {
+    let parameters: *const generic_model::Parameter = context->generics.parameters.data as
+            *const generic_model::Parameter;
+    for (var index: usize = 0; index < declaration.parameter_count; index += 1) {
+        let parameter: generic_model::Parameter = parameters[declaration.first_parameter + index];
+        if (context::tokens_equal(
+                context, parameter.unit_index, parameter.name_token, unit_index, name_token)) {
+            return index;
+        }
+    }
+    return context::no_id();
+}
+
+fn generic_pattern_tokens_match(
+    context: *context::Context, left_unit: usize, left: syntax::SyntaxNode,
+    right_unit: usize, right: syntax::SyntaxNode) -> bool {
+    let left_has_token: bool = left.token_index != context::no_id();
+    let right_has_token: bool = right.token_index != context::no_id();
+    if (left_has_token != right_has_token) {
+        return false;
+    }
+    if (!left_has_token) {
+        return true;
+    }
+    let left_token: lexer::Token = context::token(context, left_unit, left.token_index);
+    let right_token: lexer::Token = context::token(context, right_unit, right.token_index);
+    if (left_token.kind != right_token.kind) {
+        return false;
+    }
+    return context::tokens_equal(context, left_unit, left.token_index, right_unit, right.token_index);
+}
+
+fn source_parameter_position(
+    context: *context::Context, unit_index: usize, parameters: syntax::SyntaxNode, node: syntax::SyntaxNode) -> usize {
+    if (node.kind != syntax::SyntaxKind.type_named || node.child_count != 0) {
+        return context::no_id();
+    }
+    var position: usize = 0;
+    for (var child: usize = parameters.first_child; child != context::no_id();
+        child = context::node(context, unit_index, child).next_sibling) {
+        let parameter: syntax::SyntaxNode = context::node(context, unit_index, child);
+        if (context::tokens_equal(
+                context, unit_index, parameter.token_index, unit_index, node.token_index)) {
+            return position;
+        }
+        position += 1;
+    }
+    return context::no_id();
+}
+
+fn generic_patterns_match(
+    context: *context::Context, left_declaration: generic_model::Declaration, left_node_id: usize,
+    right_unit: usize, right_parameters: syntax::SyntaxNode, right_node_id: usize, depth: usize) -> bool {
+    if (depth >= context::Limit.maximum_generic_depth as usize) {
+        return false;
+    }
+    let left: syntax::SyntaxNode = context::node(context, left_declaration.unit_index, left_node_id);
+    let right: syntax::SyntaxNode = context::node(context, right_unit, right_node_id);
+    let left_position: usize = left.kind == syntax::SyntaxKind.type_named && left.child_count == 0 ?
+        generic_parameter_position(
+            context, left_declaration, left_declaration.unit_index, left.token_index) : context::no_id();
+    let right_position: usize = source_parameter_position(context, right_unit, right_parameters, right);
+    let has_generic_parameter: bool = left_position != context::no_id() || right_position != context::no_id();
+    if (has_generic_parameter) {
+        return left_position != context::no_id() && left_position == right_position;
+    }
+    let shapes_match: bool = left.kind == right.kind && left.flags == right.flags;
+    if (!shapes_match || left.child_count != right.child_count) {
+        return false;
+    }
+    if (!generic_pattern_tokens_match(context, left_declaration.unit_index, left, right_unit, right)) {
+        return false;
+    }
+    var left_child: usize = left.first_child;
+    var right_child: usize = right.first_child;
+    for (var index: usize = 0; index < left.child_count; index += 1) {
+        if (!generic_patterns_match(
+                context, left_declaration, left_child, right_unit, right_parameters, right_child, depth + 1)) {
+            return false;
+        }
+        left_child = context::node(context, left_declaration.unit_index, left_child).next_sibling;
+        right_child = context::node(context, right_unit, right_child).next_sibling;
+    }
+    return true;
+}
+
+fn generic_function_pattern_matches(
+    context: *context::Context, declaration: generic_model::Declaration,
+    unit_index: usize, source: syntax::SyntaxNode) -> bool {
+    let source_parameters_id: usize = generics::parameters_node(context, unit_index, source);
+    let source_parameters: syntax::SyntaxNode = context::node(context, unit_index, source_parameters_id);
+    if (source_parameters.child_count != declaration.parameter_count) {
+        return false;
+    }
+    let stored: syntax::SyntaxNode = context::node(context, declaration.unit_index, declaration.node_index);
+    var stored_count: usize = 0;
+    var stored_return: usize = context::no_id();
+    var stored_body: usize = context::no_id();
+    var source_count: usize = 0;
+    var source_return: usize = context::no_id();
+    var source_body: usize = context::no_id();
+    let stored_is_valid: bool = function_parts(
+        context, declaration.unit_index, stored, &stored_count, &stored_return, &stored_body);
+    let source_is_valid: bool = function_parts(
+        context, unit_index, source, &source_count, &source_return, &source_body);
+    if (!stored_is_valid || !source_is_valid) {
+        return false;
+    }
+    if (stored_count != source_count) {
+        return false;
+    }
+    var stored_parameter: usize = first_parameter_node(context, declaration.unit_index, stored);
+    var source_parameter: usize = first_parameter_node(context, unit_index, source);
+    for (var index: usize = 0; index < stored_count; index += 1) {
+        let stored_node: syntax::SyntaxNode = context::node(context, declaration.unit_index, stored_parameter);
+        let source_node: syntax::SyntaxNode = context::node(context, unit_index, source_parameter);
+        if (!generic_patterns_match(
+                context, declaration, stored_node.first_child,
+                unit_index, source_parameters, source_node.first_child, 0)) {
+            return false;
+        }
+        stored_parameter = stored_node.next_sibling;
+        source_parameter = source_node.next_sibling;
+    }
+    return true;
+}
+
+fn duplicate_generic_function(
+    context: *context::Context, module_id: usize, unit_index: usize, source: syntax::SyntaxNode) -> usize {
+    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
+            *const generic_model::Declaration;
+    for (var declaration_id: usize = 0; declaration_id < context->generics.declaration_count; declaration_id += 1) {
+        let declaration: generic_model::Declaration = declarations[declaration_id];
+        let scope_matches: bool = declaration.kind == generic_model::DeclarationKind.function_declaration &&
+            declaration.module_id == module_id;
+        let name_matches: bool = context::tokens_equal(
+            context, declaration.unit_index, declaration.name_token, unit_index, source.token_index);
+        let candidate_matches: bool = scope_matches && name_matches;
+        if (candidate_matches && generic_function_pattern_matches(context, declaration, unit_index, source)) {
+            return declaration_id;
+        }
+    }
+    return context::no_id();
+}
+
+fn generic_function_result_matches(
+    context: *context::Context, declaration_id: usize, unit_index: usize, source: syntax::SyntaxNode) -> bool {
+    if (declaration_id >= context->generics.declaration_count) {
+        return false;
+    }
+    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
+            *const generic_model::Declaration;
+    let declaration: generic_model::Declaration = declarations[declaration_id];
+    let stored: syntax::SyntaxNode = context::node(context, declaration.unit_index, declaration.node_index);
+    var stored_count: usize = 0;
+    var stored_return: usize = context::no_id();
+    var stored_body: usize = context::no_id();
+    var source_count: usize = 0;
+    var source_return: usize = context::no_id();
+    var source_body: usize = context::no_id();
+    let stored_is_valid: bool = function_parts(
+        context, declaration.unit_index, stored, &stored_count, &stored_return, &stored_body);
+    let source_is_valid: bool = function_parts(
+        context, unit_index, source, &source_count, &source_return, &source_body);
+    if (!stored_is_valid || !source_is_valid) {
+        return false;
+    }
+    let stored_is_void: bool = stored_return == context::no_id();
+    let source_is_void: bool = source_return == context::no_id();
+    if (stored_is_void || source_is_void) {
+        return stored_is_void && source_is_void;
+    }
+    let source_parameters_id: usize = generics::parameters_node(context, unit_index, source);
+    let source_parameters: syntax::SyntaxNode = context::node(context, unit_index, source_parameters_id);
+    return generic_patterns_match(context, declaration, stored_return, unit_index, source_parameters, source_return, 0);
+}
+
+fn bind_inferred_type(inference: *Inference, position: usize, type_id: usize) -> bool {
+    if (inference == null || position >= inference->count) {
+        return false;
+    }
+    if (inference->arguments[position] == context::no_id()) {
+        inference->arguments[position] = type_id;
+        return true;
+    }
+    return inference->arguments[position] == type_id;
+}
+
+fn unify_generic_pattern(
+    context: *context::Context, declaration: generic_model::Declaration,
+    unit_index: usize, pattern: syntax::SyntaxNode, actual_type: usize, inference: *Inference, depth: usize) -> bool {
+    let instance_id: usize = generic_model::instance_for_type(context->generics, actual_type);
+    if (instance_id == context::no_id() || pattern.child_count != 2) {
+        return false;
+    }
+    let base: syntax::SyntaxNode = context::node(context, unit_index, pattern.first_child);
+    let symbol_id: usize = names::lookup_qualified_symbol(
+        context, unit_index, base, context::SymbolKind.generic_type, false);
+    if (symbol_id == context::no_id()) {
+        return false;
+    }
+    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let instances: *const generic_model::Instance = context->generics.instances.data as
+            *const generic_model::Instance;
+    let arguments: *const usize = context->generics.arguments.data as *const usize;
+    let actual: generic_model::Instance = instances[instance_id];
+    if (actual.declaration_id != symbols[symbol_id].type_id) {
+        return false;
+    }
+    let pattern_arguments: syntax::SyntaxNode = context::node(context, unit_index, base.next_sibling);
+    if (pattern_arguments.child_count != actual.argument_count) {
+        return false;
+    }
+    var child: usize = pattern_arguments.first_child;
+    for (var index: usize = 0; index < actual.argument_count; index += 1) {
+        if (!unify_pattern(
+                context, declaration, unit_index, child,
+                arguments[actual.first_argument + index], inference, depth + 1)) {
+            return false;
+        }
+        child = context::node(context, unit_index, child).next_sibling;
+    }
+    return true;
+}
+
+fn unify_array_pattern(
+    context: *context::Context, declaration: generic_model::Declaration,
+    unit_index: usize, pattern: syntax::SyntaxNode, actual: type_info::Record,
+    inference: *Inference, depth: usize) -> bool {
+    if (actual.kind != type_info::Kind.array || pattern.child_count != 2) {
+        return false;
+    }
+    let count_node: syntax::SyntaxNode = context::node(context, unit_index, pattern.first_child);
+    if (count_node.kind != syntax::SyntaxKind.integer_expression) {
+        return false;
+    }
+    var count: u64 = 0;
+    let count_is_valid: bool = context::parse_unsigned(context, unit_index, count_node.token_index, &count);
+    if (!count_is_valid || count != actual.element_count as u64) {
+        return false;
+    }
+    return unify_pattern(
+        context, declaration, unit_index, count_node.next_sibling, actual.element_type, inference, depth + 1);
+}
+
+fn unify_function_pattern(
+    context: *context::Context, declaration: generic_model::Declaration,
+    unit_index: usize, pattern: syntax::SyntaxNode, actual: type_info::Record,
+    inference: *Inference, depth: usize) -> bool {
+    let expected_kind: type_info::Kind = pattern.kind == syntax::SyntaxKind.type_method_function ?
+        type_info::Kind.bound_method : type_info::Kind.function_pointer;
+    if (actual.kind != expected_kind) {
+        return false;
+    }
+    let has_return: bool = (pattern.flags & (syntax::SyntaxFlag.has_return_type as usize)) != 0;
+    let parameter_count: usize = has_return ? pattern.child_count - 1 : pattern.child_count;
+    if (parameter_count != actual.field_count) {
+        return false;
+    }
+    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    var child: usize = pattern.first_child;
+    for (var index: usize = 0; index < parameter_count; index += 1) {
+        if (!unify_pattern(
+                context, declaration, unit_index, child,
+                fields[actual.first_field + index].type_id, inference, depth + 1)) {
+            return false;
+        }
+        child = context::node(context, unit_index, child).next_sibling;
+    }
+    let expected_return: usize = has_return ? actual.element_type : type_info::BuiltinType.type_void as usize;
+    return has_return ? unify_pattern(context, declaration, unit_index, child, expected_return, inference, depth + 1) :
+        actual.element_type == expected_return;
+}
+
+fn unify_pattern(
+    context: *context::Context, declaration: generic_model::Declaration,
+    unit_index: usize, pattern_id: usize, actual_type: usize, inference: *Inference, depth: usize) -> bool {
+    if (depth >= context::Limit.maximum_generic_depth as usize || actual_type >= context->types.type_count) {
+        return false;
+    }
+    let pattern: syntax::SyntaxNode = context::node(context, unit_index, pattern_id);
+    if (pattern.kind == syntax::SyntaxKind.type_named && pattern.child_count == 0) {
+        let position: usize = generic_parameter_position(context, declaration, unit_index, pattern.token_index);
+        if (position != context::no_id()) {
+            return bind_inferred_type(inference, position, actual_type);
+        }
+    }
+    let actual: type_info::Record = context::type_record(context, actual_type);
+    switch (pattern.kind) {
+    case syntax::SyntaxKind.type_pointer {
+        if (actual.kind != type_info::Kind.pointer || pattern.child_count != 1) {
+            return false;
+        }
+        let qualifier_mask: usize = (type_info::Flag.read_only as usize) | (type_info::Flag.volatile_pointee as usize);
+        let pattern_qualifiers: usize = pattern.flags &
+            ((syntax::SyntaxFlag.read_only as usize) | (syntax::SyntaxFlag.volatile_ as usize));
+        let actual_qualifiers: usize = actual.flags & qualifier_mask;
+        let expected_qualifiers: usize = ((pattern_qualifiers & (syntax::SyntaxFlag.read_only as usize)) != 0 ?
+                type_info::Flag.read_only as usize : 0) |
+            ((pattern_qualifiers & (syntax::SyntaxFlag.volatile_ as usize)) != 0 ?
+                type_info::Flag.volatile_pointee as usize : 0);
+        return actual_qualifiers == expected_qualifiers && unify_pattern(
+            context, declaration, unit_index, pattern.first_child, actual.element_type, inference, depth + 1);
+    }
+    case syntax::SyntaxKind.type_array {
+        return unify_array_pattern(context, declaration, unit_index, pattern, actual, inference, depth);
+    }
+    case syntax::SyntaxKind.type_function, syntax::SyntaxKind.type_method_function {
+        return unify_function_pattern(context, declaration, unit_index, pattern, actual, inference, depth);
+    }
+    case syntax::SyntaxKind.type_generic {
+        return unify_generic_pattern(context, declaration, unit_index, pattern, actual_type, inference, depth);
+    }
+    default {
+        return types::resolve_type_node(context, unit_index, pattern_id) == actual_type;
+    }
+    }
+}
+
+fn explicit_inference(
+    context: *context::Context, declaration: generic_model::Declaration,
+    unit_index: usize, arguments_node: usize) -> Inference {
+    let arguments: syntax::SyntaxNode = context::node(context, unit_index, arguments_node);
+    var result: Inference = empty_inference(declaration.parameter_count);
+    if (arguments.kind != syntax::SyntaxKind.generic_arguments ||
+        arguments.child_count != declaration.parameter_count) {
+        result.status = InferenceStatus.no_match;
+        return result;
+    }
+    var child: usize = arguments.first_child;
+    for (var index: usize = 0; index < declaration.parameter_count; index += 1) {
+        let type_id: usize = types::resolve_type_node(context, unit_index, child);
+        if (type_id == context::no_id()) {
+            result.status = InferenceStatus.no_match;
+            return result;
+        }
+        result.arguments[index] = type_id;
+        child = context::node(context, unit_index, child).next_sibling;
+    }
+    return result;
+}
+
+fn inferred_arguments_are_complete(inference: Inference) -> bool {
+    for (var index: usize = 0; index < inference.count; index += 1) {
+        if (inference.arguments[index] == context::no_id()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn inferred_inference(
+    context: *context::Context, declaration: generic_model::Declaration,
+    call_node: syntax::SyntaxNode, actual_types: *const usize, actual_count: usize) -> Inference {
+    let source: syntax::SyntaxNode = context::node(context, declaration.unit_index, declaration.node_index);
+    var parameter_count: usize = 0;
+    var return_node: usize = context::no_id();
+    var body_node: usize = context::no_id();
+    if (!function_parts(
+            context, declaration.unit_index, source, &parameter_count, &return_node, &body_node)) {
+        var invalid: Inference = empty_inference(declaration.parameter_count);
+        invalid.status = InferenceStatus.no_match;
+        return invalid;
+    }
+    let profile: DefaultProfile = function_default_profile(context, declaration.unit_index, source, parameter_count);
+    let arity_is_valid: bool = actual_count >= profile.required_parameter_count && actual_count <= parameter_count;
+    var result: Inference = empty_inference(declaration.parameter_count);
+    if (!arity_is_valid) {
+        result.status = InferenceStatus.no_match;
+        return result;
+    }
+    var parameter_node: usize = first_parameter_node(context, declaration.unit_index, source);
+    for (var index: usize = 0; index < actual_count; index += 1) {
+        let parameter: syntax::SyntaxNode = context::node(context, declaration.unit_index, parameter_node);
+        if (actual_types[index] != context::no_id() && !unify_pattern(
+                context, declaration, declaration.unit_index, parameter.first_child, actual_types[index], &result, 0)) {
+            result.status = InferenceStatus.no_match;
+            return result;
+        }
+        parameter_node = parameter.next_sibling;
+    }
+    if (!inferred_arguments_are_complete(result)) {
+        result.status = InferenceStatus.no_match;
+    }
+    return result;
+}
+
+fn generic_declaration_is_visible(context: *context::Context, declaration: generic_model::Declaration) -> bool {
+    let current_module: usize = names::unit_module(context, context->current_unit);
+    if (current_module == declaration.module_id) {
+        return true;
+    }
+    return (declaration.flags & (syntax::SyntaxFlag.exported as usize)) != 0;
+}
+
+fn instantiate_generic_function(
+    context: *context::Context, declaration_id: usize, arguments: *const usize,
+    argument_count: usize, request: syntax::SyntaxNode) -> usize {
+    let existing: usize = generic_model::find_instance(
+        context->generics, declaration_id, callable::no_owner(), arguments, argument_count);
+    if (existing != context::no_id()) {
+        let instances: *const generic_model::Instance = context->generics.instances.data as
+                *const generic_model::Instance;
+        return instances[existing].state == generic_model::InstanceState.failed ?
+            context::no_id() : instances[existing].function_id;
+    }
+    if (context->generics.instance_count >= context::Limit.maximum_generic_instances as usize) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.generic_resource_limit,
+            context->current_unit, request.span, context::no_id(), context::empty_span(),
+            context->generics.instance_count);
+        return context::no_id();
+    }
+    let parent_id: usize = generic_model::instance_for_function(context->generics, context->current_function);
+    let instances: *const generic_model::Instance = context->generics.instances.data as
+            *const generic_model::Instance;
+    let expansion_depth: usize = parent_id == context::no_id() ? 0 : instances[parent_id].expansion_depth + 1;
+    if (expansion_depth >= context::Limit.maximum_generic_depth as usize) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.generic_resource_limit,
+            context->current_unit, request.span, context::no_id(), context::empty_span(), expansion_depth);
+        return context::no_id();
+    }
+    let created: generic_model::InstanceResult = generic_model::append_instance(
+        &context->generics, declaration_id, callable::no_owner(), arguments, argument_count, expansion_depth);
+    context->error = created.error;
+    if (created.error != runtime::Error.none) {
+        return context::no_id();
+    }
+    let mark: usize = generics::activate_instance(context, created.instance_id);
+    if (mark == context::no_id()) {
+        return context::no_id();
+    }
+    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
+            *const generic_model::Declaration;
+    let declaration: generic_model::Declaration = declarations[declaration_id];
+    let source: syntax::SyntaxNode = context::node(context, declaration.unit_index, declaration.node_index);
+    var parameter_count: usize = 0;
+    var return_node: usize = context::no_id();
+    var body_node: usize = context::no_id();
+    function_parts(context, declaration.unit_index, source, &parameter_count, &return_node, &body_node);
+    let defaults: DefaultProfile = function_default_profile(context, declaration.unit_index, source, parameter_count);
+    let diagnostic_start: usize = context->diagnostics.count;
+    let function_id: usize = add_function_declaration(
+        context, callable::free_function(), declaration.module_id,
+        declaration.unit_index, declaration.node_index, source, false, defaults);
+    if (function_id != context::no_id()) {
+        let functions_data: *context::Function = context->functions.data as *context::Function;
+        let symbols: *context::Symbol = context->symbols.data as *context::Symbol;
+        let exported_flags: usize = (context::SymbolFlag.exported as usize) |
+            (context::SymbolFlag.interface_declaration as usize);
+        functions_data[function_id].binding_id = declaration.binding_id;
+        functions_data[function_id].flags &= ~exported_flags;
+        symbols[functions_data[function_id].symbol_id].flags &= ~exported_flags;
+    }
+    let successful: bool = function_id != context::no_id() && context->diagnostics.count == diagnostic_start;
+    let state: generic_model::InstanceState = successful ?
+        generic_model::InstanceState.resolving : generic_model::InstanceState.failed;
+    let result_function: usize = successful ? function_id : context::no_id();
+    let state_error: runtime::Error = generic_model::set_instance_result(
+        &context->generics, created.instance_id, context::no_id(), result_function, state);
+    generics::restore_active_bindings(context, mark);
+    if (context->error == runtime::Error.none) {
+        context->error = state_error;
+    }
+    if (!successful || context->error != runtime::Error.none) {
+        return context::no_id();
+    }
+    return build_instance_signature(context, function_id) ? function_id : context::no_id();
+}
+
+fn collect_argument_types(
+    context: *context::Context, call_node: syntax::SyntaxNode,
+    probe: ArgumentTypeProbe, output: *bytes::Buffer) -> bool {
+    if (probe == null || output == null) {
+        return false;
+    }
+    if (call_node.child_count == 0) {
+        return false;
+    }
+    let callee: syntax::SyntaxNode = context::node(context, context->current_unit, call_node.first_child);
+    var child: usize = callee.next_sibling;
+    for (var index: usize = 1; index < call_node.child_count; index += 1) {
+        let type_id: usize = probe(context, child, context::no_id());
+        let appended: bytes::BufferResult = bytes::append(
+            *output, (&type_id) as *const usize as *const u8, sizeof(usize));
+        *output = appended.buffer;
+        context->error = appended.error;
+        if (appended.error != runtime::Error.none) {
+            return false;
+        }
+        child = context::node(context, context->current_unit, child).next_sibling;
+    }
+    return true;
+}
+
+fn resolve_generic_call(
+    context: *context::Context, binding_id: usize, call_node: syntax::SyntaxNode,
+    explicit_arguments: usize, probe: ArgumentTypeProbe) -> GenericResolution {
+    if (binding_id >= context->binding_count) {
+        return {status = GenericResolutionStatus.invalid, function_id = context::no_id()};
+    }
+    var actual_types: bytes::Buffer = bytes::empty();
+    if (!collect_argument_types(context, call_node, probe, &actual_types)) {
+        bytes::release(actual_types);
+        return {status = GenericResolutionStatus.invalid, function_id = context::no_id()};
+    }
+    let actual_count: usize = actual_types.length / sizeof(usize);
+    let actual: *const usize = actual_types.data as *const usize;
+    let bindings: *const context::Binding = context->bindings.data as *const context::Binding;
+    let binding: context::Binding = bindings[binding_id];
+    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
+            *const generic_model::Declaration;
+    var selected_declaration: usize = context::no_id();
+    var selected: Inference = empty_inference(0);
+    var match_count: usize = 0;
+    for (var index: usize = 0; index < binding.generic_candidate_count; index += 1) {
+        let declaration_id: usize = generic_binding_candidate(context, binding_id, index);
+        let declaration: generic_model::Declaration = declarations[declaration_id];
+        if (!generic_declaration_is_visible(context, declaration)) {
+            continue;
+        }
+        let inference: Inference = explicit_arguments == context::no_id() ?
+            inferred_inference(context, declaration, call_node, actual, actual_count) :
+            explicit_inference(context, declaration, context->current_unit, explicit_arguments);
+        if (inference.status == InferenceStatus.match) {
+            selected_declaration = declaration_id;
+            selected = inference;
+            match_count += 1;
+        }
+    }
+    let release_error: runtime::Error = bytes::release(actual_types);
+    if (context->error == runtime::Error.none) {
+        context->error = release_error;
+    }
+    if (context->error != runtime::Error.none) {
+        return {status = GenericResolutionStatus.invalid, function_id = context::no_id()};
+    }
+    if (match_count == 0) {
+        return {status = GenericResolutionStatus.no_match, function_id = context::no_id()};
+    }
+    if (match_count != 1) {
+        return {status = GenericResolutionStatus.ambiguous, function_id = context::no_id()};
+    }
+    let function_id: usize = instantiate_generic_function(
+        context, selected_declaration, &selected.arguments[0] as *const usize, selected.count, call_node);
+    return function_id == context::no_id() ?
+        {status = GenericResolutionStatus.invalid, function_id = context::no_id()} :
+        {status = GenericResolutionStatus.selected, function_id = function_id};
+}
+
+fn function_value_inference(
+    context: *context::Context, declaration: generic_model::Declaration, target: type_info::Record) -> Inference {
+    let source: syntax::SyntaxNode = context::node(context, declaration.unit_index, declaration.node_index);
+    var parameter_count: usize = 0;
+    var return_node: usize = context::no_id();
+    var body_node: usize = context::no_id();
+    var result: Inference = empty_inference(declaration.parameter_count);
+    if (!function_parts(
+            context, declaration.unit_index, source, &parameter_count, &return_node, &body_node)) {
+        result.status = InferenceStatus.no_match;
+        return result;
+    }
+    if (parameter_count != target.field_count) {
+        result.status = InferenceStatus.no_match;
+        return result;
+    }
+    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    var parameter_node: usize = first_parameter_node(context, declaration.unit_index, source);
+    for (var index: usize = 0; index < parameter_count; index += 1) {
+        let parameter: syntax::SyntaxNode = context::node(context, declaration.unit_index, parameter_node);
+        if (!unify_pattern(
+                context, declaration, declaration.unit_index, parameter.first_child,
+                fields[target.first_field + index].type_id, &result, 0)) {
+            result.status = InferenceStatus.no_match;
+            return result;
+        }
+        parameter_node = parameter.next_sibling;
+    }
+    if (!inferred_arguments_are_complete(result)) {
+        result.status = InferenceStatus.no_match;
+    }
+    return result;
+}
+
+fn instantiated_function_matches_type(
+    context: *context::Context, function_id: usize, target: type_info::Record) -> bool {
+    if (function_id >= context->function_count) {
+        return false;
+    }
+    let functions_data: *const context::Function = context->functions.data as *const context::Function;
+    let function: context::Function = functions_data[function_id];
+    if (function.parameter_count != target.field_count || function.return_type != target.element_type) {
+        return false;
+    }
+    let parameters: *const context::Parameter = context->parameters.data as *const context::Parameter;
+    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    for (var index: usize = 0; index < function.parameter_count; index += 1) {
+        if (parameters[function.first_parameter + index].type_id != fields[target.first_field + index].type_id) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn resolve_generic_function_value(
+    context: *context::Context, binding_id: usize,
+    request: syntax::SyntaxNode, expected_type: usize) -> GenericResolution {
+    if (binding_id >= context->binding_count || expected_type >= context->types.type_count) {
+        return {status = GenericResolutionStatus.invalid, function_id = context::no_id()};
+    }
+    let target: type_info::Record = context::type_record(context, expected_type);
+    if (target.kind != type_info::Kind.function_pointer) {
+        return {status = GenericResolutionStatus.no_match, function_id = context::no_id()};
+    }
+    let bindings: *const context::Binding = context->bindings.data as *const context::Binding;
+    let binding: context::Binding = bindings[binding_id];
+    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
+            *const generic_model::Declaration;
+    var selected_declaration: usize = context::no_id();
+    var selected: Inference = empty_inference(0);
+    var match_count: usize = 0;
+    for (var index: usize = 0; index < binding.generic_candidate_count; index += 1) {
+        let declaration_id: usize = generic_binding_candidate(context, binding_id, index);
+        let declaration: generic_model::Declaration = declarations[declaration_id];
+        if (!generic_declaration_is_visible(context, declaration)) {
+            continue;
+        }
+        let inference: Inference = function_value_inference(context, declaration, target);
+        if (inference.status == InferenceStatus.match) {
+            selected_declaration = declaration_id;
+            selected = inference;
+            match_count += 1;
+        }
+    }
+    if (match_count == 0) {
+        return {status = GenericResolutionStatus.no_match, function_id = context::no_id()};
+    }
+    if (match_count != 1) {
+        return {status = GenericResolutionStatus.ambiguous, function_id = context::no_id()};
+    }
+    let function_id: usize = instantiate_generic_function(
+        context, selected_declaration, &selected.arguments[0] as *const usize, selected.count, request);
+    if (!instantiated_function_matches_type(context, function_id, target)) {
+        return {status = GenericResolutionStatus.no_match, function_id = context::no_id()};
+    }
+    return {status = GenericResolutionStatus.selected, function_id = function_id};
+}

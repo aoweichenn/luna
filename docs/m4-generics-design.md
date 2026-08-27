@@ -8,6 +8,11 @@ lifetime, copy/move hooks and destruction. The older uppercase M4 in
 `roadmap.md` is the archived Luna 0 self-hosting milestone and is unrelated to
 this phase.
 
+The language and compiler implementation are complete behind the 409-case
+suite and a byte-identical fixed point. The checked-in anchor remains the M3.6
+toolchain until this source state is committed and promoted; compiler sources
+therefore do not yet adopt generic declarations themselves.
+
 M4 provides static, zero-runtime-cost generic functions and nominal generic
 types. It is designed for reusable containers, algorithms and standard-library
 utilities, including the later ordinary implementation of
@@ -24,9 +29,10 @@ name lookup or compile-time template language.
    emitted. The backend and System V ABI see only existing concrete Luna types.
 2. **No runtime generic representation.** There are no dictionaries, boxed
    values, hidden type descriptors, dynamic dispatch or generic IR opcodes.
-3. **Definition-time contracts.** Non-dependent names and every operation that
-   is not universally valid are checked at the generic definition. An invalid
-   selected instance is a hard diagnostic, never a candidate-discarding rule.
+3. **Hard selected-instance diagnostics.** Non-dependent names bind in the
+   definition environment; dependent operations are checked only after exact
+   substitution. An invalid selected instance is a hard diagnostic, never a
+   candidate-discarding rule.
 4. **Exact inference.** Type inference is structural and exact. It performs no
    numeric, pointer, inheritance or user-defined conversion and never ranks
    approximate matches.
@@ -43,16 +49,19 @@ name lookup or compile-time template language.
 The core grammar additions are:
 
 ```text
-TypeParameters       ::= "<" Identifier { "," Identifier } ">"
-TypeArguments        ::= "<" Type { "," Type } ">"
-GenericType          ::= QualifiedIdentifier TypeArguments
-ExplicitGenericName ::= QualifiedIdentifier "::" TypeArguments
-GenericImpl          ::= "impl" TypeParameters GenericType "{" MethodDefinition* "}"
+TypeParameters ::= "<" Identifier { "," Identifier } ">"
+TypeArguments  ::= "<" Type { "," Type } ">"
+GenericType    ::= QualifiedIdentifier TypeArguments
+GenericName    ::= QualifiedIdentifier TypeArguments
+GenericImpl    ::= "impl" QualifiedIdentifier "{" MethodDefinition* "}"
 ```
 
-`ExplicitGenericName` is the expression form used for calls, constructors and
-static-member access. A member call appends the same `::<...>` form after the
-member name, for example `object.convert::<u64>(value)`.
+Type parameters follow the name of the declaration they parameterize. The use
+site keeps C++'s familiar `name<T>` form without adding `template`, `typename`
+or a second generic keyword. Module qualification remains Luna's existing
+`utility::name<T>` form. Methods of a generic class use the owner's parameters
+and retain ordinary calls such as `cell.get()`; M4 does not add method-local
+type parameters.
 
 ### Generic declarations
 
@@ -87,7 +96,7 @@ export class Cell<Value> {
     pub fn replace(value: Value) -> Value;
 }
 
-impl<Value> Cell<Value> {
+impl Cell {
     init(value: Value)
         : value = value {
     }
@@ -104,8 +113,8 @@ impl<Value> Cell<Value> {
 }
 ```
 
-`<...>` is unambiguous after a declaration name or in a type position. No
-`template`, `typename` or `generic` keyword is added. A type parameter is a
+`impl Cell` reopens the generic owner and brings its declared type parameters
+into scope; Luna has no specialization-specific `impl`. A type parameter is a
 type-only binding and cannot be used as a value.
 
 ### Type use and calls
@@ -114,14 +123,14 @@ Concrete generic types always spell every type argument:
 
 ```luna
 let pair: Pair<i32, bool> = {first = 42, second = true};
-var cell: Cell<i32> = Cell::<i32>(42);
+var cell: Cell<i32> = Cell<i32>(42);
 let callback: Callback<i32, bool> = is_positive;
 ```
 
 Luna does not perform class-template argument deduction. A constructor call
 such as `Cell(42)` is invalid because `Cell` names a generic declaration, not a
-type. Type positions use `Cell<i32>`; expression positions use the explicit
-`Cell::<i32>` specialization form before construction or static-member access.
+type. Both type and expression positions use the ordinary `Cell<i32>` generic
+specialization form.
 
 Generic function calls normally infer arguments from supplied value
 arguments:
@@ -130,44 +139,54 @@ arguments:
 let answer: i32 = identity(42);
 ```
 
-Explicit type arguments use `::<...>`, preserving an unambiguous expression
-grammar around `<` and `>`:
+Explicit type arguments use the C++ spelling directly after the name:
 
 ```luna
-let wide: i64 = identity::<i64>(42);
-let other: i64 = utility::identity::<i64>(42);
+let wide: i64 = identity<i64>(42);
+let other: i64 = utility::identity<i64>(42);
 ```
 
 Type arguments are all explicit or all inferred in M4. Partial explicit
 argument lists and default type arguments are not supported.
 
-The type-argument parser treats a `shift_right` token as two closing `>`
-delimiters only while it owns nested generic-type contexts. It records the
-remaining close delimiter in its type cursor without mutating the token buffer;
-ordinary expression parsing continues to see `>>` as one shift operator.
+In a type position or directly after a declaration name, `<...>` is
+unconditionally generic. In an expression, a side-effect-free syntax probe
+recognizes a generic ID only
+when a name/member plus a valid type-argument list is followed by a call or
+member-access postfix. A context-typed `&name` may infer a generic function
+from the function pointer's parameter types. If the bounded call probe fails,
+the ordinary comparison grammar consumes `<` and `>` instead. No semantic
+lookup or dependent parsing enters the parser.
 
-### Generic methods
+The type-argument cursor treats a `shift_right` token as two closing `>`
+delimiters only while it owns nested generic contexts. It records the remaining
+close delimiter without mutating the token buffer; ordinary expression parsing
+continues to see `>>` as one shift operator.
 
-A non-virtual method, static method or constructor may introduce an additional
-type-parameter list:
+### Methods of generic classes
+
+Constructors and ordinary methods use their owner's type parameters directly:
 
 ```luna
 export class Converter<Target> {
-    pub static fn retain<Source>(value: Source) -> Source;
+    pub init(value: Target);
+    pub fn retain(value: Target) -> Target;
 }
 
-impl<Target> Converter<Target> {
-    static fn retain<Source>(value: Source) -> Source {
+impl Converter {
+    init(value: Target) {
+    }
+
+    fn retain(value: Target) -> Target {
         return value;
     }
 }
 ```
 
-The owner parameters precede the method parameters in canonical identity.
-Generic virtual, abstract and override methods are rejected: an open-ended set
-of method instances cannot occupy a finite vtable. A generic class
-specialization may still have ordinary non-generic virtual methods because its
-vtable is concrete and finite.
+M4 does not let a method introduce another type-parameter list. That separate
+feature needs owner-parameter plus method-parameter inference, declaration/body
+matching and bound-method selection; it is not required by containers or the
+later `utility::move`.
 
 ## Declaration model
 
@@ -190,10 +209,9 @@ the declaration.
 
 M4 accepts type parameters on:
 
-- free functions and `const fn` after the const evaluator supports concrete
-  instances;
+- free functions;
 - structures, unions, classes and transparent type aliases;
-- constructors and non-virtual methods.
+- class-level parameters used by constructors and ordinary direct methods.
 
 M4 rejects them on:
 
@@ -261,7 +279,7 @@ fn first<T>(values: *const T, fallback: T) -> T;
 fn from_pointer<T>(value: *const T) -> T;
 
 let a: i32 = first(&values[0], 0);          // T 推导为 i32。
-let b: i64 = first::<i64>(&wide[0], 0);     // 整数字面量获得 i64 上下文。
+let b: i64 = first<i64>(&wide[0], 0);       // 整数字面量获得 i64 上下文。
 let c: i32 = first(null, 0);                // fallback 独立确定 T 为 i32。
 let d: i32 = from_pointer(null);             // 错误：null 无法独立确定 T。
 ```
@@ -293,7 +311,7 @@ generic-pattern partial ordering. For a pointer argument, `fn use<T>(T)` and
 or the caller must select a declaration whose explicit type arguments make the
 set unique.
 
-Explicit `::<...>` calls consider only generic declarations of the requested
+Explicit `<...>` calls consider only generic declarations of the requested
 arity. Return type remains outside overload identity and selection. Defaults
 are inserted only after one concrete callable instance has been selected, as
 in M2.
@@ -309,36 +327,28 @@ SFINAE.
 
 ## Definition checking
 
-Generic declarations are parsed, bound and structurally checked once in their
-lexical definition environment. Instantiation never repeats unqualified name
-lookup in the caller.
+Generic declarations are parsed, registered and structurally checked once. A
+selected concrete instance is checked in the declaration's lexical definition
+environment; instantiation never performs unqualified lookup in the caller.
 
-An unconstrained type parameter supports only operations defined for every
-concrete value type admitted at that position:
-
-- exact initialization from another `T` value;
-- exact assignment to a writable `T` object;
-- parameter passing and return;
-- taking an address and forming pointer/array/function patterns;
-- storage inside a known aggregate or class pattern;
-- dependent `sizeof`/`alignof`, resolved after substitution.
-
-Arithmetic, comparison, member selection, calls through a `T`, arbitrary
-casts and operator lookup on a bare type parameter are rejected at the generic
-definition. M4 does not defer arbitrary source expressions and hope that some
-future argument makes them valid.
+Non-dependent module and declaration names therefore have definition-site
+meaning. Operations whose operands depend on `T` are checked against the
+selected concrete types during instantiation. Failure is reported at the call
+selected concrete types during instantiation. Failure remains attached to the
+selected specialization; it does not remove the candidate or retry overload
+resolution.
 
 A generic body may call another known generic declaration with explicit
 symbolic type arguments:
 
 ```luna
 fn second<T>(value: T) -> T {
-    return identity::<T>(value);
+    return identity<T>(value);
 }
 ```
 
-Non-dependent module and function names resolve at the definition. Lookup
-never searches declarations from the instantiating module. User-defined
+Non-dependent module and function names resolve against the definition unit.
+Lookup never searches declarations from the instantiating module. User-defined
 capability constraints or concepts are a later, separate design; they will
 extend the operations admitted on `T` without changing M4 concrete
 substitution or runtime representation.
@@ -356,8 +366,8 @@ M4 makes this source boundary explicit:
 
 - an exported generic function definition has its body in the module
   interface;
-- the bodies of an exported generic class specialization live in
-  `impl<...>` blocks in that interface;
+- the bodies of an exported generic class specialization live in its
+  `impl ClassName` blocks in that interface;
 - a private generic declaration may live in an implementation unit and may be
   instantiated only while compiling that module;
 - a non-generic exported declaration retains the existing bodyless-interface
@@ -477,20 +487,21 @@ instance state and lowering in one generic manager:
   substitution, request and instance-state records;
 - the semantic `Context` owns their checked contiguous stores and canonical
   key storage;
-- `types/generics.la` is a same-module implementation split for pattern
-  substitution, concrete type specialization and layout requests;
+- the lower `semantic.generics` service owns declaration validation and active
+  substitution views;
+- the existing `types` implementation owns concrete type specialization and
+  activates the corresponding view during layout;
 - `functions/generics.la` is a same-module implementation split for generic
   declarations, exact unification and concrete callable signatures;
-- `expr/probe/generics.la` is a same-module implementation split for
-  side-effect-free candidate inference;
-- a high-level `semantic.generics` pass after statement services plans the
-  reachable instance graph and schedules canonical lowering for `sema`.
+- `expr/probe/call.la` keeps candidate inference side-effect-free, then creates
+  only the uniquely selected concrete function;
+- statement lowering visits the canonical ordinary roots first and then the
+  bounded concrete-instance worklist, including instances discovered by other
+  instances.
 
-The high-level pass hands recursive planning/lowering entry points downward as
-function pointers, following the existing `Lowerer` boundary. A lower
-submodule never imports its parent facade. Every new module or implementation
-path is registered once in `LIBRARIES`; import-derived ordering remains the
-build authority.
+A lower submodule never imports its parent facade. Every new module or
+implementation path is registered once in `LIBRARIES`; import-derived ordering
+remains the build authority.
 
 ## Generic classes and M3 interaction
 
@@ -499,16 +510,13 @@ Every concrete generic class is an ordinary M3 class specialization:
 - fields are substituted before declaration-order layout;
 - constructor member initialization uses the substituted field types;
 - class-containing generic fields participate in M3.6 composition rules;
-- a generic class may derive from a concrete base specialization;
-- ordinary virtual methods receive one finite vtable per concrete class
-  specialization;
-- bound methods point at concrete method instances;
-- opaque generic classes remain pointer-only outside their defining module.
+- direct constructors and ordinary methods are materialized per specialization;
+- bound methods may select those already-concrete ordinary methods.
 
-Generic method parameters are permitted only on non-virtual methods. Generic
-friend declarations, partial class specialization and specialization-specific
-member sets are excluded. Every specialization has the same declared members
-and access policy after substitution.
+Generic inheritance, virtual methods, RTTI, opaque generic classes, method-local
+type parameters and generic friendship are rejected in M4. Every accepted
+specialization has the same declared members and access policy after
+substitution.
 
 An `@rtti` generic class is rejected in M4. Current M3 RTTI deliberately uses
 one descriptor address as canonical runtime identity, while M4 permits private
@@ -569,17 +577,15 @@ M4 adds stable diagnostics for at least:
 - missing, excess or conflicting type arguments;
 - failure to infer every required type parameter;
 - ambiguous generic overload;
-- unsupported operation on an unconstrained parameter;
 - invalid concrete substituted type use;
 - recursive generic expansion and generic resource exhaustion;
 - invalid generic virtual/extern/asm/variadic declaration;
-- exported generic body depending on an implementation-only declaration;
-- internal duplicate canonical instance or substitution invariant failure.
+- exported generic body depending on an implementation-only declaration.
 
-An instantiation failure points primarily at the request and relates the
-generic declaration. Nested failures emit a deterministic outer-to-inner
-instance trail bounded by the diagnostic-frame limit. The first diagnostic
-kind remains stable for `FAIL <diagnostic-kind>` tests.
+Selection, arity and resource failures point at the request; errors discovered
+while lowering a selected body point at the definition source. M4 does not add
+an instantiation backtrace. The first diagnostic kind remains stable for
+`FAIL <diagnostic-kind>` tests.
 
 ## M4 delivery sequence
 
@@ -596,7 +602,7 @@ anchor promotion before compiler sources adopt its syntax.
 
 ### M4.1: generic free functions
 
-- inferred and explicit `::<...>` calls;
+- inferred and explicit `<...>` calls;
 - M2 overload/default/function-pointer integration;
 - definition checking and exported interface bodies;
 - canonical instance planning and concrete IR emission;
@@ -611,11 +617,11 @@ anchor promotion before compiler sources adopt its syntax.
 
 ### M4.3: generic classes and methods
 
-- class fields, constructors and non-virtual generic methods;
-- generic composition and bases;
-- concrete virtual tables and bound methods;
-- opaque generic class pointer boundaries;
-- rejection of generic virtual methods, generic RTTI and generic friendship.
+- class fields, constructors and ordinary direct methods;
+- generic class-value composition;
+- concrete bound-method selection;
+- rejection of method-local parameters, generic inheritance, virtual methods,
+  RTTI, opaque classes and friendship.
 
 ### M4.4: standard-library proving ground
 
@@ -638,8 +644,8 @@ automatic cleanup begin only after M4 is complete.
 - private same-module and exported cross-module generic definitions;
 - interface/implementation and source-unit permutation determinism;
 - generic structures, unions, aliases and nested aggregate initialization;
-- generic class construction, composition, inheritance, virtual dispatch,
-  opaque pointers and bound methods;
+- generic class construction, composition and ordinary bound methods;
+- generic inheritance, virtual method, opaque-class and friendship rejection;
 - generic RTTI rejection across direct and imported specializations;
 - exact System V parameter/result classification of concrete instances;
 - canonical identity across aliases and distinct declaring modules;
@@ -658,6 +664,8 @@ automatic cleanup begin only after M4 is complete.
 - user-defined constraints, concepts and compile-time reflection;
 - dependent unqualified lookup and ADL;
 - class-template argument deduction;
+- method-local type parameters and generic `const fn`;
+- generic inheritance, virtual methods, opaque classes and friendship;
 - RTTI-enabled generic class hierarchies;
 - runtime dictionaries, boxed universal values and type erasure;
 - generic C ABI entry points;

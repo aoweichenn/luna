@@ -7,6 +7,8 @@ import luna.bootstrap.middleend.semantic.classes.model as class_model;
 import luna.bootstrap.middleend.semantic.consteval.engine as const_engine;
 import luna.bootstrap.middleend.semantic.consteval.model as const_model;
 import luna.bootstrap.middleend.semantic.context.lookup as names;
+import luna.bootstrap.middleend.semantic.generics.model as generic_model;
+import luna.bootstrap.middleend.semantic.generics;
 import luna.bootstrap.middleend.semantic.types as types;
 import luna.bootstrap.middleend.type as type_info;
 import luna.runtime as runtime;
@@ -36,16 +38,20 @@ fn append_parameter(context: *context::Context, parameter: context::Parameter) -
 }
 
 enum FunctionPartKind: usize {
-    parameter, return_type, initializer, body, asm_body, attribute, invalid,
+    generic_parameters, parameter, return_type, initializer, body, asm_body, attribute, invalid,
 }
 
 fn function_part_kind(node: syntax::SyntaxNode) -> FunctionPartKind {
     switch (node.kind) {
+    case syntax::SyntaxKind.generic_parameters {
+        return FunctionPartKind.generic_parameters;
+    }
     case syntax::SyntaxKind.parameter {
         return FunctionPartKind.parameter;
     }
     case syntax::SyntaxKind.type_builtin, syntax::SyntaxKind.type_named, syntax::SyntaxKind.type_pointer,
-        syntax::SyntaxKind.type_array, syntax::SyntaxKind.type_function, syntax::SyntaxKind.type_method_function {
+        syntax::SyntaxKind.type_array, syntax::SyntaxKind.type_function, syntax::SyntaxKind.type_method_function,
+        syntax::SyntaxKind.type_generic {
         return FunctionPartKind.return_type;
     }
     case syntax::SyntaxKind.constructor_initializer {
@@ -81,6 +87,12 @@ fn function_parts(
         let node: syntax::SyntaxNode = context::node(context, unit_index, child);
         let header_is_open: bool = *return_node == none && *body_node == none;
         switch (function_part_kind(node)) {
+        case FunctionPartKind.generic_parameters {
+            if (!header_is_open || *parameter_count != 0) {
+                context->error = runtime::Error.invalid_argument;
+                return false;
+            }
+        }
         case FunctionPartKind.parameter {
             if (!header_is_open) {
                 context->error = runtime::Error.invalid_argument;
@@ -127,6 +139,16 @@ fn function_parts(
     return true;
 }
 
+fn first_parameter_node(context: *context::Context, unit_index: usize, declaration: syntax::SyntaxNode) -> usize {
+    for (var child: usize = declaration.first_child; child != context::no_id();
+        child = context::node(context, unit_index, child).next_sibling) {
+        if (context::node(context, unit_index, child).kind == syntax::SyntaxKind.parameter) {
+            return child;
+        }
+    }
+    return context::no_id();
+}
+
 fn parameter_name_exists(
     context: *context::Context, function_id: usize, unit_index: usize, name_token: usize) -> usize {
     let parameters: *const context::Parameter = context->parameters.data as
@@ -146,7 +168,7 @@ fn collect_function_parameters(
     expected_parameter_count: usize, defaults_are_enabled: bool) -> bool {
     var functions: *context::Function = context->functions.data as
             *context::Function;
-    var child: usize = declaration.first_child;
+    var child: usize = first_parameter_node(context, unit_index, declaration);
     var defaults_are_valid: bool = true;
     for (var index: usize = 0; index < expected_parameter_count; index += 1) {
         let parameter_node: syntax::SyntaxNode = context::node(context, unit_index, child);
@@ -168,6 +190,9 @@ fn collect_function_parameters(
         let type_id: usize = types::resolve_type_node(context, unit_index, parameter_node.first_child);
         if (type_id != context::no_id()) {
             types::require_opaque_value_access(context, type_id, unit_index, parameter_node.span);
+            if (!types::require_complete_type(context, type_id)) {
+                return false;
+            }
             let type_record: type_info::RecordResult = type_info::table_get(context->types, type_id);
             if (type_record.error != runtime::Error.none) {
                 context->error = type_record.error;
@@ -417,6 +442,7 @@ fn add_function_declaration(
         if (return_type != none) {
             types::require_opaque_value_access(
                 context, return_type, unit_index, context::node(context, unit_index, return_node).span);
+            types::require_complete_type(context, return_type);
         }
         if (return_type != none && (context::type_record(context, return_type).flags &
                 ((type_info::Flag.header as usize) | (type_info::Flag.flexible as usize))) != 0) {
@@ -471,6 +497,83 @@ fn collect_function_declaration(
     }
 }
 
+fn generic_function_form_is_valid(
+    context: *context::Context, unit_index: usize, declaration: syntax::SyntaxNode, interface_unit: bool) -> bool {
+    let exported: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.exported);
+    let bodyless: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.bodyless);
+    let visibility_is_valid: bool = interface_unit ? exported : !exported;
+    let named_export: bool = attributes::declaration_has_attribute(
+        context, unit_index, declaration, attributes::Attribute.export_name);
+    let form_is_valid: bool = visibility_is_valid && !bodyless;
+    if (!form_is_valid || named_export) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_generic_declaration,
+            unit_index, declaration.span, context::no_id(), context::empty_span(), declaration.flags);
+        return false;
+    }
+    return true;
+}
+
+fn generic_name_conflicts(
+    context: *context::Context, module_id: usize, unit_index: usize, declaration: syntax::SyntaxNode) -> usize {
+    let duplicate: usize = names::find_any_local_symbol(context, module_id, unit_index, declaration.token_index);
+    if (duplicate == context::no_id()) {
+        return context::no_id();
+    }
+    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let callable_name: bool = symbols[duplicate].kind == context::SymbolKind.function ||
+        symbols[duplicate].kind == context::SymbolKind.generic_function;
+    return callable_name ? context::no_id() : duplicate;
+}
+
+fn collect_generic_function(
+    context: *context::Context, module_id: usize, unit_index: usize,
+    declaration_id: usize, declaration: syntax::SyntaxNode, interface_unit: bool) {
+    if (!generic_function_form_is_valid(context, unit_index, declaration, interface_unit)) {
+        return;
+    }
+    let conflict: usize = generic_name_conflicts(context, module_id, unit_index, declaration);
+    if (conflict != context::no_id()) {
+        report_function_declaration_conflict(
+            context, context::DiagnosticKind.duplicate_name, unit_index, declaration, conflict);
+        return;
+    }
+    let duplicate_generic: usize = duplicate_generic_function(context, module_id, unit_index, declaration);
+    if (duplicate_generic != context::no_id()) {
+        let declarations: *const generic_model::Declaration = context->generics.declarations.data as
+                *const generic_model::Declaration;
+        let previous: generic_model::Declaration = declarations[duplicate_generic];
+        let result_matches: bool = generic_function_result_matches(context, duplicate_generic, unit_index, declaration);
+        let diagnostic_kind: context::DiagnosticKind = result_matches ?
+            context::DiagnosticKind.duplicate_function : context::DiagnosticKind.signature_mismatch;
+        context::add_diagnostic(
+            context, diagnostic_kind, unit_index, declaration.span,
+            previous.unit_index, context::node(context, previous.unit_index, previous.node_index).span,
+            duplicate_generic);
+        return;
+    }
+    let generic_id: usize = generics::register_declaration(
+        context, generic_model::DeclarationKind.function_declaration,
+        module_id, unit_index, declaration_id, context::no_id());
+    if (generic_id == context::no_id()) {
+        return;
+    }
+    var flags: usize = context::SymbolFlag.none as usize;
+    if (declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.exported)) {
+        flags |= context::SymbolFlag.exported as usize;
+    }
+    if (interface_unit) {
+        flags |= context::SymbolFlag.interface_declaration as usize;
+    }
+    let symbol: context::Symbol = {
+        kind = context::SymbolKind.generic_function, module_id = module_id,
+        declaration_unit = unit_index, declaration_node = declaration_id,
+        name_token = declaration.token_index, type_id = context::no_id(),
+        function_id = generic_id, integer_value = 0, flags = flags,
+    };
+    names::append_symbol(context, symbol);
+}
+
 fn collect_functions_in_unit(
     context: *context::Context, module_id: usize, unit_index: usize, interface_unit: bool) -> bool {
     let none: usize = context::no_id();
@@ -484,6 +587,10 @@ fn collect_functions_in_unit(
         let declaration: syntax::SyntaxNode = context::node(context, unit_index, declaration_id);
         if (declaration.kind == syntax::SyntaxKind.function_declaration && (declaration.flags &
                 (syntax::SyntaxFlag.const_function as usize)) == 0) {
+            if (generics::is_generic(context, unit_index, declaration)) {
+                collect_generic_function(context, module_id, unit_index, declaration_id, declaration, interface_unit);
+                continue;
+            }
             validate_asm_function(context, unit_index, declaration, interface_unit);
             let duplicate_name: usize =
                 names::find_any_local_symbol(context, module_id, unit_index, declaration.token_index);

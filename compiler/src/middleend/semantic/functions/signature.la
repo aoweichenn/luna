@@ -1,7 +1,8 @@
 module luna.bootstrap.middleend.semantic.functions;
 
 enum SignatureFormat: usize {
-    version = 1, u32_byte_count = 4, u64_byte_count = 8, bits_per_byte = 8, byte_mask = 0xff, maximum_u32 = 0xffffffff,
+    version = 1, generic_version = 2, u32_byte_count = 4, u64_byte_count = 8,
+    bits_per_byte = 8, byte_mask = 0xff, maximum_u32 = 0xffffffff,
 }
 
 enum SignatureCallableKind: usize {
@@ -33,6 +34,7 @@ enum SignatureTypeTag: usize {
     signed_size = 7, unsigned_8 = 8, unsigned_16 = 9, unsigned_32 = 10, unsigned_64 = 11, unsigned_size = 12,
     float_32 = 13, float_64 = 14, pointer = 15, array = 16, structure = 17, record_union = 18, enumeration = 19,
     function_pointer = 20, va_list_type = 21, class_type = 22, bound_method = 23,
+    generic_structure = 24, generic_union = 25, generic_class = 26,
 }
 
 enum SignatureTypeTagMap: usize {
@@ -175,8 +177,8 @@ fn signature_module_is_valid(context: *context::Context, module_id: usize) -> bo
     return module_id != context::no_id() && module_id < context->module_count;
 }
 
-fn signature_named_type(context: *context::Context, writer: *SignatureWriter, record: type_info::Record) {
-    let module_id: usize = names::unit_module(context, record.declaration_unit);
+fn signature_declaration_name(
+    context: *context::Context, writer: *SignatureWriter, module_id: usize, unit_index: usize, name_token: usize) {
     if (!signature_module_is_valid(context, module_id)) {
         signature_writer_fail(writer, runtime::Error.invalid_argument);
         return;
@@ -198,7 +200,13 @@ fn signature_named_type(context: *context::Context, writer: *SignatureWriter, re
         signature_source_bytes(context, writer, module_record.name_unit, segment.token_index);
         child = segment.next_sibling;
     }
-    signature_source_bytes(context, writer, record.declaration_unit, record.name_token);
+    signature_source_bytes(context, writer, unit_index, name_token);
+}
+
+fn signature_named_type(context: *context::Context, writer: *SignatureWriter, record: type_info::Record) {
+    signature_declaration_name(
+        context, writer, names::unit_module(context, record.declaration_unit),
+        record.declaration_unit, record.name_token);
 }
 
 fn signature_type_reference_is_valid(context: *context::Context, type_id: usize, depth: usize) -> bool {
@@ -218,7 +226,27 @@ fn signature_pointer_qualifiers(record: type_info::Record) -> u8 {
     return read_only | volatile_pointee;
 }
 
-fn signature_type_tag(kind: type_info::Kind) -> u8 {
+fn signature_generic_type_tag(kind: type_info::Kind) -> u8 {
+    switch (kind) {
+    case type_info::Kind.structure {
+        return SignatureTypeTag.generic_structure as usize as u8;
+    }
+    case type_info::Kind.record_union {
+        return SignatureTypeTag.generic_union as usize as u8;
+    }
+    case type_info::Kind.class_type {
+        return SignatureTypeTag.generic_class as usize as u8;
+    }
+    default {
+        return SignatureTypeTag.invalid as usize as u8;
+    }
+    }
+}
+
+fn signature_type_tag(context: *context::Context, type_id: usize, kind: type_info::Kind) -> u8 {
+    if (generic_model::instance_for_type(context->generics, type_id) != context::no_id()) {
+        return signature_generic_type_tag(kind);
+    }
     let invalid: u8 = SignatureTypeTag.invalid as usize as u8;
     let tags: [SignatureTypeTagMap.kind_count]u8 = {
         invalid, SignatureTypeTag.type_void as usize as u8, SignatureTypeTag.boolean as usize as u8,
@@ -257,8 +285,32 @@ fn signature_function_pointer(
     signature_type(context, writer, record.element_type, depth + 1);
 }
 
+fn signature_generic_named_type(
+    context: *context::Context, writer: *SignatureWriter, type_id: usize, record: type_info::Record, depth: usize) {
+    signature_named_type(context, writer, record);
+    let instance_id: usize = generic_model::instance_for_type(context->generics, type_id);
+    if (instance_id == context::no_id() || instance_id >= context->generics.instance_count) {
+        signature_writer_fail(writer, runtime::Error.invalid_argument);
+        return;
+    }
+    let instances: *const generic_model::Instance = context->generics.instances.data as
+            *const generic_model::Instance;
+    let arguments: *const usize = context->generics.arguments.data as *const usize;
+    let instance: generic_model::Instance = instances[instance_id];
+    if (instance.argument_count > SignatureFormat.maximum_u32 as usize) {
+        signature_writer_fail(writer, runtime::Error.invalid_argument);
+        return;
+    }
+    signature_writer_u32(writer, instance.argument_count as u32);
+    for (var index: usize = 0;
+        index < instance.argument_count && signature_writer_is_active(writer);
+        index += 1) {
+        signature_type(context, writer, arguments[instance.first_argument + index], depth + 1);
+    }
+}
+
 fn signature_type_payload(
-    context: *context::Context, writer: *SignatureWriter, record: type_info::Record, depth: usize) {
+    context: *context::Context, writer: *SignatureWriter, type_id: usize, record: type_info::Record, depth: usize) {
     switch (record.kind) {
     case type_info::Kind.pointer {
         signature_writer_byte(writer, signature_pointer_qualifiers(record));
@@ -270,7 +322,12 @@ fn signature_type_payload(
     }
     case type_info::Kind.structure, type_info::Kind.record_union, type_info::Kind.enumeration,
         type_info::Kind.class_type {
-        signature_named_type(context, writer, record);
+        let instance_id: usize = generic_model::instance_for_type(context->generics, type_id);
+        if (instance_id == context::no_id()) {
+            signature_named_type(context, writer, record);
+        } else {
+            signature_generic_named_type(context, writer, type_id, record, depth);
+        }
     }
     case type_info::Kind.function_pointer, type_info::Kind.bound_method {
         signature_function_pointer(context, writer, record, depth);
@@ -296,13 +353,13 @@ fn signature_type(context: *context::Context, writer: *SignatureWriter, type_id:
         signature_type(context, writer, record.element_type, depth + 1);
         return;
     }
-    let tag: u8 = signature_type_tag(record.kind);
+    let tag: u8 = signature_type_tag(context, type_id, record.kind);
     if (tag == SignatureTypeTag.invalid as usize as u8) {
         signature_writer_fail(writer, runtime::Error.invalid_argument);
         return;
     }
     signature_writer_byte(writer, tag);
-    signature_type_payload(context, writer, record, depth);
+    signature_type_payload(context, writer, type_id, record, depth);
 }
 
 fn function_signature_state_is_empty(function: context::Function) -> bool {
@@ -317,6 +374,31 @@ fn function_signature_flags(function: context::Function) -> u8 {
     let external: u8 = signature_encoded_flag(
         function.flags, context::SymbolFlag.external as usize, SignatureFunctionFlag.external as usize as u8);
     return variadic | no_return | external;
+}
+
+fn signature_generic_function_origin(context: *context::Context, writer: *SignatureWriter, instance_id: usize) {
+    if (instance_id >= context->generics.instance_count) {
+        signature_writer_fail(writer, runtime::Error.invalid_argument);
+        return;
+    }
+    let instances: *const generic_model::Instance = context->generics.instances.data as
+            *const generic_model::Instance;
+    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
+            *const generic_model::Declaration;
+    let arguments: *const usize = context->generics.arguments.data as *const usize;
+    let instance: generic_model::Instance = instances[instance_id];
+    if (instance.declaration_id >= context->generics.declaration_count) {
+        signature_writer_fail(writer, runtime::Error.invalid_argument);
+        return;
+    }
+    let declaration: generic_model::Declaration = declarations[instance.declaration_id];
+    signature_declaration_name(context, writer, declaration.module_id, declaration.unit_index, declaration.name_token);
+    signature_writer_u32(writer, instance.argument_count as u32);
+    for (var index: usize = 0;
+        index < instance.argument_count && signature_writer_is_active(writer);
+        index += 1) {
+        signature_type(context, writer, arguments[instance.first_argument + index], 0);
+    }
 }
 
 fn function_signature_input_is_valid(context: *context::Context, function_id: usize) -> bool {
@@ -350,10 +432,16 @@ fn append_function_signature(context: *context::Context, function_id: usize) -> 
     let function: context::Function = functions[function_id];
     let start: usize = context->callable_signatures.length;
     var writer: SignatureWriter = signature_writer(context->callable_signatures);
-    signature_writer_byte(&writer, SignatureFormat.version as usize as u8);
+    let generic_instance: usize = generic_model::instance_for_function(context->generics, function_id);
+    let version: usize = generic_instance == context::no_id() ?
+        SignatureFormat.version as usize : SignatureFormat.generic_version as usize;
+    signature_writer_byte(&writer, version as u8);
     signature_writer_byte(&writer, SignatureCallingConvention.system_v as usize as u8);
     signature_callable_identity(&writer, function.identity);
     signature_writer_byte(&writer, function_signature_flags(function));
+    if (generic_instance != context::no_id()) {
+        signature_generic_function_origin(context, &writer, generic_instance);
+    }
     signature_owner_payload(context, &writer, function.identity);
     let parameter_count: usize = function_argument_parameter_count(function);
     let first_parameter: usize = function_first_argument_parameter(function);
@@ -375,6 +463,10 @@ fn append_function_signature(context: *context::Context, function_id: usize) -> 
     functions[function_id].signature_offset = start;
     functions[function_id].signature_length = context->callable_signatures.length - start;
     return functions[function_id].signature_length != 0;
+}
+
+fn build_instance_signature(context: *context::Context, function_id: usize) -> bool {
+    return append_function_signature(context, function_id);
 }
 
 fn build_function_signatures(context: *context::Context) -> bool {

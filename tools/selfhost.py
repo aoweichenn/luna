@@ -103,6 +103,10 @@ LIBRARIES = {
         "luna.bootstrap.middleend.semantic.classes.model",
         "middleend/semantic/classes/model",
     ),
+    "sem_generic_model": compiler_module(
+        "luna.bootstrap.middleend.semantic.generics.model",
+        "middleend/semantic/generics/model",
+    ),
     "sem_ctx": compiler_module("luna.bootstrap.middleend.semantic.context", "middleend/semantic/context"),
     "sem_ctx_lookup": compiler_module(
         "luna.bootstrap.middleend.semantic.context.lookup",
@@ -114,6 +118,7 @@ LIBRARIES = {
     ),
     "sem_attributes": compiler_module("luna.bootstrap.middleend.semantic.attributes", "middleend/semantic/attributes"),
     "sem_modules": compiler_module("luna.bootstrap.middleend.semantic.modules", "middleend/semantic/modules"),
+    "sem_generics": compiler_module("luna.bootstrap.middleend.semantic.generics", "middleend/semantic/generics"),
     "sem_types": compiler_module(
         "luna.bootstrap.middleend.semantic.types",
         "middleend/semantic/types",
@@ -147,6 +152,7 @@ LIBRARIES = {
         "middleend/semantic/functions/overloads",
         "middleend/semantic/functions/bindings",
         "middleend/semantic/functions/defaults",
+        "middleend/semantic/functions/generics",
         "middleend/semantic/functions/methods",
     ),
     "sem_funcs_ir": compiler_module(

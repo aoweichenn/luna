@@ -1,5 +1,8 @@
 module luna.bootstrap.middleend.semantic.expr.probe;
 
+import luna.bootstrap.middleend.semantic.functions.ir as function_ir;
+import luna.bootstrap.middleend.semantic.generics.model as generic_model;
+
 fn function_type(context: *context::Context, function_id: usize) -> usize {
     if (function_id >= context->function_count) {
         context->error = runtime::Error.invalid_argument;
@@ -66,12 +69,16 @@ fn function_matches_type(context: *context::Context, function_id: usize, target_
     return true;
 }
 
-fn resolve_function_value(context: *context::Context, binding_id: usize, expected_type: usize) -> Resolution {
+fn resolve_function_value(
+    context: *context::Context, binding_id: usize, request: syntax::SyntaxNode, expected_type: usize) -> Resolution {
     let visible_count: usize = functions::binding_visible_count(context, binding_id, context->current_unit);
-    if (context->error != runtime::Error.none || visible_count == 0) {
+    if (context->error != runtime::Error.none) {
         return {status = ResolutionStatus.invalid, function_id = context::no_id()};
     }
     if (expected_type == context::no_id()) {
+        if (visible_count == 0) {
+            return {status = ResolutionStatus.ambiguous, function_id = context::no_id()};
+        }
         let function_id: usize = functions::binding_single_function(context, binding_id, context->current_unit);
         if (visible_count != 1) {
             return {status = ResolutionStatus.ambiguous, function_id = context::no_id()};
@@ -96,12 +103,33 @@ fn resolve_function_value(context: *context::Context, binding_id: usize, expecte
             selected = function_id;
         }
     }
-    return selected == context::no_id() ? {status = ResolutionStatus.no_match, function_id = context::no_id()} :
-        {status = ResolutionStatus.selected, function_id = selected};
+    if (selected != context::no_id()) {
+        return {status = ResolutionStatus.selected, function_id = selected};
+    }
+    let generic: functions::GenericResolution = functions::resolve_generic_function_value(
+        context, binding_id, request, expected_type);
+    switch (generic.status) {
+    case functions::GenericResolutionStatus.selected {
+        if (!function_ir::create_ir_function_instance(context, generic.function_id)) {
+            return {status = ResolutionStatus.invalid, function_id = context::no_id()};
+        }
+        return {status = ResolutionStatus.selected, function_id = generic.function_id};
+    }
+    case functions::GenericResolutionStatus.ambiguous {
+        return {status = ResolutionStatus.ambiguous, function_id = context::no_id()};
+    }
+    case functions::GenericResolutionStatus.invalid {
+        return {status = ResolutionStatus.invalid, function_id = context::no_id()};
+    }
+    default {
+        return {status = ResolutionStatus.no_match, function_id = context::no_id()};
+    }
+    }
 }
 
-fn function_value_expression(context: *context::Context, binding_id: usize, expected_type: usize) -> Result {
-    let resolution: Resolution = resolve_function_value(context, binding_id, expected_type);
+fn function_value_expression(
+    context: *context::Context, binding_id: usize, request: syntax::SyntaxNode, expected_type: usize) -> Result {
+    let resolution: Resolution = resolve_function_value(context, binding_id, request, expected_type);
     switch (resolution.status) {
     case ResolutionStatus.ambiguous {
         return result(Status.ambiguous, context::no_id(), context::no_id());
@@ -131,9 +159,25 @@ fn invalid_call_target() -> CallTarget {
     };
 }
 
+fn prepare_generic_class_methods(context: *context::Context, owner_type: usize) -> bool {
+    let first_function: usize = context->function_count;
+    if (!functions::instantiate_generic_class(context, owner_type)) {
+        return false;
+    }
+    for (var function_id: usize = first_function;
+        function_id < context->function_count && context->error == runtime::Error.none;
+        function_id += 1) {
+        function_ir::create_ir_function_instance(context, function_id);
+    }
+    return context->error == runtime::Error.none;
+}
+
 fn constructor_call_target(context: *context::Context, callee: syntax::SyntaxNode) -> CallTarget {
     let owner_type: usize = types::resolve_class_expression(context, context->current_unit, callee);
     if (owner_type == context::no_id()) {
+        return invalid_call_target();
+    }
+    if (!prepare_generic_class_methods(context, owner_type)) {
         return invalid_call_target();
     }
     let binding_id: usize = functions::lookup_constructor_binding(context, owner_type);
@@ -167,6 +211,9 @@ fn static_call_target(context: *context::Context, base: syntax::SyntaxNode, memb
     if (owner_type == context::no_id()) {
         return invalid_call_target();
     }
+    if (!prepare_generic_class_methods(context, owner_type)) {
+        return invalid_call_target();
+    }
     let binding_id: usize = lookup_member_binding(context, owner_type, member.token_index);
     return {
         binding_id = binding_id, kind = callable::Kind.static_method, owner_type = owner_type,
@@ -197,6 +244,9 @@ fn instance_call_target(
         return invalid_call_target();
     }
     if (context::type_record(context, owner_type).kind != type_info::Kind.class_type) {
+        return invalid_call_target();
+    }
+    if (!prepare_generic_class_methods(context, owner_type)) {
         return invalid_call_target();
     }
     let binding_id: usize = lookup_member_binding(context, owner_type, member.token_index);
@@ -340,8 +390,12 @@ fn direct_call_target(context: *context::Context, node: syntax::SyntaxNode) -> C
     if (node.child_count == 0) {
         return invalid_call_target();
     }
-    let callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-    let constructor: CallTarget = constructor_call_target(context, callee);
+    let source_callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    var callee: syntax::SyntaxNode = source_callee;
+    if (callee.kind == syntax::SyntaxKind.generic_expression && callee.child_count == 2) {
+        callee = context::node(context, context->current_unit, callee.first_child);
+    }
+    let constructor: CallTarget = constructor_call_target(context, source_callee);
     if (constructor.owner_type != context::no_id()) {
         return constructor;
     }
@@ -688,7 +742,9 @@ fn resolve_call_target(
         context->error = runtime::Error.invalid_argument;
         return {status = ResolutionStatus.invalid, function_id = context::no_id()};
     }
-    let cached: usize = selected_call(context, node_id);
+    let generic_context: bool = generic_model::instance_for_function(
+        context->generics, context->current_function) != context::no_id();
+    let cached: usize = generic_context ? context::no_id() : selected_call(context, node_id);
     if (context->error != runtime::Error.none) {
         return {status = ResolutionStatus.invalid, function_id = context::no_id()};
     }
@@ -702,11 +758,41 @@ fn resolve_call_target(
         }
         return {status = ResolutionStatus.selected, function_id = cached};
     }
-    var candidates: CandidateResolution = candidate_resolution();
-    visit_target_candidates(context, node, target, &candidates);
-    let resolution: Resolution = finish_candidate_resolution(candidates);
+    let callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let generic_callee: bool = callee.kind == syntax::SyntaxKind.generic_expression && callee.child_count == 2;
+    let explicit_generic_call: bool = generic_callee && target.kind == callable::Kind.free_function;
+    let explicit_arguments: usize = explicit_generic_call ?
+        context::node(context, context->current_unit, callee.first_child).next_sibling : context::no_id();
+    var resolution: Resolution = {status = ResolutionStatus.no_match, function_id = context::no_id()};
+    if (explicit_arguments == context::no_id()) {
+        var candidates: CandidateResolution = candidate_resolution();
+        visit_target_candidates(context, node, target, &candidates);
+        resolution = finish_candidate_resolution(candidates);
+    }
+    if (resolution.status == ResolutionStatus.no_match && target.kind == callable::Kind.free_function) {
+        let generic: functions::GenericResolution = functions::resolve_generic_call(
+            context, target.binding_id, node, explicit_arguments, generic_argument_type);
+        switch (generic.status) {
+        case functions::GenericResolutionStatus.selected {
+            let status: Status = candidate_call_status(context, node, generic.function_id, target);
+            if (status == Status.compatible && function_ir::create_ir_function_instance(
+                    context, generic.function_id)) {
+                resolution = {status = ResolutionStatus.selected, function_id = generic.function_id};
+            } else {
+                resolution = {status = ResolutionStatus.no_match, function_id = context::no_id()};
+            }
+        }
+        case functions::GenericResolutionStatus.ambiguous {
+            resolution = {status = ResolutionStatus.ambiguous, function_id = context::no_id()};
+        }
+        case functions::GenericResolutionStatus.invalid {
+            resolution = {status = ResolutionStatus.invalid, function_id = context::no_id()};
+        }
+        default {}
+        }
+    }
     if (resolution.status == ResolutionStatus.selected) {
-        if (!remember_call_selection(context, node_id, resolution.function_id)) {
+        if (!generic_context && !remember_call_selection(context, node_id, resolution.function_id)) {
             return {status = ResolutionStatus.invalid, function_id = context::no_id()};
         }
     }
@@ -724,15 +810,24 @@ fn resolve_call(context: *context::Context, node_id: usize, node: syntax::Syntax
 }
 
 fn direct_call_binding(context: *context::Context, callee: syntax::SyntaxNode) -> usize {
-    if (callee.kind != syntax::SyntaxKind.name_expression) {
+    var target: syntax::SyntaxNode = callee;
+    if (target.kind == syntax::SyntaxKind.generic_expression && target.child_count == 2) {
+        target = context::node(context, context->current_unit, target.first_child);
+    }
+    if (target.kind != syntax::SyntaxKind.name_expression) {
         return context::no_id();
     }
-    if (callee.child_count != 0) {
-        return functions::lookup_qualified_callable_binding(context, context->current_unit, callee, false);
+    if (target.child_count != 0) {
+        return functions::lookup_qualified_callable_binding(context, context->current_unit, target, false);
     }
-    let local_id: usize = builder::find_local(context, context->current_unit, callee.token_index);
+    let local_id: usize = builder::find_local(context, context->current_unit, target.token_index);
     return local_id == context::no_id() ?
-        functions::lookup_callable_binding(context, context->current_unit, callee.token_index) : context::no_id();
+        functions::lookup_callable_binding(context, context->current_unit, target.token_index) : context::no_id();
+}
+
+fn generic_argument_type(context: *context::Context, node_id: usize, expected_type: usize) -> usize {
+    let argument: Result = expression(context, node_id, expected_type);
+    return argument.status == Status.compatible ? argument.type_id : context::no_id();
 }
 
 fn probe_indirect_call(

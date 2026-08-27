@@ -19,6 +19,8 @@ import luna.bootstrap.middleend.semantic.expr.base as base;
 import luna.bootstrap.middleend.semantic.expr.numeric as numeric;
 import luna.bootstrap.middleend.semantic.expr.operators as operators;
 import luna.bootstrap.middleend.semantic.functions as functions;
+import luna.bootstrap.middleend.semantic.generics.model as generic_model;
+import luna.bootstrap.middleend.semantic.generics;
 import luna.bootstrap.middleend.semantic.stmt.labels as labels;
 import luna.bootstrap.middleend.semantic.types as types;
 import luna.bootstrap.middleend.semantic.value as category;
@@ -104,6 +106,9 @@ fn lower_variable(context: *context::Context, node_id: usize, node: syntax::Synt
         }
     }
     if (!types::require_opaque_value_access(context, type_id, context->current_unit, node.span)) {
+        return false;
+    }
+    if (!types::require_complete_type(context, type_id)) {
         return false;
     }
     let type_record: type_info::Record = context::type_record(context, type_id);
@@ -984,7 +989,7 @@ fn add_parameter_locals(context: *context::Context, function_id: usize) -> bool 
             *const ir::Parameter;
     let semantic_parameters: *const context::Parameter = context->parameters.data as
             *const context::Parameter;
-    var child: usize = declaration.first_child;
+    var child: usize = functions::first_parameter_node(context, function.implementation_unit, declaration);
     let receiver_count: usize = functions::function_receiver_parameter_count(function);
     for (var index: usize = 0; index < function.parameter_count; index += 1) {
         let parameter_node: syntax::SyntaxNode = context::node(context, function.implementation_unit, child);
@@ -1002,7 +1007,7 @@ fn add_parameter_locals(context: *context::Context, function_id: usize) -> bool 
     return context->error == runtime::Error.none;
 }
 
-fn lower_function(context: *context::Context, function_id: usize) -> bool {
+fn lower_function_active(context: *context::Context, function_id: usize) -> bool {
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
     let function: context::Function = functions[function_id];
@@ -1063,11 +1068,46 @@ fn lower_function(context: *context::Context, function_id: usize) -> bool {
     return context->error == runtime::Error.none;
 }
 
+fn lower_function(context: *context::Context, function_id: usize) -> bool {
+    let instance_id: usize = generic_model::instance_for_function(context->generics, function_id);
+    if (instance_id == context::no_id()) {
+        return lower_function_active(context, function_id);
+    }
+    let mark: usize = generics::activate_instance(context, instance_id);
+    if (mark == context::no_id()) {
+        return false;
+    }
+    let success: bool = lower_function_active(context, function_id);
+    let instances: *const generic_model::Instance = context->generics.instances.data as
+            *const generic_model::Instance;
+    let function_instance: bool = instances[instance_id].function_id == function_id;
+    var state_error: runtime::Error = runtime::Error.none;
+    if (function_instance) {
+        let state: generic_model::InstanceState = success ?
+            generic_model::InstanceState.complete : generic_model::InstanceState.failed;
+        state_error = generic_model::set_instance_result(
+            &context->generics, instance_id, context::no_id(), function_id, state);
+    }
+    let restored: bool = generics::restore_active_bindings(context, mark);
+    if (context->error == runtime::Error.none) {
+        context->error = state_error;
+    }
+    let finalization_is_valid: bool = restored && state_error == runtime::Error.none;
+    return success && finalization_is_valid;
+}
+
 fn lower_functions(context: *context::Context) -> bool {
+    let ordinary_function_count: usize = context->function_count;
+    let ordinary_candidate_count: usize = context->callable_candidate_count;
     for (var order_index: usize = 0;
-        order_index < context->callable_candidate_count && context->error == runtime::Error.none;
+        order_index < ordinary_candidate_count && context->error == runtime::Error.none;
         order_index += 1) {
         lower_function(context, functions::ordered_function_id(context, order_index));
+    }
+    for (var function_id: usize = ordinary_function_count;
+        function_id < context->function_count && context->error == runtime::Error.none;
+        function_id += 1) {
+        lower_function(context, function_id);
     }
     return context->error == runtime::Error.none;
 }

@@ -199,6 +199,7 @@ fn begin_binding(context: *context::Context, function_id: usize, candidate_index
             owner_type = functions[function_id].identity.owner_type,
             declaration_unit = symbol.declaration_unit, declaration_node = symbol.declaration_node,
             name_token = symbol.name_token, first_candidate = candidate_index, candidate_count = 1,
+            first_generic_candidate = context::no_id(), generic_candidate_count = 0,
         });
 }
 
@@ -211,6 +212,200 @@ fn extend_binding(context: *context::Context, binding_id: usize) -> bool {
             *context::Binding;
     bindings[binding_id].candidate_count += 1;
     return true;
+}
+
+fn generic_declarations_share_binding(context: *context::Context, left_id: usize, right_id: usize) -> bool {
+    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
+            *const generic_model::Declaration;
+    let left: generic_model::Declaration = declarations[left_id];
+    let right: generic_model::Declaration = declarations[right_id];
+    let modules_match: bool = left.module_id == right.module_id;
+    let names_match: bool = context::tokens_equal(
+        context, left.unit_index, left.name_token, right.unit_index, right.name_token);
+    return modules_match && names_match;
+}
+
+fn generic_declaration_is_before(context: *context::Context, left_id: usize, right_id: usize) -> bool {
+    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
+            *const generic_model::Declaration;
+    let left: generic_model::Declaration = declarations[left_id];
+    let right: generic_model::Declaration = declarations[right_id];
+    if (left.module_id != right.module_id) {
+        return module_name_is_before(context, left.module_id, right.module_id);
+    }
+    if (!context::tokens_equal(
+            context, left.unit_index, left.name_token, right.unit_index, right.name_token)) {
+        return token_is_before(context, left.unit_index, left.name_token, right.unit_index, right.name_token);
+    }
+    let left_span: lexer::SourceSpan = context::node(context, left.unit_index, left.node_index).span;
+    let right_span: lexer::SourceSpan = context::node(context, right.unit_index, right.node_index).span;
+    return text_is_before(context, left.unit_index, left_span, right.unit_index, right_span);
+}
+
+fn generic_order_sift_down(context: *context::Context, ordered: *usize, start: usize, count: usize) -> bool {
+    if (ordered == null || start >= count) {
+        return false;
+    }
+    var root: usize = start;
+    for (; root < count / 2 && context->error == runtime::Error.none;) {
+        let left_child: usize = root * 2 + 1;
+        var selected: usize = root;
+        if (generic_declaration_is_before(context, ordered[selected], ordered[left_child])) {
+            selected = left_child;
+        }
+        let right_child: usize = left_child + 1;
+        if (right_child < count && generic_declaration_is_before(context, ordered[selected], ordered[right_child])) {
+            selected = right_child;
+        }
+        if (selected == root) {
+            return true;
+        }
+        let saved: usize = ordered[root];
+        ordered[root] = ordered[selected];
+        ordered[selected] = saved;
+        root = selected;
+    }
+    return context->error == runtime::Error.none;
+}
+
+fn generic_function_order(context: *context::Context) -> bytes::Buffer {
+    var order: bytes::Buffer = bytes::empty();
+    for (var declaration_id: usize = 0;
+        declaration_id < context->generics.declaration_count && context->error == runtime::Error.none;
+        declaration_id += 1) {
+        let declarations: *const generic_model::Declaration = context->generics.declarations.data as
+                *const generic_model::Declaration;
+        if (declarations[declaration_id].kind != generic_model::DeclarationKind.function_declaration) {
+            continue;
+        }
+        let appended: bytes::BufferResult = bytes::append(
+            order, (&declaration_id) as *const usize as *const u8, sizeof(usize));
+        order = appended.buffer;
+        context->error = appended.error;
+    }
+    let count: usize = order.length / sizeof(usize);
+    let ordered: *usize = order.data as *usize;
+    for (var heap_index: usize = count / 2;
+        heap_index != 0 && context->error == runtime::Error.none;
+        heap_index -= 1) {
+        generic_order_sift_down(context, ordered, heap_index - 1, count);
+    }
+    for (var remaining: usize = count;
+        remaining > 1 && context->error == runtime::Error.none;
+        remaining -= 1) {
+        let last: usize = remaining - 1;
+        let saved: usize = ordered[0];
+        ordered[0] = ordered[last];
+        ordered[last] = saved;
+        generic_order_sift_down(context, ordered, 0, last);
+    }
+    return order;
+}
+
+fn binding_matches_generic(
+    context: *context::Context, binding: context::Binding, declaration: generic_model::Declaration) -> bool {
+    let scope_matches: bool = binding.module_id == declaration.module_id && binding.owner_type == callable::no_owner();
+    let name_matches: bool = context::tokens_equal(
+        context, binding.declaration_unit, binding.name_token, declaration.unit_index, declaration.name_token);
+    return scope_matches && name_matches;
+}
+
+fn binding_is_before_generic(
+    context: *context::Context, binding: context::Binding, declaration: generic_model::Declaration) -> bool {
+    if (binding.module_id != declaration.module_id) {
+        return module_name_is_before(context, binding.module_id, declaration.module_id);
+    }
+    if (binding.owner_type != callable::no_owner()) {
+        return false;
+    }
+    if (context::tokens_equal(
+            context, binding.declaration_unit, binding.name_token, declaration.unit_index, declaration.name_token)) {
+        return false;
+    }
+    return token_is_before(
+        context, binding.declaration_unit, binding.name_token, declaration.unit_index, declaration.name_token);
+}
+
+fn find_generic_binding(
+    context: *context::Context, declaration: generic_model::Declaration,
+    binding_limit: usize, cursor: *usize) -> usize {
+    if (cursor == null || *cursor > binding_limit) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    let bindings: *const context::Binding = context->bindings.data as *const context::Binding;
+    for (; *cursor < binding_limit; *cursor += 1) {
+        let binding: context::Binding = bindings[*cursor];
+        if (binding_matches_generic(context, binding, declaration)) {
+            return *cursor;
+        }
+        if (!binding_is_before_generic(context, binding, declaration)) {
+            return context::no_id();
+        }
+    }
+    return context::no_id();
+}
+
+fn begin_generic_binding(context: *context::Context, declaration: generic_model::Declaration) -> usize {
+    return append_binding(
+        context, {
+            kind = context::BindingKind.callable_set, module_id = declaration.module_id,
+            owner_type = callable::no_owner(), declaration_unit = declaration.unit_index,
+            declaration_node = declaration.node_index, name_token = declaration.name_token,
+            first_candidate = context::no_id(), candidate_count = 0,
+            first_generic_candidate = context->generic_callable_candidate_count, generic_candidate_count = 0,
+        });
+}
+
+fn append_generic_candidate(context: *context::Context, binding_id: usize, declaration_id: usize) -> bool {
+    let appended: bytes::BufferResult = bytes::append(
+        context->generic_callable_candidates, (&declaration_id) as *const usize as *const u8, sizeof(usize));
+    context->generic_callable_candidates = appended.buffer;
+    context->error = appended.error;
+    if (appended.error != runtime::Error.none) {
+        return false;
+    }
+    let bindings: *context::Binding = context->bindings.data as *context::Binding;
+    let declarations: *generic_model::Declaration = context->generics.declarations.data as
+            *generic_model::Declaration;
+    if (bindings[binding_id].generic_candidate_count == 0) {
+        bindings[binding_id].first_generic_candidate = context->generic_callable_candidate_count;
+    }
+    bindings[binding_id].generic_candidate_count += 1;
+    declarations[declaration_id].binding_id = binding_id;
+    context->generic_callable_candidate_count += 1;
+    return true;
+}
+
+fn build_generic_bindings(context: *context::Context) -> bool {
+    let order: bytes::Buffer = generic_function_order(context);
+    let ordered: *const usize = order.data as *const usize;
+    let count: usize = order.length / sizeof(usize);
+    let ordinary_binding_count: usize = context->binding_count;
+    var binding_cursor: usize = 0;
+    var active_binding: usize = context::no_id();
+    for (var index: usize = 0; index < count && context->error == runtime::Error.none; index += 1) {
+        let declaration_id: usize = ordered[index];
+        let declarations: *const generic_model::Declaration = context->generics.declarations.data as
+                *const generic_model::Declaration;
+        let declaration: generic_model::Declaration = declarations[declaration_id];
+        let starts_binding: bool = index == 0 ||
+            !generic_declarations_share_binding(context, ordered[index - 1], declaration_id);
+        if (starts_binding) {
+            active_binding = find_generic_binding(context, declaration, ordinary_binding_count, &binding_cursor);
+            if (active_binding == context::no_id()) {
+                active_binding = begin_generic_binding(context, declaration);
+            }
+        }
+        if (active_binding == context::no_id() || !append_generic_candidate(context, active_binding, declaration_id)) {
+            break;
+        }
+    }
+    let release_error: runtime::Error = bytes::release(order);
+    if (context->error == runtime::Error.none) {
+        context->error = release_error;
+    }
+    return context->error == runtime::Error.none;
 }
 
 fn build_function_bindings(context: *context::Context) -> bool {
@@ -243,6 +438,9 @@ fn build_function_bindings(context: *context::Context) -> bool {
     if (context->error != runtime::Error.none) {
         return false;
     }
+    if (!build_generic_bindings(context)) {
+        return false;
+    }
     if (!function_bindings_are_valid(context)) {
         context->error = runtime::Error.invalid_argument;
         return false;
@@ -250,11 +448,79 @@ fn build_function_bindings(context: *context::Context) -> bool {
     return true;
 }
 
+fn bind_function_instances(context: *context::Context, first_function: usize, owner_type: usize) -> bool {
+    if (first_function > context->function_count) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    var order: bytes::Buffer = bytes::empty();
+    for (var function_id: usize = first_function;
+        function_id < context->function_count && context->error == runtime::Error.none;
+        function_id += 1) {
+        let functions_data: *const context::Function = context->functions.data as *const context::Function;
+        if (functions_data[function_id].identity.owner_type != owner_type) {
+            continue;
+        }
+        let appended: bytes::BufferResult = bytes::append(
+            order, (&function_id) as *const usize as *const u8, sizeof(usize));
+        order = appended.buffer;
+        context->error = appended.error;
+    }
+    let count: usize = order.length / sizeof(usize);
+    let ordered: *usize = order.data as *usize;
+    for (var heap_index: usize = count / 2;
+        heap_index != 0 && context->error == runtime::Error.none;
+        heap_index -= 1) {
+        function_order_sift_down(context, ordered, heap_index - 1, count);
+    }
+    for (var remaining: usize = count;
+        remaining > 1 && context->error == runtime::Error.none;
+        remaining -= 1) {
+        let last: usize = remaining - 1;
+        let saved: usize = ordered[0];
+        ordered[0] = ordered[last];
+        ordered[last] = saved;
+        function_order_sift_down(context, ordered, 0, last);
+    }
+    var active_binding: usize = context::no_id();
+    for (var index: usize = 0; index < count && context->error == runtime::Error.none; index += 1) {
+        let function_id: usize = ordered[index];
+        let candidate_index: usize = context->callable_candidate_count;
+        let appended: bytes::BufferResult = bytes::append(
+            context->callable_candidates, (&function_id) as *const usize as *const u8, sizeof(usize));
+        context->callable_candidates = appended.buffer;
+        context->error = appended.error;
+        if (appended.error != runtime::Error.none) {
+            break;
+        }
+        let starts_binding: bool = index == 0 || !functions_share_binding(context, ordered[index - 1], function_id);
+        if (starts_binding) {
+            active_binding = begin_binding(context, function_id, candidate_index);
+        } else {
+            extend_binding(context, active_binding);
+        }
+        let functions_data: *context::Function = context->functions.data as *context::Function;
+        functions_data[function_id].binding_id = active_binding;
+        context->callable_candidate_count += 1;
+    }
+    let release_error: runtime::Error = bytes::release(order);
+    if (context->error == runtime::Error.none) {
+        context->error = release_error;
+    }
+    return context->error == runtime::Error.none;
+}
+
 fn binding_range_is_valid(context: *context::Context, binding: context::Binding) -> bool {
-    let count_is_valid: bool = binding.candidate_count != 0;
-    let range_is_valid: bool = checked::range_is_valid(
+    let concrete_range_is_valid: bool = binding.candidate_count == 0 ?
+        binding.first_candidate == context::no_id() : checked::range_is_valid(
         binding.first_candidate, binding.candidate_count, context->callable_candidate_count);
-    return count_is_valid && range_is_valid;
+    let generic_range_is_valid: bool = binding.generic_candidate_count == 0 ?
+        binding.first_generic_candidate == context::no_id() : checked::range_is_valid(
+            binding.first_generic_candidate, binding.generic_candidate_count,
+            context->generic_callable_candidate_count);
+    let has_candidate: bool = binding.candidate_count != 0 || binding.generic_candidate_count != 0;
+    let ranges_are_valid: bool = concrete_range_is_valid && generic_range_is_valid;
+    return has_candidate && ranges_are_valid;
 }
 
 fn binding_candidate_is_valid(
@@ -275,6 +541,54 @@ fn binding_candidate_is_valid(
     return candidate_matches && identity_matches;
 }
 
+fn generic_candidate_slices_are_valid(context: *context::Context) -> bool {
+    if (context->generic_callable_candidate_count == 0) {
+        return context->generic_callable_candidates.length == 0;
+    }
+    let created: bytes::BufferResult = bytes::with_capacity(context->generic_callable_candidate_count);
+    var seen: bytes::Buffer = created.buffer;
+    context->error = created.error;
+    if (created.error != runtime::Error.none) {
+        return false;
+    }
+    seen.length = context->generic_callable_candidate_count;
+    for (var index: usize = 0; index < seen.length; index += 1) {
+        seen.data[index] = 0;
+    }
+    let bindings: *const context::Binding = context->bindings.data as *const context::Binding;
+    let candidates: *const usize = context->generic_callable_candidates.data as *const usize;
+    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
+            *const generic_model::Declaration;
+    var valid: bool = true;
+    for (var binding_id: usize = 0; binding_id < context->binding_count && valid; binding_id += 1) {
+        let binding: context::Binding = bindings[binding_id];
+        for (var index: usize = 0; index < binding.generic_candidate_count; index += 1) {
+            let position: usize = binding.first_generic_candidate + index;
+            let declaration_id: usize = candidates[position];
+            if (seen.data[position] != 0 || declaration_id >= context->generics.declaration_count) {
+                valid = false;
+                break;
+            }
+            let declaration: generic_model::Declaration = declarations[declaration_id];
+            let identity_matches: bool = declaration.binding_id == binding_id &&
+                binding_matches_generic(context, binding, declaration);
+            if (!identity_matches) {
+                valid = false;
+                break;
+            }
+            seen.data[position] = 1;
+        }
+    }
+    for (var index: usize = 0; index < seen.length && valid; index += 1) {
+        valid = seen.data[index] == 1;
+    }
+    let release_error: runtime::Error = bytes::release(seen);
+    if (context->error == runtime::Error.none) {
+        context->error = release_error;
+    }
+    return valid && release_error == runtime::Error.none;
+}
+
 fn function_bindings_are_valid(context: *context::Context) -> bool {
     if (context->callable_candidate_count != context->function_count) {
         return false;
@@ -285,7 +599,8 @@ fn function_bindings_are_valid(context: *context::Context) -> bool {
     for (var binding_id: usize = 0; binding_id < context->binding_count; binding_id += 1) {
         let binding: context::Binding = bindings[binding_id];
         let kind_is_valid: bool = binding.kind == context::BindingKind.callable_set;
-        let position_is_valid: bool = binding.first_candidate == expected_candidate;
+        let position_is_valid: bool = binding.candidate_count == 0 ?
+            binding.first_candidate == context::no_id() : binding.first_candidate == expected_candidate;
         let shape_is_valid: bool = kind_is_valid && position_is_valid;
         let owner_is_valid: bool = binding.owner_type == callable::no_owner() ||
             binding.owner_type < context->types.type_count;
@@ -303,6 +618,9 @@ fn function_bindings_are_valid(context: *context::Context) -> bool {
         expected_candidate += binding.candidate_count;
     }
     if (expected_candidate != context->callable_candidate_count) {
+        return false;
+    }
+    if (!generic_candidate_slices_are_valid(context)) {
         return false;
     }
     let functions: *const context::Function = context->functions.data as
@@ -346,6 +664,9 @@ fn function_is_visible(context: *context::Context, function_id: usize, unit_inde
     }
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
+    if (generic_model::instance_for_function(context->generics, function_id) != context::no_id()) {
+        return true;
+    }
     let binding_id: usize = functions[function_id].binding_id;
     if (binding_id >= context->binding_count) {
         context->error = runtime::Error.invalid_argument;
@@ -366,6 +687,23 @@ fn binding_has_visible_candidate(context: *context::Context, binding: context::B
     for (var index: usize = 0; index < binding.candidate_count; index += 1) {
         let function_id: usize = candidates[binding.first_candidate + index];
         if (candidate_is_visible_in_module(context, function_id, unit_index, binding.module_id)) {
+            return true;
+        }
+    }
+    let generic_candidates: *const usize = context->generic_callable_candidates.data as *const usize;
+    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
+            *const generic_model::Declaration;
+    let owner_module: usize = names::unit_module(context, unit_index);
+    for (var index: usize = 0; index < binding.generic_candidate_count; index += 1) {
+        let generic_id: usize = generic_candidates[binding.first_generic_candidate + index];
+        if (generic_id >= context->generics.declaration_count) {
+            context->error = runtime::Error.invalid_argument;
+            return false;
+        }
+        let declaration: generic_model::Declaration = declarations[generic_id];
+        let same_module: bool = owner_module == binding.module_id;
+        let exported: bool = (declaration.flags & (syntax::SyntaxFlag.exported as usize)) != 0;
+        if (same_module || exported) {
             return true;
         }
     }
@@ -553,6 +891,26 @@ fn binding_candidate(context: *context::Context, binding_id: usize, candidate_in
         return context::no_id();
     }
     return function_id;
+}
+
+fn generic_binding_candidate(context: *context::Context, binding_id: usize, candidate_index: usize) -> usize {
+    if (binding_id >= context->binding_count) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    let bindings: *const context::Binding = context->bindings.data as *const context::Binding;
+    let binding: context::Binding = bindings[binding_id];
+    if (!binding_range_is_valid(context, binding) || candidate_index >= binding.generic_candidate_count) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    let candidates: *const usize = context->generic_callable_candidates.data as *const usize;
+    let generic_id: usize = candidates[binding.first_generic_candidate + candidate_index];
+    if (generic_id >= context->generics.declaration_count) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    return generic_id;
 }
 
 fn binding_visible_count(context: *context::Context, binding_id: usize, unit_index: usize) -> usize {

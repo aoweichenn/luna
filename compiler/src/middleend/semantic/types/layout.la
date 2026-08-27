@@ -195,7 +195,9 @@ fn resolve_record_field_types(context: *context::Context, record: type_info::Rec
         let class_policy: bool = record.kind == type_info::Kind.class_type &&
             field_declaration.kind == syntax::SyntaxKind.friend_declaration;
         let class_metadata: bool = class_method || class_policy;
-        if (field_declaration.kind == syntax::SyntaxKind.attribute || class_metadata) {
+        let generic_metadata: bool = field_declaration.kind == syntax::SyntaxKind.generic_parameters;
+        let declaration_metadata: bool = field_declaration.kind == syntax::SyntaxKind.attribute || generic_metadata;
+        if (declaration_metadata || class_metadata) {
             field_node = field_declaration.next_sibling;
             continue;
         }
@@ -261,7 +263,9 @@ fn resolve_record_layout(context: *context::Context, type_id: usize, record: typ
         let class_policy: bool = record.kind == type_info::Kind.class_type &&
             field_declaration.kind == syntax::SyntaxKind.friend_declaration;
         let class_metadata: bool = class_method || class_policy;
-        if (field_declaration.kind == syntax::SyntaxKind.attribute || class_metadata) {
+        let generic_metadata: bool = field_declaration.kind == syntax::SyntaxKind.generic_parameters;
+        let declaration_metadata: bool = field_declaration.kind == syntax::SyntaxKind.attribute || generic_metadata;
+        if (declaration_metadata || class_metadata) {
             field_node = field_declaration.next_sibling;
             continue;
         }
@@ -525,19 +529,22 @@ fn resolve_enum_layout(context: *context::Context, type_id: usize, record: type_
 fn resolve_alias(context: *context::Context, type_id: usize, record: type_info::Record) -> bool {
     let none: usize = context::no_id();
     let declaration: syntax::SyntaxNode = context::node(context, record.declaration_unit, record.declaration_node);
-    if (declaration.child_count !=
-        1 + attributes::count_attribute_children(
-            context, record.declaration_unit, declaration)) {
+    let first: syntax::SyntaxNode = context::node(context, record.declaration_unit, declaration.first_child);
+    let generic: bool = first.kind == syntax::SyntaxKind.generic_parameters;
+    let metadata_count: usize = attributes::count_attribute_children(
+        context, record.declaration_unit, declaration) + (generic ? 1 : 0);
+    if (declaration.child_count != 1 + metadata_count) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    let target_type: usize = resolve_type_node(context, record.declaration_unit, declaration.first_child);
+    let target_node: usize = generic ? first.next_sibling : declaration.first_child;
+    let target_type: usize = resolve_type_node(context, record.declaration_unit, target_node);
     if (target_type == none) {
         return false;
     }
     let value_access: bool = require_opaque_value_access(
         context, target_type, record.declaration_unit,
-        context::node(context, record.declaration_unit, declaration.first_child).span);
+        context::node(context, record.declaration_unit, target_node).span);
     if (!value_access || !require_complete_type(context, target_type)) {
         return false;
     }
@@ -545,7 +552,7 @@ fn resolve_alias(context: *context::Context, type_id: usize, record: type_info::
     if (target.kind == type_info::Kind.type_void || target.size_bytes == 0 || target.kind == type_info::Kind.alias) {
         context::add_diagnostic(
             context, context::DiagnosticKind.invalid_type_alias, record.declaration_unit,
-            context::node(context, record.declaration_unit, declaration.first_child).span,
+            context::node(context, record.declaration_unit, target_node).span,
             none, context::empty_span(), target_type);
         return false;
     }
@@ -553,7 +560,7 @@ fn resolve_alias(context: *context::Context, type_id: usize, record: type_info::
     return context->error == runtime::Error.none;
 }
 
-fn resolve_layout(context: *context::Context, type_id: usize) -> bool {
+fn resolve_layout_active(context: *context::Context, type_id: usize) -> bool {
     let result: type_info::RecordResult = type_info::table_get(context->types, type_id);
     if (result.error != runtime::Error.none) {
         context->error = result.error;
@@ -587,6 +594,28 @@ fn resolve_layout(context: *context::Context, type_id: usize) -> bool {
     }
     context->type_depth -= 1;
     return success;
+}
+
+fn resolve_layout(context: *context::Context, type_id: usize) -> bool {
+    let instance_id: usize = generic_model::instance_for_type(context->generics, type_id);
+    if (instance_id == context::no_id()) {
+        return resolve_layout_active(context, type_id);
+    }
+    let mark: usize = generics::activate_instance(context, instance_id);
+    if (mark == context::no_id()) {
+        return false;
+    }
+    let success: bool = resolve_layout_active(context, type_id);
+    let state: generic_model::InstanceState = success ?
+        generic_model::InstanceState.complete : generic_model::InstanceState.failed;
+    let state_error: runtime::Error = generic_model::set_instance_result(
+        &context->generics, instance_id, type_id, context::no_id(), state);
+    let restored: bool = generics::restore_active_bindings(context, mark);
+    if (context->error == runtime::Error.none) {
+        context->error = state_error;
+    }
+    let finalization_is_valid: bool = restored && state_error == runtime::Error.none;
+    return success && finalization_is_valid;
 }
 
 fn resolve_all_types(context: *context::Context) -> bool {

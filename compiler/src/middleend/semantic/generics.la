@@ -1,0 +1,198 @@
+module luna.bootstrap.middleend.semantic.generics;
+
+import luna.bootstrap.frontend.lexer as lexer;
+import luna.runtime;
+
+fn parameters_node(context: *context::Context, unit_index: usize, declaration: syntax::SyntaxNode) -> usize {
+    for (var child: usize = declaration.first_child; child != context::no_id();
+        child = context::node(context, unit_index, child).next_sibling) {
+        if (context::node(context, unit_index, child).kind == syntax::SyntaxKind.generic_parameters) {
+            return child;
+        }
+    }
+    return context::no_id();
+}
+
+fn is_generic(context: *context::Context, unit_index: usize, declaration: syntax::SyntaxNode) -> bool {
+    return parameters_node(context, unit_index, declaration) != context::no_id();
+}
+
+fn report_declaration(
+    context: *context::Context, kind: context::DiagnosticKind, unit_index: usize,
+    declaration: syntax::SyntaxNode, related_node: usize, detail: usize) {
+    let has_related: bool = related_node != context::no_id();
+    let related_span: lexer::SourceSpan = has_related ?
+        context::node(context, unit_index, related_node).span : context::empty_span();
+    context::add_diagnostic(
+        context, kind, unit_index, declaration.span, has_related ? unit_index : context::no_id(), related_span, detail);
+}
+
+fn declaration_mount_is_valid(kind: model::DeclarationKind, declaration: syntax::SyntaxNode) -> bool {
+    if (kind == model::DeclarationKind.type_declaration) {
+        return declaration.kind != syntax::SyntaxKind.enum_declaration;
+    }
+    if (kind != model::DeclarationKind.function_declaration) {
+        return false;
+    }
+    let forbidden_flags: usize = (syntax::SyntaxFlag.external as usize) |
+        (syntax::SyntaxFlag.variadic as usize) | (syntax::SyntaxFlag.asm_function as usize);
+    if ((declaration.flags & forbidden_flags) != 0) {
+        return false;
+    }
+    let virtual_flags: usize = (syntax::SyntaxFlag.virtual_method as usize) |
+        (syntax::SyntaxFlag.abstract_method as usize) | (syntax::SyntaxFlag.override_method as usize);
+    return (declaration.flags & virtual_flags) == 0;
+}
+
+fn parameter_is_duplicate(
+    context: *context::Context, unit_index: usize, parameters: syntax::SyntaxNode, candidate_node: usize) -> usize {
+    let candidate: syntax::SyntaxNode = context::node(context, unit_index, candidate_node);
+    for (var child: usize = parameters.first_child; child != candidate_node;
+        child = context::node(context, unit_index, child).next_sibling) {
+        let parameter: syntax::SyntaxNode = context::node(context, unit_index, child);
+        if (context::tokens_equal(
+                context, unit_index, parameter.token_index, unit_index, candidate.token_index)) {
+            return child;
+        }
+    }
+    return context::no_id();
+}
+
+fn validate_parameters(
+    context: *context::Context, unit_index: usize, declaration: syntax::SyntaxNode, parameters_node_id: usize) -> bool {
+    let parameters: syntax::SyntaxNode = context::node(context, unit_index, parameters_node_id);
+    let count_is_valid: bool = parameters.child_count != 0 &&
+        parameters.child_count <= context::Limit.maximum_generic_parameters as usize;
+    if (!count_is_valid) {
+        report_declaration(
+            context, context::DiagnosticKind.invalid_generic_declaration,
+            unit_index, declaration, context::no_id(), parameters.child_count);
+        return false;
+    }
+    var position: usize = 0;
+    for (var child: usize = parameters.first_child; child != context::no_id();
+        child = context::node(context, unit_index, child).next_sibling) {
+        let parameter: syntax::SyntaxNode = context::node(context, unit_index, child);
+        if (parameter.kind != syntax::SyntaxKind.generic_parameter || parameter.child_count != 0) {
+            report_declaration(
+                context, context::DiagnosticKind.invalid_generic_declaration, unit_index, declaration, child, position);
+            return false;
+        }
+        let duplicate: usize = parameter_is_duplicate(context, unit_index, parameters, child);
+        if (duplicate != context::no_id()) {
+            report_declaration(
+                context, context::DiagnosticKind.duplicate_generic_parameter,
+                unit_index, parameter, duplicate, position);
+            return false;
+        }
+        position += 1;
+    }
+    return true;
+}
+
+fn register_parameters(
+    context: *context::Context, declaration_id: usize, unit_index: usize, parameters_node_id: usize) -> bool {
+    let parameters: syntax::SyntaxNode = context::node(context, unit_index, parameters_node_id);
+    var position: usize = 0;
+    for (var child: usize = parameters.first_child; child != context::no_id();
+        child = context::node(context, unit_index, child).next_sibling) {
+        let parameter: syntax::SyntaxNode = context::node(context, unit_index, child);
+        context->error = model::append_parameter(
+            &context->generics, declaration_id, {
+                declaration_id = declaration_id, unit_index = unit_index, node_index = child,
+                name_token = parameter.token_index, position = position,
+            });
+        if (context->error != runtime::Error.none) {
+            return false;
+        }
+        position += 1;
+    }
+    return true;
+}
+
+fn register_declaration(
+    context: *context::Context, kind: model::DeclarationKind, module_id: usize,
+    unit_index: usize, node_index: usize, binding_id: usize) -> usize {
+    let declaration: syntax::SyntaxNode = context::node(context, unit_index, node_index);
+    let generic_parameters: usize = parameters_node(context, unit_index, declaration);
+    if (generic_parameters == context::no_id() || !declaration_mount_is_valid(kind, declaration)) {
+        report_declaration(
+            context, context::DiagnosticKind.invalid_generic_declaration,
+            unit_index, declaration, context::no_id(), kind as usize);
+        return context::no_id();
+    }
+    if (!validate_parameters(context, unit_index, declaration, generic_parameters)) {
+        return context::no_id();
+    }
+    let declaration_id: usize = context->generics.declaration_count;
+    context->error = model::append_declaration(
+        &context->generics, {
+            kind = kind, module_id = module_id, unit_index = unit_index, node_index = node_index,
+            name_token = declaration.token_index, first_parameter = context::no_id(), parameter_count = 0,
+            binding_id = binding_id, flags = declaration.flags,
+        });
+    if (context->error != runtime::Error.none) {
+        return context::no_id();
+    }
+    if (!register_parameters(context, declaration_id, unit_index, generic_parameters)) {
+        return context::no_id();
+    }
+    return declaration_id;
+}
+
+fn active_type(context: *context::Context, unit_index: usize, name_token: usize) -> usize {
+    let bindings: *const model::ActiveBinding = context->generics.active_bindings.data as
+            *const model::ActiveBinding;
+    for (var remaining: usize = context->generics.active_binding_count; remaining != 0; remaining -= 1) {
+        let binding: model::ActiveBinding = bindings[remaining - 1];
+        if (context::tokens_equal(context, binding.unit_index, binding.name_token, unit_index, name_token)) {
+            return binding.type_id;
+        }
+    }
+    return context::no_id();
+}
+
+fn activate_instance(context: *context::Context, instance_id: usize) -> usize {
+    let none: usize = context::no_id();
+    if (instance_id >= context->generics.instance_count) {
+        context->error = runtime::Error.invalid_argument;
+        return none;
+    }
+    let mark: usize = context->generics.active_binding_count;
+    let instances: *const model::Instance = context->generics.instances.data as *const model::Instance;
+    let declarations: *const model::Declaration = context->generics.declarations.data as
+            *const model::Declaration;
+    let parameters: *const model::Parameter = context->generics.parameters.data as *const model::Parameter;
+    let arguments: *const usize = context->generics.arguments.data as *const usize;
+    let instance: model::Instance = instances[instance_id];
+    if (instance.declaration_id >= context->generics.declaration_count) {
+        context->error = runtime::Error.invalid_argument;
+        return none;
+    }
+    let declaration: model::Declaration = declarations[instance.declaration_id];
+    if (declaration.parameter_count != instance.argument_count) {
+        context->error = runtime::Error.invalid_argument;
+        return none;
+    }
+    for (var index: usize = 0; index < declaration.parameter_count; index += 1) {
+        let parameter: model::Parameter = parameters[declaration.first_parameter + index];
+        context->error = model::append_active_binding(
+            &context->generics, {
+                unit_index = parameter.unit_index, name_token = parameter.name_token,
+                type_id = arguments[instance.first_argument + index],
+            });
+        if (context->error != runtime::Error.none) {
+            model::truncate_active_bindings(&context->generics, mark);
+            return none;
+        }
+    }
+    return mark;
+}
+
+fn restore_active_bindings(context: *context::Context, count: usize) -> bool {
+    let restore_error: runtime::Error = model::truncate_active_bindings(&context->generics, count);
+    if (context->error == runtime::Error.none) {
+        context->error = restore_error;
+    }
+    return restore_error == runtime::Error.none;
+}

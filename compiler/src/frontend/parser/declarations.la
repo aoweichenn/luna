@@ -13,6 +13,34 @@ fn parser_at_member_list_end(state: *state::State) -> bool {
     return state->current.kind == lexer::TokenKind.right_brace || state->current.kind == lexer::TokenKind.end;
 }
 
+fn parser_parse_generic_parameters(state: *state::State) -> usize {
+    let none: usize = syntax::syntax_no_index();
+    if (state->current.kind != lexer::TokenKind.less) {
+        return none;
+    }
+    let start: lexer::Token = state->current;
+    let start_index: usize = state->current_index;
+    state::parser_advance(state);
+    let parameters: usize = state::parser_new_node(
+        state, syntax::SyntaxKind.generic_parameters, start.span, start_index);
+    for (; state->error == runtime::Error.none;) {
+        let name: lexer::Token = state->current;
+        let name_index: usize = state->current_index;
+        if (!state::parser_expect(state, lexer::TokenKind.identifier)) {
+            break;
+        }
+        let parameter: usize = state::parser_new_node(
+            state, syntax::SyntaxKind.generic_parameter, name.span, name_index);
+        state::parser_add_child(state, parameters, parameter);
+        if (!state::parser_match(state, lexer::TokenKind.comma)) {
+            break;
+        }
+    }
+    state::parser_expect(state, lexer::TokenKind.greater);
+    state::parser_set_node_span(state, parameters, state::parser_join_spans(start.span, state->previous.span));
+    return parameters;
+}
+
 fn parser_parse_module_name(state: *state::State, declaration: usize) -> bool {
     var saw_name: bool = false;
     while (state->error == runtime::Error.none) {
@@ -233,6 +261,10 @@ fn parser_parse_aggregate_declaration(
     state::parser_expect(state, lexer::TokenKind.identifier);
     let declaration: usize = state::parser_new_node(state, declaration_kind, start.span, name_index);
     state::parser_add_node_flags(state, declaration, flags);
+    let generic_parameters: usize = parser_parse_generic_parameters(state);
+    if (generic_parameters != none) {
+        state::parser_add_child(state, declaration, generic_parameters);
+    }
     if (declaration_kind == syntax::SyntaxKind.class_declaration &&
         state::parser_match(state, lexer::TokenKind.colon)) {
         state::parser_add_node_flags(state, declaration, syntax::SyntaxFlag.has_base as usize);
@@ -266,6 +298,10 @@ fn parser_parse_opaque_class_declaration(
     let declaration: usize = state::parser_new_node(
         state, syntax::SyntaxKind.class_declaration, start.span, name_index);
     state::parser_add_node_flags(state, declaration, flags | (syntax::SyntaxFlag.opaque_class as usize));
+    let generic_parameters: usize = parser_parse_generic_parameters(state);
+    if (generic_parameters != syntax::syntax_no_index()) {
+        state::parser_add_child(state, declaration, generic_parameters);
+    }
     state::parser_expect(state, lexer::TokenKind.semicolon);
     statements::parser_attach_attributes(state, declaration, first_attribute, attribute_count);
     state::parser_set_node_span(state, declaration, state::parser_join_spans(start.span, state->previous.span));
@@ -473,6 +509,10 @@ fn parser_parse_function_with_name(
     let function: usize = state::parser_new_node(state, syntax::SyntaxKind.function_declaration, start.span,
         name_index);
     state::parser_add_node_flags(state, function, flags);
+    let generic_parameters: usize = parser_parse_generic_parameters(state);
+    if (generic_parameters != none) {
+        state::parser_add_child(state, function, generic_parameters);
+    }
     state::parser_expect(state, lexer::TokenKind.left_parenthesis);
     if (state->current.kind != lexer::TokenKind.right_parenthesis) {
         while (state->error == runtime::Error.none) {
@@ -555,6 +595,10 @@ fn parser_parse_type_alias_declaration(
     let declaration: usize = state::parser_new_node(
         state, syntax::SyntaxKind.type_alias_declaration, start.span, name_index);
     state::parser_add_node_flags(state, declaration, flags);
+    let generic_parameters: usize = parser_parse_generic_parameters(state);
+    if (generic_parameters != none) {
+        state::parser_add_child(state, declaration, generic_parameters);
+    }
     state::parser_expect(state, lexer::TokenKind.equal);
     if (!state::parser_enter_nesting(state, start.span)) {
         statements::parser_attach_attributes(state, declaration, first_attribute, attribute_count);
@@ -572,6 +616,17 @@ fn parser_parse_type_alias_declaration(
     state::parser_expect(state, lexer::TokenKind.semicolon);
     statements::parser_attach_attributes(state, declaration, first_attribute, attribute_count);
     return declaration;
+}
+
+fn parser_at_type_alias_declaration(state: *state::State) -> bool {
+    let keyword_matches: bool = state->current.kind == lexer::TokenKind.identifier &&
+        state::parser_identifier_text_is(state, state->current, "type", 4);
+    let name_follows: bool = state::parser_token_at(
+        state, state->current_index + 1).kind == lexer::TokenKind.identifier;
+    let suffix: lexer::TokenKind = state::parser_token_at(state, state->current_index + 2).kind;
+    let alias_suffix: bool = suffix == lexer::TokenKind.equal || suffix == lexer::TokenKind.less;
+    let declaration_prefix: bool = keyword_matches && name_follows;
+    return declaration_prefix && alias_suffix;
 }
 
 fn parser_parse_top_level_declaration(state: *state::State) -> usize {
@@ -680,11 +735,7 @@ fn parser_parse_top_level_declaration(state: *state::State) -> usize {
         return statements::parser_parse_const_declaration(
             state, start, state->current_index, flags, first_attribute, attribute_count);
     }
-    if (state->current.kind == lexer::TokenKind.identifier &&
-        state::parser_identifier_text_is(state, state->current, "type", 4) &&
-        state::parser_token_at(state, state->current_index + 1).kind == lexer::TokenKind.identifier &&
-        state::parser_token_at(
-            state, state->current_index + 2).kind == lexer::TokenKind.equal) {
+    if (parser_at_type_alias_declaration(state)) {
         return parser_parse_type_alias_declaration(state, start, flags, first_attribute, attribute_count);
     }
 

@@ -277,12 +277,13 @@ M4 follows the completed M3 object model. Its accepted design is tracked in
 the archived Luna 0 self-hosting milestone named `M4` above.
 
 - [x] native-generics design draft
-- [ ] M4.0 syntax, generic patterns, substitution and canonical instance
+- [x] M4.0 syntax, generic patterns, substitution and canonical instance
       identity
-- [ ] M4.1 generic free functions, exact inference and monomorphization
-- [ ] M4.2 generic structures, unions and transparent aliases
-- [ ] M4.3 generic classes, methods and concrete M3 interaction
-- [ ] M4.4 standard-library proving ground and anchor promotion
+- [x] M4.1 generic free functions, exact inference and monomorphization
+- [x] M4.2 generic structures, unions and transparent aliases
+- [x] M4.3 generic classes, methods and concrete M3 interaction
+- [x] M4.4 cross-module standard-library proving ground
+- [ ] M4 release: source commit followed by anchor promotion
 
 ## Explicitly deferred
 

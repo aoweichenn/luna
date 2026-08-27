@@ -295,6 +295,37 @@ fn collect_fields(context: *context::Context) -> bool {
     return context->error == runtime::Error.none;
 }
 
+fn prepare_generic_class(context: *context::Context, type_id: usize) -> bool {
+    let record_id: usize = find_record(context, type_id);
+    if (record_id == context::no_id()) {
+        return false;
+    }
+    if (!types::require_complete_type(context, type_id)) {
+        return false;
+    }
+    let type_record: type_info::Record = context::type_record(context, type_id);
+    let records: *const model::Record = context->classes.records.data as *const model::Record;
+    if (records[record_id].field_count == type_record.field_count) {
+        return true;
+    }
+    if (records[record_id].field_count != 0) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    for (var index: usize = 0; index < type_record.field_count; index += 1) {
+        let field_id: usize = type_record.first_field + index;
+        let field: type_info::Field = fields[field_id];
+        let declaration: syntax::SyntaxNode = context::node(context, field.declaration_unit, field.declaration_node);
+        context->error = model::append_field(
+            &context->classes, record_id, {field_id = field_id, access = access_from_flags(declaration.flags)});
+        if (context->error != runtime::Error.none) {
+            return false;
+        }
+    }
+    return true;
+}
+
 fn report_friend(
     context: *context::Context, type_record: type_info::Record, declaration: syntax::SyntaxNode, detail: usize) {
     context::add_diagnostic(
@@ -664,6 +695,21 @@ fn collect_methods(context: *context::Context) -> bool {
         record_id += 1) {
         append_record_methods(context, record_id, records[record_id], functions, ordered);
     }
+    return context->error == runtime::Error.none;
+}
+
+fn collect_generic_methods(context: *context::Context, type_id: usize) -> bool {
+    let record_id: usize = find_record(context, type_id);
+    if (record_id == context::no_id()) {
+        return false;
+    }
+    let records: *const model::Record = context->classes.records.data as *const model::Record;
+    if (records[record_id].method_count != 0) {
+        return true;
+    }
+    let functions: *const context::Function = context->functions.data as *const context::Function;
+    let ordered: *const usize = context->callable_candidates.data as *const usize;
+    append_record_methods(context, record_id, records[record_id], functions, ordered);
     return context->error == runtime::Error.none;
 }
 

@@ -3,6 +3,8 @@ module luna.bootstrap.middleend.semantic.types;
 import luna.bootstrap.middleend.semantic.attributes as attributes;
 import luna.bootstrap.middleend.semantic.context.builder as builder;
 import luna.bootstrap.middleend.semantic.context.lookup as names;
+import luna.bootstrap.middleend.semantic.generics.model as generic_model;
+import luna.bootstrap.middleend.semantic.generics;
 import luna.runtime as runtime;
 import luna.std.bytes as bytes;
 
@@ -130,6 +132,65 @@ fn append_named_type(
         });
 }
 
+fn generic_class_features_are_supported(
+    context: *context::Context, unit_index: usize, declaration: syntax::SyntaxNode) -> bool {
+    let unsupported_flags: usize = (syntax::SyntaxFlag.has_base as usize) | (syntax::SyntaxFlag.opaque_class as usize);
+    if ((declaration.flags & unsupported_flags) != 0) {
+        return false;
+    }
+    if (attributes::declaration_has_attribute(
+            context, unit_index, declaration, attributes::Attribute.rtti)) {
+        return false;
+    }
+    for (var child: usize = declaration.first_child; child != context::no_id();
+        child = context::node(context, unit_index, child).next_sibling) {
+        let member: syntax::SyntaxNode = context::node(context, unit_index, child);
+        let virtual_flags: usize = (syntax::SyntaxFlag.virtual_method as usize) |
+            (syntax::SyntaxFlag.abstract_method as usize) | (syntax::SyntaxFlag.override_method as usize);
+        let virtual_method: bool = member.kind == syntax::SyntaxKind.function_declaration &&
+            (member.flags & virtual_flags) != 0;
+        let generic_method: bool = member.kind == syntax::SyntaxKind.function_declaration &&
+            generics::is_generic(context, unit_index, member);
+        let forbidden_member: bool = virtual_method || member.kind == syntax::SyntaxKind.friend_declaration;
+        if (forbidden_member || generic_method) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn append_generic_type(
+    context: *context::Context, module_id: usize, unit_index: usize,
+    declaration_id: usize, declaration: syntax::SyntaxNode, interface_unit: bool) {
+    let generic_class: bool = declaration.kind == syntax::SyntaxKind.class_declaration;
+    if (generic_class && !generic_class_features_are_supported(context, unit_index, declaration)) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_generic_use, unit_index, declaration.span,
+            context::no_id(), context::empty_span(), declaration.token_index);
+        return;
+    }
+    let generic_id: usize = generics::register_declaration(
+        context, generic_model::DeclarationKind.type_declaration,
+        module_id, unit_index, declaration_id, context::no_id());
+    if (generic_id == context::no_id()) {
+        return;
+    }
+    var flags: usize = context::SymbolFlag.none as usize;
+    if (declaration_has_flag(declaration, syntax::SyntaxFlag.exported)) {
+        flags |= context::SymbolFlag.exported as usize;
+    }
+    if (interface_unit) {
+        flags |= context::SymbolFlag.interface_declaration as usize;
+    }
+    names::append_symbol(
+        context, {
+            kind = context::SymbolKind.generic_type, module_id = module_id,
+            declaration_unit = unit_index, declaration_node = declaration_id,
+            name_token = declaration.token_index, type_id = generic_id,
+            function_id = context::no_id(), integer_value = 0, flags = flags,
+        });
+}
+
 fn collect_types_in_unit(context: *context::Context, module_id: usize, unit_index: usize) -> bool {
     let none: usize = context::no_id();
     if (unit_index == none) {
@@ -142,6 +203,7 @@ fn collect_types_in_unit(context: *context::Context, module_id: usize, unit_inde
         let declaration: syntax::SyntaxNode = context::node(context, unit_index, declaration_id);
         let type_kind: type_info::Kind = declaration_type_kind(declaration.kind);
         if (type_kind != type_info::Kind.invalid) {
+            let generic: bool = generics::is_generic(context, unit_index, declaration);
             let exported: bool = declaration_has_flag(declaration, syntax::SyntaxFlag.exported);
             if (!interface_unit && exported) {
                 context::add_diagnostic(
@@ -150,7 +212,7 @@ fn collect_types_in_unit(context: *context::Context, module_id: usize, unit_inde
             }
             let duplicate: usize =
                 names::find_any_local_symbol(context, module_id, unit_index, declaration.token_index);
-            let opaque_definition: bool = try_define_opaque_class(
+            let opaque_definition: bool = !generic && try_define_opaque_class(
                 context, unit_index, declaration_id, declaration, duplicate, interface_unit);
             if (duplicate != none && !opaque_definition) {
                 let symbols: *const context::Symbol = context->symbols.data as
@@ -161,6 +223,8 @@ fn collect_types_in_unit(context: *context::Context, module_id: usize, unit_inde
                     symbols[duplicate].declaration_unit,
                     context::token(context, symbols[duplicate].declaration_unit, symbols[duplicate].name_token).span,
                     duplicate);
+            } else if (duplicate == none && generic) {
+                append_generic_type(context, module_id, unit_index, declaration_id, declaration, interface_unit);
             } else if (duplicate == none) {
                 append_named_type(
                     context, module_id, unit_index, declaration_id, declaration, type_kind, interface_unit);
@@ -260,9 +324,217 @@ fn builtin_type(kind: lexer::TokenKind) -> usize {
     return context::no_id();
 }
 
+struct GenericArguments {
+    values: bytes::Buffer;
+    count: usize;
+    valid: bool;
+}
+
+fn empty_generic_arguments() -> GenericArguments {
+    return {values = bytes::empty(), count = 0, valid = false};
+}
+
+fn resolve_generic_arguments(context: *context::Context, unit_index: usize, arguments_node: usize) -> GenericArguments {
+    let arguments: syntax::SyntaxNode = context::node(context, unit_index, arguments_node);
+    let count_is_valid: bool = arguments.kind == syntax::SyntaxKind.generic_arguments && arguments.child_count != 0;
+    if (!count_is_valid || arguments.child_count > context::Limit.maximum_generic_parameters as usize) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.generic_argument_count, unit_index, arguments.span,
+            context::no_id(), context::empty_span(), arguments.child_count);
+        return empty_generic_arguments();
+    }
+    var result: GenericArguments = {values = bytes::empty(), count = 0, valid = true};
+    for (var child: usize = arguments.first_child; child != context::no_id();
+        child = context::node(context, unit_index, child).next_sibling) {
+        let type_id: usize = resolve_type_node(context, unit_index, child);
+        if (type_id == context::no_id()) {
+            result.valid = false;
+            break;
+        }
+        let appended: bytes::BufferResult = bytes::append(
+            result.values, (&type_id) as *const usize as *const u8, sizeof(usize));
+        result.values = appended.buffer;
+        context->error = appended.error;
+        if (appended.error != runtime::Error.none) {
+            result.valid = false;
+            break;
+        }
+        result.count += 1;
+    }
+    return result;
+}
+
+fn report_generic_type(
+    context: *context::Context, kind: context::DiagnosticKind, unit_index: usize,
+    node: syntax::SyntaxNode, declaration: generic_model::Declaration, detail: usize) {
+    context::add_diagnostic(
+        context, kind, unit_index, node.span, declaration.unit_index,
+        context::node(context, declaration.unit_index, declaration.node_index).span, detail);
+}
+
+fn generic_class_contract_is_valid(
+    context: *context::Context, declaration: generic_model::Declaration,
+    source: syntax::SyntaxNode, use_unit: usize, use_node: syntax::SyntaxNode) -> bool {
+    let valid: bool = generic_class_features_are_supported(context, declaration.unit_index, source);
+    if (!valid) {
+        report_generic_type(
+            context, context::DiagnosticKind.invalid_generic_use,
+            use_unit, use_node, declaration, declaration.name_token);
+    }
+    return valid;
+}
+
+fn append_generic_class_record(context: *context::Context, type_id: usize, source: syntax::SyntaxNode) -> bool {
+    let none: usize = context::no_id();
+    var flags: usize = class_model::Flag.none as usize;
+    if ((source.flags & (syntax::SyntaxFlag.exported as usize)) != 0) {
+        flags |= class_model::Flag.exported as usize;
+    }
+    if ((source.flags & (syntax::SyntaxFlag.final_class as usize)) != 0) {
+        flags |= class_model::Flag.final_class as usize;
+    }
+    context->error = class_model::append_record(
+        &context->classes, {
+            type_id = type_id, base_type = none, first_field = none, field_count = 0,
+            first_method = none, method_count = 0, first_friend = none, friend_count = 0,
+            vptr_offset = none, descriptor_global = none, vtable_global = none, flags = flags,
+        });
+    return context->error == runtime::Error.none;
+}
+
+fn instantiate_generic_type(
+    context: *context::Context, generic_id: usize, unit_index: usize,
+    node: syntax::SyntaxNode, arguments: GenericArguments) -> usize {
+    if (generic_id >= context->generics.declaration_count) {
+        context->error = runtime::Error.invalid_argument;
+        return context::no_id();
+    }
+    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
+            *const generic_model::Declaration;
+    let declaration: generic_model::Declaration = declarations[generic_id];
+    if (declaration.parameter_count != arguments.count) {
+        report_generic_type(
+            context, context::DiagnosticKind.generic_argument_count, unit_index, node, declaration, arguments.count);
+        return context::no_id();
+    }
+    let argument_types: *const usize = arguments.values.data as *const usize;
+    let existing: usize = generic_model::find_instance(
+        context->generics, generic_id, context::no_id(), argument_types, arguments.count);
+    if (existing != context::no_id()) {
+        let instances: *const generic_model::Instance = context->generics.instances.data as
+                *const generic_model::Instance;
+        return instances[existing].state == generic_model::InstanceState.failed ?
+            context::no_id() : instances[existing].type_id;
+    }
+    if (context->generics.instance_count >= context::Limit.maximum_generic_instances as usize) {
+        report_generic_type(
+            context, context::DiagnosticKind.generic_resource_limit,
+            unit_index, node, declaration, context->generics.instance_count);
+        return context::no_id();
+    }
+    let source: syntax::SyntaxNode = context::node(context, declaration.unit_index, declaration.node_index);
+    let generic_is_opaque: bool = (source.flags & (syntax::SyntaxFlag.opaque_class as usize)) != 0;
+    if (generic_is_opaque) {
+        report_generic_type(
+            context, context::DiagnosticKind.invalid_generic_use, unit_index, node, declaration, generic_id);
+        return context::no_id();
+    }
+    let type_kind: type_info::Kind = declaration_type_kind(source.kind);
+    if (type_kind == type_info::Kind.class_type && !generic_class_contract_is_valid(
+            context, declaration, source, unit_index, node)) {
+        return context::no_id();
+    }
+    if (context->type_depth >= context::Limit.maximum_generic_depth as usize) {
+        report_generic_type(
+            context, context::DiagnosticKind.generic_resource_limit,
+            unit_index, node, declaration, context->type_depth);
+        return context::no_id();
+    }
+    let instance_result: generic_model::InstanceResult = generic_model::append_instance(
+        &context->generics, generic_id, context::no_id(), argument_types, arguments.count, context->type_depth);
+    context->error = instance_result.error;
+    if (instance_result.error != runtime::Error.none) {
+        return context::no_id();
+    }
+    let exported: bool = (source.flags & (syntax::SyntaxFlag.exported as usize)) != 0;
+    let added: type_info::TableResult = type_info::table_add_named(
+        context->types, type_kind, declaration.unit_index, declaration.node_index, declaration.name_token, exported);
+    context->types = added.table;
+    context->error = added.error;
+    if (added.error != runtime::Error.none) {
+        return context::no_id();
+    }
+    let type_id: usize = context->types.type_count - 1;
+    context->error = generic_model::set_instance_result(
+        &context->generics, instance_result.instance_id, type_id, context::no_id(),
+        generic_model::InstanceState.resolving);
+    if (context->error == runtime::Error.none && type_kind == type_info::Kind.class_type) {
+        append_generic_class_record(context, type_id, source);
+    }
+    return context->error == runtime::Error.none ? type_id : context::no_id();
+}
+
+fn resolve_generic_reference(
+    context: *context::Context, unit_index: usize, node: syntax::SyntaxNode,
+    base: syntax::SyntaxNode, arguments_node: usize) -> usize {
+    let symbol_id: usize = names::lookup_qualified_symbol(
+        context, unit_index, base, context::SymbolKind.generic_type, true);
+    if (symbol_id == context::no_id()) {
+        return context::no_id();
+    }
+    let resolved_arguments: GenericArguments = resolve_generic_arguments(context, unit_index, arguments_node);
+    if (!resolved_arguments.valid) {
+        let release_error: runtime::Error = bytes::release(resolved_arguments.values);
+        if (context->error == runtime::Error.none) {
+            context->error = release_error;
+        }
+        return context::no_id();
+    }
+    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let type_id: usize = instantiate_generic_type(
+        context, symbols[symbol_id].type_id, unit_index, node, resolved_arguments);
+    let release_error: runtime::Error = bytes::release(resolved_arguments.values);
+    if (context->error == runtime::Error.none) {
+        context->error = release_error;
+    }
+    if (type_id == context::no_id()) {
+        return type_id;
+    }
+    let record: type_info::Record = context::type_record(context, type_id);
+    if (record.kind != type_info::Kind.alias) {
+        return type_id;
+    }
+    if (!require_complete_type(context, type_id)) {
+        return context::no_id();
+    }
+    return context::type_record(context, type_id).element_type;
+}
+
+fn resolve_generic_type_node(context: *context::Context, unit_index: usize, node: syntax::SyntaxNode) -> usize {
+    if (node.child_count != 2) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_generic_use, unit_index, node.span,
+            context::no_id(), context::empty_span(), node.child_count);
+        return context::no_id();
+    }
+    let base: syntax::SyntaxNode = context::node(context, unit_index, node.first_child);
+    return resolve_generic_reference(context, unit_index, node, base, base.next_sibling);
+}
+
+fn resolve_generic_expression_type(context: *context::Context, unit_index: usize, node: syntax::SyntaxNode) -> usize {
+    if (node.kind != syntax::SyntaxKind.generic_expression || node.child_count != 2) {
+        return context::no_id();
+    }
+    let base: syntax::SyntaxNode = context::node(context, unit_index, node.first_child);
+    return resolve_generic_reference(context, unit_index, node, base, base.next_sibling);
+}
+
 fn resolve_type_node(context: *context::Context, unit_index: usize, node_index: usize) -> usize {
     let none: usize = context::no_id();
     let node: syntax::SyntaxNode = context::node(context, unit_index, node_index);
+    if (node.kind == syntax::SyntaxKind.type_generic) {
+        return resolve_generic_type_node(context, unit_index, node);
+    }
     if (node.kind == syntax::SyntaxKind.type_builtin) {
         let token_kind: lexer::TokenKind = context::token(context, unit_index, node.token_index).kind;
         // va_list is not a general-purpose type: it mounts only as a local
@@ -279,6 +551,12 @@ fn resolve_type_node(context: *context::Context, unit_index: usize, node_index: 
             return type_id;
         }
     } else if (node.kind == syntax::SyntaxKind.type_named) {
+        if (node.child_count == 0) {
+            let active: usize = generics::active_type(context, unit_index, node.token_index);
+            if (active != none) {
+                return active;
+            }
+        }
         let symbol_id: usize =
             names::lookup_qualified_symbol(context, unit_index, node, context::SymbolKind.named_type, true);
         if (symbol_id == none && node.child_count != 0) {
@@ -505,6 +783,14 @@ fn resolve_type_node(context: *context::Context, unit_index: usize, node_index: 
 }
 
 fn resolve_class_expression(context: *context::Context, unit_index: usize, node: syntax::SyntaxNode) -> usize {
+    if (node.kind == syntax::SyntaxKind.generic_expression) {
+        let generic_type: usize = resolve_generic_expression_type(context, unit_index, node);
+        if (generic_type == context::no_id()) {
+            return generic_type;
+        }
+        return context::type_record(context, generic_type).kind == type_info::Kind.class_type ?
+            generic_type : context::no_id();
+    }
     if (node.kind != syntax::SyntaxKind.name_expression) {
         return context::no_id();
     }

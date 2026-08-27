@@ -18,7 +18,7 @@ implementation status is tracked in `roadmap.md`.
 | `anchor/` | promoted to the M3.6 stage-fixed toolchain |
 | Negative tests | `FAIL <diagnostic-kind>` harness landed (0.3 done) |
 | M3.0-M3.6 object model and class-value composition | implemented and promoted; 383/383 cases |
-| M4 native generics | design opened; implementation not started |
+| M4 native generics | implemented; 409/409 cases; verify fixed point; anchor promotion pending |
 
 ## Step 0 — close m1.1 completely
 
@@ -158,11 +158,14 @@ class-value composition and ordered member initialization. None of these
 milestones changes M3.0 ownership semantics: there is still no automatic
 lifetime or resource management.
 
-The next independent phase is M4 native generics, specified in
-[`m4-generics-design.md`](m4-generics-design.md). It establishes exact static
-inference, canonical monomorphization, generic data/class types and
-cross-module interface definitions before references or object lifetime are
-introduced.
+M4 native generics are implemented as specified in
+[`m4-generics-design.md`](m4-generics-design.md): exact static inference,
+canonical monomorphization, generic data/class types and cross-module interface
+definitions are green behind the 409-case suite and fixed-point verification.
+The next release action is to commit this source state and promote that exact
+revision into `anchor/`; compiler sources must not adopt generic declarations
+before the promotion. Reference types and object lifetime work follow that
+release boundary.
 
 ## Discipline reminders
 
