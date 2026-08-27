@@ -283,7 +283,7 @@ the archived Luna 0 self-hosting milestone named `M4` above.
 - [x] M4.2 generic structures, unions and transparent aliases
 - [x] M4.3 generic classes, methods and concrete M3 interaction
 - [x] M4.4 cross-module standard-library proving ground
-- [ ] M4 release: source commit followed by anchor promotion
+- [x] M4 release: source commit followed by anchor promotion
 
 ## Explicitly deferred
 

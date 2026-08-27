@@ -9,9 +9,9 @@ lifetime, copy/move hooks and destruction. The older uppercase M4 in
 this phase.
 
 The language and compiler implementation are complete behind the 409-case
-suite and a byte-identical fixed point. The checked-in anchor remains the M3.6
-toolchain until this source state is committed and promoted; compiler sources
-therefore do not yet adopt generic declarations themselves.
+suite and a byte-identical fixed point. The checked-in anchor is the promoted
+M4 toolchain, so compiler sources may adopt generic declarations under the
+normal fixed-point discipline.
 
 M4 provides static, zero-runtime-cost generic functions and nominal generic
 types. It is designed for reusable containers, algorithms and standard-library

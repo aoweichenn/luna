@@ -261,3 +261,22 @@ artifact was byte-identical. The final verified-toolchain test run passed
 383/383, including direct, inherited, polymorphic, imported, opaque-internal
 and nested-array composition plus negative initialization diagnostics. The
 stage-fixed executables were copied here and `SHA256SUMS` refreshed.
+
+## 2026-08-27: promotion to the M4 native-generics toolchain
+
+The anchor now holds the stage-fixed toolchain built from commit
+`ff021a4` (`feat: implement M4 native generics`). Starting from the previous
+M3.6 anchor, the transition toolchain implemented concise angle-bracket
+generic syntax, exact function inference, canonical monomorphization, generic
+structures, unions, transparent aliases and direct generic classes with
+ordinary, static and bound methods.
+
+Remote x86-64 verification on `caw` built the exact committed source snapshot
+through `stage-transition`, `stage-next` and `stage-fixed`; every
+stage-next/stage-fixed assembly, object and executable artifact was
+byte-identical. The promoted stage-fixed toolchain passed 409/409 tests,
+including cross-module generic bodies and ABI identities, source-order
+determinism, recursive expansion limits and rejected unsupported generic class
+cross-products. The stage-fixed executables were copied here and
+`SHA256SUMS` refreshed. Compiler sources may now adopt M4 generic syntax under
+the normal fixed-point discipline.
