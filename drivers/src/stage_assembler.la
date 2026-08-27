@@ -1,4 +1,4 @@
-module luna.tools.bootstrap.stage_assembler;
+module luna.tools.assemble;
 
 import luna.bootstrap.backend.x86_64.assembler as assembler;
 import luna.bootstrap.backend.x86_64.elf as elf;
@@ -8,6 +8,7 @@ import luna.std.bytes;
 import luna.std.io;
 import luna.std.path as path;
 import luna.std.text as text;
+import luna.tools.cli as cli;
 
 enum BootstrapStageLimit: usize {
     maximum_path_bytes = 4096, maximum_input = 67108864,
@@ -26,7 +27,7 @@ fn bootstrap_stage_driver_report(line: usize) -> runtime::Error {
         cursor -= 1;
         digits[cursor] = 48;
     }
-    while (value != 0) {
+    for (; value != 0;) {
         cursor -= 1;
         digits[cursor] = ((48 as usize) + value % 10) as u8;
         value /= 10;
@@ -74,37 +75,16 @@ fn bootstrap_stage_driver_run(input_path: path::Path, output_path: path::Path, e
     if (write_error != runtime::Error.none) {
         return BootstrapStageStatus.output_error as i32;
     }
-    if (serialized_error != runtime::Error.none || object_error != runtime::Error.none ||
-        input_error != runtime::Error.none) {
+    var release_error: runtime::Error = cli::first_error(serialized_error, object_error);
+    release_error = cli::first_error(release_error, input_error);
+    if (release_error != runtime::Error.none) {
         return BootstrapStageStatus.release_error as i32;
     }
     return BootstrapStageStatus.success as i32;
 }
 
-fn bootstrap_stage_argument_equals(argument: *const u8, expected: *const u8, length: usize) -> bool {
-    if (argument == null || expected == null) {
-        return false;
-    }
-    var index: usize = 0;
-    while (index < length) {
-        if (argument[index] != expected[index] || argument[index] == 0) {
-            return false;
-        }
-        index += 1;
-    }
-    return argument[length] == 0;
-}
-
-fn bootstrap_stage_print(file: runtime::File, data: *const u8) -> runtime::Error {
-    let text: text::ViewResult = text::from_c_string(data, 512);
-    if (text.error != runtime::Error.none) {
-        return text.error;
-    }
-    return io::write_all(file, text.view.data, text.view.length);
-}
-
 fn bootstrap_stage_usage() -> i32 {
-    bootstrap_stage_print(runtime::standard_error(), "usage: luna-as [--emit elf|lunaobj] -o <output> <input.s>\n");
+    cli::print(runtime::standard_error(), "usage: luna assemble [--emit elf|lunaobj] -o <output> <input.s>\n");
     return BootstrapStageStatus.cli_usage_error as i32;
 }
 
@@ -113,16 +93,15 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
         return bootstrap_stage_usage();
     }
     if (argc == 2 &&
-        bootstrap_stage_argument_equals(
+        cli::argument_equals(
             argv[1], "--help", 6)) {
-        bootstrap_stage_print(
-            runtime::standard_output(), "usage: luna-as [--emit elf|lunaobj] -o <output> <input.s>\n");
+        cli::print(runtime::standard_output(), "usage: luna assemble [--emit elf|lunaobj] -o <output> <input.s>\n");
         return 0;
     }
     if (argc == 2 &&
-        bootstrap_stage_argument_equals(
+        cli::argument_equals(
             argv[1], "--version", 9)) {
-        bootstrap_stage_print(runtime::standard_output(), "luna-as (self-hosted Luna 1) 0.1.0\n");
+        cli::print(runtime::standard_output(), "luna assemble (self-hosted Luna 1) 0.1.0\n");
         return 0;
     }
 
@@ -135,30 +114,30 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
     var options_finished: bool = false;
     var valid: bool = true;
     var index: usize = 1;
-    while (index < argc && valid) {
+    for (; index < argc && valid; index += 1) {
         let argument: *const u8 = argv[index];
         if (!options_finished &&
-            bootstrap_stage_argument_equals(
+            cli::argument_equals(
                 argument, "--", 2)) {
             options_finished = true;
         } else if (!options_finished &&
-            bootstrap_stage_argument_equals(
+            cli::argument_equals(
                 argument, "--emit", 6)) {
             if (has_emit || index + 1 >= argc) {
                 valid = false;
             } else {
                 index += 1;
-                if (bootstrap_stage_argument_equals(argv[index], "elf", 3)) {
+                if (cli::argument_equals(argv[index], "elf", 3)) {
                     emit_elf = true;
                     has_emit = true;
-                } else if (bootstrap_stage_argument_equals(argv[index], "lunaobj", 7)) {
+                } else if (cli::argument_equals(argv[index], "lunaobj", 7)) {
                     has_emit = true;
                 } else {
                     valid = false;
                 }
             }
         } else if (!options_finished &&
-            bootstrap_stage_argument_equals(
+            cli::argument_equals(
                 argument, "-o", 2)) {
             if (has_output || index + 1 >= argc) {
                 valid = false;
@@ -173,7 +152,7 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
                     has_output = true;
                 }
             }
-        } else if (!options_finished && argument != null && argument[0] == 45) {
+        } else if (!options_finished && cli::starts_with_dash(argument)) {
             valid = false;
         } else if (has_input) {
             valid = false;
@@ -186,7 +165,6 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
                 has_input = true;
             }
         }
-        index += 1;
     }
     if (!has_input || !has_output) {
         valid = false;
@@ -194,8 +172,9 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
     if (valid) {
         let input_text: text::ViewResult = path::text(input);
         let output_text: text::ViewResult = path::text(output);
-        valid = input_text.error == runtime::Error.none && output_text.error == runtime::Error.none &&
-            !text::equal(input_text.view, output_text.view);
+        let paths_are_readable: bool = input_text.error == runtime::Error.none &&
+            output_text.error == runtime::Error.none;
+        valid = paths_are_readable && !text::equal(input_text.view, output_text.view);
     }
 
     var status: i32 = BootstrapStageStatus.cli_usage_error as i32;
@@ -223,7 +202,7 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
     return status;
 }
 
-fn main(argc: usize, argv: **const u8) -> i32 {
+fn run(argc: usize, argv: **const u8) -> i32 {
     if (argc != 1) {
         return bootstrap_stage_cli_main(argc, argv);
     }
@@ -239,10 +218,9 @@ fn main(argc: usize, argv: **const u8) -> i32 {
     let status: i32 = bootstrap_stage_driver_run(input.path, output.path, false);
     let input_error: runtime::Error = path::release(input.path);
     let output_error: runtime::Error = path::release(output.path);
-    if (status == BootstrapStageStatus.success as i32 && (input_error != runtime::Error.none ||
-            output_error != runtime::Error.none)) {
+    let release_error: runtime::Error = cli::first_error(input_error, output_error);
+    if (status == BootstrapStageStatus.success as i32 && release_error != runtime::Error.none) {
         return BootstrapStageStatus.release_error as i32;
     }
     return status;
 }
-

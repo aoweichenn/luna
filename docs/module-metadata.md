@@ -4,7 +4,7 @@
 > seed's `.lmi` version 1 format on the archived `m0` branch. The current pure
 > Luna compiler does not emit or consume `.lmi`; stage 1 and later compile
 > dependency interfaces directly from `.lh` source. This format must not be
-> treated as the current `lunac` CLI or as the design of a future binary module
+> treated as the current `luna compile` CLI or as the design of a future binary module
 > interface.
 
 `.lmi` is Luna's target-specific compiled interface format. It is a

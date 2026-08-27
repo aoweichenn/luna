@@ -93,7 +93,7 @@ lexer -> parser -> syntax tree
           closed assembly dialect
                     |
                     v
-                 luna-as
+             luna assemble
           +---------+---------+
           |                   |
           v                   v
@@ -102,19 +102,20 @@ lexer -> parser -> syntax tree
           +---------+---------+
                     |
                     v
-                luna-link
+               luna link
                     |
                     v
           static ELF64 executable
 ```
 
 Assembly is a closed output encoding of the x86-64 backend, not a user-facing
-intermediate language. During bootstrap, the Luna assembler consumes this
+intermediate language. During bootstrap, `luna assemble` consumes this
 dialect and emits either the validated `LUNAOBJ1` bootstrap format or a
-standard ELF64 relocatable object. The Luna linker consumes both supported
-object forms and emits the final static ELF64 image. Neither stage invokes a
-host assembler or linker. See
-[the complete bootstrap toolchain contract](bootstrap-toolchain.md).
+standard ELF64 relocatable object. `luna link` consumes both supported object
+forms and emits the final static ELF64 image. The three commands are provided
+by one freestanding executable while their implementation modules remain
+independent. No stage invokes a host assembler or linker. See the
+[unified driver contract](unified-tool-driver.md).
 
 ## Frontend
 
@@ -386,13 +387,13 @@ independently verified.
 
 The pure-Luna backend consumes verified typed IR directly. It computes System
 V parameter/result locations and deterministic stack-frame storage, then emits
-the closed assembly dialect accepted by `luna-as`. Correctness takes priority
+the closed assembly dialect accepted by `luna assemble`. Correctness takes priority
 over optimization; there is no current standalone machine-IR, liveness or
 register-allocation command-line boundary.
 
-`luna-as` owns instruction parsing and encoding. Its default `LUNAOBJ1` output
+`luna assemble` owns instruction parsing and encoding. Its default `LUNAOBJ1` output
 is the self-host bootstrap object format; `--emit elf` writes standard ELF64
-`ET_REL` for the supported freestanding FFI boundary. `luna-link` reads the
+`ET_REL` for the supported freestanding FFI boundary. `luna link` reads the
 supported object forms, resolves symbols and relocations, and writes a static
 x86-64 Linux executable without a hosted assembler, linker or libc.
 
@@ -405,7 +406,7 @@ under a validated verbatim C symbol.
 The machine-IR, liveness, register-allocation, rewrite and native object-writer
 sections below record the hosted `m0` reconstruction pipeline. They are kept as
 design history and do not describe commands or data structures implemented by
-the current pure-Luna `lunac`.
+the current pure-Luna `luna compile` command.
 
 The target machine IR is an owned, target-specific boundary between typed Luna
 IR and assembly emission. Lowering resolves `isize` and `usize` to fixed

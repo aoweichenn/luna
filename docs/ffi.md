@@ -37,7 +37,7 @@ the runtime already owns.
 
 ## C calling Luna
 
-`luna-as --emit elf` turns Luna assembly into a standard ELF64 `ET_REL`
+`luna assemble --emit elf` turns Luna assembly into a standard ELF64 `ET_REL`
 object that any host linker accepts. `elf::save`
 (`compiler/src/backend/x86_64/elf/writer.la`, behind the
 `compiler/src/backend/x86_64/elf.la` facade)
@@ -53,12 +53,12 @@ scalar and narrow-integer arguments, `i64` values and pointers round-trip
 without shims:
 
 ```sh
-lunac --library -o answer.s answer.la
-luna-as --emit elf -o answer.o answer.s
+luna compile --library -o answer.s answer.la
+luna assemble --emit elf -o answer.o answer.s
 gcc -no-pie -o app cmain.c answer.o
 ```
 
-Objects destined for a host link come from `lunac --library` (no
+Objects destined for a host link come from `luna compile --library` (no
 `_start`); Luna objects are small-model and non-PIC by construction, so
 `-no-pie` (or `-fno-pic` on the C side) is the matching host mode. The
 writer's output is validated two ways in the test suite: round-trips

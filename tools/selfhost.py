@@ -70,6 +70,18 @@ def compiler_module(name: str, *implementation_stems: str) -> RegisteredModule:
     )
 
 
+def driver_module(name: str, *implementation_stems: str) -> RegisteredModule:
+    module_path = name.replace(".", "/")
+    return RegisteredModule(
+        name=name,
+        interface=f"drivers/include/{module_path}.lh",
+        implementations=tuple(
+            f"drivers/src/{implementation_stem}.la"
+            for implementation_stem in implementation_stems
+        ),
+    )
+
+
 # key -> explicit interface and implementation source records. Dependencies
 # and build order are derived, so adding or splitting a module still has one
 # configuration site.
@@ -234,13 +246,27 @@ LIBRARIES = {
     ),
     "x86_64_assembler": compiler_module("luna.bootstrap.backend.x86_64.assembler", "backend/x86_64/assembler"),
     "x86_64_linker": compiler_module("luna.bootstrap.backend.x86_64.linker", "backend/x86_64/linker"),
+    "tool_cli": driver_module("luna.tools.cli", "cli"),
+    "tool_compile": driver_module("luna.tools.compile", "stage_compiler"),
+    "tool_assemble": driver_module("luna.tools.assemble", "stage_assembler"),
+    "tool_link": driver_module("luna.tools.link", "stage_linker"),
 }
 
 # tool name -> driver source. Interface and object closures are derived.
 DRIVERS = {
-    "lunac": "drivers/src/stage_compiler.la",
-    "luna-as": "drivers/src/stage_assembler.la",
-    "luna-link": "drivers/src/stage_linker.la",
+    "luna": "drivers/src/luna.la",
+}
+
+LEGACY_LINK_BRIDGE = "drivers/src/legacy_link_bridge.la"
+REGISTERED_DRIVER_SOURCES = {
+    **DRIVERS,
+    "legacy-link-bridge": LEGACY_LINK_BRIDGE,
+}
+
+LEGACY_TOOL_NAMES = {
+    "compile": "lunac",
+    "assemble": "luna-as",
+    "link": "luna-link",
 }
 
 NATIVE_TIMEOUT_SECONDS = 600
@@ -257,10 +283,22 @@ def timeout_seconds(runner: tuple[str, ...]) -> int:
 
 def tool(
     directory: pathlib.Path,
-    name: str,
+    command: str,
     runner: tuple[str, ...],
 ) -> list[str | pathlib.Path]:
-    return [*runner, directory / name]
+    unified = directory / "luna"
+    if unified.is_file():
+        return [*runner, unified, command]
+    legacy_name = LEGACY_TOOL_NAMES.get(command)
+    if legacy_name is None:
+        fail(f"unknown tool command {command}")
+    return [*runner, directory / legacy_name]
+
+
+def toolchain_is_available(directory: pathlib.Path) -> bool:
+    if (directory / "luna").is_file():
+        return True
+    return all((directory / name).is_file() for name in LEGACY_TOOL_NAMES.values())
 
 
 def run(
@@ -465,7 +503,7 @@ def audit_sources() -> None:
                         f"{path.relative_to(ROOT)} imports unregistered module "
                         f"{imported_name}"
                     )
-    for _name, source_name in DRIVERS.items():
+    for _name, source_name in REGISTERED_DRIVER_SOURCES.items():
         source = ROOT / source_name
         source_paths.append(source)
         if not source.is_file():
@@ -548,19 +586,46 @@ def reset(directory: pathlib.Path) -> None:
     directory.mkdir(parents=True)
 
 
+def build_legacy_link_bridge(
+    out: pathlib.Path,
+    compiler: list[str | pathlib.Path],
+    assembler: list[str | pathlib.Path],
+    linker: list[str | pathlib.Path],
+    objects: dict[str, pathlib.Path],
+    *,
+    timeout: int,
+) -> tuple[list[str | pathlib.Path], pathlib.Path]:
+    work = out / "legacy-link-bridge"
+    reset(work)
+    source = ROOT / LEGACY_LINK_BRIDGE
+    assembly = work / "bridge.s"
+    object_file = work / "bridge.lo"
+    executable = work / "luna-link"
+    run(
+        [*compiler, "--executable", "-o", assembly, *driver_units(source)],
+        timeout=timeout,
+    )
+    run([*assembler, "-o", object_file, assembly], timeout=timeout)
+    link_keys = implementation_closure(driver_dependencies(source))
+    run(
+        [*linker, "-o", executable, object_file, *(objects[key] for key in link_keys)],
+        timeout=timeout,
+    )
+    return [executable], work
+
+
 def build_stage(
     tools: pathlib.Path,
     out: pathlib.Path,
     runner: tuple[str, ...],
 ) -> dict[str, pathlib.Path]:
     """Compile, assemble and link one complete toolchain into `out`."""
-    compiler = tool(tools, "lunac", runner)
-    assembler = tool(tools, "luna-as", runner)
-    linker = tool(tools, "luna-link", runner)
+    if not toolchain_is_available(tools):
+        fail(f"missing toolchain under {tools}")
+    compiler = tool(tools, "compile", runner)
+    assembler = tool(tools, "assemble", runner)
+    linker = tool(tools, "link", runner)
     timeout = timeout_seconds(runner)
-    for prefix in (compiler, assembler, linker):
-        if not prefix[-1].is_file():
-            fail(f"missing tool {prefix[-1]}")
 
     assembly_root = out / "assembly"
     object_root = out / "objects"
@@ -582,6 +647,18 @@ def build_stage(
         objects[key] = object_file
         print(f"  built library {key}")
 
+    output_linker = linker
+    bridge_work: pathlib.Path | None = None
+    if not (tools / "luna").is_file():
+        output_linker, bridge_work = build_legacy_link_bridge(
+            out,
+            compiler,
+            assembler,
+            linker,
+            objects,
+            timeout=timeout,
+        )
+
     executables: dict[str, pathlib.Path] = {}
     for name, source_name in DRIVERS.items():
         source = ROOT / source_name
@@ -595,11 +672,14 @@ def build_stage(
         executable = binary_root / name
         link_keys = implementation_closure(driver_dependencies(source))
         run(
-            [*linker, "-o", executable, driver_object, *(objects[key] for key in link_keys)],
+            [*output_linker, "-o", executable, driver_object, *(objects[key] for key in link_keys)],
             timeout=timeout,
         )
         executables[name] = executable
         print(f"  linked {name} ({len(link_keys)} library objects)")
+
+    if bridge_work is not None:
+        shutil.rmtree(bridge_work)
 
     return {"assemblies": assembly_root, "objects": object_root, "binaries": binary_root}
 
@@ -820,6 +900,70 @@ def require_two_unit_order_identity(
         raise AssertionError("assembly differs after implementation-unit permutation")
 
 
+def execute_tool_cli_tests(
+    stage_bin: pathlib.Path,
+    runner: tuple[str, ...],
+) -> tuple[int, list[str]]:
+    executable = stage_bin / "luna"
+    root_usage = "usage: luna <compile|assemble|link> [options]\n"
+    cases = (
+        (
+            "tool-root-help",
+            ("--help",),
+            0,
+            "usage: luna <command> [options]\n"
+            "commands:\n"
+            "  compile   lower Luna source to assembly\n"
+            "  assemble  encode assembly into an object\n"
+            "  link      link objects into an executable\n",
+            "",
+        ),
+        ("tool-root-version", ("--version",), 0, "luna (self-hosted Luna 1) 0.1.0\n", ""),
+        ("tool-root-missing-command", (), 125, "", root_usage),
+        ("tool-root-unknown-command", ("unknown",), 125, "", root_usage),
+        (
+            "tool-compile-help",
+            ("compile", "--help"),
+            0,
+            "usage: luna compile [--executable|--library] -o <output.s> <source-unit>...\n",
+            "",
+        ),
+        (
+            "tool-assemble-help",
+            ("assemble", "--help"),
+            0,
+            "usage: luna assemble [--emit elf|lunaobj] -o <output> <input.s>\n",
+            "",
+        ),
+        (
+            "tool-link-help",
+            ("link", "--help"),
+            0,
+            "usage: luna link -o <executable> <input.lo>...\n",
+            "",
+        ),
+    )
+    timeout = timeout_seconds(runner)
+    passed = 0
+    failed: list[str] = []
+    for name, arguments, expected_status, expected_stdout, expected_stderr in cases:
+        try:
+            completed = test_command(
+                [*runner, executable, *arguments],
+                timeout=timeout,
+            )
+            actual = (completed.returncode, completed.stdout, completed.stderr)
+            expected = (expected_status, expected_stdout, expected_stderr)
+            if actual != expected:
+                raise AssertionError(f"result {actual!r}, expected {expected!r}")
+            passed += 1
+            print(f"PASS {name}")
+        except Exception as error:  # noqa: BLE001 - report and continue
+            failed.append(name)
+            print(f"FAIL {name}: {error}")
+    return passed, failed
+
+
 def execute_callable_identity_tests(
     stage_bin: pathlib.Path,
     runner: tuple[str, ...],
@@ -828,9 +972,9 @@ def execute_callable_identity_tests(
     work = ROOT / "out" / "tests" / "callable-identity"
     reset(work)
     timeout = timeout_seconds(runner)
-    compiler = tool(stage_bin, "lunac", runner)
-    assembler = tool(stage_bin, "luna-as", runner)
-    linker = tool(stage_bin, "luna-link", runner)
+    compiler = tool(stage_bin, "compile", runner)
+    assembler = tool(stage_bin, "assemble", runner)
+    linker = tool(stage_bin, "link", runner)
     passed = 0
     failed: list[str] = []
 
@@ -1034,8 +1178,8 @@ def execute_relocation_data_tests(
     work = ROOT / "out" / "tests" / "relocation-data"
     reset(work)
     timeout = timeout_seconds(runner)
-    assembler = tool(stage_bin, "luna-as", runner)
-    linker = tool(stage_bin, "luna-link", runner)
+    assembler = tool(stage_bin, "assemble", runner)
+    linker = tool(stage_bin, "link", runner)
     passed = 0
     failed: list[str] = []
 
@@ -1051,7 +1195,7 @@ def execute_relocation_data_tests(
             executable = work / name
             require_test_success(
                 [
-                    *tool(stage_bin, "lunac", runner),
+                    *tool(stage_bin, "compile", runner),
                     "--executable",
                     "-o",
                     assembly,
@@ -1139,7 +1283,7 @@ def execute_relocation_data_tests(
             )
             if completed.returncode != 2:
                 raise AssertionError(
-                    f"luna-as returned {completed.returncode}, expected 2"
+                    f"luna assemble returned {completed.returncode}, expected 2"
                 )
             expected_error = f"assembler:{expected_line}\n"
             if completed.stderr != expected_error:
@@ -1162,17 +1306,17 @@ def execute_ffi_tests(
     """Link tests/ffi cases against the checked-in ELF64 fixture objects.
 
     Each expectation line is `<case>.la <fixture>.o <exit>`, or
-    `<case>.la <fixture>.o link:<status>` when luna-link itself must fail
+    `<case>.la <fixture>.o link:<status>` when `luna link` itself must fail
     with the given exit status (malformed or unresolvable fixtures). Fixtures
     not checked in (fixture.o) are built from C sources with an x86-64 C
     compiler; without one their cases are skipped, not failed.
 
-    Two more shapes exercise the luna-as --emit elf writer:
+    Two more shapes exercise the `luna assemble --emit elf` writer:
     `<case>.la elf-link <fixture>.o <exit>` (or link:<status>) assembles the
     case to a standard ELF64 ET_REL instead of LUNAOBJ1, then links with
-    luna-link exactly as above — a writer -> reader -> linker round-trip;
+    `luna link` exactly as above — a writer -> reader -> linker round-trip;
     `<case>.la host-link <cmain>.c <exit>` compiles the case with
-    `lunac --library`, assembles it with --emit elf and links the object
+    `luna compile --library`, assembles it with `--emit elf` and links the object
     against a C main with the same compiler, running the resulting hosted
     executable (skipped when no suitable compiler is present).
     """
@@ -1194,7 +1338,7 @@ def execute_ffi_tests(
         if len(parts) == 4 and parts[1] in ("elf-link", "host-link"):
             mode, fixture, expected = parts[1], parts[2], parts[3]
         else:
-            mode, fixture, expected = "luna-link", parts[1], parts[2]
+            mode, fixture, expected = "link", parts[1], parts[2]
         work = ROOT / "out" / "tests" / name.removesuffix(".la")
         reset(work)
         assembly = work / f"{name}.s"
@@ -1211,7 +1355,7 @@ def execute_ffi_tests(
                 object_file = work / f"{name}.o"
                 run(
                     [
-                        *tool(stage_bin, "lunac", runner),
+                        *tool(stage_bin, "compile", runner),
                         "--library",
                         "-o",
                         assembly,
@@ -1221,7 +1365,7 @@ def execute_ffi_tests(
                 )
                 run(
                     [
-                        *tool(stage_bin, "luna-as", runner),
+                        *tool(stage_bin, "assemble", runner),
                         "--emit",
                         "elf",
                         "-o",
@@ -1264,10 +1408,10 @@ def execute_ffi_tests(
                     skipped += 1
                     continue
                 fixture_path = gcc_fixtures / fixture
-            object_file = work / f"{name}.lo" if mode == "luna-link" else work / f"{name}.o"
+            object_file = work / f"{name}.lo" if mode == "link" else work / f"{name}.o"
             run(
                 [
-                    *tool(stage_bin, "lunac", runner),
+                    *tool(stage_bin, "compile", runner),
                     "--executable",
                     "-o",
                     assembly,
@@ -1275,7 +1419,7 @@ def execute_ffi_tests(
                 ],
                 timeout=timeout,
             )
-            assemble_command = [*tool(stage_bin, "luna-as", runner)]
+            assemble_command = [*tool(stage_bin, "assemble", runner)]
             if mode == "elf-link":
                 assemble_command += ["--emit", "elf"]
             run(
@@ -1284,7 +1428,7 @@ def execute_ffi_tests(
             )
             linked = subprocess.run(
                 [
-                    *tool(stage_bin, "luna-link", runner),
+                    *tool(stage_bin, "link", runner),
                     "-o",
                     executable,
                     object_file,
@@ -1297,12 +1441,12 @@ def execute_ffi_tests(
                 wanted = int(expected.removeprefix("link:"))
                 if linked.returncode != wanted:
                     raise AssertionError(
-                        f"luna-link exit {linked.returncode}, expected {wanted}"
+                        f"luna link exit {linked.returncode}, expected {wanted}"
                     )
             else:
                 if linked.returncode != 0:
                     raise AssertionError(
-                        f"luna-link exit {linked.returncode}, expected 0"
+                        f"luna link exit {linked.returncode}, expected 0"
                     )
                 completed = subprocess.run(
                     [*runner, str(executable)],
@@ -1327,6 +1471,9 @@ def execute_tests(stage_bin: pathlib.Path, runner: tuple[str, ...]) -> int:
     timeout = timeout_seconds(runner)
     passed = 0
     failed: list[str] = []
+    cli_passed, cli_failed = execute_tool_cli_tests(stage_bin, runner)
+    passed += cli_passed
+    failed.extend(cli_failed)
     for line in expectations.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -1342,7 +1489,7 @@ def execute_tests(stage_bin: pathlib.Path, runner: tuple[str, ...]) -> int:
                     raise AssertionError(f"unknown diagnostic kind {kind}")
                 completed = subprocess.run(
                     [
-                        *tool(stage_bin, "lunac", runner),
+                        *tool(stage_bin, "compile", runner),
                         "--executable",
                         "-o",
                         assembly,
@@ -1369,7 +1516,7 @@ def execute_tests(stage_bin: pathlib.Path, runner: tuple[str, ...]) -> int:
             executable = work / name.removesuffix(".la")
             run(
                 [
-                    *tool(stage_bin, "lunac", runner),
+                    *tool(stage_bin, "compile", runner),
                     "--executable",
                     "-o",
                     assembly,
@@ -1378,12 +1525,12 @@ def execute_tests(stage_bin: pathlib.Path, runner: tuple[str, ...]) -> int:
                 timeout=timeout,
             )
             run(
-                [*tool(stage_bin, "luna-as", runner), "-o", object_file, assembly],
+                [*tool(stage_bin, "assemble", runner), "-o", object_file, assembly],
                 timeout=timeout,
             )
             run(
                 [
-                    *tool(stage_bin, "luna-link", runner),
+                    *tool(stage_bin, "link", runner),
                     "-o",
                     executable,
                     object_file,
@@ -1491,7 +1638,7 @@ def main() -> None:
         print("FIXED POINT: all artifacts byte-identical")
     else:
         stage = arguments.stage or default_out / "stage-next" / "bin"
-        if not (stage / "lunac").is_file():
+        if not toolchain_is_available(stage):
             fail(f"no built toolchain under {stage}; run 'build' first")
         raise SystemExit(execute_tests(stage, runner))
 

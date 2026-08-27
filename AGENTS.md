@@ -93,8 +93,10 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
 
 ## Layout
 
-- `anchor/` — fixed-point `lunac`, `luna-as`, `luna-link` from m0, with
-  `SHA256SUMS` + `PROVENANCE.md`. Sole binary trust root.
+- `anchor/` — the fixed-point toolchain with `SHA256SUMS` + `PROVENANCE.md`.
+  The current anchor still carries the three M4 transition tools; verified
+  source stages produce the single multi-command `luna` executable. Sole
+  binary trust root.
 - `library/include/luna/` — library interface units, mirroring module
   names (`luna.std.text` is `luna/std/text.lh`).
 - `library/src/` — runtime, Linux syscall and standard-library
@@ -110,12 +112,14 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
   `elf/{format,reader,writer}`, assembler over
   `assembler/{operands,encoding,source}`, linker). Correctness-first,
   no optimization.
-- `drivers/src/` — freestanding argument-driven tool programs.
+- `drivers/include/luna/tools/` and `drivers/src/` — the shared CLI service,
+  independent compile/assemble/link command services and single freestanding
+  `luna` entry point.
 - `tests/cases/` — executable behavior programs returning their verdict
   as the exit status.
 - `tests/ffi/` — hand-encoded ELF64 ET_REL fixtures
   (`generate_fixtures.py` regenerates them) linked against Luna cases;
-  expectations accept `<exit-code>` or `link:<luna-link status>`.
+  expectations accept `<exit-code>` or `link:<luna link status>`.
 - `docs/` — authoritative per-subsystem design record (language,
   semantics, seed contract). Some docs describe the archived m0 seed;
   treat them as history where paths no longer exist.

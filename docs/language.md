@@ -117,8 +117,8 @@ self-host build compiles each library from all its implementation units, its
 matching interface and the reachable dependency interfaces, then links the
 independently built module objects.
 
-The current `lunac` modes are `--executable` and `--library`, both producing
-x86-64 assembly. Stage 1 and later do not emit or consume compiled `.lmi`
+The current `luna compile` modes are `--executable` and `--library`, both
+producing x86-64 assembly. Stage 1 and later do not emit or consume compiled `.lmi`
 interfaces. The archived Luna 0 metadata format is documented separately for
 historical reconstruction, not as a current command-line or language
 capability.

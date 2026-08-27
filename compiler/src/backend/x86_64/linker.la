@@ -5,7 +5,7 @@ import luna.std.checked as checked;
 import luna.std.text as text;
 
 enum Limit: usize {
-    maximum_inputs = 64, maximum_output = 268435456, page_size = 4096, image_base = 4194304, text_offset = 4096,
+    maximum_inputs = 128, maximum_output = 268435456, page_size = 4096, image_base = 4194304, text_offset = 4096,
 }
 
 enum Elf: usize {
@@ -43,6 +43,11 @@ struct Image {
     entry_address: usize;
     error: runtime::Error;
     input_index: usize;
+}
+
+struct BinaryWriter {
+    output: *bytes::Buffer;
+    active: bool;
 }
 
 fn image_empty() -> Image {
@@ -95,30 +100,72 @@ fn append_bytes(output: *bytes::Buffer, data: *const u8, length: usize) -> bool 
     return appended.error == runtime::Error.none;
 }
 
+fn binary_writer(output: *bytes::Buffer) -> BinaryWriter {
+    return {output = output, active = output != null};
+}
+
+fn binary_writer_bytes(writer: *BinaryWriter, data: *const u8, length: usize) {
+    if (writer == null || !writer->active) {
+        return;
+    }
+    writer->active = append_bytes(writer->output, data, length);
+}
+
+fn binary_writer_u16(writer: *BinaryWriter, value: u16) {
+    if (writer == null || !writer->active) {
+        return;
+    }
+    writer->active = append_u16(writer->output, value);
+}
+
+fn binary_writer_u32(writer: *BinaryWriter, value: u32) {
+    if (writer == null || !writer->active) {
+        return;
+    }
+    writer->active = append_u32(writer->output, value);
+}
+
+fn binary_writer_u64(writer: *BinaryWriter, value: u64) {
+    if (writer == null || !writer->active) {
+        return;
+    }
+    writer->active = append_u64(writer->output, value);
+}
+
 fn append_padding(output: *bytes::Buffer, count: usize, fill: u8) -> bool {
-    var index: usize = 0;
-    while (index < count) {
+    for (var index: usize = 0; index < count; index += 1) {
         if (!append_u8(output, fill)) {
             return false;
         }
-        index += 1;
     }
     return true;
 }
 
 fn pad_to(output: *bytes::Buffer, offset: usize) -> bool {
-    return output != null && output->length <= offset && append_padding(output, offset - output->length, 0);
+    if (output == null || output->length > offset) {
+        return false;
+    }
+    return append_padding(output, offset - output->length, 0);
 }
 
 fn region_append(
     image: *Image, destination: *bytes::Buffer, source: bytes::Buffer, alignment: usize, fill: u8,
     input_index: usize, placement: *usize) -> bool {
+    if (destination == null || placement == null) {
+        return fail(image, runtime::Error.out_of_memory, input_index);
+    }
     var aligned: usize = 0;
-    if (destination == null || placement == null || !align(destination->length, alignment, &aligned) ||
-        aligned > Limit.maximum_output as usize || source.length > (Limit.maximum_output as usize) - aligned ||
-        !append_padding(destination, aligned - destination->length, fill) ||
-        !append_bytes(
-            destination, source.data as *const u8, source.length)) {
+    if (!align(destination->length, alignment, &aligned)) {
+        return fail(image, runtime::Error.out_of_memory, input_index);
+    }
+    let range_is_valid: bool = aligned <= Limit.maximum_output as usize &&
+        source.length <= (Limit.maximum_output as usize) - aligned;
+    if (!range_is_valid) {
+        return fail(image, runtime::Error.out_of_memory, input_index);
+    }
+    let padded: bool = append_padding(destination, aligned - destination->length, fill);
+    let appended: bool = padded && append_bytes(destination, source.data as *const u8, source.length);
+    if (!appended) {
         return fail(image, runtime::Error.out_of_memory, input_index);
     }
     *placement = aligned;
@@ -132,26 +179,22 @@ fn name_equal(left: text::View, right: text::View) -> bool {
 fn find_global(image: *const Image, name: text::View, result: *Global) -> bool {
     let globals: *const Global = image->globals.data as *const Global;
     let count: usize = image->globals.length / sizeof(Global);
-    var index: usize = 0;
-    while (index < count) {
+    for (var index: usize = 0; index < count; index += 1) {
         if (name_equal(globals[index].name, name)) {
             if (result != null) {
                 *result = globals[index];
             }
             return true;
         }
-        index += 1;
     }
     return false;
 }
 
 fn collect_globals(image: *Image, objects: *const object::Object, object_count: usize) -> bool {
-    var object_index: usize = 0;
-    while (object_index < object_count) {
+    for (var object_index: usize = 0; object_index < object_count; object_index += 1) {
         image->input_index = object_index;
         let object: object::Object = objects[object_index];
-        var symbol_index: usize = 0;
-        while (symbol_index < object::symbol_count(object)) {
+        for (var symbol_index: usize = 0; symbol_index < object::symbol_count(object); symbol_index += 1) {
             let result: object::SymbolResult = object::get_symbol(object, symbol_index);
             if (result.error != runtime::Error.none) {
                 return fail(image, result.error, object_index);
@@ -175,29 +218,25 @@ fn collect_globals(image: *Image, objects: *const object::Object, object_count: 
                     return fail(image, appended.error, object_index);
                 }
             }
-            symbol_index += 1;
         }
-        object_index += 1;
     }
     return true;
 }
 
 fn layout_regions(image: *Image, objects: *const object::Object, object_count: usize, placements: *Placement) -> bool {
-    var object_index: usize = 0;
-    while (object_index < object_count) {
+    for (var object_index: usize = 0; object_index < object_count; object_index += 1) {
         let object: object::Object = objects[object_index];
         if (!object::is_valid(object)) {
             return fail(image, runtime::Error.invalid_argument, object_index);
         }
-        if (!region_append(
-                image, &image->text, object.text, object.text_alignment, 144, object_index,
-                &placements[object_index].text) ||
-            !region_append(
-                image, &image->rodata, object.rodata, object.rodata_alignment, 0, object_index,
-                &placements[object_index].rodata) ||
-            !region_append(
-                image, &image->data, object.data, object.data_alignment, 0, object_index, &placements[object_index].data
-            )) {
+        let text_appended: bool = region_append(
+            image, &image->text, object.text, object.text_alignment, 144, object_index, &placements[object_index].text);
+        let rodata_appended: bool = text_appended && region_append(
+            image, &image->rodata, object.rodata, object.rodata_alignment, 0, object_index,
+            &placements[object_index].rodata);
+        let data_appended: bool = rodata_appended && region_append(
+            image, &image->data, object.data, object.data_alignment, 0, object_index, &placements[object_index].data);
+        if (!data_appended) {
             return false;
         }
         var bss_offset: usize = 0;
@@ -219,7 +258,6 @@ fn layout_regions(image: *Image, objects: *const object::Object, object_count: u
         if (image->bss_alignment < object.bss_alignment) {
             image->bss_alignment = object.bss_alignment;
         }
-        object_index += 1;
     }
     return image->text.length != 0;
 }
@@ -230,9 +268,13 @@ fn layout_image(image: *Image) -> bool {
     let text_offset: usize = Limit.text_offset as usize;
     var rodata_offset: usize = 0;
     var data_offset: usize = 0;
-    if (!align(text_offset + image->text.length, page, &rodata_offset) ||
-        !align(rodata_offset + image->rodata.length, page, &data_offset) ||
-        data_offset > 18446744073709551615 as usize - base) {
+    if (!align(text_offset + image->text.length, page, &rodata_offset)) {
+        return fail(image, runtime::Error.out_of_memory, image->input_index);
+    }
+    if (!align(rodata_offset + image->rodata.length, page, &data_offset)) {
+        return fail(image, runtime::Error.out_of_memory, image->input_index);
+    }
+    if (data_offset > 18446744073709551615 as usize - base) {
         return fail(image, runtime::Error.out_of_memory, image->input_index);
     }
     image->text_address = base + text_offset;
@@ -296,9 +338,14 @@ fn resolve_symbol(
         return symbol_address(image, objects, placements, object_index, symbol_index, result);
     }
     let name: text::ViewResult = object::symbol_name(object, symbol_result.symbol);
+    if (name.error != runtime::Error.none) {
+        return false;
+    }
     var global: Global = {};
-    return name.error == runtime::Error.none && find_global(image, name.view, &global) &&
-        symbol_address(image, objects, placements, global.object_index, global.symbol_index, result);
+    if (!find_global(image, name.view, &global)) {
+        return false;
+    }
+    return symbol_address(image, objects, placements, global.object_index, global.symbol_index, result);
 }
 
 fn region(
@@ -330,14 +377,43 @@ fn store_u64(destination: *u8, value: u64) -> bool {
     return binary::store_u64(destination, value);
 }
 
+fn relocation_range_is_valid(
+    region: *bytes::Buffer, placement_offset: usize, relocation_offset: usize, width: usize) -> bool {
+    if (region == null || placement_offset > region->length) {
+        return false;
+    }
+    let remaining: usize = region->length - placement_offset;
+    if (relocation_offset > remaining) {
+        return false;
+    }
+    return width <= remaining - relocation_offset;
+}
+
+fn signed_addition_is_valid(value: isize, addend: isize) -> bool {
+    if (addend > 0) {
+        return value <= 9223372036854775807 as isize - addend;
+    }
+    if (addend < 0) {
+        return value >= -9223372036854775807 as isize - 1 - addend;
+    }
+    return true;
+}
+
+fn relocation_value_fits(kind: object::RelocationKind, value: isize) -> bool {
+    if (kind == object::RelocationKind.absolute32) {
+        return value >= 0 && value <= 4294967295;
+    }
+    return value >= -2147483648 && value <= 2147483647;
+}
+
 fn apply_relocations(
     image: *Image, objects: *const object::Object, object_count: usize, placements: *const Placement) -> bool {
-    var object_index: usize = 0;
-    while (object_index < object_count) {
+    for (var object_index: usize = 0; object_index < object_count; object_index += 1) {
         image->input_index = object_index;
         let object: object::Object = objects[object_index];
-        var relocation_index: usize = 0;
-        while (relocation_index < object::relocation_count(object)) {
+        for (var relocation_index: usize = 0;
+            relocation_index < object::relocation_count(object);
+            relocation_index += 1) {
             let result: object::RelocationResult = object::get_relocation(object, relocation_index);
             if (result.error != runtime::Error.none) {
                 return fail(image, result.error, object_index);
@@ -354,9 +430,7 @@ fn apply_relocations(
             let region: *bytes::Buffer = region(
                 image, placements[object_index], relocation.section, &placement_offset, &region_address);
             let width: usize = relocation.kind == object::RelocationKind.absolute64 ? 8 : 4;
-            if (region == null || relocation.offset > region->length || placement_offset > region->length ||
-                relocation.offset > region->length - placement_offset || width > region->length -
-                        placement_offset - relocation.offset) {
+            if (!relocation_range_is_valid(region, placement_offset, relocation.offset, width)) {
                 return fail(image, runtime::Error.invalid_argument, object_index);
             }
             let output_offset: usize = placement_offset + relocation.offset;
@@ -367,86 +441,104 @@ fn apply_relocations(
                 }
                 let place: isize = (region_address + output_offset) as isize;
                 let difference: isize = symbol_address as isize - place;
-                if ((relocation.addend > 0 && difference > 9223372036854775807 as isize - relocation.addend) ||
-                    (relocation.addend < 0 && difference < -9223372036854775807 as isize - 1 - relocation.addend)) {
+                if (!signed_addition_is_valid(difference, relocation.addend)) {
                     return fail(image, runtime::Error.invalid_argument, object_index);
                 }
                 let value: isize = difference + relocation.addend;
-                if (value < -2147483648 || value > 2147483647 ||
-                    !store_u32(
-                        &region->data[output_offset], value as u32)) {
+                let value_fits: bool = value >= -2147483648 && value <= 2147483647;
+                if (!value_fits || !store_u32(&region->data[output_offset], value as u32)) {
                     return fail(image, runtime::Error.invalid_argument, object_index);
                 }
             } else if (relocation.kind == object::RelocationKind.absolute64) {
                 let signed_symbol: isize = symbol_address as isize;
-                if (symbol_address > 9223372036854775807 as usize || (relocation.addend > 0 && signed_symbol >
-                        9223372036854775807 as isize - relocation.addend) || (relocation.addend < 0 && signed_symbol <
-                        -9223372036854775807 as isize - 1 - relocation.addend) ||
-                    !store_u64(
-                        &region->data[output_offset], (signed_symbol + relocation.addend) as u64)) {
+                let addition_is_valid: bool = signed_addition_is_valid(signed_symbol, relocation.addend);
+                if (symbol_address > 9223372036854775807 as usize || !addition_is_valid) {
+                    return fail(image, runtime::Error.invalid_argument, object_index);
+                }
+                if (!store_u64(&region->data[output_offset], (signed_symbol + relocation.addend) as u64)) {
                     return fail(image, runtime::Error.invalid_argument, object_index);
                 }
             } else if (relocation.kind == object::RelocationKind.absolute32 || relocation.kind ==
                     object::RelocationKind.signed32) {
                 let signed_symbol: isize = symbol_address as isize;
-                if (symbol_address > 9223372036854775807 as usize || (relocation.addend > 0 && signed_symbol >
-                        9223372036854775807 as isize - relocation.addend) || (relocation.addend < 0 && signed_symbol <
-                        -9223372036854775807 as isize - 1 - relocation.addend)) {
+                let addition_is_valid: bool = signed_addition_is_valid(signed_symbol, relocation.addend);
+                if (symbol_address > 9223372036854775807 as usize || !addition_is_valid) {
                     return fail(image, runtime::Error.invalid_argument, object_index);
                 }
                 let value: isize = signed_symbol + relocation.addend;
-                if ((relocation.kind == object::RelocationKind.absolute32 && (value < 0 || value >
-                        4294967295)) || (relocation.kind == object::RelocationKind.signed32 && (value <
-                        -2147483648 || value > 2147483647)) ||
-                    !store_u32(
-                        &region->data[output_offset], value as u32)) {
+                if (!relocation_value_fits(relocation.kind, value) ||
+                    !store_u32(&region->data[output_offset], value as u32)) {
                     return fail(image, runtime::Error.invalid_argument, object_index);
                 }
             } else {
                 return fail(image, runtime::Error.not_supported, object_index);
             }
-            relocation_index += 1;
         }
-        object_index += 1;
     }
     return true;
 }
 
 fn resolve_entry(image: *Image, objects: *const object::Object, placements: *const Placement) -> bool {
     let entry: text::ViewResult = text::view("_start", 6);
+    if (entry.error != runtime::Error.none) {
+        return fail(image, runtime::Error.not_found, image->input_index);
+    }
     var global: Global = {};
-    if (entry.error != runtime::Error.none || !find_global(image as *const Image, entry.view, &global) ||
-        !symbol_address(
+    if (!find_global(image as *const Image, entry.view, &global)) {
+        return fail(image, runtime::Error.not_found, image->input_index);
+    }
+    if (!symbol_address(
             image as *const Image, objects, placements, global.object_index, global.symbol_index,
             &image->entry_address)) {
         return fail(image, runtime::Error.not_found, image->input_index);
     }
     let symbol: object::SymbolResult = object::get_symbol(objects[global.object_index], global.symbol_index);
-    if (symbol.error != runtime::Error.none || symbol.symbol.section != object::Section.text ||
-        symbol.symbol.kind != object::SymbolKind.function) {
+    let symbol_is_entry: bool = symbol.symbol.section == object::Section.text &&
+        symbol.symbol.kind == object::SymbolKind.function;
+    if (symbol.error != runtime::Error.none || !symbol_is_entry) {
         return fail(image, runtime::Error.invalid_argument, global.object_index);
     }
     return true;
 }
 
 fn write_header(output: *bytes::Buffer, image: *const Image, program_count: usize) -> bool {
-    return append_bytes(output, "\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00", 16) &&
-        append_u16(output, (Elf.executable_type as usize) as u16) &&
-        append_u16(output, (Elf.machine_x86_64 as usize) as u16) &&
-        append_u32(output, 1) && append_u64(output, image->entry_address as u64) &&
-        append_u64(output, (Elf.header_size as usize) as u64) && append_u64(output, 0) && append_u32(output, 0) &&
-        append_u16(output, (Elf.header_size as usize) as u16) &&
-        append_u16(output, (Elf.program_header_size as usize) as u16) && append_u16(output, program_count as u16) &&
-        append_u16(output, 0) && append_u16(output, 0) && append_u16(output, 0);
+    var writer: BinaryWriter = binary_writer(output);
+    binary_writer_bytes(&writer, "\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00", 16);
+    binary_writer_u16(&writer, (Elf.executable_type as usize) as u16);
+    binary_writer_u16(&writer, (Elf.machine_x86_64 as usize) as u16);
+    binary_writer_u32(&writer, 1);
+    binary_writer_u64(&writer, image->entry_address as u64);
+    binary_writer_u64(&writer, (Elf.header_size as usize) as u64);
+    binary_writer_u64(&writer, 0);
+    binary_writer_u32(&writer, 0);
+    binary_writer_u16(&writer, (Elf.header_size as usize) as u16);
+    binary_writer_u16(&writer, (Elf.program_header_size as usize) as u16);
+    binary_writer_u16(&writer, program_count as u16);
+    binary_writer_u16(&writer, 0);
+    binary_writer_u16(&writer, 0);
+    binary_writer_u16(&writer, 0);
+    return writer.active;
 }
 
 fn write_program(
     output: *bytes::Buffer, flags: u32, offset: usize, address: usize, file_size: usize, memory_size: usize) -> bool {
-    return append_u32(output, (Elf.load_segment as usize) as u32) &&
-        append_u32(output, flags) && append_u64(output, offset as u64) &&
-        append_u64(output, address as u64) && append_u64(output, address as u64) &&
-        append_u64(output, file_size as u64) && append_u64(output, memory_size as u64) &&
-        append_u64(output, (Limit.page_size as usize) as u64);
+    var writer: BinaryWriter = binary_writer(output);
+    binary_writer_u32(&writer, (Elf.load_segment as usize) as u32);
+    binary_writer_u32(&writer, flags);
+    binary_writer_u64(&writer, offset as u64);
+    binary_writer_u64(&writer, address as u64);
+    binary_writer_u64(&writer, address as u64);
+    binary_writer_u64(&writer, file_size as u64);
+    binary_writer_u64(&writer, memory_size as u64);
+    binary_writer_u64(&writer, (Limit.page_size as usize) as u64);
+    return writer.active;
+}
+
+fn append_region(output: *bytes::Buffer, offset: usize, source: bytes::Buffer, enabled: bool) -> bool {
+    if (!enabled) {
+        return true;
+    }
+    return pad_to(output, offset) && append_bytes(output, source.data as *const u8, source.length);
 }
 
 fn serialize(image: *const Image) -> bytes::BufferResult {
@@ -487,14 +579,10 @@ fn serialize(image: *const Image) -> bytes::BufferResult {
             };
         }
     }
-    if (!pad_to(&output, Limit.text_offset as usize) ||
-        !append_bytes(&output, image->text.data as *const u8, image->text.length) ||
-        (has_rodata && (!pad_to(&output, rodata_offset) ||
-          !append_bytes(
-            &output, image->rodata.data as *const u8, image->rodata.length))) || (has_data &&
-         (!pad_to(&output, data_offset) ||
-          !append_bytes(
-            &output, image->data.data as *const u8, image->data.length)))) {
+    let text_appended: bool = append_region(&output, Limit.text_offset as usize, image->text, true);
+    let rodata_appended: bool = text_appended && append_region(&output, rodata_offset, image->rodata, has_rodata);
+    let data_appended: bool = rodata_appended && append_region(&output, data_offset, image->data, has_data);
+    if (!data_appended) {
         bytes::release(output);
         return {
             buffer = bytes::empty(), error = runtime::Error.out_of_memory,
@@ -524,28 +612,36 @@ fn image_release(image: Image) -> runtime::Error {
 
 fn link(objects: *const object::Object, object_count: usize) -> Result {
     var image: Image = image_empty();
-    if (objects == null || object_count == 0 || object_count > Limit.maximum_inputs as usize) {
+    if (objects == null || object_count == 0) {
         return {
             executable = bytes::empty(), error = runtime::Error.invalid_argument, input_index = 0,
         };
     }
-    var placements: [65]Placement = {};
+    if (object_count > Limit.maximum_inputs as usize) {
+        return {
+            executable = bytes::empty(), error = runtime::Error.invalid_argument, input_index = 0,
+        };
+    }
+    var placements: [Limit.maximum_inputs + 1]Placement = {};
     var executable: bytes::BufferResult = {
         buffer = bytes::empty(), error = runtime::Error.invalid_argument,
     };
-    if (collect_globals(&image, objects, object_count) &&
-        layout_regions(&image, objects, object_count, &placements[0]) && layout_image(&image) &&
-        apply_relocations(&image, objects, object_count, &placements[0] as *const Placement) &&
-        resolve_entry(
-            &image, objects, &placements[0] as *const Placement)) {
+    let globals_collected: bool = collect_globals(&image, objects, object_count);
+    let regions_laid_out: bool = globals_collected && layout_regions(&image, objects, object_count, &placements[0]);
+    let image_laid_out: bool = regions_laid_out && layout_image(&image);
+    let relocations_applied: bool = image_laid_out &&
+        apply_relocations(&image, objects, object_count, &placements[0] as *const Placement);
+    let entry_resolved: bool = relocations_applied &&
+        resolve_entry(&image, objects, &placements[0] as *const Placement);
+    if (entry_resolved) {
         executable = serialize(&image as *const Image);
         if (executable.error != runtime::Error.none) {
             image.error = executable.error;
         }
     }
     let image_error: runtime::Error = image_release(image);
-    if (image.error == runtime::Error.none && executable.error == runtime::Error.none &&
-        image_error != runtime::Error.none) {
+    let image_build_succeeded: bool = image.error == runtime::Error.none && executable.error == runtime::Error.none;
+    if (image_build_succeeded && image_error != runtime::Error.none) {
         bytes::release(executable.buffer);
         return {
             executable = bytes::empty(), error = image_error, input_index = image.input_index,

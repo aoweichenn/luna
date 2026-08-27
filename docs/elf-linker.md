@@ -1,7 +1,7 @@
 # Project-owned ELF64 static linker
 
 > **Historical m0 contract.** This document records the hosted `lunalink`
-> reconstruction. The current freestanding driver is `luna-link`; its source
+> reconstruction. The current freestanding driver command is `luna link`; its source
 > and current CLI are authoritative, and current Luna symbols carry module and
 > function names rather than `.lmi` fingerprints.
 

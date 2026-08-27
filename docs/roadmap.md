@@ -285,6 +285,14 @@ the archived Luna 0 self-hosting milestone named `M4` above.
 - [x] M4.4 cross-module standard-library proving ground
 - [x] M4 release: source commit followed by anchor promotion
 
+## Current toolchain packaging
+
+- [x] one `luna` executable with compile, assemble and link commands
+- [x] independent command modules behind a table-driven root dispatcher
+- [x] legacy three-tool anchor accepted only at the transition boundary
+- [x] unified-tool fixed point and full test suite
+- [ ] unified-tool anchor promotion
+
 ## Explicitly deferred
 
 Optimization beyond local x86-64 improvements, general metaprogramming beyond

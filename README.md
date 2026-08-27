@@ -20,7 +20,8 @@ library/include/luna/      runtime and standard-library interfaces (.lh)
 library/src/               runtime and standard-library implementations (.la)
 compiler/include/luna/     compiler interfaces under luna/bootstrap/ (.lh)
 compiler/src/              frontend, middle end and x86-64 backend (.la)
-drivers/src/               freestanding lunac / luna-as / luna-link drivers
+drivers/include/luna/tools/ command-service interfaces
+drivers/src/               freestanding multi-command luna driver
 tests/                     behavior and FFI fixtures + expected results
 tools/                     selfhost.py: audit / build / verify / test driver
 docs/                      design record (language, semantics, seed contract)
@@ -50,7 +51,7 @@ same default. The optional C FFI cases require an x86-64-targeting C compiler
 (`LUNA_FFI_CC` may name a cross compiler) and are reported as skipped when one
 is unavailable. Release validation runs all FFI cases on an x86-64 host.
 
-`build` stops after producing `out/stage-next/bin/{lunac,luna-as,luna-link}`.
+`build` stops after producing `out/stage-next/bin/luna`.
 `test` compiles, links and executes every case in `tests/cases/` through the
 freshly built tools, checks exact callable-identity/linking invariants, and
 runs the ELF/host FFI matrix. Behavior cases use `tests/expectations.txt`;
@@ -64,9 +65,9 @@ unregistered modules, dependency cycles and duplicate imports before a build.
 Compile and run a program directly:
 
 ```sh
-out/stage-next/bin/lunac --executable -o hello.s examples/hello.la
-out/stage-next/bin/luna-as -o hello.lo hello.s
-out/stage-next/bin/luna-link -o hello hello.lo
+out/stage-next/bin/luna compile --executable -o hello.s examples/hello.la
+out/stage-next/bin/luna assemble -o hello.lo hello.s
+out/stage-next/bin/luna link -o hello hello.lo
 ./hello
 ```
 

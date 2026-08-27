@@ -1,7 +1,7 @@
 # Complete Luna-owned bootstrap toolchain
 
-Luna's fixed-point toolchain consists of three freestanding x86-64
-executables, all implemented in Luna:
+Luna's current fixed-point toolchain consists of one freestanding x86-64
+executable, implemented in Luna, with three commands:
 
 1. the compiler lowers Luna source to the project-owned closed assembly
    dialect;
@@ -13,7 +13,11 @@ The tools use the Luna runtime and direct Linux system calls. They do not call
 libc, GNU `as`, GNU `ld`, LLVM MC, LLD or a C compiler. They perform no
 optimization.
 
-## Reconstruction boundary
+The compiler, assembler and linker remain independent modules; only their
+driver and distribution artifact are unified. See
+[`unified-tool-driver.md`](unified-tool-driver.md).
+
+## Archived reconstruction boundary
 
 Stage 0 is the frozen hosted C23 reconstruction seed. It compiles and links
 the three stage-1 Luna drivers once. That is the complete hosted boundary.
@@ -34,23 +38,23 @@ The distributable fixed point is the canonical versioned seed described in
 [the bootstrap seed contract](bootstrap-seed.md). It binds the three tools to
 the complete Luna source graph and proves an offline byte-identical rebuild.
 
-## Command-line tools
+## Current command-line tool
 
-The verified stage-3 directory contains the normal tools `lunac`, `luna-as`
-and `luna-link`. All three are the same Luna implementations used by the
-fixed protocol; they do not wrap the C23 seed:
+The verified stage directory contains one `luna` executable. Its commands use
+the same Luna implementations as the fixed protocol and do not wrap a hosted
+toolchain:
 
 ```sh
 cmake --build --preset debug --target luna_selfhost_toolchain
 
-TOOLS=build/debug/selfhost-bootstrap/stage-three/bin
-"$TOOLS/lunac" --executable -o app.s app.la dependency.lh \
+TOOLS=out/stage-next/bin
+"$TOOLS/luna" compile --executable -o app.s app.la dependency.lh \
   dependency.la
-"$TOOLS/luna-as" -o app.lo app.s
-"$TOOLS/luna-link" -o app app.lo
+"$TOOLS/luna" assemble -o app.lo app.s
+"$TOOLS/luna" link -o app app.lo
 ```
 
-`lunac` accepts one to 64 `.la` or `.lh` Luna source units, defaults to
+`luna compile` accepts one to 64 `.la` or `.lh` Luna source units, defaults to
 `--executable`, uses `--library` to suppress `_start`, and emits only the owned
 assembly dialect. It does not search for modules or map module names to paths:
 the caller must provide a complete source-interface dependency closure. Module
@@ -66,17 +70,21 @@ interface. Multiple implementation units with the same module name share one
 module-private declaration and import scope and are emitted into the same
 assembly output.
 
-`luna-as` accepts exactly one assembly input and emits `LUNAOBJ1`.
-`luna-link` accepts one to 64 `LUNAOBJ1` inputs and emits one static x86-64
+`luna assemble` accepts exactly one assembly input and emits `LUNAOBJ1`.
+`luna link` accepts one to 128 `LUNAOBJ1` or ELF64 relocatable inputs and emits one static x86-64
 Linux ELF64 executable. Every command requires `-o`, accepts `--` before
 dash-prefixed input paths, returns zero on command-line success, and provides
 `--help` and `--version`. Input and output paths may not alias.
 
 All command-line output is written through an exclusive same-directory
 temporary file and committed with `renameat`. A rejected input or failed
-write leaves an existing destination byte-for-byte unchanged. The no-argument
-form is reserved for the fixed stage protocol and retains its success status
-42.
+write leaves an existing destination byte-for-byte unchanged. A command with
+no following arguments is reserved for its fixed stage protocol and retains
+success status 42.
+
+The object-format, stage-driver and reconstruction sections below preserve the
+archived m0 contract. Current command limits and behavior are defined by the
+pure-Luna driver sources and [`unified-tool-driver.md`](unified-tool-driver.md).
 
 ## Bootstrap object format
 
@@ -168,7 +176,7 @@ The stage driver reads contiguous files named
 `bootstrap-link-output` and exits with status 42. Input, object decoding,
 linking, output and release failures have distinct statuses.
 
-## Verification
+## Archived m0 verification
 
 `integration.bootstrap_reproducibility` is the ownership gate. In addition to
 the complete three-tool fixed point, it:

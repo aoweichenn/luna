@@ -1,4 +1,4 @@
-module luna.tools.bootstrap.stage_compiler;
+module luna.tools.compile;
 
 import luna.bootstrap.backend.x86_64.codegen as codegen;
 import luna.bootstrap.backend.x86_64.text as asm_text;
@@ -11,6 +11,7 @@ import luna.std.bytes;
 import luna.std.io;
 import luna.std.path as path;
 import luna.std.text as text;
+import luna.tools.cli as cli;
 
 enum BootstrapStageLimit: usize {
     maximum_units = 64, maximum_path_bytes = 4096, maximum_source_bytes = 8388608,
@@ -33,10 +34,11 @@ fn bootstrap_stage_invalid_path_result(error: runtime::Error) -> path::PathResul
 
 fn bootstrap_stage_unit_path(index: usize) -> path::PathResult {
     var text: asm_text::Text = asm_text::empty();
-    if (!asm_text::append_c_string(&text, "bootstrap-stage-unit-", 32) || !asm_text::append_usize(&text, index) ||
-        !asm_text::append_c_string(
-            &text, ".luna", 8)) {
-        let error: runtime::Error = text.error == runtime::Error.none ? runtime::Error.invalid_argument : text.error;
+    asm_text::append_c_string(&text, "bootstrap-stage-unit-", 32);
+    asm_text::append_usize(&text, index);
+    asm_text::append_c_string(&text, ".luna", 8);
+    if (text.error != runtime::Error.none) {
+        let error: runtime::Error = text.error;
         asm_text::release(text);
         return bootstrap_stage_invalid_path_result(error);
     }
@@ -108,34 +110,34 @@ fn bootstrap_stage_read_version() -> runtime::Error {
 }
 
 fn bootstrap_stage_source_release(source: bytes::Buffer, frontend: parser::FrontendResult) -> runtime::Error {
-    var error: runtime::Error = parser::frontend_result_release(frontend);
+    let frontend_error: runtime::Error = parser::frontend_result_release(frontend);
     let source_error: runtime::Error = bytes::release(source);
-    if (error == runtime::Error.none) {
-        error = source_error;
-    }
-    return error;
+    return cli::first_error(frontend_error, source_error);
 }
 
 fn bootstrap_stage_sources_release(
     sources: *bytes::Buffer, frontends: *parser::FrontendResult, count: usize) -> runtime::Error {
-    if (sources == null || frontends == null || count > BootstrapStageLimit.maximum_units as usize) {
+    if (sources == null || frontends == null) {
+        return runtime::Error.invalid_argument;
+    }
+    if (count > BootstrapStageLimit.maximum_units as usize) {
         return runtime::Error.invalid_argument;
     }
     var error: runtime::Error = runtime::Error.none;
-    var index: usize = count;
-    while (index != 0) {
-        index -= 1;
+    for (var remaining: usize = count; remaining != 0; remaining -= 1) {
+        let index: usize = remaining - 1;
         let release_error: runtime::Error = bootstrap_stage_source_release(sources[index], frontends[index]);
-        if (error == runtime::Error.none) {
-            error = release_error;
-        }
+        error = cli::first_error(error, release_error);
     }
     return error;
 }
 
 fn bootstrap_stage_source_load(
     path: path::Path, result_source: *bytes::Buffer, result_frontend: *parser::FrontendResult) -> runtime::Error {
-    if (!path::is_valid(path) || result_source == null || result_frontend == null) {
+    if (!path::is_valid(path) || result_source == null) {
+        return runtime::Error.invalid_argument;
+    }
+    if (result_frontend == null) {
         return runtime::Error.invalid_argument;
     }
     let source: bytes::BufferResult = io::read_file_limited(path, BootstrapStageLimit.maximum_source_bytes as usize);
@@ -153,33 +155,30 @@ fn bootstrap_stage_source_load(
     return runtime::Error.none;
 }
 
+fn bootstrap_stage_diagnostic_is_resource(diagnostic: lexer::Diagnostic) -> bool {
+    return diagnostic.kind == lexer::DiagnosticKind.nesting_limit ||
+        diagnostic.kind == lexer::DiagnosticKind.resource_limit;
+}
+
 fn bootstrap_stage_frontend_diagnostic(frontend: parser::FrontendResult, lexical: *bool) -> lexer::DiagnosticResult {
     if (lexical == null) {
         return {
             diagnostic = {}, error = runtime::Error.invalid_argument,
         };
     }
-    var index: usize = 0;
-    while (index < frontend.lex.diagnostics.count) {
+    for (var index: usize = 0; index < frontend.lex.diagnostics.count; index += 1) {
         let diagnostic: lexer::DiagnosticResult = lexer::diagnostic_buffer_get(frontend.lex.diagnostics, index);
-        if (diagnostic.error != runtime::Error.none || diagnostic.diagnostic.kind ==
-                lexer::DiagnosticKind.nesting_limit || diagnostic.diagnostic.kind ==
-                lexer::DiagnosticKind.resource_limit) {
+        if (diagnostic.error != runtime::Error.none || bootstrap_stage_diagnostic_is_resource(diagnostic.diagnostic)) {
             *lexical = true;
             return diagnostic;
         }
-        index += 1;
     }
-    index = 0;
-    while (index < frontend.parse.diagnostics.count) {
+    for (var index: usize = 0; index < frontend.parse.diagnostics.count; index += 1) {
         let diagnostic: lexer::DiagnosticResult = lexer::diagnostic_buffer_get(frontend.parse.diagnostics, index);
-        if (diagnostic.error != runtime::Error.none || diagnostic.diagnostic.kind ==
-                lexer::DiagnosticKind.nesting_limit || diagnostic.diagnostic.kind ==
-                lexer::DiagnosticKind.resource_limit) {
+        if (diagnostic.error != runtime::Error.none || bootstrap_stage_diagnostic_is_resource(diagnostic.diagnostic)) {
             *lexical = false;
             return diagnostic;
         }
-        index += 1;
     }
     if (frontend.lex.diagnostics.count != 0) {
         *lexical = true;
@@ -203,8 +202,7 @@ fn bootstrap_stage_frontend_status(frontend: parser::FrontendResult) -> i32 {
     if (result.error != runtime::Error.none) {
         return BootstrapStageStatus.input_error as i32;
     }
-    if (result.diagnostic.kind == lexer::DiagnosticKind.nesting_limit || result.diagnostic.kind ==
-            lexer::DiagnosticKind.resource_limit) {
+    if (bootstrap_stage_diagnostic_is_resource(result.diagnostic)) {
         return BootstrapStageStatus.resource_limit as i32;
     }
     return BootstrapStageStatus.input_error as i32;
@@ -238,11 +236,15 @@ fn bootstrap_stage_report_frontend(frontend: parser::FrontendResult) -> runtime:
         return result.error;
     }
     var text: asm_text::Text = asm_text::empty();
-    if (!asm_text::append_c_string(&text, lexical ? "frontend:lex:" : "frontend:parse:", 32) ||
-        !asm_text::append_usize(&text, result.diagnostic.kind as usize) || !asm_text::append_c_string(&text, ":", 2) ||
-        !asm_text::append_usize(&text, result.diagnostic.span.offset) || !asm_text::append_c_string(&text, ":", 2) ||
-        !asm_text::append_usize(&text, result.diagnostic.detail) || !asm_text::append_c_string(&text, "\n", 2)) {
-        let error: runtime::Error = text.error == runtime::Error.none ? runtime::Error.invalid_argument : text.error;
+    asm_text::append_c_string(&text, lexical ? "frontend:lex:" : "frontend:parse:", 32);
+    asm_text::append_usize(&text, result.diagnostic.kind as usize);
+    asm_text::append_c_string(&text, ":", 2);
+    asm_text::append_usize(&text, result.diagnostic.span.offset);
+    asm_text::append_c_string(&text, ":", 2);
+    asm_text::append_usize(&text, result.diagnostic.detail);
+    asm_text::append_c_string(&text, "\n", 2);
+    if (text.error != runtime::Error.none) {
+        let error: runtime::Error = text.error;
         asm_text::release(text);
         return error;
     }
@@ -252,12 +254,15 @@ fn bootstrap_stage_report_frontend(frontend: parser::FrontendResult) -> runtime:
 fn bootstrap_stage_report_resource(
     label: *const u8, label_maximum_length: usize, unit_index: usize, limit: usize) -> runtime::Error {
     var text: asm_text::Text = asm_text::empty();
-    if (!asm_text::append_c_string(&text, "resource:", 16) ||
-        !asm_text::append_c_string(&text, label, label_maximum_length) || !asm_text::append_c_string(&text, ":", 2) ||
-        !asm_text::append_usize(&text, unit_index) ||
-        !asm_text::append_c_string(&text, ":", 2) || !asm_text::append_usize(&text, limit) ||
-        !asm_text::append_c_string(&text, "\n", 2)) {
-        let error: runtime::Error = text.error == runtime::Error.none ? runtime::Error.invalid_argument : text.error;
+    asm_text::append_c_string(&text, "resource:", 16);
+    asm_text::append_c_string(&text, label, label_maximum_length);
+    asm_text::append_c_string(&text, ":", 2);
+    asm_text::append_usize(&text, unit_index);
+    asm_text::append_c_string(&text, ":", 2);
+    asm_text::append_usize(&text, limit);
+    asm_text::append_c_string(&text, "\n", 2);
+    if (text.error != runtime::Error.none) {
+        let error: runtime::Error = text.error;
         asm_text::release(text);
         return error;
     }
@@ -301,14 +306,17 @@ fn bootstrap_stage_report_semantic(semantic: context::Result) -> runtime::Error 
         return diagnostic.error;
     }
     var text: asm_text::Text = asm_text::empty();
-    if (!asm_text::append_c_string(&text, "semantic:", 16) ||
-        !asm_text::append_usize(&text, diagnostic.diagnostic.kind as usize) ||
-        !asm_text::append_c_string(&text, ":", 2) || !asm_text::append_usize(&text, diagnostic.diagnostic.unit_index) ||
-        !asm_text::append_c_string(&text, ":", 2) ||
-        !asm_text::append_usize(&text, diagnostic.diagnostic.span.offset) ||
-        !asm_text::append_c_string(&text, ":", 2) || !asm_text::append_usize(&text, diagnostic.diagnostic.detail) ||
-        !asm_text::append_c_string(&text, "\n", 2)) {
-        let error: runtime::Error = text.error == runtime::Error.none ? runtime::Error.invalid_argument : text.error;
+    asm_text::append_c_string(&text, "semantic:", 16);
+    asm_text::append_usize(&text, diagnostic.diagnostic.kind as usize);
+    asm_text::append_c_string(&text, ":", 2);
+    asm_text::append_usize(&text, diagnostic.diagnostic.unit_index);
+    asm_text::append_c_string(&text, ":", 2);
+    asm_text::append_usize(&text, diagnostic.diagnostic.span.offset);
+    asm_text::append_c_string(&text, ":", 2);
+    asm_text::append_usize(&text, diagnostic.diagnostic.detail);
+    asm_text::append_c_string(&text, "\n", 2);
+    if (text.error != runtime::Error.none) {
+        let error: runtime::Error = text.error;
         asm_text::release(text);
         return error;
     }
@@ -326,11 +334,21 @@ fn bootstrap_stage_report_semantic(semantic: context::Result) -> runtime::Error 
     return error == runtime::Error.none ? release_error : error;
 }
 
+fn bootstrap_stage_inputs_are_valid(fixed_protocol: bool, input_paths: *const path::Path, input_count: usize) -> bool {
+    if (fixed_protocol) {
+        return true;
+    }
+    if (input_paths == null || input_count == 0) {
+        return false;
+    }
+    return input_count <= BootstrapStageLimit.maximum_units as usize;
+}
+
 fn bootstrap_stage_run(
     fixed_protocol: bool, input_paths: *const path::Path, input_count: usize, executable: bool, output_path: path::Path
 ) -> i32 {
-    if ((!fixed_protocol && (input_paths == null || input_count == 0 || input_count >
-                    BootstrapStageLimit.maximum_units as usize)) || !path::is_valid(output_path)) {
+    let inputs_are_valid: bool = bootstrap_stage_inputs_are_valid(fixed_protocol, input_paths, input_count);
+    if (!inputs_are_valid || !path::is_valid(output_path)) {
         return BootstrapStageStatus.input_error as i32;
     }
     var sources: [64]bytes::Buffer = {};
@@ -338,7 +356,7 @@ fn bootstrap_stage_run(
     var source_count: usize = 0;
     var total_source_bytes: usize = 0;
     let expected_count: usize = fixed_protocol ? BootstrapStageLimit.maximum_units as usize : input_count;
-    while (source_count < expected_count) {
+    for (; source_count < expected_count;) {
         var path: path::PathResult = bootstrap_stage_invalid_path_result(runtime::Error.none);
         if (fixed_protocol) {
             path = bootstrap_stage_unit_path(source_count);
@@ -380,8 +398,8 @@ fn bootstrap_stage_run(
         }
         total_source_bytes += source_length;
         let frontend: parser::FrontendResult = frontends[source_count - 1];
-        if (frontend.error != runtime::Error.none || frontend.lex.diagnostics.count != 0 ||
-            frontend.parse.diagnostics.count != 0) {
+        let diagnostics_exist: bool = frontend.lex.diagnostics.count != 0 || frontend.parse.diagnostics.count != 0;
+        if (frontend.error != runtime::Error.none || diagnostics_exist) {
             let status: i32 = bootstrap_stage_frontend_status(frontend);
             var lexical: bool = false;
             let diagnostic: lexer::DiagnosticResult = bootstrap_stage_frontend_diagnostic(frontend, &lexical);
@@ -428,8 +446,7 @@ fn bootstrap_stage_run(
 
     var input: context::Input = context::input_empty(executable);
     var added: bool = true;
-    var index: usize = 0;
-    while (index < source_count && added) {
+    for (var index: usize = 0; index < source_count && added; index += 1) {
         if (fixed_protocol) {
             let path: path::PathResult = bootstrap_stage_unit_path(index);
             if (path.error != runtime::Error.none) {
@@ -445,7 +462,6 @@ fn bootstrap_stage_run(
             added = text.error == runtime::Error.none &&
                 bootstrap_stage_input_add(&input, sources[index], frontends[index], text.view);
         }
-        index += 1;
     }
     if (!added) {
         context::input_release(input);
@@ -489,38 +505,18 @@ fn bootstrap_stage_run(
     if (write_error != runtime::Error.none) {
         return BootstrapStageStatus.output_error as i32;
     }
-    if (backend_error != runtime::Error.none || semantic_error != runtime::Error.none ||
-        input_error != runtime::Error.none || sources_error != runtime::Error.none) {
+    var release_error: runtime::Error = cli::first_error(backend_error, semantic_error);
+    release_error = cli::first_error(release_error, input_error);
+    release_error = cli::first_error(release_error, sources_error);
+    if (release_error != runtime::Error.none) {
         return BootstrapStageStatus.release_error as i32;
     }
     return BootstrapStageStatus.success as i32;
 }
 
-fn bootstrap_stage_argument_equals(argument: *const u8, expected: *const u8, length: usize) -> bool {
-    if (argument == null || expected == null) {
-        return false;
-    }
-    var index: usize = 0;
-    while (index < length) {
-        if (argument[index] != expected[index] || argument[index] == 0) {
-            return false;
-        }
-        index += 1;
-    }
-    return argument[length] == 0;
-}
-
-fn bootstrap_stage_print_c_string(file: runtime::File, data: *const u8) -> runtime::Error {
-    let text: text::ViewResult = text::from_c_string(data, 1024);
-    if (text.error != runtime::Error.none) {
-        return text.error;
-    }
-    return io::write_all(file, text.view.data, text.view.length);
-}
-
 fn bootstrap_stage_cli_usage() -> i32 {
-    bootstrap_stage_print_c_string(
-        runtime::standard_error(), "usage: lunac [--executable|--library] -o <output.s> <source-unit>...\n");
+    cli::print(
+        runtime::standard_error(), "usage: luna compile [--executable|--library] -o <output.s> <source-unit>...\n");
     return BootstrapStageStatus.cli_usage_error as i32;
 }
 
@@ -529,15 +525,16 @@ fn bootstrap_stage_release_paths(paths: *path::Path, count: usize) -> runtime::E
         return runtime::Error.invalid_argument;
     }
     var error: runtime::Error = runtime::Error.none;
-    var index: usize = count;
-    while (index != 0) {
-        index -= 1;
+    for (var remaining: usize = count; remaining != 0; remaining -= 1) {
+        let index: usize = remaining - 1;
         let release_error: runtime::Error = path::release(paths[index]);
-        if (error == runtime::Error.none) {
-            error = release_error;
-        }
+        error = cli::first_error(error, release_error);
     }
     return error;
+}
+
+fn bootstrap_stage_argument_is_mode(argument: *const u8) -> bool {
+    return cli::argument_equals(argument, "--library", 9) || cli::argument_equals(argument, "--executable", 12);
 }
 
 fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
@@ -545,16 +542,17 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
         return bootstrap_stage_cli_usage();
     }
     if (argc == 2 &&
-        bootstrap_stage_argument_equals(
+        cli::argument_equals(
             argv[1], "--help", 6)) {
-        bootstrap_stage_print_c_string(
-            runtime::standard_output(), "usage: lunac [--executable|--library] -o <output.s> <source-unit>...\n");
+        cli::print(
+            runtime::standard_output(),
+            "usage: luna compile [--executable|--library] -o <output.s> <source-unit>...\n");
         return 0;
     }
     if (argc == 2 &&
-        bootstrap_stage_argument_equals(
+        cli::argument_equals(
             argv[1], "--version", 9)) {
-        bootstrap_stage_print_c_string(runtime::standard_output(), "lunac (self-hosted Luna 1) 0.1.0\n");
+        cli::print(runtime::standard_output(), "luna compile (self-hosted Luna 1) 0.1.0\n");
         return 0;
     }
 
@@ -567,14 +565,14 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
     var options_finished: bool = false;
     var valid: bool = true;
     var index: usize = 1;
-    while (index < argc && valid) {
+    for (; index < argc && valid; index += 1) {
         let argument: *const u8 = argv[index];
         if (!options_finished &&
-            bootstrap_stage_argument_equals(
+            cli::argument_equals(
                 argument, "--", 2)) {
             options_finished = true;
         } else if (!options_finished &&
-            bootstrap_stage_argument_equals(
+            cli::argument_equals(
                 argument, "-o", 2)) {
             if (has_output || index + 1 >= argc) {
                 valid = false;
@@ -589,16 +587,14 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
                     has_output = true;
                 }
             }
-        } else if (!options_finished && (bootstrap_stage_argument_equals(argument, "--library", 9) ||
-                bootstrap_stage_argument_equals(
-                    argument, "--executable", 12))) {
+        } else if (!options_finished && bootstrap_stage_argument_is_mode(argument)) {
             if (has_mode) {
                 valid = false;
             } else {
-                executable = bootstrap_stage_argument_equals(argument, "--executable", 12);
+                executable = cli::argument_equals(argument, "--executable", 12);
                 has_mode = true;
             }
-        } else if (!options_finished && argument != null && argument[0] == 45) {
+        } else if (!options_finished && cli::starts_with_dash(argument)) {
             valid = false;
         } else if (input_count == BootstrapStageLimit.maximum_units as usize) {
             valid = false;
@@ -611,7 +607,6 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
                 input_count += 1;
             }
         }
-        index += 1;
     }
     if (!has_output || input_count == 0) {
         valid = false;
@@ -619,11 +614,11 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
     if (valid) {
         let output_text: text::ViewResult = path::text(output);
         index = 0;
-        while (index < input_count && valid) {
+        for (; index < input_count && valid; index += 1) {
             let input_text: text::ViewResult = path::text(inputs[index]);
-            valid = output_text.error == runtime::Error.none && input_text.error == runtime::Error.none &&
-                !text::equal(output_text.view, input_text.view);
-            index += 1;
+            let paths_are_readable: bool = output_text.error == runtime::Error.none &&
+                input_text.error == runtime::Error.none;
+            valid = paths_are_readable && !text::equal(output_text.view, input_text.view);
         }
     }
 
@@ -641,13 +636,14 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
     if (has_output) {
         output_release_error = path::release(output);
     }
-    if (status == 0 && (input_release_error != runtime::Error.none || output_release_error != runtime::Error.none)) {
+    let release_error: runtime::Error = cli::first_error(input_release_error, output_release_error);
+    if (status == 0 && release_error != runtime::Error.none) {
         return BootstrapStageStatus.release_error as i32;
     }
     return status;
 }
 
-fn main(argc: usize, argv: **const u8) -> i32 {
+fn run(argc: usize, argv: **const u8) -> i32 {
     if (argc != 1) {
         return bootstrap_stage_cli_main(argc, argv);
     }

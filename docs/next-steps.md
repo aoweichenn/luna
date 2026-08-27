@@ -19,6 +19,7 @@ implementation status is tracked in `roadmap.md`.
 | Negative tests | `FAIL <diagnostic-kind>` harness landed (0.3 done) |
 | M3.0-M3.6 object model and class-value composition | implemented and promoted; 383/383 cases |
 | M4 native generics | implemented and promoted; 409/409 cases; verify fixed point |
+| Unified `luna` tool driver | implemented; 416/416 cases; verify fixed point; anchor promotion pending |
 
 ## Step 0 — close m1.1 completely
 
@@ -165,6 +166,9 @@ definitions are green behind the 409-case suite and fixed-point verification.
 The exact M4 source revision is promoted into `anchor/`, so compiler sources
 may now adopt generic declarations under the ordinary fixed-point discipline.
 Reference types and object lifetime work form the next language-design phase.
+The independent packaging cleanup in [`unified-tool-driver.md`](unified-tool-driver.md)
+replaces the three emitted tool binaries with one command-dispatched `luna`
+before that language work begins.
 
 ## Discipline reminders
 
