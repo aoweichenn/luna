@@ -257,18 +257,6 @@ DRIVERS = {
     "luna": "drivers/src/luna.la",
 }
 
-LEGACY_LINK_BRIDGE = "drivers/src/legacy_link_bridge.la"
-REGISTERED_DRIVER_SOURCES = {
-    **DRIVERS,
-    "legacy-link-bridge": LEGACY_LINK_BRIDGE,
-}
-
-LEGACY_TOOL_NAMES = {
-    "compile": "lunac",
-    "assemble": "luna-as",
-    "link": "luna-link",
-}
-
 NATIVE_TIMEOUT_SECONDS = 600
 EMULATED_TIMEOUT_SECONDS = 3600
 
@@ -286,19 +274,11 @@ def tool(
     command: str,
     runner: tuple[str, ...],
 ) -> list[str | pathlib.Path]:
-    unified = directory / "luna"
-    if unified.is_file():
-        return [*runner, unified, command]
-    legacy_name = LEGACY_TOOL_NAMES.get(command)
-    if legacy_name is None:
-        fail(f"unknown tool command {command}")
-    return [*runner, directory / legacy_name]
+    return [*runner, directory / "luna", command]
 
 
 def toolchain_is_available(directory: pathlib.Path) -> bool:
-    if (directory / "luna").is_file():
-        return True
-    return all((directory / name).is_file() for name in LEGACY_TOOL_NAMES.values())
+    return (directory / "luna").is_file()
 
 
 def run(
@@ -503,7 +483,7 @@ def audit_sources() -> None:
                         f"{path.relative_to(ROOT)} imports unregistered module "
                         f"{imported_name}"
                     )
-    for _name, source_name in REGISTERED_DRIVER_SOURCES.items():
+    for _name, source_name in DRIVERS.items():
         source = ROOT / source_name
         source_paths.append(source)
         if not source.is_file():
@@ -586,34 +566,6 @@ def reset(directory: pathlib.Path) -> None:
     directory.mkdir(parents=True)
 
 
-def build_legacy_link_bridge(
-    out: pathlib.Path,
-    compiler: list[str | pathlib.Path],
-    assembler: list[str | pathlib.Path],
-    linker: list[str | pathlib.Path],
-    objects: dict[str, pathlib.Path],
-    *,
-    timeout: int,
-) -> tuple[list[str | pathlib.Path], pathlib.Path]:
-    work = out / "legacy-link-bridge"
-    reset(work)
-    source = ROOT / LEGACY_LINK_BRIDGE
-    assembly = work / "bridge.s"
-    object_file = work / "bridge.lo"
-    executable = work / "luna-link"
-    run(
-        [*compiler, "--executable", "-o", assembly, *driver_units(source)],
-        timeout=timeout,
-    )
-    run([*assembler, "-o", object_file, assembly], timeout=timeout)
-    link_keys = implementation_closure(driver_dependencies(source))
-    run(
-        [*linker, "-o", executable, object_file, *(objects[key] for key in link_keys)],
-        timeout=timeout,
-    )
-    return [executable], work
-
-
 def build_stage(
     tools: pathlib.Path,
     out: pathlib.Path,
@@ -647,18 +599,6 @@ def build_stage(
         objects[key] = object_file
         print(f"  built library {key}")
 
-    output_linker = linker
-    bridge_work: pathlib.Path | None = None
-    if not (tools / "luna").is_file():
-        output_linker, bridge_work = build_legacy_link_bridge(
-            out,
-            compiler,
-            assembler,
-            linker,
-            objects,
-            timeout=timeout,
-        )
-
     executables: dict[str, pathlib.Path] = {}
     for name, source_name in DRIVERS.items():
         source = ROOT / source_name
@@ -672,14 +612,11 @@ def build_stage(
         executable = binary_root / name
         link_keys = implementation_closure(driver_dependencies(source))
         run(
-            [*output_linker, "-o", executable, driver_object, *(objects[key] for key in link_keys)],
+            [*linker, "-o", executable, driver_object, *(objects[key] for key in link_keys)],
             timeout=timeout,
         )
         executables[name] = executable
         print(f"  linked {name} ({len(link_keys)} library objects)")
-
-    if bridge_work is not None:
-        shutil.rmtree(bridge_work)
 
     return {"assemblies": assembly_root, "objects": object_root, "binaries": binary_root}
 

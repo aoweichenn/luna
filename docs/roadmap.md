@@ -291,7 +291,7 @@ the archived Luna 0 self-hosting milestone named `M4` above.
 - [x] independent command modules behind a table-driven root dispatcher
 - [x] legacy three-tool anchor accepted only at the transition boundary
 - [x] unified-tool fixed point and full test suite
-- [ ] unified-tool anchor promotion
+- [x] unified-tool anchor promotion
 
 ## Explicitly deferred
 

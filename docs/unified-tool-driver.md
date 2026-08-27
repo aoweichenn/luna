@@ -2,10 +2,9 @@
 
 ## Status
 
-The pure-Luna source tree builds one freestanding executable named `luna`.
-The checked-in M4 anchor remains a three-tool transition input until the
-verified unified executable is promoted. The source implementation is green
-behind a byte-identical fixed point and the 416-case suite.
+The pure-Luna source tree and checked-in anchor contain one freestanding
+executable named `luna`. The promoted implementation is green behind a
+byte-identical fixed point and the 416-case suite.
 
 ## Command surface
 
@@ -52,25 +51,17 @@ can fall through into another command.
 
 ## Self-hosting transition
 
-`tools/selfhost.py` resolves a toolchain directory through one compatibility
-boundary:
+Promotion from the former three-tool M4 anchor used one bounded compatibility
+step. That anchor's linker accepted only 64 inputs while the unified driver
+closure contains 75, so the promoted source revision built a temporary linker
+bridge, linked the first `bin/luna`, and removed the bridge work directory.
 
-- a directory containing `luna` runs `luna compile`, `luna assemble` and
-  `luna link`;
-- otherwise the current transition anchor supplies `lunac`, `luna-as` and
-  `luna-link`.
-
-The old anchor can therefore build a transition stage containing only
-`bin/luna`. Every later stage uses the unified commands, and fixed-point
-comparison requires one driver assembly, object and executable. The module
-objects remain independently compared, preserving component-level
-determinism even though distribution has one binary.
-
-The old anchor linker accepts only 64 input objects, while the unified driver
-closure contains 75. During that first transition only, `selfhost.py` builds a
-small linker bridge from `luna.tools.link`, uses it to link `bin/luna`, and
-removes the bridge work directory. Unified stages raise the explicit linker
-input bound to 128 and require no bridge.
+The checked-in anchor and `selfhost.py` now require `luna` directly; the
+legacy resolver and bridge source have been removed. Every stage runs
+`luna compile`, `luna assemble` and `luna link`, and fixed-point comparison
+requires one driver assembly, object and executable. Module objects remain
+independently compared, preserving component-level determinism even though
+distribution has one binary.
 
 ## Deliberate limits
 

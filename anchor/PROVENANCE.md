@@ -280,3 +280,20 @@ determinism, recursive expansion limits and rejected unsupported generic class
 cross-products. The stage-fixed executables were copied here and
 `SHA256SUMS` refreshed. Compiler sources may now adopt M4 generic syntax under
 the normal fixed-point discipline.
+
+## 2026-08-27: promotion to the unified Luna toolchain
+
+The anchor now contains the single stage-fixed `luna` executable built from
+commit `587a929` (`refactor: unify Luna toolchain driver`). Its `compile`,
+`assemble` and `link` commands retain independent modules and command
+contracts behind one table-driven entry point. The project linker input bound
+is 128 objects, covering the unified driver's 75-object closure.
+
+Remote x86-64 verification on `caw` started from the previous three-tool M4
+anchor, used the bounded first-transition linker bridge, and built
+`stage-transition`, `stage-next` and `stage-fixed`. Every stage-next/stage-fixed
+assembly, object and the sole `bin/luna` executable was byte-identical. The
+promoted stage-fixed executable passed 416/416 tests, including root and
+command CLI contracts, all language behavior, relocation determinism and the
+ELF/host FFI matrix. The three previous anchor executables were replaced by
+this one file and `SHA256SUMS` was reduced to its single hash.

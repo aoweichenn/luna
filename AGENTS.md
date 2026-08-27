@@ -93,10 +93,8 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
 
 ## Layout
 
-- `anchor/` — the fixed-point toolchain with `SHA256SUMS` + `PROVENANCE.md`.
-  The current anchor still carries the three M4 transition tools; verified
-  source stages produce the single multi-command `luna` executable. Sole
-  binary trust root.
+- `anchor/` — the single fixed-point multi-command `luna` executable with
+  `SHA256SUMS` + `PROVENANCE.md`. Sole binary trust root.
 - `library/include/luna/` — library interface units, mirroring module
   names (`luna.std.text` is `luna/std/text.lh`).
 - `library/src/` — runtime, Linux syscall and standard-library
