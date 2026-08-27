@@ -427,6 +427,45 @@ fn parser_parse_function_declaration(
     return parser_parse_function_with_name(state, start, flags, first_attribute, attribute_count, name, name_index);
 }
 
+fn parser_parse_constructor_initializer(state: *state::State) -> usize {
+    let none: usize = syntax::syntax_no_index();
+    let name: lexer::Token = state->current;
+    let name_index: usize = state->current_index;
+    if (!state::parser_expect(state, lexer::TokenKind.identifier)) {
+        return none;
+    }
+    let initializer: usize = state::parser_new_node(
+        state, syntax::SyntaxKind.constructor_initializer, name.span, name_index);
+    state::parser_expect(state, lexer::TokenKind.equal);
+    let value: usize = expression::parser_parse_expression(state);
+    if (value != none) {
+        state::parser_add_child(state, initializer, value);
+        let value_node: *syntax::SyntaxNode = state::parser_node_pointer(state, value);
+        if (value_node != null) {
+            state::parser_set_node_span(state, initializer, state::parser_join_spans(name.span, value_node->span));
+        }
+    }
+    return initializer;
+}
+
+fn parser_parse_constructor_initializers(state: *state::State, function: usize) {
+    if (!state::parser_match(state, lexer::TokenKind.colon)) {
+        return;
+    }
+    for (; state->error == runtime::Error.none;) {
+        let initializer: usize = parser_parse_constructor_initializer(state);
+        if (initializer != syntax::syntax_no_index()) {
+            state::parser_add_child(state, function, initializer);
+        }
+        if (!state::parser_match(state, lexer::TokenKind.comma)) {
+            return;
+        }
+        if (state->current.kind == lexer::TokenKind.left_brace || state->current.kind == lexer::TokenKind.semicolon) {
+            return;
+        }
+    }
+}
+
 fn parser_parse_function_with_name(
     state: *state::State, start: lexer::Token, flags: usize,
     first_attribute: usize, attribute_count: usize, name: lexer::Token, name_index: usize) -> usize {
@@ -466,6 +505,10 @@ fn parser_parse_function_with_name(
         if (return_type != none) {
             state::parser_add_child(state, function, return_type);
         }
+    }
+    let constructor: bool = (flags & (syntax::SyntaxFlag.constructor as usize)) != 0;
+    if (constructor) {
+        parser_parse_constructor_initializers(state, function);
     }
 
     if (state::parser_match(

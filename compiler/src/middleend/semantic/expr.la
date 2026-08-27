@@ -9,9 +9,18 @@ import luna.bootstrap.middleend.semantic.expr.base as base;
 import luna.bootstrap.middleend.semantic.expr.initializer as initializer;
 import luna.bootstrap.middleend.semantic.expr.numeric as numeric;
 import luna.bootstrap.middleend.semantic.expr.operators as operators;
+import luna.bootstrap.middleend.semantic.expr.probe as probe;
 import luna.bootstrap.middleend.semantic.expr.strings as strings;
 import luna.bootstrap.middleend.semantic.intrinsics as intrinsics;
 import luna.bootstrap.middleend.type as type_info;
+
+fn lower_into_destination(
+    context: *context::Context, node_id: usize, expected_type: usize,
+    destination: usize, result: *context::Expression) -> void {
+    if (result != null) {
+        *result = lower_expression_into(context, node_id, expected_type, destination);
+    }
+}
 
 fn lower_expression(context: *context::Context, node_id: usize, expected_type: usize) -> context::Expression {
     let node: syntax::SyntaxNode = context::node(context, context->current_unit, node_id);
@@ -110,7 +119,7 @@ fn lower_expression(context: *context::Context, node_id: usize, expected_type: u
         return operators::lower_conditional(context, node, expected_type, lower_into);
     }
     if (node.kind == syntax::SyntaxKind.zero_initializer || node.kind == syntax::SyntaxKind.aggregate_initializer) {
-        return initializer::lower_initializer(context, node_id, expected_type, lower_into);
+        return initializer::lower_initializer(context, node_id, expected_type, lower_into_destination);
     }
     if (node.kind == syntax::SyntaxKind.sizeof_expression || node.kind == syntax::SyntaxKind.alignof_expression ||
         node.kind == syntax::SyntaxKind.offsetof_expression) {
@@ -123,6 +132,19 @@ fn lower_expression(context: *context::Context, node_id: usize, expected_type: u
         context, context::DiagnosticKind.internal_invariant, context->current_unit, node.span, context::no_id(),
         context::empty_span(), node.kind as usize);
     return base::invalid_expression();
+}
+
+fn lower_expression_into(
+    context: *context::Context, node_id: usize, expected_type: usize, destination: usize) -> context::Expression {
+    let node: syntax::SyntaxNode = context::node(context, context->current_unit, node_id);
+    if (node.kind == syntax::SyntaxKind.call_expression) {
+        let target: probe::CallTarget = probe::direct_call_target(context, node);
+        let constructor: bool = target.receiver_source == probe::ReceiverSource.construction;
+        if (constructor && target.owner_type == expected_type) {
+            return access::lower_call_into(context, node_id, node, destination, expected_type, lower_into);
+        }
+    }
+    return lower_expression(context, node_id, expected_type);
 }
 
 fn lower_into(context: *context::Context, node_id: usize, expected_type: usize, result: *context::Expression) -> void {

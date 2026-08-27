@@ -5,7 +5,8 @@
 This is the accepted and implemented design for the M3 phase. M3.0 direct
 classes, M3.1 single inheritance/contracts, M3.2 relocation data, M3.3 dynamic
 dispatch, M3.4 advanced callable class features and M3.5 opaque classes are
-implemented. The design consumes the canonical signature, overload,
+implemented; M3.6 adds class-value composition and ordered member
+initialization. The design consumes the canonical signature, overload,
 default-parameter and value-category foundation delivered by
 [`m2-callable-infrastructure.md`](m2-callable-infrastructure.md).
 The older uppercase M2/M3 headings in `roadmap.md` belong to archived Luna 0
@@ -15,16 +16,15 @@ M3 takes modern C++'s useful zero-cost object model as a reference while
 deliberately rejecting its historical compatibility surface. The phase adds no
 ownership, lifetime or automatic resource-management semantics.
 
-For this design, "composition is deferred" means:
-
-- no trait, mixin, component, delegation or automatic forwarding feature;
-- no class-valued fields or arrays of class values in M3;
-- raw pointers to other classes remain legal and non-owning;
-- existing structure/union/array nesting remains unchanged.
+M3.6 composition is embedded value storage, not an ownership framework. Direct
+class fields and arrays containing class values participate in ordinary layout
+and representation-copy semantics. Traits, mixins, delegation, automatic
+forwarding, destruction and resource ownership remain separate concerns.
 
 The primary M3 features are classes, implicit-receiver methods, overloaded
 constructors/methods, access control, single inheritance, opt-in virtual
-dispatch, restricted operators, non-owning bound methods and minimal RTTI.
+dispatch, restricted operators, non-owning bound methods, minimal RTTI and
+embedded class-value composition.
 
 ## Design principles
 
@@ -98,10 +98,14 @@ ImplDeclaration  ::= "impl" QualifiedType "{" MethodDefinition* "}"
 
 MethodDefinition ::= "static" "fn" Signature FunctionBody
                    | "fn" MethodSignature FunctionBody
-                   | "init" "(" [ ParameterList ] ")" FunctionBody
+                   | "init" "(" [ ParameterList ] ")"
+                     [ ":" MemberInitializer { "," MemberInitializer } ]
+                     FunctionBody
                    | "operator" OperatorToken MethodSignature FunctionBody
                    | "priv" "static" "fn" Signature FunctionBody
                    | "priv" "fn" MethodSignature FunctionBody
+
+MemberInitializer ::= Identifier "=" Expression
 ```
 
 This grammar describes the complete accepted M3 direction. The implemented
@@ -250,8 +254,32 @@ aggregate initialization is unavailable outside methods of that class.
 
 A derived constructor calls `super.init(...)` exactly once as its first
 effective statement. The base constructor is selected through its overload set
-before direct-field initialization proceeds. M3 has no C++ initializer-list,
-delegating-constructor or inherited-constructor grammar.
+before direct-field initialization proceeds. M3.6 then evaluates the strict
+member initialization table in direct-field declaration order before entering
+the remaining constructor body:
+
+```luna
+init(x: i32, y: i32)
+    : origin = Point(x, y), samples = {Point(20, 0), Point(22, 0)} {
+    // 进入函数体时，origin 和 samples 中的类元素均已完成初始化。
+}
+```
+
+Every direct field whose type is a class, or an array recursively containing a
+class, must be present in every constructor definition. Class-containing array
+literals must cover every element positionally at every dimension. Scalar
+fields may be omitted and retain the existing zero-initialized state. Listed
+fields may skip omitted scalar fields but must otherwise follow declaration
+order; duplicates, inherited/unknown fields and initializer tables on bodyless
+contracts are rejected. Initializer expressions cannot read `this` or `super`,
+so they cannot observe the object being initialized. Delegating and inherited
+constructors remain unsupported.
+
+An exact constructor-call initializer lowers its receiver directly to the final
+member address; it does not construct a per-member stack temporary. A copy or
+factory expression still performs the explicit representation store required by
+its source form. Aggregate arrays construct class-call elements in their final
+aggregate slots before any enclosing aggregate copy.
 
 Exact same-class copy, assignment, parameter passing and return reuse Luna's
 existing representation-copy rules. There are:
@@ -654,7 +682,7 @@ M3 should use specific leading diagnostic kinds for at least:
 - invalid receiver or method definition mismatch;
 - inaccessible private/protected member;
 - invalid class initialization;
-- class-valued composition in the deferred M3 subset;
+- missing, duplicate, out-of-order or incomplete member initialization;
 - invalid/final base class;
 - missing or invalid override;
 - override of final method;
@@ -675,7 +703,7 @@ change.
 - `new`/`delete`, garbage collection and reference counting;
 - conversion operators and implicit user-defined conversions;
 - multiple or virtual inheritance;
-- trait, mixin, component, delegation and class-value composition;
+- trait, mixin, component, delegation and automatic forwarding;
 - extension methods and ADL;
 - arbitrary free-function or cross-module friends;
 - `typeid` strings, reflection and throwing downcasts;
@@ -770,6 +798,22 @@ source-order and fixed-point coverage.
 Opaque classes are valuable for representation hiding but are not a prerequisite
 for direct methods or single inheritance.
 
+### M3.6: class-value composition
+
+Status: implemented with direct/nested/array/polymorphic/imported/opaque value
+coverage, strict constructor initialization diagnostics and representation-copy
+ABI tests.
+
+- direct class fields and recursively class-containing arrays use embedded
+  declaration-order layout;
+- constructor member initializers execute after the base constructor and before
+  the body;
+- every class-containing direct field is completely initialized in every
+  constructor;
+- recursive and abstract class storage is rejected;
+- copy, assignment, parameter and return retain exact representation semantics;
+- no destructor, copy/move hook or ownership behavior is implied.
+
 ## Required test matrix
 
 Every slice needs positive, negative and determinism coverage:
@@ -792,6 +836,9 @@ Every slice needs positive, negative and determinism coverage:
 - same-module friendship and rejected cross-module/free-function friendship;
 - opaque pointer ABI, private definition source order and rejected external
   value/layout/member/inheritance use;
+- direct, inherited, polymorphic, imported and nested-array class composition;
+- missing, duplicate, out-of-order, partial-array and premature-`this` member
+  initialization rejection;
 - fixed-point rebuild before compiler sources adopt each slice.
 
 ## C++ features retained and removed
@@ -803,7 +850,7 @@ Every slice needs positive, negative and determinism coverage:
 | single inheritance | retained |
 | virtual/override/final | retained, override always explicit |
 | abstract methods | retained as `abstract fn`, no `= 0` syntax |
-| constructors | retained as overloaded `init`, no initializer-list baggage |
+| constructors | overloaded `init` with strict declaration-order member initialization |
 | destructors | deferred; explicit cleanup until copy/lifetime policy exists |
 | RAII and smart pointers | removed; no ownership model |
 | overload sets/default arguments | inherited from exact M2 callable rules |

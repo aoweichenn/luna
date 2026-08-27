@@ -8,6 +8,7 @@ import luna.bootstrap.frontend.lexer as lexer;
 import luna.bootstrap.frontend.syntax as syntax;
 import luna.bootstrap.middleend.ir as ir;
 import luna.bootstrap.middleend.semantic.attributes as attributes;
+import luna.bootstrap.middleend.semantic.callable as callable;
 import luna.bootstrap.middleend.semantic.classes as classes;
 import luna.bootstrap.middleend.semantic.consteval as consteval;
 import luna.bootstrap.middleend.semantic.consteval.engine as const_engine;
@@ -851,6 +852,92 @@ fn lower_statement(context: *context::Context, node_id: usize) -> bool {
     return false;
 }
 
+fn next_constructor_initializer(context: *context::Context, declaration_unit: usize, child: usize) -> usize {
+    var current: usize = child;
+    for (; current != context::no_id();
+        current = context::node(context, declaration_unit, current).next_sibling) {
+        if (context::node(
+                context, declaration_unit, current).kind == syntax::SyntaxKind.constructor_initializer) {
+            return current;
+        }
+    }
+    return context::no_id();
+}
+
+fn lower_member_initializers(context: *context::Context, function: context::Function) -> bool {
+    let declaration: syntax::SyntaxNode = context::node(
+        context, function.implementation_unit, function.implementation_node);
+    var initializer_id: usize = next_constructor_initializer(
+        context, function.implementation_unit, declaration.first_child);
+    if (initializer_id == context::no_id()) {
+        return true;
+    }
+    let receiver: context::Expression = access::lower_this(
+        context, context::node(context, function.implementation_unit, initializer_id));
+    if (!receiver.valid) {
+        return false;
+    }
+    let owner: type_info::Record = context::type_record(context, function.identity.owner_type);
+    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    for (var index: usize = 0; index < owner.field_count && initializer_id != context::no_id(); index += 1) {
+        let field: type_info::Field = fields[owner.first_field + index];
+        let initializer: syntax::SyntaxNode = context::node(context, function.implementation_unit, initializer_id);
+        let matches: bool = context::tokens_equal(
+            context, function.implementation_unit, initializer.token_index, field.declaration_unit, field.name_token);
+        if (!matches) {
+            continue;
+        }
+        let pointer: type_info::IdResult = type_info::table_pointer(&context->types, field.type_id, false, false);
+        context->error = pointer.error;
+        var address: ir::Instruction = builder::instruction(ir::Opcode.member_address, initializer);
+        address.left = receiver.value_id;
+        address.auxiliary = field.offset_bytes;
+        let field_address: usize = builder::emit_value(context, address, pointer.type_id);
+        let value: context::Expression = expr::lower_expression_into(
+            context, initializer.first_child, field.type_id, field_address);
+        if (!value.valid || value.type_id != field.type_id) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.invalid_member_initializer,
+                function.implementation_unit, initializer.span, field.declaration_unit,
+                context::node(context, field.declaration_unit, field.declaration_node).span, owner.first_field + index);
+            return false;
+        }
+        if (!builder::store_to_address(context, initializer, field_address, field.type_id, value)) {
+            return false;
+        }
+        initializer_id = next_constructor_initializer(context, function.implementation_unit, initializer.next_sibling);
+    }
+    return initializer_id == context::no_id();
+}
+
+fn lower_constructor_block(context: *context::Context, body_id: usize, function: context::Function) -> bool {
+    let body: syntax::SyntaxNode = context::node(context, context->current_unit, body_id);
+    if (body.kind != syntax::SyntaxKind.block_statement) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    let local_start: usize = builder::enter_scope(context);
+    if (local_start == context::no_id()) {
+        return false;
+    }
+    var child: usize = body.first_child;
+    let owner: type_info::Record = context::type_record(context, function.identity.owner_type);
+    if (owner.base_type != context::no_id() && child != context::no_id()) {
+        lower_statement(context, child);
+        child = context::node(context, context->current_unit, child).next_sibling;
+    }
+    if (!lower_member_initializers(context, function)) {
+        builder::leave_scope(context, local_start);
+        return false;
+    }
+    for (; child != context::no_id() && context->error == runtime::Error.none;
+        child = context::node(context, context->current_unit, child).next_sibling) {
+        lower_statement(context, child);
+    }
+    builder::leave_scope(context, local_start);
+    return context->error == runtime::Error.none;
+}
+
 fn lower_block(context: *context::Context, node_id: usize) -> bool {
     let node: syntax::SyntaxNode = context::node(context, context->current_unit, node_id);
     if (node.kind != syntax::SyntaxKind.block_statement) {
@@ -861,10 +948,10 @@ fn lower_block(context: *context::Context, node_id: usize) -> bool {
     if (local_start == context::no_id()) {
         return false;
     }
-    var child: usize = node.first_child;
-    while (child != context::no_id() && context->error == runtime::Error.none) {
+    for (var child: usize = node.first_child;
+        child != context::no_id() && context->error == runtime::Error.none;
+        child = context::node(context, context->current_unit, child).next_sibling) {
         lower_statement(context, child);
-        child = context::node(context, context->current_unit, child).next_sibling;
     }
     builder::leave_scope(context, local_start);
     return context->error == runtime::Error.none;
@@ -941,7 +1028,11 @@ fn lower_function(context: *context::Context, function_id: usize) -> bool {
     context->continue_block = context::no_id();
     context->current_block = builder::add_current_block(context);
     add_parameter_locals(context, function_id);
-    lower_block(context, body_node);
+    if (function.identity.kind == callable::Kind.constructor) {
+        lower_constructor_block(context, body_node, function);
+    } else {
+        lower_block(context, body_node);
+    }
     labels::validate_labels(context);
     let return_record: type_info::Record = context::type_record(context, function.return_type);
     let ir_functions: *const ir::Function = context->ir.functions.data as

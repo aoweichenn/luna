@@ -1122,9 +1122,13 @@ fn current_receiver(
 
 fn collect_direct_receiver(
     context: *context::Context, node: syntax::SyntaxNode, target: probe::CallTarget,
-    receiver_type: usize, lowerer: api::Lowerer, values: *bytes::Buffer) -> usize {
+    receiver_type: usize, construction_address: usize, lowerer: api::Lowerer, values: *bytes::Buffer) -> usize {
     switch (target.receiver_source) {
     case probe::ReceiverSource.construction {
+        if (construction_address != context::no_id()) {
+            return append_call_argument(context, values, construction_address) ?
+                construction_address : context::no_id();
+        }
         return constructor_receiver(context, node, target.owner_type, values);
     }
     case probe::ReceiverSource.expression {
@@ -1139,9 +1143,9 @@ fn collect_direct_receiver(
     }
 }
 
-fn lower_target_call(
+fn lower_target_call_with_receiver(
     context: *context::Context, node_id: usize, node: syntax::SyntaxNode,
-    target: probe::CallTarget, lowerer: api::Lowerer) -> context::Expression {
+    target: probe::CallTarget, construction_address: usize, lowerer: api::Lowerer) -> context::Expression {
     let none: usize = context::no_id();
     if (node.child_count == 0) {
         context->error = runtime::Error.invalid_argument;
@@ -1250,7 +1254,8 @@ fn lower_target_call(
     let target_has_receiver: bool = target.receiver_source != probe::ReceiverSource.none;
     if (selected_function != none && target_has_receiver) {
         let receiver_type: usize = functions::function_receiver_type(context, functions[selected_function]);
-        constructed_address = collect_direct_receiver(context, node, target, receiver_type, lowerer, &argument_values);
+        constructed_address = collect_direct_receiver(
+            context, node, target, receiver_type, construction_address, lowerer, &argument_values);
         if (constructed_address == none) {
             bytes::release(argument_values);
             return base::invalid_expression();
@@ -1338,6 +1343,28 @@ fn lower_target_call(
             type_info::is_memory(return_record.kind) ? result_value : none, constant_value = 0, has_constant = false,
         category = result_category, valid = instruction_id != none, bitfield_segment = context::no_id(),
     };
+}
+
+fn lower_target_call(
+    context: *context::Context, node_id: usize, node: syntax::SyntaxNode,
+    target: probe::CallTarget, lowerer: api::Lowerer) -> context::Expression {
+    return lower_target_call_with_receiver(context, node_id, node, target, context::no_id(), lowerer);
+}
+
+fn lower_call_into(
+    context: *context::Context, node_id: usize, node: syntax::SyntaxNode,
+    destination: usize, expected_type: usize, lowerer: api::Lowerer) -> context::Expression {
+    let target: probe::CallTarget = probe::direct_call_target(context, node);
+    let constructor: bool = target.receiver_source == probe::ReceiverSource.construction;
+    let target_matches: bool = target.owner_type == expected_type;
+    let target_is_valid: bool = target.valid && constructor;
+    if (!target_is_valid || !target_matches) {
+        return base::invalid_expression();
+    }
+    if (!initialize_class_vptr(context, node, expected_type, destination)) {
+        return base::invalid_expression();
+    }
+    return lower_target_call_with_receiver(context, node_id, node, target, destination, lowerer);
 }
 
 fn lower_call(

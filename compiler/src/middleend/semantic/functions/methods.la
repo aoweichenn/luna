@@ -239,6 +239,129 @@ fn operator_method_is_valid(
     return true;
 }
 
+fn next_constructor_initializer(context: *context::Context, unit_index: usize, child: usize) -> usize {
+    var current: usize = child;
+    for (; current != context::no_id();
+        current = context::node(context, unit_index, current).next_sibling) {
+        if (context::node(context, unit_index, current).kind == syntax::SyntaxKind.constructor_initializer) {
+            return current;
+        }
+    }
+    return context::no_id();
+}
+
+fn initializer_expression_is_valid(
+    context: *context::Context, unit_index: usize, node_id: usize, depth: usize) -> bool {
+    if (depth >= context::Limit.maximum_type_depth as usize) {
+        return false;
+    }
+    let node: syntax::SyntaxNode = context::node(context, unit_index, node_id);
+    if (node.kind == syntax::SyntaxKind.this_expression || node.kind == syntax::SyntaxKind.super_expression) {
+        return false;
+    }
+    for (var child: usize = node.first_child; child != context::no_id();
+        child = context::node(context, unit_index, child).next_sibling) {
+        if (!initializer_expression_is_valid(context, unit_index, child, depth + 1)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn class_array_initializer_is_complete(
+    context: *context::Context, unit_index: usize, type_id: usize, value_id: usize, depth: usize) -> bool {
+    if (depth >= context::Limit.maximum_type_depth as usize) {
+        return false;
+    }
+    let record: type_info::Record = context::type_record(context, type_id);
+    if (record.kind != type_info::Kind.array) {
+        return record.kind == type_info::Kind.class_type;
+    }
+    if (!classes::type_contains_class_value(context, type_id)) {
+        return true;
+    }
+    let value: syntax::SyntaxNode = context::node(context, unit_index, value_id);
+    if (value.kind == syntax::SyntaxKind.zero_initializer) {
+        return false;
+    }
+    if (value.kind != syntax::SyntaxKind.aggregate_initializer) {
+        return true;
+    }
+    if (value.child_count != record.element_count) {
+        return false;
+    }
+    for (var child: usize = value.first_child; child != context::no_id();
+        child = context::node(context, unit_index, child).next_sibling) {
+        let element: syntax::SyntaxNode = context::node(context, unit_index, child);
+        let indexed: bool = (element.flags & (syntax::SyntaxFlag.indexed as usize)) != 0;
+        if (element.kind != syntax::SyntaxKind.initializer_element || indexed) {
+            return false;
+        }
+        if (element.child_count != 1 || !class_array_initializer_is_complete(
+                context, unit_index, record.element_type, element.first_child, depth + 1)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn report_member_initializer(
+    context: *context::Context, unit_index: usize, span: lexer::SourceSpan, field: type_info::Field, detail: usize) {
+    context::add_diagnostic(
+        context, context::DiagnosticKind.invalid_member_initializer, unit_index, span,
+        field.declaration_unit, context::node(context, field.declaration_unit, field.declaration_node).span, detail);
+}
+
+fn constructor_initializers_are_valid(
+    context: *context::Context, owner_type: usize, unit_index: usize, declaration: syntax::SyntaxNode) -> bool {
+    let first_initializer: usize = next_constructor_initializer(context, unit_index, declaration.first_child);
+    let constructor: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.constructor);
+    let bodyless: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.bodyless);
+    if (!constructor || bodyless) {
+        if (first_initializer != context::no_id()) {
+            method_diagnostic(
+                context, context::DiagnosticKind.invalid_member_initializer, unit_index, declaration, owner_type);
+            return false;
+        }
+        return true;
+    }
+    let owner: type_info::Record = context::type_record(context, owner_type);
+    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    var initializer_id: usize = first_initializer;
+    var valid: bool = true;
+    for (var index: usize = 0; index < owner.field_count; index += 1) {
+        let field: type_info::Field = fields[owner.first_field + index];
+        var initializer_matches: bool = false;
+        var initializer: syntax::SyntaxNode = {};
+        if (initializer_id != context::no_id()) {
+            initializer = context::node(context, unit_index, initializer_id);
+            initializer_matches = context::tokens_equal(
+                context, unit_index, initializer.token_index, field.declaration_unit, field.name_token);
+        }
+        if (initializer_matches) {
+            let expression_is_valid: bool = initializer.child_count == 1 &&
+                initializer_expression_is_valid(context, unit_index, initializer.first_child, 0);
+            let storage_is_complete: bool = !classes::type_contains_class_value(context, field.type_id) ||
+                class_array_initializer_is_complete(context, unit_index, field.type_id, initializer.first_child, 0);
+            if (!expression_is_valid || !storage_is_complete) {
+                report_member_initializer(context, unit_index, initializer.span, field, owner.first_field + index);
+                valid = false;
+            }
+            initializer_id = next_constructor_initializer(context, unit_index, initializer.next_sibling);
+        } else if (classes::type_contains_class_value(context, field.type_id)) {
+            report_member_initializer(context, unit_index, declaration.span, field, owner.first_field + index);
+            valid = false;
+        }
+    }
+    if (initializer_id != context::no_id()) {
+        let initializer: syntax::SyntaxNode = context::node(context, unit_index, initializer_id);
+        method_diagnostic(
+            context, context::DiagnosticKind.invalid_member_initializer, unit_index, initializer, owner_type);
+        valid = false;
+    }
+    return valid;
+}
+
 fn method_form_is_valid(
     context: *context::Context, owner_type: usize, unit_index: usize, declaration: syntax::SyntaxNode) -> bool {
     let variadic: bool = declaration_has_syntax_flag(declaration, syntax::SyntaxFlag.variadic);
@@ -250,7 +373,9 @@ fn method_form_is_valid(
         method_diagnostic(context, context::DiagnosticKind.invalid_method, unit_index, declaration, owner_type);
         return false;
     }
-    return operator_method_is_valid(context, owner_type, unit_index, declaration);
+    let operator_is_valid: bool = operator_method_is_valid(context, owner_type, unit_index, declaration);
+    let initializers_are_valid: bool = constructor_initializers_are_valid(context, owner_type, unit_index, declaration);
+    return operator_is_valid && initializers_are_valid;
 }
 
 fn mark_member_exported(context: *context::Context, function_id: usize) {

@@ -268,14 +268,6 @@ fn type_contains_class_value(context: *context::Context, type_id: usize) -> bool
     return true;
 }
 
-fn report_class_composition(context: *context::Context, owner: type_info::Record, field: type_info::Field) {
-    context::add_diagnostic(
-        context, context::DiagnosticKind.invalid_class_composition, field.declaration_unit,
-        context::node(context, field.declaration_unit, field.declaration_node).span,
-        owner.declaration_unit, context::node(context, owner.declaration_unit, owner.declaration_node).span,
-        field.type_id);
-}
-
 fn collect_fields(context: *context::Context) -> bool {
     if (context->classes.field_count != 0) {
         context->error = runtime::Error.invalid_argument;
@@ -297,9 +289,6 @@ fn collect_fields(context: *context::Context) -> bool {
             let declaration: syntax::SyntaxNode =
                 context::node(context, field.declaration_unit, field.declaration_node);
             let access: model::Access = access_from_flags(declaration.flags);
-            if (type_contains_class_value(context, field.type_id)) {
-                report_class_composition(context, owner, field);
-            }
             context->error = model::append_field(&context->classes, record_id, {field_id = field_id, access = access});
         }
     }
@@ -1184,6 +1173,41 @@ fn validate_abstract_function_types(context: *context::Context) {
     }
 }
 
+fn class_storage_is_abstract(context: *context::Context, type_id: usize) -> bool {
+    var current: usize = type_id;
+    for (var depth: usize = 0; depth < context::Limit.maximum_type_depth as usize; depth += 1) {
+        let record: type_info::Record = context::type_record(context, current);
+        if (record.kind == type_info::Kind.class_type) {
+            return class_is_abstract(context, current);
+        }
+        if (record.kind != type_info::Kind.array) {
+            return false;
+        }
+        current = record.element_type;
+    }
+    return true;
+}
+
+fn validate_abstract_class_fields(context: *context::Context) {
+    let records: *const model::Record = context->classes.records.data as *const model::Record;
+    let type_records: *const type_info::Record = context->types.types.data as *const type_info::Record;
+    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    for (var record_id: usize = 0; record_id < context->classes.record_count; record_id += 1) {
+        let owner: type_info::Record = type_records[records[record_id].type_id];
+        for (var index: usize = 0; index < owner.field_count; index += 1) {
+            let field: type_info::Field = fields[owner.first_field + index];
+            if (!class_storage_is_abstract(context, field.type_id)) {
+                continue;
+            }
+            context::add_diagnostic(
+                context, context::DiagnosticKind.invalid_abstract_class,
+                field.declaration_unit, context::node(context, field.declaration_unit, field.declaration_node).span,
+                owner.declaration_unit, context::node(context, owner.declaration_unit, owner.declaration_node).span,
+                field.type_id);
+        }
+    }
+}
+
 fn validate_methods(context: *context::Context) -> bool {
     if (!analyze_method_hierarchy(context)) {
         return false;
@@ -1218,6 +1242,7 @@ fn validate_methods(context: *context::Context) -> bool {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
+    validate_abstract_class_fields(context);
     validate_abstract_function_types(context);
     return true;
 }

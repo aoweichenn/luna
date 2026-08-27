@@ -396,8 +396,18 @@ members are accessible only while lowering a method of that class in M3.0;
 merely sharing a module grants no access. Protected access expands to
 derived classes only when M3.1 inheritance lands.
 
-Class-valued fields, including arrays containing class values, are rejected in
-M3.0. Raw pointers to classes are legal, non-owning fields. Class fields also
+M3.6 permits embedded class-valued fields and arrays recursively containing
+class values. Every constructor definition must initialize each such direct
+field through its declaration-order member initialization table, written after
+the parameter list as `: field = expression`. A derived class still performs
+its required first `super.init(...)` call before its direct member initializers
+run. Initializer expressions cannot read `this` or `super`; class-containing
+array literals must initialize every element positionally. Recursive and
+abstract class storage is rejected. Scalar fields may be listed or retain their
+existing zero-initialized state. Exact copy, assignment, parameter and return
+remain representation operations and do not invoke hooks.
+
+Raw pointers to classes remain legal, non-owning fields. Class fields also
 reject bitfields, flexible arrays, anonymous members and packed layout.
 `sizeof` and `alignof` are supported; `offsetof` remains limited to structures
 and unions. Passing or returning a class by value through `extern fn` is

@@ -115,7 +115,7 @@ fn validate_initializer_fields(
 
 fn lower_array_initializer(
     context: *context::Context, node: syntax::SyntaxNode, address_id: usize, expected_type: usize,
-    type_record: type_info::Record, lowerer: api::Lowerer) -> bool {
+    type_record: type_info::Record, lowerer: api::IntoLowerer) -> bool {
     let none: usize = context::no_id();
     let element_type: usize = type_record.element_type;
     let element_count: usize = type_record.element_count;
@@ -193,17 +193,6 @@ fn lower_array_initializer(
         seen_indices = appended.buffer;
         context->error = appended.error;
         cursor = slot + 1;
-        let value_node: syntax::SyntaxNode = context::node(context, context->current_unit, value_child);
-        if (element_record.kind == type_info::Kind.array && value_node.kind ==
-                syntax::SyntaxKind.aggregate_initializer) {
-            // Nested array-of-array lists are deferred.
-            context::add_diagnostic(
-                context, context::DiagnosticKind.invalid_initializer, context->current_unit, value_node.span, none,
-                context::empty_span(), expected_type);
-            valid = false;
-            child = element.next_sibling;
-            continue;
-        }
         // Element addresses use pointer_offset with a constant index, the
         // same instruction shape as array indexing; member_address only
         // validates against record fields.
@@ -215,7 +204,7 @@ fn lower_array_initializer(
         element_instruction.right = index_constant.value_id;
         element_instruction.auxiliary = element_record.size_bytes;
         let element_address: usize = builder::emit_value(context, element_instruction, pointer.type_id);
-        let value: context::Expression = api::invoke(lowerer, context, value_child, element_type);
+        let value: context::Expression = api::invoke_into(lowerer, context, value_child, element_type, element_address);
         if (value.type_id != element_type) {
             context::add_diagnostic(
                 context, context::DiagnosticKind.type_mismatch, context->current_unit, element.span, none,
@@ -234,7 +223,7 @@ fn lower_array_initializer(
 }
 
 fn lower_initializer(context: *context::Context, node_id: usize, expected_type: usize,
-    lowerer: api::Lowerer) -> context::Expression {
+    lowerer: api::IntoLowerer) -> context::Expression {
     let none: usize = context::no_id();
     let node: syntax::SyntaxNode = context::node(context, context->current_unit, node_id);
     let type_record: type_info::Record = context::type_record(context, expected_type);
@@ -329,8 +318,8 @@ fn lower_initializer(context: *context::Context, node_id: usize, expected_type: 
                     member_instruction.left = address_id;
                     member_instruction.auxiliary = lookup.offset_bytes;
                     let field_address: usize = builder::emit_value(context, member_instruction, pointer.type_id);
-                    let value: context::Expression = api::invoke(lowerer, context, initializer.first_child,
-                        field.type_id);
+                    let value: context::Expression = api::invoke_into(
+                        lowerer, context, initializer.first_child, field.type_id, field_address);
                     if (value.type_id != field.type_id) {
                         context::add_diagnostic(
                             context, context::DiagnosticKind.type_mismatch, context->current_unit, initializer.span,
