@@ -10,12 +10,11 @@ module luna.compiler.x86.elf;
 
 impl ElfReader {
     init(input: *const u8, input_size: usize): sections = vector::vector<InputSection>(),
-            symbol_map = vector::vector<SymbolMapping>() {
+            symbol_map = vector::vector<SymbolMapping>(), storage = object::ObjectBuilder() {
         this->input = input;
         this->input_size = input_size;
         this->symtab_index = 0;
         this->has_symtab = false;
-        this->storage = object::empty();
         this->error_code = runtime::Error.none;
     }
 
@@ -55,38 +54,6 @@ impl ElfReader {
         }
         return this->sections.get(index);
     }
-
-    priv fn region_buffer(object: *object::Object, section: object::Section) -> *bytes::Buffer {
-    if (object == null) {
-        return null;
-    }
-    switch (section) {
-    case object::Section.text {
-        return &object->text;
-    }
-    case object::Section.rodata {
-        return &object->rodata;
-    }
-    case object::Section.data {
-        return &object->data;
-    }
-    default {
-        return null;
-    }
-    }
-}
-
-    priv fn append_bytes(buffer: *bytes::Buffer, bytes: *const u8, offset: usize, size: usize) -> bool {
-    if (buffer == null) {
-        return false;
-    }
-    if (size != 0 && bytes == null) {
-        return false;
-    }
-    let appended: bytes::BufferResult = bytes::append(*buffer, size == 0 ? null as *const u8 : &bytes[offset], size);
-    *buffer = appended.buffer;
-    return appended.error == runtime::Error.none;
-}
 
     priv fn classify_progbits(section: *InputSection, allocated: bool) -> bool {
         if (!allocated) {
@@ -246,7 +213,7 @@ impl ElfReader {
             if (section->region == object::Section.undefined) {
                 continue;
             }
-            if (!object::set_alignment(&this->storage, section->region, section->alignment)) {
+            if (!this->storage.set_alignment(section->region, section->alignment)) {
                 return this->fail(runtime::Error.invalid_argument);
             }
             if (!this->place_section(section)) {
@@ -259,32 +226,28 @@ impl ElfReader {
     priv fn place_section(section: *InputSection) -> bool {
         if (section->region == object::Section.bss) {
             var placed: usize = 0;
-            if (!align(this->storage.bss_size, section->alignment, &placed)) {
-                return this->fail(runtime::Error.out_of_memory);
-            }
-            if (section->size > (Limit.maximum_payload as usize) - placed) {
-                return this->fail(runtime::Error.out_of_memory);
+            if (!this->storage.allocate_bss(section->size, section->alignment, &placed)) {
+                return this->fail(this->storage.error());
             }
             section->region_offset = placed;
-            this->storage.bss_size = placed + section->size;
             return true;
         }
-        let buffer: *bytes::Buffer = this->region_buffer(&this->storage, section->region);
-        if (buffer == null) {
-            return this->fail(runtime::Error.invalid_argument);
-        }
+        let current_size: usize = this->storage.section_size(section->region);
         var placed: usize = 0;
-        if (!align(buffer->length, section->alignment, &placed)) {
+        if (!align(current_size, section->alignment, &placed)) {
             return this->fail(runtime::Error.out_of_memory);
         }
         if (section->size > (Limit.maximum_payload as usize) - placed) {
             return this->fail(runtime::Error.out_of_memory);
         }
-        if (!pad_to(buffer, placed)) {
-            return this->fail(runtime::Error.out_of_memory);
+        for (var index: usize = current_size; index < placed; index += 1) {
+            if (!this->storage.append_u8(section->region, 0)) {
+                return this->fail(this->storage.error());
+            }
         }
-        if (!this->append_bytes(buffer, this->input, section->offset, section->size)) {
-            return this->fail(runtime::Error.out_of_memory);
+        let bytes: *const u8 = section->size == 0 ? null : &this->input[section->offset];
+        if (!this->storage.append(section->region, bytes, section->size)) {
+            return this->fail(this->storage.error());
         }
         section->region_offset = placed;
         return true;
@@ -380,14 +343,14 @@ impl ElfReader {
         if (!this->synthetic_view("section", 7, st_shndx, &name_storage[0], &name)) {
             return this->fail(runtime::Error.invalid_argument);
         }
-        let added: object::IndexResult = object::add_symbol(&this->storage, name);
+        let added: object::IndexResult = this->storage.add_symbol(name);
         if (added.error != runtime::Error.none) {
             return this->fail(added.error);
         }
         if (added.found) {
             return this->fail(runtime::Error.invalid_argument);
         }
-        let symbol: *object::Symbol = object::symbol_mut(&this->storage, added.index);
+        let symbol: *object::Symbol = this->storage.symbol_mut(added.index);
         if (symbol == null) {
             return this->fail(runtime::Error.invalid_argument);
         }
@@ -417,11 +380,11 @@ impl ElfReader {
     if (!this->symbol_name(strtab, st_name, &name)) {
         return this->fail(runtime::Error.invalid_argument);
     }
-    let added: object::IndexResult = object::add_symbol(&this->storage, name);
+    let added: object::IndexResult = this->storage.add_symbol(name);
     if (added.error != runtime::Error.none) {
         return this->fail(added.error);
     }
-    let symbol: *object::Symbol = object::symbol_mut(&this->storage, added.index);
+    let symbol: *object::Symbol = this->storage.symbol_mut(added.index);
     if (symbol == null) {
         return this->fail(runtime::Error.invalid_argument);
     }
@@ -453,21 +416,17 @@ impl ElfReader {
         return this->fail(runtime::Error.invalid_argument);
     }
     var placed: usize = 0;
-    if (!align(this->storage.bss_size, alignment, &placed) || (st_size as usize) >
-            (Limit.maximum_payload as usize) - placed) {
-        return this->fail(runtime::Error.out_of_memory);
-    }
     var name: string_views::string_view = {
         data = null, length = 0,
     };
     if (!this->symbol_name(strtab, st_name, &name)) {
         return this->fail(runtime::Error.invalid_argument);
     }
-    let added: object::IndexResult = object::add_symbol(&this->storage, name);
+    let added: object::IndexResult = this->storage.add_symbol(name);
     if (added.error != runtime::Error.none) {
         return this->fail(added.error);
     }
-    let symbol: *object::Symbol = object::symbol_mut(&this->storage, added.index);
+    let symbol: *object::Symbol = this->storage.symbol_mut(added.index);
     if (symbol == null || symbol->defined) {
         return this->fail(runtime::Error.invalid_argument);
     }
@@ -475,13 +434,12 @@ impl ElfReader {
     symbol->global = true;
     symbol->external = false;
     symbol->section = object::Section.bss;
-    symbol->value = placed;
     symbol->size = st_size as usize;
     symbol->kind = object::SymbolKind.object;
-    this->storage.bss_size = placed + (st_size as usize);
-    if (!object::set_alignment(&this->storage, object::Section.bss, alignment)) {
-        return this->fail(runtime::Error.invalid_argument);
+    if (!this->storage.allocate_bss(st_size as usize, alignment, &placed)) {
+        return this->fail(this->storage.error());
     }
+    symbol->value = placed;
     *mapped = added.index;
     return true;
 }
@@ -510,7 +468,7 @@ impl ElfReader {
     } else if (!this->symbol_name(strtab, st_name, &name)) {
         return this->fail(runtime::Error.invalid_argument);
     }
-    var added: object::IndexResult = object::add_symbol(&this->storage, name);
+    var added: object::IndexResult = this->storage.add_symbol(name);
     if (added.error != runtime::Error.none) {
         return this->fail(added.error);
     }
@@ -520,7 +478,7 @@ impl ElfReader {
         if (!this->synthetic_view("local", 5, index, &name_storage[0], &name)) {
             return this->fail(runtime::Error.invalid_argument);
         }
-        added = object::add_symbol(&this->storage, name);
+        added = this->storage.add_symbol(name);
         if (added.error != runtime::Error.none) {
             return this->fail(added.error);
         }
@@ -528,7 +486,7 @@ impl ElfReader {
             return this->fail(runtime::Error.invalid_argument);
         }
     }
-    let symbol: *object::Symbol = object::symbol_mut(&this->storage, added.index);
+    let symbol: *object::Symbol = this->storage.symbol_mut(added.index);
     if (symbol == null || symbol->defined) {
         return this->fail(runtime::Error.invalid_argument);
     }
@@ -716,9 +674,9 @@ impl ElfReader {
                 section = target.region, offset = target.region_offset + (offset as usize),
                 symbol_index = mapped_symbol, kind = kind, addend = addend as isize,
             };
-            if (!object::add_relocation(&this->storage, relocation)) {
-                return this->fail(this->storage.error == runtime::Error.none ? runtime::Error.invalid_argument :
-                        this->storage.error);
+            if (!this->storage.add_relocation(relocation)) {
+                let error: runtime::Error = this->storage.error();
+                return this->fail(error == runtime::Error.none ? runtime::Error.invalid_argument : error);
             }
         }
     }
@@ -745,25 +703,19 @@ impl ElfReader {
         if (!this->load_relocations()) {
             return;
         }
-        if (!object::is_valid(this->storage)) {
+        if (!this->storage.is_valid()) {
             this->fail(runtime::Error.invalid_argument);
         }
     }
 
     fn take_result() -> object::Result {
         if (this->error_code != runtime::Error.none) {
-            object::release(this->storage);
-            this->storage = object::empty();
-            return { object = object::empty(), error = this->error_code };
+            return { object = object::Object(), error = this->error_code };
         }
-        let loaded: object::Object = this->storage;
-        this->storage = object::empty();
-        return { object = loaded, error = runtime::Error.none };
+        return { object = this->storage.take_object(), error = runtime::Error.none };
     }
 
     deinit() {
-        object::release(this->storage);
-        this->storage = object::empty();
     }
 
 }

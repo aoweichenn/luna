@@ -269,7 +269,15 @@ LIBRARIES = {
         "backend/x86_64/codegen/module",
         "backend/x86_64/codegen/facade",
     ),
-    "x86_64_object": compiler_module("luna.compiler.x86.object", "backend/x86_64/object/object"),
+    "x86_64_object": compiler_module(
+        "luna.compiler.x86.object",
+        "backend/x86_64/object/object",
+        "backend/x86_64/object/builder",
+        "backend/x86_64/object/collection",
+        "backend/x86_64/object/reader",
+        "backend/x86_64/object/writer",
+        "backend/x86_64/object/facade",
+    ),
     "x86_64_elf": compiler_module(
         "luna.compiler.x86.elf",
         "backend/x86_64/elf/format",

@@ -128,10 +128,10 @@ impl Assembler {
 }
 
     priv fn define_label(name: string_views::string_view) -> bool {
-    let section: *bytes::Buffer = this->section_buffer();
-    if (section == null || name.length == 0) {
+    if (!this->section_is_active() || name.length == 0) {
         return this->fail(runtime::Error.invalid_argument);
     }
+    let section_size: usize = this->storage.section_size(this->current_section);
     var numeric: bool = true;
     var number: usize = 0;
     for (var index: usize = 0; index < name.length; index += 1) {
@@ -150,7 +150,7 @@ impl Assembler {
             return this->fail(runtime::Error.out_of_memory);
         }
         let label: NumericLabel = {
-            section = this->current_section, offset = section->length, number = number,
+            section = this->current_section, offset = section_size, number = number,
         };
         let error: runtime::Error = this->numeric_labels.push_back(label);
         if (error != runtime::Error.none) {
@@ -165,7 +165,7 @@ impl Assembler {
     if (found.error != runtime::Error.none) {
         return false;
     }
-    let symbol: *object::Symbol = object::symbol_mut(&this->storage, found.index);
+    let symbol: *object::Symbol = this->storage.symbol_mut(found.index);
     if (symbol == null) {
         return this->fail(runtime::Error.invalid_argument);
     }
@@ -174,7 +174,7 @@ impl Assembler {
     }
     symbol->defined = true;
     symbol->section = this->current_section;
-    symbol->value = section->length;
+    symbol->value = section_size;
     return true;
 }
 
@@ -187,7 +187,7 @@ impl Assembler {
     if (found.error != runtime::Error.none) {
         return false;
     }
-    let symbol: *object::Symbol = object::symbol_mut(&this->storage, found.index);
+    let symbol: *object::Symbol = this->storage.symbol_mut(found.index);
     if (symbol == null) {
         return this->fail(runtime::Error.invalid_argument);
     }
@@ -210,7 +210,7 @@ impl Assembler {
         return this->fail(runtime::Error.invalid_argument);
     }
     let found: object::IndexResult = this->get_symbol(name);
-    let symbol: *object::Symbol = object::symbol_mut(&this->storage, found.index);
+    let symbol: *object::Symbol = this->storage.symbol_mut(found.index);
     if (found.error != runtime::Error.none || symbol == null) {
         return false;
     }
@@ -230,14 +230,13 @@ impl Assembler {
     let name: string_views::string_view = trim(slice(input, 0, comma));
     let expression: string_views::string_view = trim(slice(input, comma + 1, input.length - comma - 1));
     let found: object::IndexResult = this->symbols.find(name);
-    let symbol: *object::Symbol = object::symbol_mut(&this->storage, found.index);
-    let section: *bytes::Buffer = this->section_buffer();
+    let symbol: *object::Symbol = this->storage.symbol_mut(found.index);
     let lookup_is_valid: bool = found.found && found.error == runtime::Error.none;
     let symbol_is_defined: bool = symbol != null && symbol->defined;
     if (!lookup_is_valid || !symbol_is_defined) {
         return this->fail(runtime::Error.invalid_argument);
     }
-    let section_is_valid: bool = symbol->section == this->current_section && section != null;
+    let section_is_valid: bool = symbol->section == this->current_section && this->section_is_active();
     let expression_length_is_valid: bool = expression.length == name.length + 2;
     if (!section_is_valid || !expression_length_is_valid) {
         return this->fail(runtime::Error.invalid_argument);
@@ -251,10 +250,11 @@ impl Assembler {
             return this->fail(runtime::Error.invalid_argument);
         }
     }
-    if (symbol->value > section->length) {
+    let section_size: usize = this->storage.section_size(this->current_section);
+    if (symbol->value > section_size) {
         return this->fail(runtime::Error.invalid_argument);
     }
-    symbol->size = section->length - symbol->value;
+    symbol->size = section_size - symbol->value;
     return true;
 }
 
@@ -271,14 +271,14 @@ impl Assembler {
     if (!alignment_is_valid) {
         return this->fail(runtime::Error.invalid_argument);
     }
-    if (!object::set_alignment(&this->storage, this->current_section, alignment)) {
+    if (!this->storage.set_alignment(this->current_section, alignment)) {
         return this->fail(runtime::Error.invalid_argument);
     }
-    let output: *bytes::Buffer = this->section_buffer();
-    if (output == null) {
+    if (!this->section_is_active()) {
         return this->fail(runtime::Error.invalid_argument);
     }
-    let remainder: usize = output->length & (alignment - 1);
+    let section_size: usize = this->storage.section_size(this->current_section);
+    let remainder: usize = section_size & (alignment - 1);
     let padding: usize = remainder == 0 ? 0 : alignment - remainder;
     let fill: u8 = this->current_section == object::Section.text ? 144 : 0;
     for (var index: usize = 0; index < padding; index += 1) {
@@ -388,22 +388,10 @@ impl Assembler {
 }
 
     priv fn patch(fixup: Fixup, target: usize) -> bool {
-    var output: *bytes::Buffer = null;
-    switch (fixup.section) {
-    case object::Section.text {
-        output = &this->storage.text;
-    }
-    case object::Section.rodata {
-        output = &this->storage.rodata;
-    }
-    case object::Section.data {
-        output = &this->storage.data;
-    }
-    default {
-    }
-    }
+    let output: *u8 = this->storage.section_data(fixup.section);
+    let output_size: usize = this->storage.section_size(fixup.section);
     var next: usize = 0;
-    if (output == null || !checked::range_is_valid(fixup.offset, 4, output->length)) {
+    if (output == null || !checked::range_is_valid(fixup.offset, 4, output_size)) {
         return this->fail(runtime::Error.invalid_argument);
     }
     let next_is_valid: bool = checked::add(fixup.offset, 4, &next) && next <= 9223372036854775807 as usize;
@@ -414,7 +402,7 @@ impl Assembler {
     if (displacement < -2147483648 || displacement > 2147483647) {
         return this->fail(runtime::Error.invalid_argument);
     }
-    return binary::store_u32(&output->data[fixup.offset], displacement as u32);
+    return binary::store_u32(&output[fixup.offset], displacement as u32);
 }
 
     priv fn numeric_target(fixup: Fixup, result: *usize) -> bool {
@@ -481,7 +469,7 @@ impl Assembler {
                 return this->fail(materialized.error);
             }
         }
-        let symbol: *object::Symbol = object::symbol_mut(&this->storage, binding->index);
+        let symbol: *object::Symbol = this->storage.symbol_mut(binding->index);
         if (symbol == null) {
             return this->fail(runtime::Error.invalid_argument);
         }
@@ -527,20 +515,20 @@ impl Assembler {
             section = fixup.section, offset = fixup.offset, symbol_index = binding->index,
             kind = relocation_kind, addend = addend,
         };
-        if (!object::add_relocation(&this->storage, relocation)) {
-            return this->fail(this->storage.error);
+        if (!this->storage.add_relocation(relocation)) {
+            return this->fail(this->storage.error());
         }
     }
     return true;
 }
 
     priv fn validate_symbols() -> bool {
-    let count: usize = object::symbol_count(this->storage);
+    let count: usize = this->storage.symbol_count();
     if (!this->symbols.is_valid() || this->symbols.size() != count) {
         return this->fail(runtime::Error.invalid_argument);
     }
     for (var index: usize = 0; index < count; index += 1) {
-        let result: object::SymbolResult = object::get_symbol(this->storage, index);
+        let result: object::SymbolResult = this->storage.symbol_at(index);
         let symbol_is_known: bool = result.symbol.defined || result.symbol.global;
         let symbol_has_linkage: bool = symbol_is_known || result.symbol.external;
         if (result.error != runtime::Error.none || !symbol_has_linkage) {

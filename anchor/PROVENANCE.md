@@ -574,3 +574,48 @@ SHA-256
 Median wall time fell from 9.565 to 6.024 seconds, about 37.0 percent. The
 promoted executable is 4,798,279 bytes with SHA-256
 `cfdacf4855d86d70925fc7766cd8fe057ceaba329655ba093eda331ac4e0b65b`.
+
+## 2026-08-28: promotion to the RAII Object model
+
+The anchor now contains the stage-fixed `luna` executable from the x86-64
+Object ownership snapshot accompanying this provenance note. The former
+public six-buffer Object record and free-procedure mutation/release API are
+replaced by a move-only `Object`, a single `ObjectBuilder` mutation boundary,
+private LUNAOBJ1 Reader/Writer operations and an RAII `ObjectSet` for linker
+inputs. Symbol and Relocation remain passive records; their storage is now
+typed `vector` rather than byte tables and pointer casts.
+
+Assembler and ELF Reader own Builders, while ELF Writer and StaticLinker read
+passive domain views. Link drivers move completed Objects into ObjectSet, so
+no owning handle is shallow-copied and no caller maintains a manual release
+tree. The duplicate-input test uses the explicit const-copy overload. A
+narrow `vector::detach` migration boundary transfers typed data, element
+shape and exact allocation size before resetting the source vector; ObjectSet
+uses it together with byte-buffer detach and releases every allocation in its
+destructor.
+
+Public Object views deliberately use non-generic Byte/Symbol/Relocation view
+records. Directly embedding generic spans in a cross-module record produced
+duplicate specializations because LUNAOBJ1 does not yet support COMDAT or weak
+ODR merging. Internal Object storage and algorithms still use typed vectors
+and spans. The real 128-input linker bound is represented by a fixed typed
+descriptor array rather than a raw byte table or an unnecessary dynamic
+allocation.
+
+Remote x86-64 verification on isolated `caw` built the complete 75-module
+graph through `stage-transition`, `stage-next` and `stage-fixed` with
+`verify --fresh` in 52.78 seconds. Every next/fixed assembly, object and
+executable artifact was byte-identical. The final suite passed 443/443 with no
+skips in 4.34 seconds, and all six Object/ELF/relocation probes passed. Audit
+and formatting gates were green.
+
+The final 429-byte LUNAOBJ1 probe, 944-byte ELF object and 8,200-byte
+executable are byte-identical to the preceding anchor outputs, with SHA-256
+values `c5b3ebe6c59c33489e2088d41626437eb89237f5d2b3b10a16688471108ca62d`,
+`c86f305ce26f4c66ee9ff1c2afe36b81d37942607019ee059daaca4c335cfc76`
+and `8f7b2e1fbda758462d5f709993c2dc53fb477db491cccecdb71a3e479816d592`.
+For the complete toolchain input set, recorded old/new link samples were
+0.509/0.500/0.507 and 0.742/0.737/0.742 seconds; no further performance scope
+was added in this batch. The promoted executable is 4,876,112 bytes with
+SHA-256
+`a264d40411ce8c88086f0477497c25cbd5d59be7356025dd16cba60838337870`.

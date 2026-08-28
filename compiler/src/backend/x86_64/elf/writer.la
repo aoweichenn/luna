@@ -141,7 +141,7 @@ impl ElfWriter {
     return this->ready();
 }
 
-    priv fn save_plan(object: object::Object, plan: *SavePlan) -> bool {
+    priv fn save_plan(object: object::ObjectView, plan: *SavePlan) -> bool {
     if (plan == null) {
         return this->fail(runtime::Error.invalid_argument);
     }
@@ -154,9 +154,9 @@ impl ElfWriter {
     var rodata_relocations: usize = 0;
     var data_relocations: usize = 0;
     // 含已定义符号的 region 即使为空也需要 section，否则该符号没有有效 st_shndx。
-    let symbol_total: usize = object::symbol_count(object);
+    let symbol_total: usize = object.symbols.count;
     for (var index: usize = 0; index < symbol_total; index += 1) {
-        let result: object::SymbolResult = object::get_symbol(object, index);
+        let result: object::SymbolResult = object::symbol_at(object, index);
         if (result.error != runtime::Error.none) {
             return this->fail(result.error);
         }
@@ -182,9 +182,9 @@ impl ElfWriter {
             }
         }
     }
-    let relocation_total: usize = object::relocation_count(object);
+    let relocation_total: usize = object.relocations.count;
     for (var index: usize = 0; index < relocation_total; index += 1) {
-        let result: object::RelocationResult = object::get_relocation(object, index);
+        let result: object::RelocationResult = object::relocation_at(object, index);
         if (result.error != runtime::Error.none) {
             return this->fail(result.error);
         }
@@ -278,13 +278,14 @@ impl ElfWriter {
 }
 
     priv fn save_symbol_entry(
-    object: object::Object, plan: *SavePlan, symbol: object::Symbol, model_index: usize, symtab_index: usize) -> bool {
+    object: object::ObjectView, plan: *SavePlan, symbol: object::Symbol,
+    model_index: usize, symtab_index: usize) -> bool {
     let shndx: usize = this->save_symbol_shndx(plan, symbol);
     if (symbol.defined && shndx == 0) {
         return this->fail(runtime::Error.invalid_argument);
     }
     let name_offset: usize = this->strtab.length;
-    this->emit_bytes(&this->strtab, &object.names.data[symbol.name_offset] as *const u8, symbol.name_length);
+    this->emit_bytes(&this->strtab, &object.names.data[symbol.name_offset], symbol.name_length);
     this->emit_u8(&this->strtab, 0);
     // 未定义模型符号必为 global 或 external，两者都发射成 STB_GLOBAL SHN_UNDEF；
     // 这是 reader 接受的唯一未定义形态。
@@ -316,14 +317,14 @@ impl ElfWriter {
     return true;
 }
 
-    priv fn save_symbols(object: object::Object, plan: *SavePlan) -> bool {
+    priv fn save_symbols(object: object::ObjectView, plan: *SavePlan) -> bool {
     // Symbol 0 是强制的全零 entry；string table 以 NUL 开头，使 st_name 0 表示无名字。
     this->emit_padding(&this->symtab, Limit.symbol_size as usize);
     this->emit_u8(&this->strtab, 0);
     if (!this->ready()) {
         return false;
     }
-    let symbol_total: usize = object::symbol_count(object);
+    let symbol_total: usize = object.symbols.count;
     for (var index: usize = 0; index < symbol_total; index += 1) {
         let append_error: runtime::Error = this->symbol_map.push_back({index = 0});
         if (append_error != runtime::Error.none) {
@@ -336,7 +337,7 @@ impl ElfWriter {
     for (var pass: usize = 0; pass < 2; pass += 1) {
         let global_pass: bool = pass != 0;
         for (var index: usize = 0; index < symbol_total; index += 1) {
-            let result: object::SymbolResult = object::get_symbol(object, index);
+            let result: object::SymbolResult = object::symbol_at(object, index);
             if (result.error != runtime::Error.none) {
                 return this->fail(result.error);
             }
@@ -352,10 +353,10 @@ impl ElfWriter {
     return true;
 }
 
-    priv fn save_relocations(object: object::Object) -> bool {
-    let relocation_total: usize = object::relocation_count(object);
+    priv fn save_relocations(object: object::ObjectView) -> bool {
+    let relocation_total: usize = object.relocations.count;
     for (var index: usize = 0; index < relocation_total; index += 1) {
-        let result: object::RelocationResult = object::get_relocation(object, index);
+        let result: object::RelocationResult = object::relocation_at(object, index);
         if (result.error != runtime::Error.none) {
             return this->fail(result.error);
         }
@@ -408,7 +409,7 @@ impl ElfWriter {
     return true;
 }
 
-    priv fn save_sections(object: object::Object, plan: *SavePlan) -> bool {
+    priv fn save_sections(object: object::ObjectView, plan: *SavePlan) -> bool {
     this->emit_u8(&this->shstrtab, 0);
     if (!this->ready()) {
         return false;
@@ -527,37 +528,37 @@ impl ElfWriter {
     return true;
 }
 
-    priv fn save_source(object: object::Object, source: SectionSource, content: *bytes::Buffer) -> bool {
+    priv fn save_source(object: object::ObjectView, source: SectionSource, content: *span::const_span<u8>) -> bool {
     if (content == null) {
         return false;
     }
     switch (source) {
     case SectionSource.text {
-        *content = object.text;
+        *content = span::const_span<u8>(object.text.data, object.text.length);
     }
     case SectionSource.rodata {
-        *content = object.rodata;
+        *content = span::const_span<u8>(object.rodata.data, object.rodata.length);
     }
     case SectionSource.data {
-        *content = object.data;
+        *content = span::const_span<u8>(object.data.data, object.data.length);
     }
     case SectionSource.symtab {
-        *content = this->symtab;
+        *content = span::const_span<u8>(this->symtab.data as *const u8, this->symtab.length);
     }
     case SectionSource.strtab {
-        *content = this->strtab;
+        *content = span::const_span<u8>(this->strtab.data as *const u8, this->strtab.length);
     }
     case SectionSource.shstrtab {
-        *content = this->shstrtab;
+        *content = span::const_span<u8>(this->shstrtab.data as *const u8, this->shstrtab.length);
     }
     case SectionSource.rela_text {
-        *content = this->rela_text;
+        *content = span::const_span<u8>(this->rela_text.data as *const u8, this->rela_text.length);
     }
     case SectionSource.rela_rodata {
-        *content = this->rela_rodata;
+        *content = span::const_span<u8>(this->rela_rodata.data as *const u8, this->rela_rodata.length);
     }
     case SectionSource.rela_data {
-        *content = this->rela_data;
+        *content = span::const_span<u8>(this->rela_data.data as *const u8, this->rela_data.length);
     }
     default {
         return false;
@@ -588,7 +589,7 @@ impl ElfWriter {
         return this->ready();
     }
 
-    priv fn emit_section_content(object: object::Object, section: *OutputSection, output: *bytes::Buffer) -> bool {
+    priv fn emit_section_content(object: object::ObjectView, section: *OutputSection, output: *bytes::Buffer) -> bool {
         if (section->kind == SectionType.nobits) {
             return true;
         }
@@ -596,14 +597,14 @@ impl ElfWriter {
         if (!this->ready() || section->size == 0) {
             return this->ready();
         }
-        var content: bytes::Buffer = bytes::empty();
+        var content: span::const_span<u8> = span::const_span<u8>(null, 0);
         if (!this->save_source(object, section->source, &content)) {
             return this->fail(runtime::Error.invalid_argument);
         }
-        if (content.length != section->size) {
+        if (content.size() != section->size) {
             return this->fail(runtime::Error.invalid_argument);
         }
-        this->emit_bytes(output, content.data as *const u8, content.length);
+        this->emit_bytes(output, content.data(), content.size());
         return this->ready();
     }
 
@@ -621,7 +622,7 @@ impl ElfWriter {
         return this->ready();
     }
 
-    priv fn save_emit(object: object::Object, plan: *SavePlan, output: *bytes::Buffer) -> bool {
+    priv fn save_emit(object: object::ObjectView, plan: *SavePlan, output: *bytes::Buffer) -> bool {
         if (!this->emit_header(plan, output)) {
             return false;
         }
@@ -649,20 +650,21 @@ impl ElfWriter {
     }
 
     fn run() {
-        if (this->source == null || !object::is_valid(*this->source)) {
+        if (this->source == null || !this->source->is_valid()) {
             this->fail(runtime::Error.invalid_argument);
             return;
         }
-        if (!this->save_plan(*this->source, &this->plan)) {
+        let object: object::ObjectView = this->source->view();
+        if (!this->save_plan(object, &this->plan)) {
             return;
         }
-        if (!this->save_symbols(*this->source, &this->plan)) {
+        if (!this->save_symbols(object, &this->plan)) {
             return;
         }
-        if (!this->save_relocations(*this->source)) {
+        if (!this->save_relocations(object)) {
             return;
         }
-        if (!this->save_sections(*this->source, &this->plan)) {
+        if (!this->save_sections(object, &this->plan)) {
             return;
         }
         if (!this->save_layout(&this->plan)) {
@@ -684,7 +686,7 @@ impl ElfWriter {
             return;
         }
         this->output = reserved.buffer;
-        this->save_emit(*this->source, &this->plan, &this->output);
+        this->save_emit(object, &this->plan, &this->output);
     }
 
     fn take_result() -> bytes::BufferResult {

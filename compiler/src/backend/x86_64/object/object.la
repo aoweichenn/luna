@@ -1,22 +1,29 @@
 module luna.compiler.x86.object;
 
-import luna.std.binary as binary;
-import luna.std.checked as checked;
-
-enum Format: usize {
-    header_size = 112, symbol_size = 56, relocation_size = 40, version = 1, maximum_payload = 67108864,
-    maximum_records = 65536, maximum_name = 4096, maximum_alignment = 4096,
-}
-
-enum SymbolFlag: usize {
-    defined = 1, global = 2, external = 4, function = 8, object = 16,
-}
-
-fn fail(object: *Object, error: runtime::Error) -> bool {
-    if (object != null && object->error == runtime::Error.none) {
-        object->error = error;
+fn section_is_valid(section: Section) -> bool {
+    switch (section) {
+    case Section.text, Section.rodata, Section.data, Section.bss {
+        return true;
     }
-    return false;
+    default {
+        return false;
+    }
+    }
+}
+
+fn relocation_section_is_valid(section: Section) -> bool {
+    switch (section) {
+    case Section.text, Section.rodata, Section.data {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn alignment_is_valid(alignment: usize) -> bool {
+    return checked::is_power_of_two(alignment) && alignment <= Format.maximum_alignment as usize;
 }
 
 fn invalid_symbol() -> Symbol {
@@ -26,691 +33,247 @@ fn invalid_symbol() -> Symbol {
     };
 }
 
-fn empty() -> Object {
+fn invalid_relocation() -> Relocation {
     return {
-        text = bytes::empty(), rodata = bytes::empty(), data = bytes::empty(),
-        names = bytes::empty(), symbols = bytes::empty(), relocations = bytes::empty(),
-        bss_size = 0, text_alignment = 1, rodata_alignment = 1, data_alignment = 1, bss_alignment = 1,
-        error = runtime::Error.none,
+        section = Section.undefined, offset = 0, symbol_index = 0, kind = RelocationKind.pc32, addend = 0,
     };
 }
 
-fn section_is_valid(section: Section) -> bool {
-    return section == Section.text || section == Section.rodata || section == Section.data || section == Section.bss;
-}
-
-fn relocation_section_is_valid(section: Section) -> bool {
-    return section == Section.text || section == Section.rodata || section == Section.data;
-}
-
-fn alignment_is_valid(alignment: usize) -> bool {
-    return checked::is_power_of_two(alignment) && alignment <= Format.maximum_alignment as usize;
-}
-
-fn storage_is_valid(buffer: bytes::Buffer, record_size: usize) -> bool {
-    return bytes::is_valid(buffer) && record_size != 0 && buffer.length % record_size == 0;
-}
-
-fn symbol_count(object: Object) -> usize {
-    if (!storage_is_valid(
-            object.symbols, sizeof(Symbol))) {
-        return 0;
+fn symbol_kind_is_valid(kind: SymbolKind) -> bool {
+    switch (kind) {
+    case SymbolKind.none, SymbolKind.function, SymbolKind.object {
+        return true;
     }
-    return object.symbols.length / sizeof(Symbol);
-}
-
-fn relocation_count(object: Object) -> usize {
-    if (!storage_is_valid(
-            object.relocations, sizeof(Relocation))) {
-        return 0;
-    }
-    return object.relocations.length / sizeof(Relocation);
-}
-
-fn section_length(object: Object, section: Section) -> usize {
-    if (section == Section.text) {
-        return object.text.length;
-    }
-    if (section == Section.rodata) {
-        return object.rodata.length;
-    }
-    if (section == Section.data) {
-        return object.data.length;
-    }
-    if (section == Section.bss) {
-        return object.bss_size;
-    }
-    return 0;
-}
-
-fn symbol_is_valid(object: Object, symbol: Symbol) -> bool {
-    if (symbol.name_length == 0 || symbol.name_length > Format.maximum_name as usize ||
-        symbol.name_offset > object.names.length || symbol.name_length > object.names.length - symbol.name_offset) {
+    default {
         return false;
     }
-    let name: string_views::string_view_result = string_views::from_bytes(&object.names.data[symbol.name_offset] as
-        *const u8, symbol.name_length);
-    if (name.error != runtime::Error.none) {
+    }
+}
+
+fn relocation_width(kind: RelocationKind) -> usize {
+    switch (kind) {
+    case RelocationKind.absolute64 {
+        return 8;
+    }
+    case RelocationKind.pc32, RelocationKind.plt32, RelocationKind.absolute32, RelocationKind.signed32 {
+        return 4;
+    }
+    default {
+        return 0;
+    }
+    }
+}
+
+fn section(view: ObjectView, section_kind: Section) -> ByteView {
+    switch (section_kind) {
+    case Section.text {
+        return view.text;
+    }
+    case Section.rodata {
+        return view.rodata;
+    }
+    case Section.data {
+        return view.data;
+    }
+    default {
+        return {data = null, length = 0};
+    }
+    }
+}
+
+fn section_size(view: ObjectView, section_kind: Section) -> usize {
+    return section_kind == Section.bss ? view.bss_size : section(view, section_kind).length;
+}
+
+fn alignment(view: ObjectView, section_kind: Section) -> usize {
+    switch (section_kind) {
+    case Section.text {
+        return view.text_alignment;
+    }
+    case Section.rodata {
+        return view.rodata_alignment;
+    }
+    case Section.data {
+        return view.data_alignment;
+    }
+    case Section.bss {
+        return view.bss_alignment;
+    }
+    default {
+        return 0;
+    }
+    }
+}
+
+fn symbol_at(view: ObjectView, index: usize) -> SymbolResult {
+    if (index >= view.symbols.count) {
+        return {symbol = invalid_symbol(), error = runtime::Error.invalid_argument};
+    }
+    return {symbol = view.symbols.data[index], error = runtime::Error.none};
+}
+
+fn relocation_at(view: ObjectView, index: usize) -> RelocationResult {
+    if (index >= view.relocations.count) {
+        return {relocation = invalid_relocation(), error = runtime::Error.invalid_argument};
+    }
+    return {relocation = view.relocations.data[index], error = runtime::Error.none};
+}
+
+fn symbol_name(view: ObjectView, symbol: Symbol) -> string_views::string_view_result {
+    let offset_is_valid: bool = symbol.name_offset <= view.names.length;
+    let length_is_valid: bool = offset_is_valid && symbol.name_length <= view.names.length - symbol.name_offset;
+    if (!length_is_valid) {
+        return {view = {data = null, length = 0}, error = runtime::Error.invalid_argument};
+    }
+    let data: *const u8 = symbol.name_length == 0 ? null : &view.names.data[symbol.name_offset];
+    return string_views::from_bytes(data, symbol.name_length);
+}
+
+fn symbol_is_valid(view: ObjectView, symbol: Symbol) -> bool {
+    let name_length_is_valid: bool = symbol.name_length != 0 && symbol.name_length <= Format.maximum_name as usize;
+    if (!name_length_is_valid || !symbol_kind_is_valid(symbol.kind)) {
         return false;
     }
-    if (symbol.kind != SymbolKind.none && symbol.kind != SymbolKind.function && symbol.kind != SymbolKind.object) {
+    if (symbol_name(view, symbol).error != runtime::Error.none) {
         return false;
     }
     if (symbol.defined) {
-        if (!section_is_valid(symbol.section) || symbol.value > section_length(object, symbol.section) || symbol.size >
-                section_length(object, symbol.section) - symbol.value || symbol.external) {
+        if (!section_is_valid(symbol.section) || symbol.external) {
             return false;
         }
-    } else if (symbol.section != Section.undefined || symbol.value != 0 || symbol.size != 0 ||
-        (!symbol.global && !symbol.external)) {
-        return false;
+        let size: usize = section_size(view, symbol.section);
+        let value_is_valid: bool = symbol.value <= size;
+        return value_is_valid && symbol.size <= size - symbol.value;
     }
-    return true;
+    let location_is_empty: bool = symbol.section == Section.undefined && symbol.value == 0;
+    let shape_is_empty: bool = location_is_empty && symbol.size == 0;
+    let linkage_is_valid: bool = symbol.global || symbol.external;
+    return shape_is_empty && linkage_is_valid;
 }
 
-fn relocation_is_valid(object: Object, relocation: Relocation) -> bool {
-    if (!relocation_section_is_valid(relocation.section) || relocation.symbol_index >= symbol_count(object) ||
-        (relocation.kind != RelocationKind.pc32 && relocation.kind != RelocationKind.plt32 && relocation.kind !=
-            RelocationKind.absolute64 && relocation.kind != RelocationKind.absolute32 && relocation.kind !=
-            RelocationKind.signed32)) {
+fn relocation_is_valid(view: ObjectView, relocation: Relocation) -> bool {
+    if (!relocation_section_is_valid(relocation.section)) {
         return false;
     }
-    let width: usize = relocation.kind == RelocationKind.absolute64 ? 8 : 4;
-    let section_length: usize = section_length(object, relocation.section);
-    return relocation.offset <= section_length && width <= section_length - relocation.offset;
+    if (relocation.symbol_index >= view.symbols.count) {
+        return false;
+    }
+    let width: usize = relocation_width(relocation.kind);
+    if (width == 0) {
+        return false;
+    }
+    let size: usize = section_size(view, relocation.section);
+    let offset_is_valid: bool = relocation.offset <= size;
+    return offset_is_valid && width <= size - relocation.offset;
 }
 
-fn is_valid(object: Object) -> bool {
-    if (object.error != runtime::Error.none || !bytes::is_valid(object.text) ||
-        !bytes::is_valid(object.rodata) || !bytes::is_valid(object.data) || !bytes::is_valid(object.names) ||
-        !storage_is_valid(object.symbols, sizeof(Symbol)) ||
-        !storage_is_valid(object.relocations, sizeof(Relocation)) ||
-        object.text.length > Format.maximum_payload as usize || object.rodata.length >
-            Format.maximum_payload as usize || object.data.length > Format.maximum_payload as usize || object.bss_size >
-            Format.maximum_payload as usize || object.names.length >
-            Format.maximum_payload as usize || symbol_count(object) >
-            Format.maximum_records as usize || relocation_count(object) > Format.maximum_records as usize ||
-        !alignment_is_valid(object.text_alignment) || !alignment_is_valid(object.rodata_alignment) ||
-        !alignment_is_valid(object.data_alignment) || !alignment_is_valid(object.bss_alignment)) {
+fn view_is_valid(view: ObjectView) -> bool {
+    let text_is_valid: bool = view.text.length == 0 || view.text.data != null;
+    let rodata_is_valid: bool = view.rodata.length == 0 || view.rodata.data != null;
+    let data_is_valid: bool = view.data.length == 0 || view.data.data != null;
+    let names_are_valid: bool = view.names.length == 0 || view.names.data != null;
+    let symbols_are_valid: bool = view.symbols.count == 0 || view.symbols.data != null;
+    let relocations_are_valid: bool = view.relocations.count == 0 || view.relocations.data != null;
+    let readonly_views_are_valid: bool = text_is_valid && rodata_is_valid;
+    let writable_views_are_valid: bool = data_is_valid && names_are_valid;
+    let record_views_are_valid: bool = symbols_are_valid && relocations_are_valid;
+    if (!readonly_views_are_valid || !writable_views_are_valid) {
         return false;
     }
-    let symbols: *const Symbol = object.symbols.data as *const Symbol;
-    var symbol_index: usize = 0;
-    while (symbol_index < symbol_count(object)) {
-        if (!symbol_is_valid(
-                object, symbols[symbol_index])) {
+    if (!record_views_are_valid) {
+        return false;
+    }
+    let readonly_payloads_fit: bool = view.text.length <= Format.maximum_payload as usize &&
+        view.rodata.length <= Format.maximum_payload as usize;
+    let writable_payloads_fit: bool = view.data.length <= Format.maximum_payload as usize &&
+        view.bss_size <= Format.maximum_payload as usize;
+    let metadata_fits: bool = view.names.length <= Format.maximum_payload as usize &&
+        view.symbols.count <= Format.maximum_records as usize;
+    let records_fit: bool = metadata_fits && view.relocations.count <= Format.maximum_records as usize;
+    if (!readonly_payloads_fit || !writable_payloads_fit) {
+        return false;
+    }
+    if (!records_fit) {
+        return false;
+    }
+    let readonly_alignment_is_valid: bool = alignment_is_valid(view.text_alignment) &&
+        alignment_is_valid(view.rodata_alignment);
+    let writable_alignment_is_valid: bool = alignment_is_valid(view.data_alignment) &&
+        alignment_is_valid(view.bss_alignment);
+    if (!readonly_alignment_is_valid || !writable_alignment_is_valid) {
+        return false;
+    }
+    for (var index: usize = 0; index < view.symbols.count; index += 1) {
+        if (!symbol_is_valid(view, view.symbols.data[index])) {
             return false;
         }
-        symbol_index += 1;
     }
-    let relocations: *const Relocation = object.relocations.data as *const Relocation;
-    var relocation_index: usize = 0;
-    while (relocation_index < relocation_count(object)) {
-        if (!relocation_is_valid(
-                object, relocations[relocation_index])) {
+    for (var index: usize = 0; index < view.relocations.count; index += 1) {
+        if (!relocation_is_valid(view, view.relocations.data[index])) {
             return false;
         }
-        relocation_index += 1;
     }
     return true;
 }
 
-fn release(object: Object) -> runtime::Error {
-    var error: runtime::Error = bytes::release(object.relocations);
-    let symbols_error: runtime::Error = bytes::release(object.symbols);
-    let names_error: runtime::Error = bytes::release(object.names);
-    let data_error: runtime::Error = bytes::release(object.data);
-    let rodata_error: runtime::Error = bytes::release(object.rodata);
-    let text_error: runtime::Error = bytes::release(object.text);
-    if (error == runtime::Error.none) {
-        error = symbols_error;
+impl Object {
+    init(): text = buffer::byte_buffer(), rodata = buffer::byte_buffer(), data = buffer::byte_buffer(),
+            names = buffer::byte_buffer(), symbols = vector::vector<Symbol>(),
+            relocations = vector::vector<Relocation>() {
+        this->reset_metadata();
     }
-    if (error == runtime::Error.none) {
-        error = names_error;
-    }
-    if (error == runtime::Error.none) {
-        error = data_error;
-    }
-    if (error == runtime::Error.none) {
-        error = rodata_error;
-    }
-    if (error == runtime::Error.none) {
-        error = text_error;
-    }
-    return error;
-}
 
-fn section_buffer(object: *Object, section: Section) -> *bytes::Buffer {
-    if (object == null) {
-        return null;
+    init(other: Object&&): text = other.text as buffer::byte_buffer&&, rodata = other.rodata as buffer::byte_buffer&&,
+            data = other.data as buffer::byte_buffer&&, names = other.names as buffer::byte_buffer&&,
+            symbols = other.symbols as vector::vector<Symbol>&&,
+            relocations = other.relocations as vector::vector<Relocation>&& {
+        this->take_metadata(other);
     }
-    if (section == Section.text) {
-        return &object->text;
-    }
-    if (section == Section.rodata) {
-        return &object->rodata;
-    }
-    if (section == Section.data) {
-        return &object->data;
-    }
-    return null;
-}
 
-fn set_alignment(object: *Object, section: Section, alignment: usize) -> bool {
-    if (object == null || !alignment_is_valid(alignment)) {
-        return fail(object, runtime::Error.invalid_argument);
-    }
-    if (section == Section.text) {
-        if (object->text_alignment < alignment) {
-            object->text_alignment = alignment;
-        }
-        return true;
-    }
-    if (section == Section.rodata) {
-        if (object->rodata_alignment < alignment) {
-            object->rodata_alignment = alignment;
-        }
-        return true;
-    }
-    if (section == Section.data) {
-        if (object->data_alignment < alignment) {
-            object->data_alignment = alignment;
-        }
-        return true;
-    }
-    if (section == Section.bss) {
-        if (object->bss_alignment < alignment) {
-            object->bss_alignment = alignment;
-        }
-        return true;
-    }
-    return fail(object, runtime::Error.invalid_argument);
-}
-
-fn append_u8(object: *Object, section: Section, value: u8) -> bool {
-    let buffer: *bytes::Buffer = section_buffer(object, section);
-    if (buffer == null || object->error != runtime::Error.none) {
-        return fail(object, runtime::Error.invalid_argument);
-    }
-    let appended: bytes::BufferResult = bytes::push(*buffer, value);
-    *buffer = appended.buffer;
-    if (appended.error != runtime::Error.none) {
-        return fail(object, appended.error);
-    }
-    return true;
-}
-
-fn append_u16(object: *Object, section: Section, value: u16) -> bool {
-    return append_u8(object, section, (value & 255) as u8) && append_u8(object, section, ((value >> 8) & 255) as u8);
-}
-
-fn append_u32(object: *Object, section: Section, value: u32) -> bool {
-    var index: usize = 0;
-    while (index < 4) {
-        if (!append_u8(
-                object, section, ((value >> ((index * 8) as u32)) & 255) as u8)) {
-            return false;
-        }
-        index += 1;
-    }
-    return true;
-}
-
-fn append_u64(object: *Object, section: Section, value: u64) -> bool {
-    var index: usize = 0;
-    while (index < 8) {
-        if (!append_u8(
-                object, section, ((value >> ((index * 8) as u64)) & 255) as u8)) {
-            return false;
-        }
-        index += 1;
-    }
-    return true;
-}
-
-fn symbol_name(object: Object, symbol: Symbol) -> string_views::string_view_result {
-    if (symbol.name_offset > object.names.length || symbol.name_length > object.names.length - symbol.name_offset) {
+    fn view() const -> ObjectView {
         return {
-            view = { data = null, length = 0, }, error = runtime::Error.invalid_argument,
+            text = {data = this->text.data(), length = this->text.size()},
+            rodata = {data = this->rodata.data(), length = this->rodata.size()},
+            data = {data = this->data.data(), length = this->data.size()},
+            names = {data = this->names.data(), length = this->names.size()},
+            symbols = {data = this->symbols.as_span().data(), count = this->symbols.size()},
+            relocations = {data = this->relocations.as_span().data(), count = this->relocations.size()},
+            bss_size = this->bss_size_bytes, text_alignment = this->text_alignment_bytes,
+            rodata_alignment = this->rodata_alignment_bytes, data_alignment = this->data_alignment_bytes,
+            bss_alignment = this->bss_alignment_bytes,
         };
     }
-    return string_views::from_bytes(
-        symbol.name_length == 0 ? null as *const u8 : &object.names.data[symbol.name_offset] as *const u8,
-        symbol.name_length);
-}
 
-fn get_symbol(object: Object, index: usize) -> SymbolResult {
-    if (!storage_is_valid(object.symbols, sizeof(Symbol)) || index >= symbol_count(object)) {
-        return {
-            symbol = invalid_symbol(), error = runtime::Error.invalid_argument,
-        };
+    fn is_valid() const -> bool {
+        let readonly_storage_is_valid: bool = this->text.is_valid() && this->rodata.is_valid();
+        let writable_storage_is_valid: bool = this->data.is_valid() && this->names.is_valid();
+        let record_storage_is_valid: bool = this->symbols.is_valid() && this->relocations.is_valid();
+        let byte_storage_is_valid: bool = readonly_storage_is_valid && writable_storage_is_valid;
+        let all_storage_is_valid: bool = byte_storage_is_valid && record_storage_is_valid;
+        return all_storage_is_valid && view_is_valid(this->view());
     }
-    let symbols: *const Symbol = object.symbols.data as *const Symbol;
-    return {
-        symbol = symbols[index], error = runtime::Error.none,
-    };
-}
 
-fn symbol_mut(object: *Object, index: usize) -> *Symbol {
-    if (object == null || !storage_is_valid(object->symbols, sizeof(Symbol)) || index >= symbol_count(*object)) {
-        return null;
+    deinit() {
     }
-    let symbols: *Symbol = object->symbols.data as *Symbol;
-    return &symbols[index];
-}
 
-fn find_symbol(object: Object, name: string_views::string_view) -> IndexResult {
-    if (!string_views::is_valid_utf8(name) || name.length == 0 ||
-        !storage_is_valid(
-            object.symbols, sizeof(Symbol))) {
-        return {
-            index = 0, found = false, error = runtime::Error.invalid_argument,
-        };
+    priv fn reset_metadata() {
+        this->bss_size_bytes = 0;
+        this->text_alignment_bytes = 1;
+        this->rodata_alignment_bytes = 1;
+        this->data_alignment_bytes = 1;
+        this->bss_alignment_bytes = 1;
     }
-    let symbols: *const Symbol = object.symbols.data as *const Symbol;
-    var index: usize = 0;
-    while (index < symbol_count(object)) {
-        let candidate: string_views::string_view_result = symbol_name(object, symbols[index]);
-        if (candidate.error != runtime::Error.none) {
-            return {
-                index = 0, found = false, error = candidate.error,
-            };
-        }
-        if (string_views::equal(candidate.view, name)) {
-            return {
-                index = index, found = true, error = runtime::Error.none,
-            };
-        }
-        index += 1;
-    }
-    return {
-        index = 0, found = false, error = runtime::Error.none,
-    };
-}
 
-// SymbolTable 已证明名字唯一；该入口避免重新扫描。add_symbol 保持完整的防御性
-// 查重路径供 ELF reader 使用，两种契约故意不通过一个带模式参数的弱接口合并。
-fn append_symbol(object: *Object, name: string_views::string_view) -> IndexResult {
-    let object_is_ready: bool = object != null && object->error == runtime::Error.none;
-    let name_is_valid: bool = string_views::is_valid_utf8(name) && name.length != 0;
-    if (!object_is_ready || !name_is_valid) {
-        fail(object, runtime::Error.invalid_argument);
-        return { index = 0, found = false, error = runtime::Error.invalid_argument };
+    priv fn take_metadata(other: Object&&) {
+        this->bss_size_bytes = other.bss_size_bytes;
+        this->text_alignment_bytes = other.text_alignment_bytes;
+        this->rodata_alignment_bytes = other.rodata_alignment_bytes;
+        this->data_alignment_bytes = other.data_alignment_bytes;
+        this->bss_alignment_bytes = other.bss_alignment_bytes;
+        other.bss_size_bytes = 0;
+        other.text_alignment_bytes = 1;
+        other.rodata_alignment_bytes = 1;
+        other.data_alignment_bytes = 1;
+        other.bss_alignment_bytes = 1;
     }
-    if (name.length > Format.maximum_name as usize) {
-        fail(object, runtime::Error.invalid_argument);
-        return { index = 0, found = false, error = runtime::Error.invalid_argument };
-    }
-    let count: usize = symbol_count(*object);
-    if (count >= Format.maximum_records as usize || name.length >
-            (Format.maximum_payload as usize) - object->names.length) {
-        fail(object, runtime::Error.out_of_memory);
-        return { index = 0, found = false, error = runtime::Error.out_of_memory };
-    }
-    let name_offset: usize = object->names.length;
-    let appended_name: bytes::BufferResult = bytes::append(object->names, name.data, name.length);
-    object->names = appended_name.buffer;
-    if (appended_name.error != runtime::Error.none) {
-        fail(object, appended_name.error);
-        return { index = 0, found = false, error = appended_name.error };
-    }
-    var symbol: Symbol = invalid_symbol();
-    symbol.name_offset = name_offset;
-    symbol.name_length = name.length;
-    let appended_symbol: bytes::BufferResult =
-        bytes::append(object->symbols, (&symbol) as *const Symbol as *const u8, sizeof(Symbol));
-    object->symbols = appended_symbol.buffer;
-    if (appended_symbol.error != runtime::Error.none) {
-        let truncated: bytes::BufferResult = bytes::truncate(object->names, name_offset);
-        object->names = truncated.buffer;
-        fail(object, appended_symbol.error);
-        return { index = 0, found = false, error = appended_symbol.error };
-    }
-    return { index = count, found = false, error = runtime::Error.none };
-}
-
-fn add_symbol(object: *Object, name: string_views::string_view) -> IndexResult {
-    if (object == null || object->error != runtime::Error.none || !string_views::is_valid_utf8(name) ||
-        name.length == 0 || name.length > Format.maximum_name as usize) {
-        fail(object, runtime::Error.invalid_argument);
-        return {
-            index = 0, found = false, error = runtime::Error.invalid_argument,
-        };
-    }
-    let existing: IndexResult = find_symbol(*object, name);
-    if (existing.error != runtime::Error.none || existing.found) {
-        return existing;
-    }
-    let count: usize = symbol_count(*object);
-    if (count >= Format.maximum_records as usize || name.length >
-            (Format.maximum_payload as usize) - object->names.length) {
-        fail(object, runtime::Error.out_of_memory);
-        return {
-            index = 0, found = false, error = runtime::Error.out_of_memory,
-        };
-    }
-    let name_offset: usize = object->names.length;
-    let appended_name: bytes::BufferResult = bytes::append(object->names, name.data, name.length);
-    object->names = appended_name.buffer;
-    if (appended_name.error != runtime::Error.none) {
-        fail(object, appended_name.error);
-        return {
-            index = 0, found = false, error = appended_name.error,
-        };
-    }
-    var symbol: Symbol = invalid_symbol();
-    symbol.name_offset = name_offset;
-    symbol.name_length = name.length;
-    let appended_symbol: bytes::BufferResult =
-        bytes::append(object->symbols, (&symbol) as *const Symbol as *const u8, sizeof(Symbol));
-    object->symbols = appended_symbol.buffer;
-    if (appended_symbol.error != runtime::Error.none) {
-        let truncated: bytes::BufferResult = bytes::truncate(object->names, name_offset);
-        object->names = truncated.buffer;
-        fail(object, appended_symbol.error);
-        return {
-            index = 0, found = false, error = appended_symbol.error,
-        };
-    }
-    return {
-        index = count, found = false, error = runtime::Error.none,
-    };
-}
-
-fn add_relocation(object: *Object, relocation: Relocation) -> bool {
-    if (object == null || object->error != runtime::Error.none || relocation_count(*object) >=
-            Format.maximum_records as usize || !relocation_is_valid(*object, relocation)) {
-        return fail(object, runtime::Error.invalid_argument);
-    }
-    let appended: bytes::BufferResult = bytes::append(
-        object->relocations, (&relocation) as *const Relocation as *const u8, sizeof(Relocation));
-    object->relocations = appended.buffer;
-    if (appended.error != runtime::Error.none) {
-        return fail(object, appended.error);
-    }
-    return true;
-}
-
-fn get_relocation(object: Object, index: usize) -> RelocationResult {
-    if (!storage_is_valid(object.relocations, sizeof(Relocation)) || index >= relocation_count(object)) {
-        return {
-            relocation = {
-                section = Section.undefined, offset = 0, symbol_index = 0, kind = RelocationKind.pc32, addend = 0,
-            }, error = runtime::Error.invalid_argument,
-        };
-    }
-    let relocations: *const Relocation = object.relocations.data as *const Relocation;
-    return {
-        relocation = relocations[index], error = runtime::Error.none,
-    };
-}
-
-fn output_append(output: *bytes::Buffer, data: *const u8, length: usize) -> bool {
-    if (output == null) {
-        return false;
-    }
-    let appended: bytes::BufferResult = bytes::append(*output, data, length);
-    *output = appended.buffer;
-    return appended.error == runtime::Error.none;
-}
-
-fn symbol_flags(symbol: Symbol) -> usize {
-    var flags: usize = 0;
-    if (symbol.defined) {
-        flags |= SymbolFlag.defined as usize;
-    }
-    if (symbol.global) {
-        flags |= SymbolFlag.global as usize;
-    }
-    if (symbol.external) {
-        flags |= SymbolFlag.external as usize;
-    }
-    if (symbol.kind == SymbolKind.function) {
-        flags |= SymbolFlag.function as usize;
-    } else if (symbol.kind == SymbolKind.object) {
-        flags |= SymbolFlag.object as usize;
-    }
-    return flags;
-}
-
-fn serialize(object: Object) -> bytes::BufferResult {
-    var output: bytes::Buffer = bytes::empty();
-    if (!is_valid(object)) {
-        return {
-            buffer = output, error = runtime::Error.invalid_argument,
-        };
-    }
-    let total_payload: usize = object.text.length + object.rodata.length + object.data.length + object.names.length;
-    let reserve_size: usize = Format.header_size as usize + total_payload +
-        symbol_count(object) * (Format.symbol_size as usize) +
-        relocation_count(object) * (Format.relocation_size as usize);
-    let reserved: bytes::BufferResult = bytes::with_capacity(reserve_size);
-    if (reserved.error != runtime::Error.none) {
-        return reserved;
-    }
-    output = reserved.buffer;
-    var success: bool = output_append(&output, "LUNAOBJ1", 8) &&
-        binary::append_u32(&output, (Format.version as usize) as u32) &&
-        binary::append_u32(&output, (Format.header_size as usize) as u32) &&
-        binary::append_u64(&output, object.text.length as u64) &&
-        binary::append_u64(&output, object.rodata.length as u64) &&
-        binary::append_u64(&output, object.data.length as u64) && binary::append_u64(&output, object.bss_size as u64) &&
-        binary::append_u64(&output, object.names.length as u64) &&
-        binary::append_u64(&output, symbol_count(object) as u64) &&
-        binary::append_u64(&output, relocation_count(object) as u64) &&
-        binary::append_u64(&output, object.text_alignment as u64) &&
-        binary::append_u64(&output, object.rodata_alignment as u64) &&
-        binary::append_u64(&output, object.data_alignment as u64) &&
-        binary::append_u64(&output, object.bss_alignment as u64) && binary::append_u64(&output, 0);
-    if (success) {
-        success = output_append(&output, object.text.data as *const u8, object.text.length) &&
-            output_append(&output, object.rodata.data as *const u8, object.rodata.length) &&
-            output_append(&output, object.data.data as *const u8, object.data.length) &&
-            output_append(&output, object.names.data as *const u8, object.names.length);
-    }
-    let symbols: *const Symbol = object.symbols.data as *const Symbol;
-    var symbol_index: usize = 0;
-    while (success && symbol_index < symbol_count(object)) {
-        let symbol: Symbol = symbols[symbol_index];
-        success = binary::append_u64(&output, symbol.name_offset as u64) &&
-            binary::append_u64(&output, symbol.name_length as u64) &&
-            binary::append_u64(&output, symbol.section as usize as u64) &&
-            binary::append_u64(&output, symbol.value as u64) && binary::append_u64(&output, symbol.size as u64) &&
-            binary::append_u64(&output, symbol_flags(symbol) as u64) && binary::append_u64(&output, 0);
-        symbol_index += 1;
-    }
-    let relocations: *const Relocation = object.relocations.data as *const Relocation;
-    var relocation_index: usize = 0;
-    while (success && relocation_index < relocation_count(object)) {
-        let relocation: Relocation = relocations[relocation_index];
-        success = binary::append_u64(&output, relocation.section as usize as u64) &&
-            binary::append_u64(&output, relocation.offset as u64) &&
-            binary::append_u64(&output, relocation.symbol_index as u64) &&
-            binary::append_u64(&output, relocation.kind as usize as u64) &&
-            binary::append_u64(&output, relocation.addend as u64);
-        relocation_index += 1;
-    }
-    if (!success) {
-        bytes::release(output);
-        return {
-            buffer = bytes::empty(), error = runtime::Error.out_of_memory,
-        };
-    }
-    return {
-        buffer = output, error = runtime::Error.none,
-    };
-}
-
-fn u64_to_usize(value: u64, result: *usize) -> bool {
-    if (result == null || value > 18446744073709551615 as u64) {
-        return false;
-    }
-    *result = value as usize;
-    return true;
-}
-
-fn copy_range(bytes: *const u8, length: usize, cursor: *usize, size: usize, destination: *bytes::Buffer) -> bool {
-    if (cursor == null || destination == null || !checked::range_is_valid(*cursor, size, length)) {
-        return false;
-    }
-    let copied: bytes::BufferResult = bytes::from(size == 0 ? null as *const u8 : &bytes[*cursor], size);
-    if (copied.error != runtime::Error.none) {
-        return false;
-    }
-    *destination = copied.buffer;
-    *cursor += size;
-    return true;
-}
-
-fn deserialize_fail(object: Object, error: runtime::Error) -> Result {
-    release(object);
-    return {
-        object = empty(), error = error,
-    };
-}
-
-fn deserialize(bytes: *const u8, length: usize) -> Result {
-    var object: Object = empty();
-    if (bytes == null || length < Format.header_size as usize) {
-        return {
-            object = object, error = runtime::Error.invalid_argument,
-        };
-    }
-    if (bytes[0] != 76 || bytes[1] != 85 || bytes[2] != 78 || bytes[3] != 65 || bytes[4] != 79 || bytes[5] != 66 ||
-        bytes[6] != 74 || bytes[7] != 49) {
-        return {
-            object = object, error = runtime::Error.invalid_argument,
-        };
-    }
-    var version: u32 = 0;
-    var header_size: u32 = 0;
-    var fields: [12]u64 = {};
-    if (!binary::read_u32(bytes, length, 8, &version) ||
-        !binary::read_u32(bytes, length, 12, &header_size) || version !=
-            (Format.version as usize) as u32 || header_size != (Format.header_size as usize) as u32) {
-        return {
-            object = object, error = runtime::Error.invalid_argument,
-        };
-    }
-    var field_index: usize = 0;
-    while (field_index < 12) {
-        if (!binary::read_u64(
-                bytes, length, 16 + field_index * 8, &fields[field_index])) {
-            return {
-                object = object, error = runtime::Error.invalid_argument,
-            };
-        }
-        field_index += 1;
-    }
-    var text_size: usize = 0;
-    var rodata_size: usize = 0;
-    var data_size: usize = 0;
-    var names_size: usize = 0;
-    var symbol_count: usize = 0;
-    var relocation_count: usize = 0;
-    if (!u64_to_usize(fields[0], &text_size) || !u64_to_usize(fields[1], &rodata_size) ||
-        !u64_to_usize(fields[2], &data_size) || !u64_to_usize(fields[4], &names_size) ||
-        !u64_to_usize(fields[5], &symbol_count) || !u64_to_usize(fields[6], &relocation_count) || fields[11] != 0 ||
-        text_size > Format.maximum_payload as usize || rodata_size > Format.maximum_payload as usize ||
-        data_size > Format.maximum_payload as usize || fields[3] > (Format.maximum_payload as usize) as u64 ||
-        names_size > Format.maximum_payload as usize ||
-        symbol_count > Format.maximum_records as usize || relocation_count > Format.maximum_records as usize) {
-        return {
-            object = object, error = runtime::Error.invalid_argument,
-        };
-    }
-    object.bss_size = fields[3] as usize;
-    object.text_alignment = fields[7] as usize;
-    object.rodata_alignment = fields[8] as usize;
-    object.data_alignment = fields[9] as usize;
-    object.bss_alignment = fields[10] as usize;
-    if (!alignment_is_valid(object.text_alignment) || !alignment_is_valid(object.rodata_alignment) ||
-        !alignment_is_valid(object.data_alignment) || !alignment_is_valid(object.bss_alignment)) {
-        return {
-            object = object, error = runtime::Error.invalid_argument,
-        };
-    }
-    let expected: usize = Format.header_size as usize +
-        text_size + rodata_size + data_size + names_size + symbol_count * (Format.symbol_size as usize) +
-        relocation_count * (Format.relocation_size as usize);
-    if (expected != length) {
-        return {
-            object = object, error = runtime::Error.invalid_argument,
-        };
-    }
-    var cursor: usize = Format.header_size as usize;
-    if (!copy_range(bytes, length, &cursor, text_size, &object.text) ||
-        !copy_range(bytes, length, &cursor, rodata_size, &object.rodata) ||
-        !copy_range(bytes, length, &cursor, data_size, &object.data) ||
-        !copy_range(
-            bytes, length, &cursor, names_size, &object.names)) {
-        return deserialize_fail(object, runtime::Error.out_of_memory);
-    }
-    var index: usize = 0;
-    while (index < symbol_count) {
-        var record: [7]u64 = {};
-        var record_index: usize = 0;
-        while (record_index < 7) {
-            if (!binary::read_u64(
-                    bytes, length, cursor + record_index * 8, &record[record_index])) {
-                return deserialize_fail(object, runtime::Error.invalid_argument);
-            }
-            record_index += 1;
-        }
-        cursor += Format.symbol_size as usize;
-        if (record[6] != 0) {
-            return deserialize_fail(object, runtime::Error.invalid_argument);
-        }
-        let flags: usize = record[5] as usize;
-        let kind: SymbolKind = (flags & (SymbolFlag.function as usize)) != 0 ?
-                SymbolKind.function : (flags & (SymbolFlag.object as usize)) != 0 ? SymbolKind.object : SymbolKind.none;
-        if ((flags & (31 as usize)) != flags || (flags & (SymbolFlag.function as usize)) != 0 && (flags &
-                (SymbolFlag.object as usize)) != 0) {
-            return deserialize_fail(object, runtime::Error.invalid_argument);
-        }
-        let symbol: Symbol = {
-            name_offset = record[0] as usize, name_length = record[1] as usize,
-            section = record[2] as usize as Section, value = record[3] as usize,
-            size = record[4] as usize, kind = kind, defined = (flags &
-                    (SymbolFlag.defined as usize)) != 0, global = (flags &
-                    (SymbolFlag.global as usize)) != 0, external = (flags & (SymbolFlag.external as usize)) != 0,
-        };
-        let appended: bytes::BufferResult = bytes::append(
-            object.symbols, (&symbol) as *const Symbol as *const u8, sizeof(Symbol));
-        object.symbols = appended.buffer;
-        if (appended.error != runtime::Error.none) {
-            return deserialize_fail(object, appended.error);
-        }
-        index += 1;
-    }
-    index = 0;
-    while (index < relocation_count) {
-        var record: [5]u64 = {};
-        var record_index: usize = 0;
-        while (record_index < 5) {
-            if (!binary::read_u64(
-                    bytes, length, cursor + record_index * 8, &record[record_index])) {
-                return deserialize_fail(object, runtime::Error.invalid_argument);
-            }
-            record_index += 1;
-        }
-        cursor += Format.relocation_size as usize;
-        let relocation: Relocation = {
-            section = record[0] as usize as Section, offset = record[1] as usize,
-            symbol_index = record[2] as usize, kind = record[3] as usize as RelocationKind, addend = record[4] as isize,
-        };
-        let appended: bytes::BufferResult = bytes::append(
-            object.relocations, (&relocation) as *const Relocation as *const u8, sizeof(Relocation));
-        object.relocations = appended.buffer;
-        if (appended.error != runtime::Error.none) {
-            return deserialize_fail(object, appended.error);
-        }
-        index += 1;
-    }
-    if (cursor != length || !is_valid(object)) {
-        return deserialize_fail(object, runtime::Error.invalid_argument);
-    }
-    return {
-        object = object, error = runtime::Error.none,
-    };
 }

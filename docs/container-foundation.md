@@ -171,6 +171,10 @@ assert(@is_trivially_relocatable(Value));
 所有元素容量到字节容量的转换都检查 `count * sizeof(Value)`。底层 mmap 地址满足目标
 最大 4096 字节对齐，而 Luna 类型大小按自身对齐向上取整，因此连续元素地址保持对齐。
 
+`detach()`是与`byte_buffer`相同的窄迁移出口：返回 typed data、元素 size/capacity 和精确
+allocation size，并立即把源 vector 恢复为空状态。它只用于 ObjectSet 这类跨 owner 的零拷贝
+转移；接收方必须按 allocation size 释放，普通容器调用端继续使用 move construction/assignment。
+
 泛型方法只负责类型换算和引用接口；扩容、自别名处理和字节搬迁全部委托给非泛型
 `byte_buffer`，控制单态化代码尺寸和自举编译时间。
 

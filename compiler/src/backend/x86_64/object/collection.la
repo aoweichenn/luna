@@ -1,0 +1,332 @@
+module luna.compiler.x86.object;
+
+import luna.std.memory as memory;
+
+fn empty_content() -> ObjectContent {
+    return {
+        text_data = null, text_size = 0, text_capacity = 0, rodata_data = null, rodata_size = 0, rodata_capacity = 0,
+        data_data = null, data_size = 0, data_capacity = 0, names_data = null, names_size = 0, names_capacity = 0,
+    };
+}
+
+fn empty_records() -> ObjectRecords {
+    return {
+        symbols_data = null, symbol_count = 0, symbol_capacity = 0, symbol_allocation_size = 0,
+        relocations_data = null, relocation_count = 0, relocation_capacity = 0, relocation_allocation_size = 0,
+    };
+}
+
+fn release_allocation(data: *u8, allocation_size: usize) -> runtime::Error {
+    return memory::release({address = data, length = allocation_size});
+}
+
+fn release_content(content: ObjectContent) -> runtime::Error {
+    var error: runtime::Error = release_allocation(content.names_data, content.names_capacity);
+    let data_error: runtime::Error = release_allocation(content.data_data, content.data_capacity);
+    let rodata_error: runtime::Error = release_allocation(content.rodata_data, content.rodata_capacity);
+    let text_error: runtime::Error = release_allocation(content.text_data, content.text_capacity);
+    if (error == runtime::Error.none) {
+        error = data_error;
+    }
+    if (error == runtime::Error.none) {
+        error = rodata_error;
+    }
+    return error == runtime::Error.none ? text_error : error;
+}
+
+fn release_records(records: ObjectRecords) -> runtime::Error {
+    let relocation_error: runtime::Error =
+        release_allocation(records.relocations_data as *u8, records.relocation_allocation_size);
+    let symbol_error: runtime::Error = release_allocation(records.symbols_data as *u8, records.symbol_allocation_size);
+    return relocation_error == runtime::Error.none ? symbol_error : relocation_error;
+}
+
+fn copy_content_buffer(source: ByteView, data: **u8, capacity: *usize) -> runtime::Error {
+    if (data == null || capacity == null) {
+        return runtime::Error.invalid_argument;
+    }
+    let source_is_valid: bool = source.length == 0 || source.data != null;
+    if (!source_is_valid) {
+        return runtime::Error.invalid_argument;
+    }
+    var storage: buffer::byte_buffer = buffer::byte_buffer();
+    let error: runtime::Error = storage.append(source.data, source.length);
+    if (error != runtime::Error.none) {
+        return error;
+    }
+    *capacity = storage.capacity();
+    *data = storage.detach();
+    return runtime::Error.none;
+}
+
+fn copy_record_buffer<Value>(
+    source: *const Value, count: usize, data: **Value, capacity: *usize, allocation_size: *usize) -> runtime::Error {
+    if (data == null || capacity == null) {
+        return runtime::Error.invalid_argument;
+    }
+    if (allocation_size == null) {
+        return runtime::Error.invalid_argument;
+    }
+    let source_is_valid: bool = count == 0 || source != null;
+    if (!source_is_valid) {
+        return runtime::Error.invalid_argument;
+    }
+    var bytes: usize = 0;
+    if (@mul_overflow(count, sizeof(Value), &bytes)) {
+        return runtime::Error.out_of_memory;
+    }
+    let allocated: memory::AllocationResult = memory::allocate(bytes);
+    if (allocated.error != runtime::Error.none) {
+        return allocated.error;
+    }
+    if (bytes != 0) {
+        let move_error: runtime::Error = memory::move(allocated.allocation.address, source as *const u8, bytes);
+        if (move_error != runtime::Error.none) {
+            memory::release(allocated.allocation);
+            return move_error;
+        }
+    }
+    *data = allocated.allocation.address as *Value;
+    *capacity = allocated.allocation.length / sizeof(Value);
+    *allocation_size = allocated.allocation.length;
+    return runtime::Error.none;
+}
+
+impl ObjectSet {
+    init() {
+        this->object_count = 0;
+        this->error_code = runtime::Error.none;
+    }
+
+    priv fn ready() const -> bool {
+        return this->error_code == runtime::Error.none;
+    }
+
+    priv fn fail(error: runtime::Error) -> bool {
+        if (this->ready()) {
+            this->error_code = error;
+        }
+        return false;
+    }
+
+    fn error() const -> runtime::Error {
+        return this->error_code;
+    }
+
+    fn empty() const -> bool {
+        return this->object_count == 0;
+    }
+
+    fn size() const -> usize {
+        return this->object_count;
+    }
+
+    priv fn can_add(view: ObjectView) -> bool {
+        if (!this->ready() || !view_is_valid(view)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (this->object_count >= ObjectSetLimit.maximum_objects as usize) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        return true;
+    }
+
+    priv fn copy_content(view: ObjectView, content: *ObjectContent) -> bool {
+        if (content == null) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        *content = empty_content();
+        content->text_size = view.text.length;
+        content->rodata_size = view.rodata.length;
+        content->data_size = view.data.length;
+        content->names_size = view.names.length;
+        var error: runtime::Error = copy_content_buffer(view.text, &content->text_data, &content->text_capacity);
+        if (error == runtime::Error.none) {
+            error = copy_content_buffer(view.rodata, &content->rodata_data, &content->rodata_capacity);
+        }
+        if (error == runtime::Error.none) {
+            error = copy_content_buffer(view.data, &content->data_data, &content->data_capacity);
+        }
+        if (error == runtime::Error.none) {
+            error = copy_content_buffer(view.names, &content->names_data, &content->names_capacity);
+        }
+        if (error != runtime::Error.none) {
+            release_content(*content);
+            *content = empty_content();
+            return this->fail(error);
+        }
+        return true;
+    }
+
+    priv fn copy_records(view: ObjectView, records: *ObjectRecords) -> bool {
+        if (records == null) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        *records = empty_records();
+        records->symbol_count = view.symbols.count;
+        records->relocation_count = view.relocations.count;
+        var error: runtime::Error = copy_record_buffer<Symbol>(
+            view.symbols.data, view.symbols.count, &records->symbols_data,
+            &records->symbol_capacity, &records->symbol_allocation_size);
+        if (error == runtime::Error.none) {
+            error = copy_record_buffer<Relocation>(
+                view.relocations.data, view.relocations.count, &records->relocations_data,
+                &records->relocation_capacity, &records->relocation_allocation_size);
+        }
+        if (error != runtime::Error.none) {
+            release_records(*records);
+            *records = empty_records();
+            return this->fail(error);
+        }
+        return true;
+    }
+
+    priv fn take_content(source: *Object) -> ObjectContent {
+        let content: ObjectContent = {
+            text_data = source->text.data(), text_size = source->text.size(), text_capacity = source->text.capacity(),
+            rodata_data = source->rodata.data(), rodata_size = source->rodata.size(),
+            rodata_capacity = source->rodata.capacity(),
+            data_data = source->data.data(), data_size = source->data.size(), data_capacity = source->data.capacity(),
+            names_data = source->names.data(), names_size = source->names.size(),
+            names_capacity = source->names.capacity(),
+        };
+        source->text.detach();
+        source->rodata.detach();
+        source->data.detach();
+        source->names.detach();
+        return content;
+    }
+
+    priv fn take_records(source: *Object) -> ObjectRecords {
+        let symbols: vector::vector_storage<Symbol> = source->symbols.detach();
+        let relocations: vector::vector_storage<Relocation> = source->relocations.detach();
+        return {
+            symbols_data = symbols.data, symbol_count = symbols.size, symbol_capacity = symbols.capacity,
+            symbol_allocation_size = symbols.allocation_size,
+            relocations_data = relocations.data, relocation_count = relocations.size,
+            relocation_capacity = relocations.capacity, relocation_allocation_size = relocations.allocation_size,
+        };
+    }
+
+    priv fn layout(view: ObjectView) -> ObjectLayout {
+        return {
+            bss_size = view.bss_size, text_alignment = view.text_alignment,
+            rodata_alignment = view.rodata_alignment, data_alignment = view.data_alignment,
+            bss_alignment = view.bss_alignment,
+        };
+    }
+
+    priv fn finish_add(descriptor: ObjectDescriptor) -> bool {
+        this->objects[this->object_count] = descriptor;
+        this->object_count += 1;
+        return true;
+    }
+
+    fn add(object: Object const&) -> bool {
+        let view: ObjectView = object.view();
+        if (!this->can_add(view)) {
+            return false;
+        }
+        var descriptor: ObjectDescriptor = {
+            content = empty_content(), records = empty_records(), layout = this->layout(view),
+        };
+        if (!this->copy_content(view, &descriptor.content)) {
+            return false;
+        }
+        if (!this->copy_records(view, &descriptor.records)) {
+            release_content(descriptor.content);
+            return false;
+        }
+        return this->finish_add(descriptor);
+    }
+
+    fn add(object: Object&&) -> bool {
+        let source: *Object = &object;
+        let view: ObjectView = source->view();
+        if (!this->can_add(view)) {
+            return false;
+        }
+        let descriptor: ObjectDescriptor = {
+            content = this->take_content(source), records = this->take_records(source), layout = this->layout(view),
+        };
+        source->reset_metadata();
+        return this->finish_add(descriptor);
+    }
+
+    fn get(index: usize) const -> ObjectView {
+        if (index >= this->size()) {
+            return {
+                text = {data = null, length = 0}, rodata = {data = null, length = 0},
+                data = {data = null, length = 0}, names = {data = null, length = 0},
+                symbols = {data = null, count = 0}, relocations = {data = null, count = 0},
+                bss_size = 0, text_alignment = 0, rodata_alignment = 0, data_alignment = 0, bss_alignment = 0,
+            };
+        }
+        let descriptor: ObjectDescriptor = this->objects[index];
+        return {
+            text = {data = descriptor.content.text_data as *const u8, length = descriptor.content.text_size},
+            rodata = {data = descriptor.content.rodata_data as *const u8, length = descriptor.content.rodata_size},
+            data = {data = descriptor.content.data_data as *const u8, length = descriptor.content.data_size},
+            names = {data = descriptor.content.names_data as *const u8, length = descriptor.content.names_size},
+            symbols = {
+                data = descriptor.records.symbols_data as *const Symbol, count = descriptor.records.symbol_count,
+            }, relocations = {
+                data = descriptor.records.relocations_data as *const Relocation,
+                count = descriptor.records.relocation_count,
+            }, bss_size = descriptor.layout.bss_size, text_alignment = descriptor.layout.text_alignment,
+            rodata_alignment = descriptor.layout.rodata_alignment,
+            data_alignment = descriptor.layout.data_alignment, bss_alignment = descriptor.layout.bss_alignment,
+        };
+    }
+
+    priv fn content_is_valid(content: ObjectContent) const -> bool {
+        let text_is_valid: bool = content.text_size <= content.text_capacity &&
+            (content.text_capacity == 0 || content.text_data != null);
+        let rodata_is_valid: bool = content.rodata_size <= content.rodata_capacity &&
+            (content.rodata_capacity == 0 || content.rodata_data != null);
+        let data_is_valid: bool = content.data_size <= content.data_capacity &&
+            (content.data_capacity == 0 || content.data_data != null);
+        let names_are_valid: bool = content.names_size <= content.names_capacity &&
+            (content.names_capacity == 0 || content.names_data != null);
+        let readonly_is_valid: bool = text_is_valid && rodata_is_valid;
+        let writable_is_valid: bool = data_is_valid && names_are_valid;
+        return readonly_is_valid && writable_is_valid;
+    }
+
+    priv fn records_are_valid(records: ObjectRecords) const -> bool {
+        let symbols_fit: bool = records.symbol_count <= records.symbol_capacity;
+        let relocations_fit: bool = records.relocation_count <= records.relocation_capacity;
+        let symbols_exist: bool = records.symbol_capacity == 0 || records.symbols_data != null;
+        let relocations_exist: bool = records.relocation_capacity == 0 || records.relocations_data != null;
+        let symbol_storage_is_valid: bool = symbols_fit && symbols_exist;
+        let relocation_storage_is_valid: bool = relocations_fit && relocations_exist;
+        return symbol_storage_is_valid && relocation_storage_is_valid;
+    }
+
+    fn is_valid() const -> bool {
+        let count_is_valid: bool = this->object_count <= ObjectSetLimit.maximum_objects as usize;
+        if (!this->ready() || !count_is_valid) {
+            return false;
+        }
+        for (var index: usize = 0; index < this->size(); index += 1) {
+            let descriptor: ObjectDescriptor = this->objects[index];
+            if (!this->content_is_valid(descriptor.content) || !this->records_are_valid(descriptor.records)) {
+                return false;
+            }
+            if (!view_is_valid(this->get(index))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    deinit() {
+        for (var index: usize = 0; index < this->object_count; index += 1) {
+            release_records(this->objects[index].records);
+            release_content(this->objects[index].content);
+            this->objects[index].records = empty_records();
+            this->objects[index].content = empty_content();
+        }
+        this->object_count = 0;
+    }
+}

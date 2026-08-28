@@ -1,0 +1,200 @@
+module luna.compiler.x86.object;
+
+impl ObjectWriter {
+    init(source: Object const&): output = buffer::byte_buffer() {
+        this->source = &source;
+        this->error_code = runtime::Error.none;
+    }
+
+    priv fn view() const -> ObjectView {
+        return this->source->view();
+    }
+
+    priv fn ready() const -> bool {
+        return this->error_code == runtime::Error.none;
+    }
+
+    priv fn fail(error: runtime::Error) -> bool {
+        if (this->ready()) {
+            this->error_code = error;
+        }
+        return false;
+    }
+
+    priv fn emit(data: *const u8, length: usize) -> bool {
+        if (!this->ready()) {
+            return false;
+        }
+        let error: runtime::Error = this->output.append(data, length);
+        return error == runtime::Error.none ? true : this->fail(error);
+    }
+
+    priv fn emit_u32(value: u32) -> bool {
+        for (var index: usize = 0; index < 4; index += 1) {
+            let byte: u8 = ((value >> ((index * 8) as u32)) & 255) as u8;
+            if (!this->emit(&byte as *const u8, 1)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    priv fn emit_u64(value: u64) -> bool {
+        for (var index: usize = 0; index < 8; index += 1) {
+            let byte: u8 = ((value >> ((index * 8) as u64)) & 255) as u8;
+            if (!this->emit(&byte as *const u8, 1)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    priv fn symbol_flags(symbol: Symbol) -> usize {
+        var flags: usize = 0;
+        if (symbol.defined) {
+            flags |= SymbolFlag.defined as usize;
+        }
+        if (symbol.global) {
+            flags |= SymbolFlag.global as usize;
+        }
+        if (symbol.external) {
+            flags |= SymbolFlag.external as usize;
+        }
+        switch (symbol.kind) {
+        case SymbolKind.function {
+            flags |= SymbolFlag.function as usize;
+        }
+        case SymbolKind.object {
+            flags |= SymbolFlag.object as usize;
+        }
+        default {}
+        }
+        return flags;
+    }
+
+    priv fn serialized_size(result: *usize) -> bool {
+        if (result == null) {
+            return false;
+        }
+        let source: ObjectView = this->view();
+        var size: usize = Format.header_size as usize;
+        let payloads: [4]usize = {
+            source.text.length, source.rodata.length, source.data.length, source.names.length,
+        };
+        for (var index: usize = 0; index < 4; index += 1) {
+            if (!checked::add(size, payloads[index], &size)) {
+                return false;
+            }
+        }
+        var symbol_bytes: usize = 0;
+        var relocation_bytes: usize = 0;
+        if (@mul_overflow(source.symbols.count, Format.symbol_size as usize, &symbol_bytes)) {
+            return false;
+        }
+        if (@mul_overflow(
+                source.relocations.count, Format.relocation_size as usize, &relocation_bytes)) {
+            return false;
+        }
+        if (!checked::add(size, symbol_bytes, &size)) {
+            return false;
+        }
+        if (!checked::add(size, relocation_bytes, &size)) {
+            return false;
+        }
+        *result = size;
+        return true;
+    }
+
+    priv fn emit_header() -> bool {
+        let source: ObjectView = this->view();
+        this->emit("LUNAOBJ1", 8);
+        this->emit_u32((Format.version as usize) as u32);
+        this->emit_u32((Format.header_size as usize) as u32);
+        this->emit_u64(source.text.length as u64);
+        this->emit_u64(source.rodata.length as u64);
+        this->emit_u64(source.data.length as u64);
+        this->emit_u64(source.bss_size as u64);
+        this->emit_u64(source.names.length as u64);
+        this->emit_u64(source.symbols.count as u64);
+        this->emit_u64(source.relocations.count as u64);
+        this->emit_u64(source.text_alignment as u64);
+        this->emit_u64(source.rodata_alignment as u64);
+        this->emit_u64(source.data_alignment as u64);
+        this->emit_u64(source.bss_alignment as u64);
+        this->emit_u64(0);
+        return this->ready();
+    }
+
+    priv fn emit_payloads() -> bool {
+        let source: ObjectView = this->view();
+        this->emit(source.text.data, source.text.length);
+        this->emit(source.rodata.data, source.rodata.length);
+        this->emit(source.data.data, source.data.length);
+        this->emit(source.names.data, source.names.length);
+        return this->ready();
+    }
+
+    priv fn emit_symbol(symbol: Symbol) -> bool {
+        this->emit_u64(symbol.name_offset as u64);
+        this->emit_u64(symbol.name_length as u64);
+        this->emit_u64(symbol.section as usize as u64);
+        this->emit_u64(symbol.value as u64);
+        this->emit_u64(symbol.size as u64);
+        this->emit_u64(this->symbol_flags(symbol) as u64);
+        this->emit_u64(0);
+        return this->ready();
+    }
+
+    priv fn emit_relocation(relocation: Relocation) -> bool {
+        this->emit_u64(relocation.section as usize as u64);
+        this->emit_u64(relocation.offset as u64);
+        this->emit_u64(relocation.symbol_index as u64);
+        this->emit_u64(relocation.kind as usize as u64);
+        this->emit_u64(relocation.addend as u64);
+        return this->ready();
+    }
+
+    fn run() {
+        if (this->source == null || !this->source->is_valid()) {
+            this->fail(runtime::Error.invalid_argument);
+            return;
+        }
+        var size: usize = 0;
+        if (!this->serialized_size(&size)) {
+            this->fail(runtime::Error.out_of_memory);
+            return;
+        }
+        let reserve_error: runtime::Error = this->output.reserve(size);
+        if (reserve_error != runtime::Error.none) {
+            this->fail(reserve_error);
+            return;
+        }
+        if (!this->emit_header() || !this->emit_payloads()) {
+            return;
+        }
+        let source: ObjectView = this->view();
+        for (var index: usize = 0; index < source.symbols.count; index += 1) {
+            if (!this->emit_symbol(source.symbols.data[index])) {
+                return;
+            }
+        }
+        for (var index: usize = 0; index < source.relocations.count; index += 1) {
+            if (!this->emit_relocation(source.relocations.data[index])) {
+                return;
+            }
+        }
+    }
+
+    fn take_result() -> bytes::BufferResult {
+        if (!this->ready()) {
+            return {buffer = bytes::empty(), error = this->error_code};
+        }
+        let size: usize = this->output.size();
+        let capacity: usize = this->output.capacity();
+        let data: *u8 = this->output.detach();
+        return {buffer = {data = data, length = size, capacity = capacity}, error = runtime::Error.none};
+    }
+
+    deinit() {
+    }
+}

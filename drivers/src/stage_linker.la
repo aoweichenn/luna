@@ -79,16 +79,6 @@ fn bootstrap_stage_driver_parse(data: *const u8, length: usize) -> object::Resul
     return object::deserialize(data, length);
 }
 
-fn bootstrap_stage_driver_release_objects(objects: *object::Object, count: usize) -> runtime::Error {
-    var error: runtime::Error = runtime::Error.none;
-    for (var remaining: usize = count; remaining != 0; remaining -= 1) {
-        let index: usize = remaining - 1;
-        let release_error: runtime::Error = object::release(objects[index]);
-        error = cli::first_error(error, release_error);
-    }
-    return error;
-}
-
 fn bootstrap_stage_driver_inputs_are_valid(
     fixed_protocol: bool, input_paths: *const path::Path, input_count: usize) -> bool {
     if (fixed_protocol) {
@@ -106,7 +96,7 @@ fn bootstrap_stage_driver_run(
     if (!inputs_are_valid || !path::is_valid(output_path)) {
         return BootstrapStageStatus.input_error as i32;
     }
-    var objects: [BootstrapStageLimit.maximum_inputs]object::Object = {};
+    var objects: object::ObjectSet = object::ObjectSet();
     var count: usize = 0;
     let expected_count: usize = fixed_protocol ? BootstrapStageLimit.maximum_inputs as usize : input_count;
     for (; count < expected_count;) {
@@ -114,7 +104,6 @@ fn bootstrap_stage_driver_run(
         if (fixed_protocol) {
             path = bootstrap_stage_driver_input_path(count);
             if (path.error != runtime::Error.none) {
-                bootstrap_stage_driver_release_objects(&objects[0], count);
                 return BootstrapStageStatus.input_error as i32;
             }
         }
@@ -126,7 +115,6 @@ fn bootstrap_stage_driver_run(
         }
         if (fixed_protocol && bytes.error == runtime::Error.not_found) {
             if (path_error != runtime::Error.none) {
-                bootstrap_stage_driver_release_objects(&objects[0], count);
                 return BootstrapStageStatus.release_error as i32;
             }
             break;
@@ -135,25 +123,21 @@ fn bootstrap_stage_driver_run(
             if (bytes.error == runtime::Error.none) {
                 bytes::release(bytes.buffer);
             }
-            bootstrap_stage_driver_release_objects(&objects[0], count);
             return BootstrapStageStatus.input_error as i32;
         }
-        let parsed: object::Result = bootstrap_stage_driver_parse(bytes.buffer.data as *const u8, bytes.buffer.length);
+        var parsed: object::Result = bootstrap_stage_driver_parse(bytes.buffer.data as *const u8, bytes.buffer.length);
         let bytes_error: runtime::Error = bytes::release(bytes.buffer);
         if (parsed.error != runtime::Error.none || bytes_error != runtime::Error.none) {
-            if (parsed.error == runtime::Error.none) {
-                object::release(parsed.object);
-            }
-            bootstrap_stage_driver_release_objects(&objects[0], count);
             return BootstrapStageStatus.object_error as i32;
         }
-        objects[count] = parsed.object;
+        if (!objects.add(parsed.object as object::Object&&)) {
+            return BootstrapStageStatus.object_error as i32;
+        }
         count += 1;
     }
     if (fixed_protocol && count == BootstrapStageLimit.maximum_inputs as usize) {
         let excess_path: path::PathResult = bootstrap_stage_driver_input_path(count);
         if (excess_path.error != runtime::Error.none) {
-            bootstrap_stage_driver_release_objects(&objects[0], count);
             return BootstrapStageStatus.input_error as i32;
         }
         let excess: bytes::BufferResult = io::read_file_limited(excess_path.path, 0);
@@ -162,26 +146,23 @@ fn bootstrap_stage_driver_run(
             bytes::release(excess.buffer);
         }
         if (excess.error != runtime::Error.not_found || excess_path_error != runtime::Error.none) {
-            bootstrap_stage_driver_release_objects(&objects[0], count);
             return BootstrapStageStatus.input_error as i32;
         }
     }
     if (count == 0) {
         return BootstrapStageStatus.input_error as i32;
     }
-    let linked: linker::Result = linker::link(&objects[0] as *const object::Object, count);
+    let linked: linker::Result = linker::link(objects);
     if (linked.error != runtime::Error.none) {
-        bootstrap_stage_driver_release_objects(&objects[0], count);
         return BootstrapStageStatus.link_error as i32;
     }
     let write_error: runtime::Error =
         io::write_executable_file_atomic(output_path, linked.executable.data as *const u8, linked.executable.length);
     let executable_error: runtime::Error = bytes::release(linked.executable);
-    let objects_error: runtime::Error = bootstrap_stage_driver_release_objects(&objects[0], count);
     if (write_error != runtime::Error.none) {
         return BootstrapStageStatus.output_error as i32;
     }
-    if (executable_error != runtime::Error.none || objects_error != runtime::Error.none) {
+    if (executable_error != runtime::Error.none) {
         return BootstrapStageStatus.release_error as i32;
     }
     return BootstrapStageStatus.success as i32;

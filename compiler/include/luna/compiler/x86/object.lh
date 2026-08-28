@@ -1,8 +1,12 @@
 export module luna.compiler.x86.object;
 
 import luna.runtime;
+import luna.std.binary as binary;
+import luna.std.buffer as buffer;
 import luna.std.bytes as bytes;
+import luna.std.checked as checked;
 import luna.std.string_view as string_views;
+import luna.std.vector as vector;
 
 export enum Section: usize {
     undefined = 0, text = 1, rodata = 2, data = 3, bss = 4,
@@ -14,6 +18,19 @@ export enum SymbolKind: usize {
 
 export enum RelocationKind: usize {
     pc32 = 1, plt32 = 2, absolute64 = 3, absolute32 = 4, signed32 = 5,
+}
+
+enum Format: usize {
+    header_size = 112, symbol_size = 56, relocation_size = 40, version = 1, maximum_payload = 67108864,
+    maximum_records = 65536, maximum_name = 4096, maximum_alignment = 4096,
+}
+
+enum SymbolFlag: usize {
+    defined = 1, global = 2, external = 4, function = 8, object = 16,
+}
+
+enum ObjectSetLimit: usize {
+    maximum_objects = 128,
 }
 
 export struct Symbol {
@@ -36,19 +53,56 @@ export struct Relocation {
     addend: isize;
 }
 
-export struct Object {
-    text: bytes::Buffer;
-    rodata: bytes::Buffer;
-    data: bytes::Buffer;
-    names: bytes::Buffer;
-    symbols: bytes::Buffer;
-    relocations: bytes::Buffer;
+export struct ByteView {
+    data: *const u8;
+    length: usize;
+}
+
+export struct SymbolView {
+    data: *const Symbol;
+    count: usize;
+}
+
+export struct RelocationView {
+    data: *const Relocation;
+    count: usize;
+}
+
+export struct ObjectView {
+    text: ByteView;
+    rodata: ByteView;
+    data: ByteView;
+    names: ByteView;
+    symbols: SymbolView;
+    relocations: RelocationView;
     bss_size: usize;
     text_alignment: usize;
     rodata_alignment: usize;
     data_alignment: usize;
     bss_alignment: usize;
-    error: runtime::Error;
+}
+
+export class Object {
+    priv text: buffer::byte_buffer;
+    priv rodata: buffer::byte_buffer;
+    priv data: buffer::byte_buffer;
+    priv names: buffer::byte_buffer;
+    priv symbols: vector::vector<Symbol>;
+    priv relocations: vector::vector<Relocation>;
+    priv bss_size_bytes: usize;
+    priv text_alignment_bytes: usize;
+    priv rodata_alignment_bytes: usize;
+    priv data_alignment_bytes: usize;
+    priv bss_alignment_bytes: usize;
+
+    friend class ObjectBuilder;
+    friend class ObjectSet;
+
+    pub init();
+    pub init(other: Object&&);
+    pub fn is_valid() const -> bool;
+    pub fn view() const -> ObjectView;
+    pub deinit();
 }
 
 export struct Result {
@@ -72,24 +126,124 @@ export struct IndexResult {
     error: runtime::Error;
 }
 
-export fn empty() -> Object;
-export fn is_valid(object: Object) -> bool;
-export fn release(object: Object) -> runtime::Error;
-export fn section_length(object: Object, section: Section) -> usize;
-export fn set_alignment(object: *Object, section: Section, alignment: usize) -> bool;
-export fn append_u8(object: *Object, section: Section, value: u8) -> bool;
-export fn append_u16(object: *Object, section: Section, value: u16) -> bool;
-export fn append_u32(object: *Object, section: Section, value: u32) -> bool;
-export fn append_u64(object: *Object, section: Section, value: u64) -> bool;
-export fn append_symbol(object: *Object, name: string_views::string_view) -> IndexResult;
-export fn add_symbol(object: *Object, name: string_views::string_view) -> IndexResult;
-export fn find_symbol(object: Object, name: string_views::string_view) -> IndexResult;
-export fn get_symbol(object: Object, index: usize) -> SymbolResult;
-export fn symbol_mut(object: *Object, index: usize) -> *Symbol;
-export fn symbol_name(object: Object, symbol: Symbol) -> string_views::string_view_result;
-export fn add_relocation(object: *Object, relocation: Relocation) -> bool;
-export fn get_relocation(object: Object, index: usize) -> RelocationResult;
-export fn symbol_count(object: Object) -> usize;
-export fn relocation_count(object: Object) -> usize;
-export fn serialize(object: Object) -> bytes::BufferResult;
+export fn view_is_valid(view: ObjectView) -> bool;
+export fn section(view: ObjectView, section: Section) -> ByteView;
+export fn section_size(view: ObjectView, section: Section) -> usize;
+export fn alignment(view: ObjectView, section: Section) -> usize;
+export fn symbol_at(view: ObjectView, index: usize) -> SymbolResult;
+export fn relocation_at(view: ObjectView, index: usize) -> RelocationResult;
+export fn symbol_name(view: ObjectView, symbol: Symbol) -> string_views::string_view_result;
+
+export class ObjectBuilder {
+    priv storage: Object;
+    priv error_code: runtime::Error;
+
+    pub init();
+    pub fn is_valid() const -> bool;
+    pub fn error() const -> runtime::Error;
+    pub fn section_size(section: Section) const -> usize;
+    pub fn section_data(section: Section) -> *u8;
+    pub fn append(section: Section, data: *const u8, length: usize) -> bool;
+    pub fn append_u8(section: Section, value: u8) -> bool;
+    pub fn append_u16(section: Section, value: u16) -> bool;
+    pub fn append_u32(section: Section, value: u32) -> bool;
+    pub fn append_u64(section: Section, value: u64) -> bool;
+    pub fn set_alignment(section: Section, alignment: usize) -> bool;
+    pub fn allocate_bss(size: usize, alignment: usize, offset: *usize) -> bool;
+    pub fn reserve_records(symbol_count: usize, relocation_count: usize) -> bool;
+    pub fn append_symbol(name: string_views::string_view) -> IndexResult;
+    pub fn add_symbol(name: string_views::string_view) -> IndexResult;
+    pub fn find_symbol(name: string_views::string_view) const -> IndexResult;
+    pub fn symbol_count() const -> usize;
+    pub fn symbol_at(index: usize) const -> SymbolResult;
+    pub fn symbol_mut(index: usize) -> *Symbol;
+    pub fn add_relocation(relocation: Relocation) -> bool;
+    pub fn import_names(data: *const u8, length: usize) -> bool;
+    pub fn import_symbol(symbol: Symbol) -> bool;
+    pub fn import_relocation(relocation: Relocation) -> bool;
+    pub fn take_object() -> Object;
+    pub deinit();
+}
+
+export struct ObjectContent {
+    text_data: *u8;
+    text_size: usize;
+    text_capacity: usize;
+    rodata_data: *u8;
+    rodata_size: usize;
+    rodata_capacity: usize;
+    data_data: *u8;
+    data_size: usize;
+    data_capacity: usize;
+    names_data: *u8;
+    names_size: usize;
+    names_capacity: usize;
+}
+
+export struct ObjectRecords {
+    symbols_data: *Symbol;
+    symbol_count: usize;
+    symbol_capacity: usize;
+    symbol_allocation_size: usize;
+    relocations_data: *Relocation;
+    relocation_count: usize;
+    relocation_capacity: usize;
+    relocation_allocation_size: usize;
+}
+
+export struct ObjectLayout {
+    bss_size: usize;
+    text_alignment: usize;
+    rodata_alignment: usize;
+    data_alignment: usize;
+    bss_alignment: usize;
+}
+
+export struct ObjectDescriptor {
+    content: ObjectContent;
+    records: ObjectRecords;
+    layout: ObjectLayout;
+}
+
+class ObjectReader {
+    priv input: *const u8;
+    priv input_size: usize;
+    priv builder: *ObjectBuilder;
+    priv cursor: usize;
+    priv error_code: runtime::Error;
+
+    pub init(input: *const u8, input_size: usize, builder: ObjectBuilder&);
+    pub fn run();
+    pub fn error() const -> runtime::Error;
+    pub deinit();
+}
+
+class ObjectWriter {
+    priv source: *const Object;
+    priv output: buffer::byte_buffer;
+    priv error_code: runtime::Error;
+
+    pub init(source: Object const&);
+    pub fn run();
+    pub fn take_result() -> bytes::BufferResult;
+    pub deinit();
+}
+
+export class ObjectSet {
+    priv objects: [ObjectSetLimit.maximum_objects]ObjectDescriptor;
+    priv object_count: usize;
+    priv error_code: runtime::Error;
+
+    pub init();
+    pub fn is_valid() const -> bool;
+    pub fn empty() const -> bool;
+    pub fn size() const -> usize;
+    pub fn add(object: Object const&) -> bool;
+    pub fn add(object: Object&&) -> bool;
+    pub fn get(index: usize) const -> ObjectView;
+    pub fn error() const -> runtime::Error;
+    pub deinit();
+}
+
+export fn serialize(object: Object const&) -> bytes::BufferResult;
 export fn deserialize(bytes: *const u8, length: usize) -> Result;

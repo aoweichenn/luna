@@ -1,0 +1,314 @@
+module luna.compiler.x86.object;
+
+impl ObjectBuilder {
+    init(): storage = Object() {
+        this->error_code = runtime::Error.none;
+    }
+
+    priv fn ready() const -> bool {
+        return this->error_code == runtime::Error.none;
+    }
+
+    priv fn fail(error: runtime::Error) -> bool {
+        if (this->ready()) {
+            this->error_code = error;
+        }
+        return false;
+    }
+
+    fn error() const -> runtime::Error {
+        return this->error_code;
+    }
+
+    fn is_valid() const -> bool {
+        return this->ready() && this->storage.is_valid();
+    }
+
+    priv fn section_buffer(section: Section) -> *buffer::byte_buffer {
+        switch (section) {
+        case Section.text {
+            return &this->storage.text;
+        }
+        case Section.rodata {
+            return &this->storage.rodata;
+        }
+        case Section.data {
+            return &this->storage.data;
+        }
+        default {
+            return null;
+        }
+        }
+    }
+
+    fn section_size(section: Section) const -> usize {
+        return section_size(this->storage.view(), section);
+    }
+
+    fn section_data(section: Section) -> *u8 {
+        let storage: *buffer::byte_buffer = this->section_buffer(section);
+        return storage == null ? null : storage->data();
+    }
+
+    fn append(section: Section, data: *const u8, length: usize) -> bool {
+        let storage: *buffer::byte_buffer = this->section_buffer(section);
+        if (storage == null || !this->ready()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let length_is_valid: bool = storage->size() <= Format.maximum_payload as usize &&
+            length <= (Format.maximum_payload as usize) - storage->size();
+        if (!length_is_valid) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        let error: runtime::Error = storage->append(data, length);
+        return error == runtime::Error.none ? true : this->fail(error);
+    }
+
+    fn append_u8(section: Section, value: u8) -> bool {
+        return this->append(section, &value as *const u8, 1);
+    }
+
+    fn append_u16(section: Section, value: u16) -> bool {
+        for (var index: usize = 0; index < 2; index += 1) {
+            if (!this->append_u8(section, ((value >> ((index * 8) as u16)) & 255) as u8)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn append_u32(section: Section, value: u32) -> bool {
+        for (var index: usize = 0; index < 4; index += 1) {
+            if (!this->append_u8(section, ((value >> ((index * 8) as u32)) & 255) as u8)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn append_u64(section: Section, value: u64) -> bool {
+        for (var index: usize = 0; index < 8; index += 1) {
+            if (!this->append_u8(section, ((value >> ((index * 8) as u64)) & 255) as u8)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn set_alignment(section: Section, alignment: usize) -> bool {
+        if (!this->ready() || !alignment_is_valid(alignment)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        switch (section) {
+        case Section.text {
+            if (this->storage.text_alignment_bytes < alignment) {
+                this->storage.text_alignment_bytes = alignment;
+            }
+        }
+        case Section.rodata {
+            if (this->storage.rodata_alignment_bytes < alignment) {
+                this->storage.rodata_alignment_bytes = alignment;
+            }
+        }
+        case Section.data {
+            if (this->storage.data_alignment_bytes < alignment) {
+                this->storage.data_alignment_bytes = alignment;
+            }
+        }
+        case Section.bss {
+            if (this->storage.bss_alignment_bytes < alignment) {
+                this->storage.bss_alignment_bytes = alignment;
+            }
+        }
+        default {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        }
+        return true;
+    }
+
+    fn allocate_bss(size: usize, alignment: usize, offset: *usize) -> bool {
+        if (offset == null || !this->set_alignment(Section.bss, alignment)) {
+            return false;
+        }
+        var placed: usize = 0;
+        if (!checked::align_up(this->storage.bss_size_bytes, alignment, &placed)) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        if (placed > Format.maximum_payload as usize) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        if (size > (Format.maximum_payload as usize) - placed) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        *offset = placed;
+        this->storage.bss_size_bytes = placed + size;
+        return true;
+    }
+
+    fn reserve_records(symbol_count: usize, relocation_count: usize) -> bool {
+        if (!this->ready()) {
+            return false;
+        }
+        if (symbol_count > Format.maximum_records as usize) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (relocation_count > Format.maximum_records as usize) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let symbol_error: runtime::Error = this->storage.symbols.reserve(symbol_count);
+        if (symbol_error != runtime::Error.none) {
+            return this->fail(symbol_error);
+        }
+        let relocation_error: runtime::Error = this->storage.relocations.reserve(relocation_count);
+        return relocation_error == runtime::Error.none ? true : this->fail(relocation_error);
+    }
+
+    fn symbol_count() const -> usize {
+        return this->storage.symbols.size();
+    }
+
+    fn symbol_at(index: usize) const -> SymbolResult {
+        if (index >= this->symbol_count()) {
+            return {symbol = invalid_symbol(), error = runtime::Error.invalid_argument};
+        }
+        return {symbol = this->storage.symbols.get(index), error = runtime::Error.none};
+    }
+
+    fn symbol_mut(index: usize) -> *Symbol {
+        if (index >= this->symbol_count()) {
+            return null;
+        }
+        return &this->storage.symbols.get(index);
+    }
+
+    fn find_symbol(name: string_views::string_view) const -> IndexResult {
+        let name_is_valid: bool = string_views::is_valid_utf8(name) && name.length != 0;
+        if (!name_is_valid) {
+            return {index = 0, found = false, error = runtime::Error.invalid_argument};
+        }
+        let view: ObjectView = this->storage.view();
+        for (var index: usize = 0; index < this->symbol_count(); index += 1) {
+            let candidate: string_views::string_view_result = symbol_name(view, this->storage.symbols.get(index));
+            if (candidate.error != runtime::Error.none) {
+                return {index = 0, found = false, error = candidate.error};
+            }
+            if (string_views::equal(candidate.view, name)) {
+                return {index = index, found = true, error = runtime::Error.none};
+            }
+        }
+        return {index = 0, found = false, error = runtime::Error.none};
+    }
+
+    fn append_symbol(name: string_views::string_view) -> IndexResult {
+        let builder_is_ready: bool = this->ready() && this->storage.names.is_valid();
+        let name_is_valid: bool = string_views::is_valid_utf8(name) && name.length != 0;
+        if (!builder_is_ready || !name_is_valid) {
+            this->fail(runtime::Error.invalid_argument);
+            return {index = 0, found = false, error = runtime::Error.invalid_argument};
+        }
+        if (name.length > Format.maximum_name as usize) {
+            this->fail(runtime::Error.invalid_argument);
+            return {index = 0, found = false, error = runtime::Error.invalid_argument};
+        }
+        let count: usize = this->symbol_count();
+        if (count >= Format.maximum_records as usize) {
+            this->fail(runtime::Error.out_of_memory);
+            return {index = 0, found = false, error = runtime::Error.out_of_memory};
+        }
+        let names_size: usize = this->storage.names.size();
+        let names_fit: bool = names_size <= Format.maximum_payload as usize &&
+            name.length <= (Format.maximum_payload as usize) - names_size;
+        if (!names_fit) {
+            this->fail(runtime::Error.out_of_memory);
+            return {index = 0, found = false, error = runtime::Error.out_of_memory};
+        }
+        let name_error: runtime::Error = this->storage.names.append(name.data, name.length);
+        if (name_error != runtime::Error.none) {
+            this->fail(name_error);
+            return {index = 0, found = false, error = name_error};
+        }
+        var symbol: Symbol = invalid_symbol();
+        symbol.name_offset = names_size;
+        symbol.name_length = name.length;
+        let symbol_error: runtime::Error = this->storage.symbols.push_back(symbol);
+        if (symbol_error != runtime::Error.none) {
+            this->storage.names.truncate(names_size);
+            this->fail(symbol_error);
+            return {index = 0, found = false, error = symbol_error};
+        }
+        return {index = count, found = false, error = runtime::Error.none};
+    }
+
+    fn add_symbol(name: string_views::string_view) -> IndexResult {
+        let existing: IndexResult = this->find_symbol(name);
+        if (existing.error != runtime::Error.none || existing.found) {
+            return existing;
+        }
+        return this->append_symbol(name);
+    }
+
+    fn add_relocation(relocation: Relocation) -> bool {
+        if (!this->ready()) {
+            return false;
+        }
+        if (this->storage.relocations.size() >= Format.maximum_records as usize) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        if (!relocation_section_is_valid(relocation.section)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (relocation.symbol_index >= this->symbol_count()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let width: usize = relocation_width(relocation.kind);
+        if (width == 0) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let section_size: usize = this->section_size(relocation.section);
+        let offset_is_valid: bool = relocation.offset <= section_size;
+        if (!offset_is_valid || width > section_size - relocation.offset) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let error: runtime::Error = this->storage.relocations.push_back(relocation);
+        return error == runtime::Error.none ? true : this->fail(error);
+    }
+
+    fn import_names(data: *const u8, length: usize) -> bool {
+        if (!this->ready() || !this->storage.names.empty()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (length > Format.maximum_payload as usize) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let error: runtime::Error = this->storage.names.append(data, length);
+        return error == runtime::Error.none ? true : this->fail(error);
+    }
+
+    fn import_symbol(symbol: Symbol) -> bool {
+        if (!this->ready() || this->symbol_count() >= Format.maximum_records as usize) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let error: runtime::Error = this->storage.symbols.push_back(symbol);
+        return error == runtime::Error.none ? true : this->fail(error);
+    }
+
+    fn import_relocation(relocation: Relocation) -> bool {
+        if (!this->ready() || this->storage.relocations.size() >= Format.maximum_records as usize) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let error: runtime::Error = this->storage.relocations.push_back(relocation);
+        return error == runtime::Error.none ? true : this->fail(error);
+    }
+
+    fn take_object() -> Object {
+        if (!this->is_valid()) {
+            this->fail(runtime::Error.invalid_argument);
+            return Object();
+        }
+        return this->storage as Object&&;
+    }
+
+    deinit() {
+    }
+}

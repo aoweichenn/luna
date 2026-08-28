@@ -1,0 +1,276 @@
+module luna.compiler.x86.object;
+
+impl ObjectReader {
+    init(input: *const u8, input_size: usize, builder: ObjectBuilder&) {
+        this->input = input;
+        this->input_size = input_size;
+        this->builder = &builder;
+        this->cursor = 0;
+        this->error_code = runtime::Error.none;
+    }
+
+    priv fn ready() const -> bool {
+        return this->error_code == runtime::Error.none;
+    }
+
+    priv fn fail(error: runtime::Error) -> bool {
+        if (this->ready()) {
+            this->error_code = error;
+        }
+        return false;
+    }
+
+    priv fn magic_is_valid() const -> bool {
+        if (this->input == null || this->input_size < 8) {
+            return false;
+        }
+        let magic: *const u8 = "LUNAOBJ1";
+        for (var index: usize = 0; index < 8; index += 1) {
+            if (this->input[index] != magic[index]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    priv fn read_header(fields: *u64) -> bool {
+        if (fields == null || !this->magic_is_valid()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        var version: u32 = 0;
+        var header_size: u32 = 0;
+        let version_is_read: bool = binary::read_u32(this->input, this->input_size, 8, &version);
+        let size_is_read: bool = binary::read_u32(this->input, this->input_size, 12, &header_size);
+        if (!version_is_read || !size_is_read) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let version_is_valid: bool = version == (Format.version as usize) as u32;
+        let size_is_valid: bool = header_size == (Format.header_size as usize) as u32;
+        if (!version_is_valid || !size_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        for (var index: usize = 0; index < 12; index += 1) {
+            if (!binary::read_u64(this->input, this->input_size, 16 + index * 8, &fields[index])) {
+                return this->fail(runtime::Error.invalid_argument);
+            }
+        }
+        return true;
+    }
+
+    priv fn field_is_usize(value: u64) -> bool {
+        return value <= 18446744073709551615 as u64;
+    }
+
+    priv fn fields_are_valid(fields: *const u64) -> bool {
+        if (fields == null || fields[11] != 0) {
+            return false;
+        }
+        for (var index: usize = 0; index < 11; index += 1) {
+            if (!this->field_is_usize(fields[index])) {
+                return false;
+            }
+        }
+        let readonly_payloads_fit: bool = fields[0] <= (Format.maximum_payload as usize) as u64 &&
+            fields[1] <= (Format.maximum_payload as usize) as u64;
+        let writable_payloads_fit: bool = fields[2] <= (Format.maximum_payload as usize) as u64 &&
+            fields[3] <= (Format.maximum_payload as usize) as u64;
+        let names_fit: bool = fields[4] <= (Format.maximum_payload as usize) as u64;
+        let symbols_fit: bool = fields[5] <= (Format.maximum_records as usize) as u64;
+        let relocations_fit: bool = fields[6] <= (Format.maximum_records as usize) as u64;
+        let records_fit: bool = symbols_fit && relocations_fit;
+        if (!readonly_payloads_fit || !writable_payloads_fit) {
+            return false;
+        }
+        return names_fit && records_fit;
+    }
+
+    priv fn expected_size(fields: *const u64, result: *usize) -> bool {
+        if (fields == null || result == null) {
+            return false;
+        }
+        var size: usize = Format.header_size as usize;
+        for (var index: usize = 0; index < 5; index += 1) {
+            if (!checked::add(size, fields[index] as usize, &size)) {
+                return false;
+            }
+        }
+        var symbol_bytes: usize = 0;
+        var relocation_bytes: usize = 0;
+        if (@mul_overflow(fields[5] as usize, Format.symbol_size as usize, &symbol_bytes)) {
+            return false;
+        }
+        if (@mul_overflow(fields[6] as usize, Format.relocation_size as usize, &relocation_bytes)) {
+            return false;
+        }
+        if (!checked::add(size, symbol_bytes, &size)) {
+            return false;
+        }
+        if (!checked::add(size, relocation_bytes, &size)) {
+            return false;
+        }
+        *result = size;
+        return true;
+    }
+
+    priv fn configure(fields: *const u64) -> bool {
+        let text_alignment: usize = fields[7] as usize;
+        let rodata_alignment: usize = fields[8] as usize;
+        let data_alignment: usize = fields[9] as usize;
+        let bss_alignment: usize = fields[10] as usize;
+        if (!this->builder->set_alignment(Section.text, text_alignment)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!this->builder->set_alignment(Section.rodata, rodata_alignment)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!this->builder->set_alignment(Section.data, data_alignment)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        var bss_offset: usize = 0;
+        if (!this->builder->allocate_bss(fields[3] as usize, bss_alignment, &bss_offset)) {
+            return this->fail(this->builder->error());
+        }
+        return bss_offset == 0;
+    }
+
+    priv fn append_range(section: Section, size: usize) -> bool {
+        if (!checked::range_is_valid(this->cursor, size, this->input_size)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let data: *const u8 = size == 0 ? null : &this->input[this->cursor];
+        if (!this->builder->append(section, data, size)) {
+            return this->fail(this->builder->error());
+        }
+        this->cursor += size;
+        return true;
+    }
+
+    priv fn append_names(size: usize) -> bool {
+        if (!checked::range_is_valid(this->cursor, size, this->input_size)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let data: *const u8 = size == 0 ? null : &this->input[this->cursor];
+        if (!this->builder->import_names(data, size)) {
+            return this->fail(this->builder->error());
+        }
+        this->cursor += size;
+        return true;
+    }
+
+    priv fn symbol_kind(flags: usize) -> SymbolKind {
+        let is_function: bool = (flags & (SymbolFlag.function as usize)) != 0;
+        let is_object: bool = (flags & (SymbolFlag.object as usize)) != 0;
+        if (is_function) {
+            return SymbolKind.function;
+        }
+        return is_object ? SymbolKind.object : SymbolKind.none;
+    }
+
+    priv fn read_symbol() -> bool {
+        var record: [7]u64 = {};
+        for (var index: usize = 0; index < 7; index += 1) {
+            if (!binary::read_u64(this->input, this->input_size, this->cursor + index * 8, &record[index])) {
+                return this->fail(runtime::Error.invalid_argument);
+            }
+        }
+        this->cursor += Format.symbol_size as usize;
+        if (record[6] != 0) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let flags: usize = record[5] as usize;
+        if ((flags & (31 as usize)) != flags) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let has_function_kind: bool = (flags & (SymbolFlag.function as usize)) != 0;
+        let has_object_kind: bool = (flags & (SymbolFlag.object as usize)) != 0;
+        if (has_function_kind && has_object_kind) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let symbol: Symbol = {
+            name_offset = record[0] as usize, name_length = record[1] as usize,
+            section = record[2] as usize as Section, value = record[3] as usize, size = record[4] as usize,
+            kind = this->symbol_kind(flags), defined = (flags & (SymbolFlag.defined as usize)) != 0,
+            global = (flags & (SymbolFlag.global as usize)) != 0,
+            external = (flags & (SymbolFlag.external as usize)) != 0,
+        };
+        return this->builder->import_symbol(symbol) ? true : this->fail(this->builder->error());
+    }
+
+    priv fn read_relocation() -> bool {
+        var record: [5]u64 = {};
+        for (var index: usize = 0; index < 5; index += 1) {
+            if (!binary::read_u64(this->input, this->input_size, this->cursor + index * 8, &record[index])) {
+                return this->fail(runtime::Error.invalid_argument);
+            }
+        }
+        this->cursor += Format.relocation_size as usize;
+        let relocation: Relocation = {
+            section = record[0] as usize as Section, offset = record[1] as usize,
+            symbol_index = record[2] as usize, kind = record[3] as usize as RelocationKind, addend = record[4] as isize,
+        };
+        return this->builder->import_relocation(relocation) ? true : this->fail(this->builder->error());
+    }
+
+    fn run() {
+        if (this->builder == null || this->input == null) {
+            this->fail(runtime::Error.invalid_argument);
+            return;
+        }
+        if (this->input_size < Format.header_size as usize) {
+            this->fail(runtime::Error.invalid_argument);
+            return;
+        }
+        var fields: [12]u64 = {};
+        let fields_view: *const u64 = &fields[0] as *const u64;
+        if (!this->read_header(&fields[0]) || !this->fields_are_valid(fields_view)) {
+            this->fail(runtime::Error.invalid_argument);
+            return;
+        }
+        var expected_size: usize = 0;
+        if (!this->expected_size(fields_view, &expected_size) || expected_size != this->input_size) {
+            this->fail(runtime::Error.invalid_argument);
+            return;
+        }
+        if (!this->configure(fields_view)) {
+            this->fail(runtime::Error.invalid_argument);
+            return;
+        }
+        if (!this->builder->reserve_records(fields[5] as usize, fields[6] as usize)) {
+            this->fail(this->builder->error());
+            return;
+        }
+        this->cursor = Format.header_size as usize;
+        if (!this->append_range(Section.text, fields[0] as usize)) {
+            return;
+        }
+        if (!this->append_range(Section.rodata, fields[1] as usize)) {
+            return;
+        }
+        if (!this->append_range(Section.data, fields[2] as usize)) {
+            return;
+        }
+        if (!this->append_names(fields[4] as usize)) {
+            return;
+        }
+        for (var index: usize = 0; index < fields[5] as usize; index += 1) {
+            if (!this->read_symbol()) {
+                return;
+            }
+        }
+        for (var index: usize = 0; index < fields[6] as usize; index += 1) {
+            if (!this->read_relocation()) {
+                return;
+            }
+        }
+        if (this->cursor != this->input_size || !this->builder->is_valid()) {
+            this->fail(runtime::Error.invalid_argument);
+        }
+    }
+
+    fn error() const -> runtime::Error {
+        return this->error_code;
+    }
+
+    deinit() {
+    }
+}

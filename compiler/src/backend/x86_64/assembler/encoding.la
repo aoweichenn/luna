@@ -9,26 +9,20 @@ impl Assembler {
         return false;
     }
 
-    priv fn section_buffer() -> *bytes::Buffer {
+    priv fn section_is_active() const -> bool {
         switch (this->current_section) {
-        case object::Section.text {
-            return &this->storage.text;
-        }
-        case object::Section.rodata {
-            return &this->storage.rodata;
-        }
-        case object::Section.data {
-            return &this->storage.data;
+        case object::Section.text, object::Section.rodata, object::Section.data {
+            return true;
         }
         default {
-            return null;
+            return false;
         }
         }
     }
 
     priv fn append_u8(value: u8) -> bool {
-        if (!object::append_u8(&this->storage, this->current_section, value)) {
-            return this->fail(this->storage.error);
+        if (!this->storage.append_u8(this->current_section, value)) {
+            return this->fail(this->storage.error());
         }
         return true;
     }
@@ -118,11 +112,10 @@ impl Assembler {
 }
 
     priv fn append_symbol_address(target: string_views::string_view) -> bool {
-    let output: *bytes::Buffer = this->section_buffer();
     if (this->current_section != object::Section.rodata) {
         return this->fail(runtime::Error.invalid_argument);
     }
-    if (output == null || !this->add_fixup(target, output->length, FixupKind.absolute64)) {
+    if (!this->add_fixup(target, this->storage.section_size(this->current_section), FixupKind.absolute64)) {
         return false;
     }
     return this->append_u64(0);
@@ -175,11 +168,11 @@ impl Assembler {
         if (!this->append_u8(modrm)) {
             return false;
         }
-        let output: *bytes::Buffer = this->section_buffer();
-        if (output == null) {
+        if (!this->section_is_active()) {
             return false;
         }
-        if (!this->add_fixup(rm->memory.symbol, output->length, FixupKind.rip_relative)) {
+        let offset: usize = this->storage.section_size(this->current_section);
+        if (!this->add_fixup(rm->memory.symbol, offset, FixupKind.rip_relative)) {
             return false;
         }
         return this->append_u32(0);
@@ -236,11 +229,11 @@ impl Assembler {
     if (!this->append_opcode(opcode_first, opcode_second, opcode_count)) {
         return false;
     }
-    let output: *bytes::Buffer = this->section_buffer();
-    if (output == null) {
+    if (!this->section_is_active()) {
         return false;
     }
-    if (!this->add_fixup(operands->values[0].label, output->length, kind)) {
+    let offset: usize = this->storage.section_size(this->current_section);
+    if (!this->add_fixup(operands->values[0].label, offset, kind)) {
         return false;
     }
     return this->append_u32(0);

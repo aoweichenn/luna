@@ -23,11 +23,12 @@ enum ExecutableLayout: usize {
     magic_zero = 127, magic_one = 69, magic_two = 76, magic_three = 70,
 }
 
-fn relocation_table_is_valid(value: object::Object) -> bool {
-    if (!object::is_valid(value) || object::relocation_count(value) != ProbeLayout.relocation_count as usize) {
+fn relocation_table_is_valid(value: object::Object const&) -> bool {
+    let view: object::ObjectView = value.view();
+    if (!object::view_is_valid(view) || view.relocations.count != ProbeLayout.relocation_count as usize) {
         return false;
     }
-    if (value.rodata.length != ProbeLayout.byte_count as usize) {
+    if (view.rodata.length != ProbeLayout.byte_count as usize) {
         return false;
     }
     let expected_name: string_views::string_view_result = string_views::from_c_string("dispatch_target", 32);
@@ -35,7 +36,7 @@ fn relocation_table_is_valid(value: object::Object) -> bool {
         return false;
     }
     for (var index: usize = 0; index < ProbeLayout.relocation_count as usize; index += 1) {
-        let found: object::RelocationResult = object::get_relocation(value, index);
+        let found: object::RelocationResult = object::relocation_at(view, index);
         if (found.error != runtime::Error.none) {
             return false;
         }
@@ -47,11 +48,11 @@ fn relocation_table_is_valid(value: object::Object) -> bool {
         if (!shape_is_valid || !value_is_valid) {
             return false;
         }
-        let symbol_result: object::SymbolResult = object::get_symbol(value, relocation.symbol_index);
+        let symbol_result: object::SymbolResult = object::symbol_at(view, relocation.symbol_index);
         if (symbol_result.error != runtime::Error.none) {
             return false;
         }
-        let name: string_views::string_view_result = object::symbol_name(value, symbol_result.symbol);
+        let name: string_views::string_view_result = object::symbol_name(view, symbol_result.symbol);
         if (name.error != runtime::Error.none || !string_views::equal(name.view, expected_name.view)) {
             return false;
         }
@@ -65,9 +66,7 @@ fn first_error(current: runtime::Error, next: runtime::Error) -> runtime::Error 
 
 fn load_is_rejected(data: *const u8, length: usize) -> bool {
     let loaded: object::Result = elf::load(data, length);
-    let rejected: bool = loaded.error != runtime::Error.none;
-    let release_error: runtime::Error = object::release(loaded.object);
-    return rejected && release_error == runtime::Error.none;
+    return loaded.error != runtime::Error.none;
 }
 
 fn mutation_is_rejected(source: bytes::Buffer, offset: usize, value: u8) -> bool {
@@ -220,14 +219,16 @@ fn link_failure_is(
     }
     let assembled: assembler::Result = assembler::assemble(source.view);
     if (assembled.error != runtime::Error.none) {
-        object::release(assembled.object);
         return false;
     }
-    let linked: linker::Result = linker::link(&assembled.object as *const object::Object, 1);
+    var objects: object::ObjectSet = object::ObjectSet();
+    if (!objects.add(assembled.object)) {
+        return false;
+    }
+    let linked: linker::Result = linker::link(objects);
     let error_is_valid: bool = linked.error == expected_error && linked.input_index == expected_input;
     let output_is_empty: bool = linked.executable.length == 0 && linked.executable.data == null;
-    var release_error: runtime::Error = bytes::release(linked.executable);
-    release_error = first_error(release_error, object::release(assembled.object));
+    let release_error: runtime::Error = bytes::release(linked.executable);
     if (!error_is_valid || !output_is_empty) {
         return false;
     }
@@ -253,31 +254,35 @@ fn linker_boundary_status() -> i32 {
     }
     let assembled: assembler::Result = assembler::assemble(source.view);
     if (assembled.error != runtime::Error.none) {
-        object::release(assembled.object);
         return 21;
     }
-    let first: linker::Result = linker::link(&assembled.object as *const object::Object, 1);
-    let second: linker::Result = linker::link(&assembled.object as *const object::Object, 1);
+    var objects: object::ObjectSet = object::ObjectSet();
+    if (!objects.add(assembled.object)) {
+        return 21;
+    }
+    let first: linker::Result = linker::link(objects);
+    let second: linker::Result = linker::link(objects);
     let output_is_valid: bool = first.error == runtime::Error.none && second.error == runtime::Error.none;
     let layout_is_valid: bool = output_is_valid && executable_layout_is_valid(first.executable);
     let output_is_stable: bool = layout_is_valid &&
         bytes::equal(first.executable, second.executable.data as *const u8, second.executable.length);
 
-    var duplicate_inputs: [2]object::Object = { assembled.object, assembled.object };
-    let duplicate: linker::Result = linker::link(&duplicate_inputs[0] as *const object::Object, 2);
+    var duplicate_inputs: object::ObjectSet = object::ObjectSet();
+    let duplicate_is_ready: bool = duplicate_inputs.add(assembled.object) && duplicate_inputs.add(assembled.object);
+    let duplicate: linker::Result = linker::link(duplicate_inputs);
     let duplicate_is_valid: bool = duplicate.error == runtime::Error.exists && duplicate.input_index == 1;
-    let empty: linker::Result = linker::link(null, 0);
+    var empty_inputs: object::ObjectSet = object::ObjectSet();
+    let empty: linker::Result = linker::link(empty_inputs);
     let empty_is_valid: bool = empty.error == runtime::Error.invalid_argument && empty.input_index == 0;
 
     var release_error: runtime::Error = bytes::release(empty.executable);
     release_error = first_error(release_error, bytes::release(duplicate.executable));
     release_error = first_error(release_error, bytes::release(second.executable));
     release_error = first_error(release_error, bytes::release(first.executable));
-    release_error = first_error(release_error, object::release(assembled.object));
     if (!output_is_stable) {
         return 22;
     }
-    if (!duplicate_is_valid) {
+    if (!duplicate_is_ready || !duplicate_is_valid) {
         return 23;
     }
     if (!empty_is_valid) {
@@ -323,21 +328,17 @@ fn numeric_labels_are_valid() -> bool {
     if (assembled.error != runtime::Error.none) {
         return false;
     }
-    if (assembled.object.text.length != 13) {
-        object::release(assembled.object);
+    let view: object::ObjectView = assembled.object.view();
+    if (view.text.length != 13) {
         return false;
     }
-    let bytes_are_valid: bool = assembled.object.text.data[0] == 233 &&
-        assembled.object.text.data[1] == 2;
-    let backward_is_valid: bool = assembled.object.text.data[7] == 233 &&
-        assembled.object.text.data[8] == 244;
-    let shape_is_valid: bool = object::relocation_count(assembled.object) == 0 &&
-        object::is_valid(assembled.object);
-    let release_error: runtime::Error = object::release(assembled.object);
+    let bytes_are_valid: bool = view.text.data[0] == 233 && view.text.data[1] == 2;
+    let backward_is_valid: bool = view.text.data[7] == 233 && view.text.data[8] == 244;
+    let shape_is_valid: bool = view.relocations.count == 0 && object::view_is_valid(view);
     if (!bytes_are_valid || !backward_is_valid) {
         return false;
     }
-    if (!shape_is_valid || release_error != runtime::Error.none) {
+    if (!shape_is_valid) {
         return false;
     }
 
@@ -348,8 +349,8 @@ fn numeric_labels_are_valid() -> bool {
     }
     let unresolved: assembler::Result = assembler::assemble(unresolved_source.view);
     let unresolved_is_valid: bool = unresolved.error == runtime::Error.invalid_argument &&
-        object::is_valid(unresolved.object);
-    return object::release(unresolved.object) == runtime::Error.none && unresolved_is_valid;
+        unresolved.object.is_valid();
+    return unresolved_is_valid;
 }
 
 fn main() -> i32 {
@@ -400,7 +401,6 @@ fn main() -> i32 {
     }
     if (!malformed_elf_is_rejected(elf_bytes.buffer)) {
         bytes::release(elf_bytes.buffer);
-        object::release(assembled.object);
         return 11;
     }
     let elf_object: object::Result = elf::load(elf_bytes.buffer.data as *const u8, elf_bytes.buffer.length);
@@ -414,11 +414,8 @@ fn main() -> i32 {
     }
 
     var release_error: runtime::Error = bytes::release(elf_bytes_again.buffer);
-    release_error = first_error(release_error, object::release(elf_object.object));
     release_error = first_error(release_error, bytes::release(elf_bytes.buffer));
     release_error = first_error(release_error, bytes::release(serialized_again.buffer));
-    release_error = first_error(release_error, object::release(restored.object));
     release_error = first_error(release_error, bytes::release(serialized.buffer));
-    release_error = first_error(release_error, object::release(assembled.object));
     return release_error == runtime::Error.none ? 42 : 9;
 }
