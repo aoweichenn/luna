@@ -51,7 +51,55 @@ fn first_error(current: runtime::Error, next: runtime::Error) -> runtime::Error 
     return current == runtime::Error.none ? next : current;
 }
 
+fn numeric_labels_are_valid() -> bool {
+    let source: string_views::string_view_result = string_views::from_c_string(
+        ".text\n"
+        "1:\n"
+        "jmp 2f\n"
+        "ud2\n"
+        "2:\n"
+        "jmp 1b\n"
+        "ret\n", 64);
+    if (source.error != runtime::Error.none) {
+        return false;
+    }
+    let assembled: assembler::Result = assembler::assemble(source.view);
+    if (assembled.error != runtime::Error.none) {
+        return false;
+    }
+    if (assembled.object.text.length != 13) {
+        object::release(assembled.object);
+        return false;
+    }
+    let bytes_are_valid: bool = assembled.object.text.data[0] == 233 &&
+        assembled.object.text.data[1] == 2;
+    let backward_is_valid: bool = assembled.object.text.data[7] == 233 &&
+        assembled.object.text.data[8] == 244;
+    let shape_is_valid: bool = object::relocation_count(assembled.object) == 0 &&
+        object::is_valid(assembled.object);
+    let release_error: runtime::Error = object::release(assembled.object);
+    if (!bytes_are_valid || !backward_is_valid) {
+        return false;
+    }
+    if (!shape_is_valid || release_error != runtime::Error.none) {
+        return false;
+    }
+
+    let unresolved_source: string_views::string_view_result =
+        string_views::from_c_string(".text\njmp 9f\n", 32);
+    if (unresolved_source.error != runtime::Error.none) {
+        return false;
+    }
+    let unresolved: assembler::Result = assembler::assemble(unresolved_source.view);
+    let unresolved_is_valid: bool = unresolved.error == runtime::Error.invalid_argument &&
+        object::is_valid(unresolved.object);
+    return object::release(unresolved.object) == runtime::Error.none && unresolved_is_valid;
+}
+
 fn main() -> i32 {
+    if (!numeric_labels_are_valid()) {
+        return 10;
+    }
     let source: string_views::string_view_result = string_views::from_c_string(
         ".section .rodata,\"a\",@progbits\n"
         ".extern dispatch_target\n"

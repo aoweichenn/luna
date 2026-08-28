@@ -445,3 +445,28 @@ fixed-point verification took 251.72 seconds. Compiling the 3,069,988-byte
 `sem_funcs.s` took 10.00 seconds and assembling it took 0.75 seconds. The
 promoted executable remains 4,654,934 bytes with SHA-256
 `b05126bfd8d3cee85431df92cd828d65a3b794122bf6af8820f11b288da89c07`.
+
+## 2026-08-28: promotion to the object-oriented assembler toolchain
+
+The anchor now contains the stage-fixed `luna` executable from the Assembler
+RAII snapshot accompanying this provenance note. The historical public
+`State` record and `*State` procedure families are replaced by one private
+`Assembler` class composed from `Object`, `SymbolTable`, `vector<Fixup>` and
+`vector<NumericLabel>`. Construction, deterministic destruction and
+`take_result()` now own every success, failure and transfer path.
+
+The closed x86-64 subset is represented by 87 instruction rules and 30
+condition-code aliases initialized once per assembly session and dispatched by
+`EncodingKind`. Directives, sections, symbol kinds and legacy registers use
+the same table-driven policy. All bounded traversals use `for`; only source
+consumption retains state-driven `while` loops, and every condition has at
+most two logical clauses.
+
+Remote x86-64 verification on `caw` built the complete 75-module graph through
+`stage-transition`, `stage-next` and `stage-fixed`; every next/fixed assembly,
+object and executable artifact was byte-identical. The final test run passed
+443/443 with no skips, including forward/backward numeric labels and rejected
+unresolved fixups. Three assemblies of the 3,069,988-byte `sem_funcs.s` took
+0.767, 0.774 and 0.762 seconds and produced an object byte-identical to the
+previous assembler. The promoted executable is 4,704,081 bytes with SHA-256
+`001fb90a511648f25d255320ae9761045625832ef4ee8145784d5b1a2c78142a`.

@@ -75,13 +75,14 @@ implementation-file 名称进入 module namespace。
 - 保留 SymbolTable 的 class、访问控制、构造/析构、泛型 map、组合和自然`operator <`；
 - `string`采用私有`byte_buffer`组合、move construction、move assignment 与 RAII；
 - `charconv`是无状态、无分配算法，保留 free function 比装饰性 class 更准确；
+- Assembler 已按`docs/assembler-design.md`成为组合 SymbolTable、typed vectors 和规则表的 RAII class；
 - ABI、frame、operand、ELF record、Object 和 Fixup 继续是透明 struct；
 - 本批次没有资源转移边界，因此不新增 move surface；
 - 没有运行期替换层次，因此 inheritance、virtual dispatch 和 RTTI 不适用；
 - 没有需要捕获对象的策略回调，因此 bound method 不适用；
 - 不使用 friend 扩大访问面；同模块 implementation unit 已提供所需私有共享边界。
 
-后续 OOP backend 批次会分别把 CodeGenerator、Assembler、ElfReader、ElfWriter 和 Linker
+后续 OOP backend 批次会继续把 CodeGenerator、ElfReader、ElfWriter 和 Linker
 升级为状态类。本批次刻意不把 namespace 迁移与行为重写混在同一个正确性变化中。
 
 ## 验证
@@ -102,3 +103,7 @@ next/fixed artifact 逐字节一致。完整测试 443/443 通过且无跳过，
 通用字符串迁移后的 `caw` 复验为 75 modules、65 driver-closure objects；单套 build
 86.73 秒，verify 251.72 秒，443/443 测试用时 20.21 秒。`sem_funcs.s`保持 0.75 秒汇编，
 stage-next/stage-fixed 的全部产物继续逐字节一致。
+
+Assembler OOP 批次随后把`State + *State`收敛为组合 SymbolTable、typed vectors 和规则表的
+私有 RAII class。`caw`完整测试 443/443、verify 全产物一致；`sem_funcs.s`三次汇编为
+0.767/0.774/0.762 秒，并与旧 assembler 对同一输入生成的 object 逐字节相同。

@@ -1,55 +1,73 @@
 module luna.compiler.x86.assembler;
 
+impl Assembler {
+    init(): symbols = SymbolTable(), fixups = vector::vector<Fixup>(), numeric_labels = vector::vector<NumericLabel>() {
+        this->storage = object::empty();
+        this->current_section = object::Section.undefined;
+        this->current_line = 1;
+        this->error_code = runtime::Error.none;
+        this->initialize_rules();
+    }
+
+    fn run(assembly: string_views::string_view) {
+        if (!string_views::is_valid_utf8(assembly) || assembly.length > Limit.maximum_source as usize) {
+            this->fail(runtime::Error.invalid_argument);
+            return;
+        }
+        var offset: usize = 0;
+        while (this->error_code == runtime::Error.none && offset < assembly.length) {
+            var end: usize = offset;
+            while (end < assembly.length && assembly.data[end] != '\n') {
+                end += 1;
+            }
+            let line_length: usize = end - offset;
+            if (line_length > Limit.maximum_line as usize) {
+                this->fail(runtime::Error.invalid_argument);
+                break;
+            }
+            if (!this->assemble_line(slice(assembly, offset, line_length))) {
+                this->fail(runtime::Error.invalid_argument);
+                break;
+            }
+            if (end == assembly.length) {
+                offset = end;
+            } else {
+                offset = end + 1;
+                this->current_line += 1;
+            }
+        }
+        if (this->error_code != runtime::Error.none) {
+            return;
+        }
+        if (!this->resolve_fixups() || !this->validate_symbols()) {
+            this->fail(runtime::Error.invalid_argument);
+            return;
+        }
+        if (!object::is_valid(this->storage)) {
+            this->fail(runtime::Error.invalid_argument);
+        }
+    }
+
+    fn take_result() -> Result {
+        let final_line: usize = this->current_line;
+        if (this->error_code != runtime::Error.none) {
+            object::release(this->storage);
+            this->storage = object::empty();
+            return { object = object::empty(), error = this->error_code, line = final_line };
+        }
+        let assembled: object::Object = this->storage;
+        this->storage = object::empty();
+        return { object = assembled, error = runtime::Error.none, line = final_line };
+    }
+
+    deinit() {
+        object::release(this->storage);
+        this->storage = object::empty();
+    }
+}
 
 fn assemble(assembly: string_views::string_view) -> Result {
-    var symbol_table: SymbolTable = SymbolTable();
-    var assembler: State = {
-        object = object::empty(), symbol_table = &symbol_table, section = object::Section.undefined,
-        fixups = bytes::empty(), numeric_labels = bytes::empty(), line = 1, error = runtime::Error.none,
-    };
-    if (!string_views::is_valid_utf8(assembly) || assembly.length > Limit.maximum_source as usize) {
-        assembler.error = runtime::Error.invalid_argument;
-    }
-    var offset: usize = 0;
-    while (assembler.error == runtime::Error.none && offset < assembly.length) {
-        var end: usize = offset;
-        while (end < assembly.length && assembly.data[end] != '\n') {
-            end += 1;
-        }
-        if (end - offset > Limit.maximum_line as usize ||
-            !line(
-                &assembler, slice(assembly, offset, end - offset))) {
-            if (assembler.error == runtime::Error.none) {
-                assembler.error = runtime::Error.invalid_argument;
-            }
-            break;
-        }
-        if (end == assembly.length) {
-            offset = end;
-        } else {
-            offset = end + 1;
-            assembler.line += 1;
-        }
-    }
-    if (assembler.error == runtime::Error.none && (!resolve_fixups(&assembler) ||
-         !validate_symbols(&assembler) || !object::is_valid(assembler.object))) {
-        if (assembler.error == runtime::Error.none) {
-            assembler.error = runtime::Error.invalid_argument;
-        }
-    }
-    let fixup_error: runtime::Error = bytes::release(assembler.fixups);
-    let label_error: runtime::Error = bytes::release(assembler.numeric_labels);
-    if (assembler.error == runtime::Error.none && fixup_error != runtime::Error.none) {
-        assembler.error = fixup_error;
-    }
-    if (assembler.error == runtime::Error.none && label_error != runtime::Error.none) {
-        assembler.error = label_error;
-    }
-    if (assembler.error != runtime::Error.none) {
-        object::release(assembler.object);
-        assembler.object = object::empty();
-    }
-    return {
-        object = assembler.object, error = assembler.error, line = assembler.line,
-    };
+    var assembler: Assembler = Assembler();
+    assembler.run(assembly);
+    return assembler.take_result();
 }

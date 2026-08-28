@@ -273,6 +273,7 @@ LIBRARIES = {
         "luna.compiler.x86.assembler",
         "backend/x86_64/assembler/operands",
         "backend/x86_64/assembler/symbols",
+        "backend/x86_64/assembler/rules",
         "backend/x86_64/assembler/encoding",
         "backend/x86_64/assembler/source",
         "backend/x86_64/assembler/facade",
