@@ -1,0 +1,191 @@
+module luna.compiler.parser;
+
+impl Parser {
+
+priv fn parse_integer_token(token: lexer::Token) -> bool {
+    var index: usize = 0;
+    var base: u64 = 10;
+    if (token.span.length >= 2 && this->source.data[token.span.offset] == '0') {
+        let prefix: u8 = this->source.data[token.span.offset + 1];
+        if (prefix == 'b' || prefix == 'B') {
+            base = 2;
+            index = 2;
+        } else if (prefix == 'o' || prefix == 'O') {
+            base = 8;
+            index = 2;
+        } else if (prefix == 'x' || prefix == 'X') {
+            base = 16;
+            index = 2;
+        }
+    }
+
+    var value: u64 = 0;
+    var saw_digit: bool = false;
+    var previous_separator: bool = false;
+    for (; index < token.span.length; index += 1) {
+        let byte: u8 = this->source.data[token.span.offset + index];
+        if (byte == '_') {
+            if (!saw_digit || previous_separator) {
+                this->add_diagnostic(lexer::DiagnosticKind.invalid_integer, token.span, lexer::TokenKind.integer,
+                    token.kind, 1);
+                return false;
+            }
+            previous_separator = true;
+            continue;
+        }
+
+        var digit: u64 = 0;
+        if (!ascii::digit_value(byte, base, &digit)) {
+            this->add_diagnostic(lexer::DiagnosticKind.invalid_integer, token.span, lexer::TokenKind.integer,
+                token.kind, 2);
+            return false;
+        }
+        if (value > (18446744073709551615 - digit) / base) {
+            this->add_diagnostic(lexer::DiagnosticKind.invalid_integer, token.span, lexer::TokenKind.integer,
+                token.kind, 3);
+            return false;
+        }
+        value = value * base + digit;
+        saw_digit = true;
+        previous_separator = false;
+    }
+    if (!saw_digit || previous_separator) {
+        this->add_diagnostic(lexer::DiagnosticKind.invalid_integer, token.span, lexer::TokenKind.integer, token.kind,
+            4);
+        return false;
+    }
+    return true;
+}
+
+priv fn scan_float_digits(token: lexer::Token, start: usize, hexadecimal: bool) -> usize {
+    var index: usize = start;
+    var saw_digit: bool = false;
+    var previous_separator: bool = false;
+    for (; index < token.span.length;) {
+        let byte: u8 = this->source.data[token.span.offset + index];
+        let digit_matches: bool = hexadecimal ? ascii::is_hex_digit(byte) : ascii::is_decimal_digit(byte);
+        if (digit_matches) {
+            saw_digit = true;
+            previous_separator = false;
+            index += 1;
+            continue;
+        }
+        if (byte == '_') {
+            let separator_has_prefix: bool = saw_digit && !previous_separator;
+            let separator_has_suffix: bool = index + 1 < token.span.length;
+            if (!separator_has_prefix || !separator_has_suffix) {
+                return syntax::no_index();
+            }
+            let next: u8 = this->source.data[token.span.offset + index + 1];
+            if (!ascii::is_hex_digit(next)) {
+                if (hexadecimal || !ascii::is_decimal_digit(next)) {
+                    return syntax::no_index();
+                }
+            }
+            previous_separator = true;
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    if (!saw_digit || previous_separator) {
+        return syntax::no_index();
+    }
+    return index;
+}
+
+priv fn has_hex_prefix(token: lexer::Token) -> bool {
+    if (token.span.length < 2) {
+        return false;
+    }
+    if (this->source.data[token.span.offset] != '0') {
+        return false;
+    }
+    let prefix: u8 = this->source.data[token.span.offset + 1];
+    return prefix == 'x' || prefix == 'X';
+}
+
+priv fn validate_hex_float(token: lexer::Token) -> bool {
+    let none: usize = syntax::no_index();
+    var index: usize = 2;
+    var saw_mantissa: bool = false;
+    let integer_end: usize = this->scan_float_digits(token, index, true);
+    if (integer_end != none) {
+        saw_mantissa = true;
+        index = integer_end;
+    }
+    if (index < token.span.length && this->source.data[token.span.offset + index] == '.') {
+        let fraction_end: usize = this->scan_float_digits(token, index + 1, true);
+        if (fraction_end == none) {
+            this->add_diagnostic(lexer::DiagnosticKind.invalid_floating, token.span, lexer::TokenKind.floating,
+                token.kind, 0);
+            return false;
+        }
+        saw_mantissa = true;
+        index = fraction_end;
+    }
+    var valid: bool = saw_mantissa;
+    if (valid && index < token.span.length) {
+        let exponent: u8 = this->source.data[token.span.offset + index];
+        if (exponent == 'p' || exponent == 'P') {
+            index += 1;
+            if (index < token.span.length) {
+                let sign: u8 = this->source.data[token.span.offset + index];
+                if (sign == '+' || sign == '-') {
+                    index += 1;
+                }
+            }
+            index = this->scan_float_digits(token, index, false);
+            valid = index == token.span.length;
+        } else {
+            valid = false;
+        }
+    } else {
+        valid = false;
+    }
+    if (!valid) {
+        this->add_diagnostic(lexer::DiagnosticKind.invalid_floating, token.span, lexer::TokenKind.floating, token.kind,
+            0);
+        return false;
+    }
+    return true;
+}
+
+priv fn validate_float(token: lexer::Token) -> bool {
+    if (this->has_hex_prefix(token)) {
+        return this->validate_hex_float(token);
+    }
+    let none: usize = syntax::no_index();
+    var index: usize = this->scan_float_digits(token, 0, false);
+    var has_fraction: bool = false;
+    var has_exponent: bool = false;
+    let fraction_position_is_valid: bool = index != none && index < token.span.length;
+    if (fraction_position_is_valid && this->source.data[token.span.offset + index] == '.') {
+        has_fraction = true;
+        index = this->scan_float_digits(token, index + 1, false);
+    }
+    if (index != none && index < token.span.length) {
+        let exponent: u8 = this->source.data[token.span.offset + index];
+        if (exponent == 'e' || exponent == 'E') {
+            has_exponent = true;
+            index += 1;
+            if (index < token.span.length) {
+                let sign: u8 = this->source.data[token.span.offset + index];
+                if (sign == '+' || sign == '-') {
+                    index += 1;
+                }
+            }
+            index = this->scan_float_digits(token, index, false);
+        }
+    }
+    let consumed_all: bool = index != none && index == token.span.length;
+    let has_floating_shape: bool = has_fraction || has_exponent;
+    if (!consumed_all || !has_floating_shape) {
+        this->add_diagnostic(lexer::DiagnosticKind.invalid_floating, token.span, lexer::TokenKind.floating, token.kind,
+            0);
+        return false;
+    }
+    return true;
+}
+
+}

@@ -58,10 +58,11 @@ harness 对满足以下条件的 expectation 自动生成少量大 suite 文件�
 
 这些任务仍使用独立工作目录，并与 suite 一起进入有界并行 worker pool。
 
-Lexer 与 Syntax 契约属于 frontend 专用协议：消费端只携带相应接口独立编译，再链接 stage 中单独生成的
-`lexer.lo`/`syntax.lo` 与真实依赖对象。这样同时验证公开 ABI、RAII 析构和模块链接，避免把实现与消费端
-错误地揉进一个源模块编译。Lexer 大用例覆盖全部关键字、标点、字面量、trivia、span 和诊断；Syntax
-大用例覆盖 Builder、Tree、View、move、mark/restore 与失败状态，不为每条细规则启动一次工具链。
+Lexer、Syntax 与 Parser 契约属于 frontend 专用协议：消费端只携带相应接口独立编译，再链接 stage 中单独
+生成的 `lexer.lo`、`syntax.lo`、`parser.lo` 与真实依赖对象。这样同时验证公开 ABI、RAII 析构和模块链接，
+避免把实现与消费端错误地揉进一个源模块编译。Lexer 大用例覆盖全部关键字、标点、字面量、trivia、span
+和诊断；Syntax 大用例覆盖 Builder、Tree、View、move、mark/restore 与失败状态；Parser 大用例覆盖完整
+树形、泛型回滚、精确诊断、非法输入和 Result move 生命周期，不为每条细规则启动一次工具链。
 
 ## 失败与确定性
 

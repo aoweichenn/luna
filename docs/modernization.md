@@ -8,7 +8,7 @@ modernization. It applies to every new or rewritten source under `library/`,
 subsystem must move toward this design rather than preserve its historical
 bootstrap shape.
 
-The current branch has established a green baseline with 443 tests and
+The current branch has established a green baseline with 450 tests and
 a byte-identical fixed point. Every migration batch must preserve those gates.
 
 ## Non-negotiable design rules
@@ -141,7 +141,7 @@ contain files or child module/family directories at one level, never both.
 | --- | --- | --- |
 | `bootstrap.frontend.lexer` | `luna.compiler.lexer` | facade, session, keywords, literals, token |
 | `bootstrap.frontend.syntax` | `luna.compiler.syntax` | tree, builder, verify |
-| `bootstrap.frontend.parser.*` | `luna.compiler.parser` | facade, session, expression, statements, declarations |
+| `bootstrap.frontend.parser.*` | `luna.compiler.parser` | facade, session, rules, literals, types, expression, statements, classes, declarations |
 | `bootstrap.middleend.type` | `luna.compiler.types` | storage, construction, validation, layout |
 | `bootstrap.middleend.ir` + `ir.verify` | `luna.compiler.ir` | model, builder, validation |
 | semantic foundational records | `luna.compiler.sema.domain` | callable, value, classes, generics |

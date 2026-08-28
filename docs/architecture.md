@@ -121,10 +121,11 @@ independent. No stage invokes a host assembler or linker. See the
 
 Source locations are byte spans into immutable source files. Tokens and syntax
 nodes retain spans so every parser, type and IR error can point to the original
-text. The parser uses an arena and never owns isolated syntax nodes.
+text. `luna.compiler.parser` owns one private recursive-descent `Parser`
+session; it borrows TokenView and never owns isolated syntax nodes.
 
 `luna.compiler.syntax` owns that arena as a move-only typed `SyntaxTree`.
-Parser state mutates it only through `SyntaxBuilder`; semantic analysis and
+Parser mutates it only through `SyntaxBuilder`; semantic analysis and
 Codegen receive a non-owning `SyntaxView`, so no consumer can release or resize
 the completed tree.
 

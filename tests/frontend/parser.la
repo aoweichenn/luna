@@ -1,0 +1,116 @@
+module tests.frontend_parser;
+
+import luna.compiler.lexer as lexer;
+import luna.compiler.parser as parser;
+import luna.compiler.syntax as syntax;
+import luna.runtime;
+import luna.std.string_view as string_views;
+import luna.std.utility as utility;
+
+fn count_kind(tree: syntax::SyntaxView, kind: syntax::SyntaxKind) -> usize {
+    var count: usize = 0;
+    for (var index: usize = 0; index < tree.size(); index += 1) {
+        let result: syntax::SyntaxNodeResult = tree.get(index);
+        if (result.error == runtime::Error.none && result.node.kind == kind) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+fn source_text() -> string_views::string_view_result {
+    return string_views::from_c_string(
+        "module tests.parser_contract;\n"
+        "import luna.std.utility as utility;\n"
+        "import luna.std.vector::{vector};\n"
+        "class Box<T> {\n"
+        "    priv value: T;\n"
+        "    pub init(input: T);\n"
+        "    pub fn get() const -> T;\n"
+        "}\n"
+        "fn select(left: i32, right: i32) -> i32 {\n"
+        "    let smaller: i32 = left < right ? left : right;\n"
+        "    return smaller;\n"
+        "}\n",
+        512);
+}
+
+fn verify_tree() -> bool {
+    let source: string_views::string_view_result = source_text();
+    let frontend: parser::FrontendResult = parser::frontend_parse(source.view);
+    let view: parser::FrontendView = frontend.view();
+    let diagnostics_are_empty: bool = view.lex.diagnostics.empty() && view.parse.diagnostics.empty();
+    if (source.error != runtime::Error.none || view.error != runtime::Error.none) {
+        return false;
+    }
+    if (!diagnostics_are_empty || !view.parse.tree.is_valid()) {
+        return false;
+    }
+    if (view.parse.tree.token_count() != view.lex.tokens.size()) {
+        return false;
+    }
+
+    let root: syntax::SyntaxNodeResult = view.parse.tree.get(view.parse.tree.root());
+    if (root.error != runtime::Error.none || root.node.kind != syntax::SyntaxKind.program) {
+        return false;
+    }
+    let top_level_shape_is_valid: bool = root.node.child_count == 5 &&
+        count_kind(view.parse.tree, syntax::SyntaxKind.import_declaration) == 2;
+    let class_shape_is_valid: bool = count_kind(view.parse.tree, syntax::SyntaxKind.class_declaration) == 1 &&
+        count_kind(view.parse.tree, syntax::SyntaxKind.generic_parameter) == 1;
+    if (!top_level_shape_is_valid || !class_shape_is_valid) {
+        return false;
+    }
+    let expression_shape_is_valid: bool = count_kind(view.parse.tree, syntax::SyntaxKind.conditional_expression) == 1 &&
+        count_kind(view.parse.tree, syntax::SyntaxKind.binary_expression) == 1;
+    return expression_shape_is_valid && count_kind(view.parse.tree, syntax::SyntaxKind.function_declaration) == 3;
+}
+
+fn verify_diagnostic() -> bool {
+    let source: string_views::string_view_result = string_views::from_c_string("module tests.bad\n", 32);
+    let frontend: parser::FrontendResult = parser::frontend_parse(source.view);
+    let view: parser::FrontendView = frontend.view();
+    if (view.error != runtime::Error.none || view.parse.diagnostics.size() != 1) {
+        return false;
+    }
+    let diagnostic: lexer::DiagnosticResult = view.parse.diagnostics.get(0);
+    let kind_is_valid: bool = diagnostic.diagnostic.kind == lexer::DiagnosticKind.expected_token &&
+        diagnostic.diagnostic.expected == lexer::TokenKind.semicolon;
+    let location_is_valid: bool = diagnostic.diagnostic.found == lexer::TokenKind.end &&
+        diagnostic.diagnostic.span.offset == source.view.length;
+    let result_is_valid: bool = diagnostic.error == runtime::Error.none && kind_is_valid;
+    return result_is_valid && location_is_valid;
+}
+
+fn verify_invalid_input() -> bool {
+    let source: string_views::string_view_result = string_views::from_c_string("module tests.invalid;", 32);
+    let invalid_tokens: lexer::TokenView = lexer::TokenView(null, 1);
+    let result: parser::ParseResult = parser::parse(source.view, invalid_tokens);
+    let shape_is_empty: bool = result.tree().empty() && result.diagnostics().empty();
+    return result.error() == runtime::Error.invalid_argument && shape_is_empty;
+}
+
+fn verify_move() -> bool {
+    let source: string_views::string_view_result = source_text();
+    var original: parser::FrontendResult = parser::frontend_parse(source.view);
+    let moved: parser::FrontendResult = utility::move(original);
+    let moved_view: parser::FrontendView = moved.view();
+    if (moved_view.error != runtime::Error.none || !moved.parsed().is_valid()) {
+        return false;
+    }
+    let source_is_empty: bool = original.lexical().tokens().empty() && original.parsed().tree().empty();
+    return source_is_empty && original.parsed().is_valid();
+}
+
+fn main() -> i32 {
+    if (!verify_tree()) {
+        return 1;
+    }
+    if (!verify_diagnostic()) {
+        return 2;
+    }
+    if (!verify_invalid_input()) {
+        return 3;
+    }
+    return verify_move() ? 0 : 4;
+}

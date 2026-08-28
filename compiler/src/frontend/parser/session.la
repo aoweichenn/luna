@@ -1,0 +1,327 @@
+module luna.compiler.parser;
+
+fn empty_span() -> lexer::SourceSpan {
+    return {
+        offset = 0, length = 0, line = 0, column = 0,
+    };
+}
+
+fn invalid_token() -> lexer::Token {
+    return {
+        kind = lexer::TokenKind.invalid, span = empty_span(),
+    };
+}
+
+fn invalid_node() -> syntax::SyntaxNode {
+    let none: usize = syntax::no_index();
+    return {
+        kind = syntax::SyntaxKind.invalid, span = empty_span(), token_index = none,
+        parent = none, first_child = none, last_child = none,
+        next_sibling = none, child_count = 0, flags = syntax::SyntaxFlag.none as usize,
+    };
+}
+
+impl Parser {
+
+priv fn token_at(index: usize) -> lexer::Token {
+    let result: lexer::TokenResult = this->tokens.get(index);
+    if (result.error != runtime::Error.none) {
+        if (this->error_code == runtime::Error.none) {
+            this->error_code = result.error;
+        }
+        return {
+            kind = lexer::TokenKind.invalid, span = {
+                offset = 0, length = 0, line = 0, column = 0,
+            },
+        };
+    }
+    return result.token;
+}
+
+priv fn identifier_text_is(token: lexer::Token, expected: *const u8, length: usize) -> bool {
+    if (token.kind != lexer::TokenKind.identifier || token.span.length != length) {
+        return false;
+    }
+    let source: string_views::string_view = this->source;
+    for (var index: usize = 0; index < length; index += 1) {
+        if (source.data[token.span.offset + index] != expected[index]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}
+
+fn span_is_valid(source: string_views::string_view, span: lexer::SourceSpan) -> bool {
+    let offset_is_valid: bool = span.offset <= source.length;
+    let length_is_valid: bool = offset_is_valid && span.length <= source.length - span.offset;
+    let position_is_valid: bool = span.line != 0 && span.column != 0;
+    return length_is_valid && position_is_valid;
+}
+
+fn source_is_valid(source: string_views::string_view) -> bool {
+    if (!string_views::is_valid_utf8(source)) {
+        return false;
+    }
+    for (var index: usize = 0; index < source.length; index += 1) {
+        if (source.data[index] == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn input_is_valid(source: string_views::string_view, tokens: lexer::TokenView) -> bool {
+    let buffers_are_valid: bool = source_is_valid(source) && tokens.is_valid();
+    if (!buffers_are_valid || tokens.empty()) {
+        return false;
+    }
+
+    let token_count: usize = tokens.size();
+    var previous_end: usize = 0;
+    var scan_offset: usize = 0;
+    var scan_line: usize = 1;
+    var scan_column: usize = 1;
+    for (var index: usize = 0; index < token_count; index += 1) {
+        let token_result: lexer::TokenResult = tokens.get(index);
+        if (token_result.error != runtime::Error.none) {
+            return false;
+        }
+        let token: lexer::Token = token_result.token;
+        let kind_is_valid: bool = (token.kind as usize) <= (lexer::TokenKind.keyword_opaque as usize);
+        let source_is_valid: bool = span_is_valid(source, token.span) && token.span.offset >= previous_end;
+        if (!kind_is_valid || !source_is_valid) {
+            return false;
+        }
+        for (; scan_offset < token.span.offset; scan_offset += 1) {
+            if (source.data[scan_offset] == '\n') {
+                scan_line += 1;
+                scan_column = 1;
+            } else {
+                scan_column += 1;
+            }
+        }
+        if (token.span.line != scan_line || token.span.column != scan_column) {
+            return false;
+        }
+        previous_end = token.span.offset + token.span.length;
+        if (index + 1 == token_count) {
+            let end_token_is_valid: bool = token.kind == lexer::TokenKind.end && token.span.length == 0;
+            return end_token_is_valid && token.span.offset == source.length;
+        }
+        if (token.kind == lexer::TokenKind.end) {
+            return false;
+        }
+    }
+    return false;
+}
+
+fn join_spans(first: lexer::SourceSpan, last: lexer::SourceSpan) -> lexer::SourceSpan {
+    if (last.offset < first.offset || last.length > (ParserLimit.maximum_size as usize) - last.offset) {
+        return first;
+    }
+    let last_end: usize = last.offset + last.length;
+    if (last_end < first.offset) {
+        return first;
+    }
+    return {
+        offset = first.offset, length = last_end - first.offset, line = first.line, column = first.column,
+    };
+}
+
+impl Parser {
+
+priv fn add_diagnostic(kind: lexer::DiagnosticKind, span: lexer::SourceSpan,
+    expected: lexer::TokenKind, found: lexer::TokenKind, detail: usize) -> bool {
+    if (this->error_code != runtime::Error.none) {
+        return false;
+    }
+    let error: runtime::Error = this->diagnostics.add({
+        kind = kind, span = span, expected = expected, found = found, detail = detail,
+    });
+    this->error_code = error;
+    return error == runtime::Error.none;
+}
+
+priv fn new_node(kind: syntax::SyntaxKind, span: lexer::SourceSpan, token_index: usize) -> usize {
+    let none: usize = syntax::no_index();
+    if (this->error_code != runtime::Error.none) {
+        return none;
+    }
+    let added: syntax::SyntaxIndexResult = this->syntax_builder.add(kind, span, token_index);
+    if (added.error == runtime::Error.none) {
+        return added.index;
+    }
+    if (added.error == runtime::Error.out_of_memory) {
+        this->add_diagnostic(lexer::DiagnosticKind.resource_limit, span, lexer::TokenKind.invalid,
+            this->current_token.kind, syntax::maximum_nodes());
+    }
+    this->error_code = added.error;
+    return none;
+}
+
+priv fn node(index: usize) -> syntax::SyntaxNode {
+    if (this->error_code != runtime::Error.none) {
+        return invalid_node();
+    }
+    let result: syntax::SyntaxNodeResult = this->syntax_builder.get(index);
+    if (result.error != runtime::Error.none) {
+        this->error_code = result.error;
+        return invalid_node();
+    }
+    return result.node;
+}
+
+priv fn set_node_span(index: usize, span: lexer::SourceSpan) -> bool {
+    if (!this->syntax_builder.set_span(index, span)) {
+        this->error_code = this->syntax_builder.error();
+        return false;
+    }
+    return true;
+}
+
+priv fn set_node_token(index: usize, token_index: usize) -> bool {
+    if (!this->syntax_builder.set_token(index, token_index)) {
+        this->error_code = this->syntax_builder.error();
+        return false;
+    }
+    return true;
+}
+
+priv fn add_node_flags(index: usize, flags: usize) -> bool {
+    if (!this->syntax_builder.add_flags(index, flags)) {
+        this->error_code = this->syntax_builder.error();
+        return false;
+    }
+    return true;
+}
+
+priv fn add_child(parent_index: usize, child_index: usize) -> bool {
+    if (!this->syntax_builder.add_child(parent_index, child_index)) {
+        this->error_code = this->syntax_builder.error();
+        return false;
+    }
+    return true;
+}
+
+priv fn advance() -> void {
+    if (this->error_code != runtime::Error.none) {
+        return;
+    }
+    this->previous_token = this->current_token;
+    for (; this->next_token_index < this->tokens.size();) {
+        let token_result: lexer::TokenResult = this->tokens.get(this->next_token_index);
+        if (token_result.error != runtime::Error.none) {
+            this->error_code = token_result.error;
+            return;
+        }
+        this->current_token = token_result.token;
+        this->current_token_index = this->next_token_index;
+        this->next_token_index += 1;
+        if (this->current_token.kind != lexer::TokenKind.invalid) {
+            return;
+        }
+    }
+    this->error_code = runtime::Error.invalid_argument;
+}
+
+priv fn check(kind: lexer::TokenKind) -> bool {
+    return this->current_token.kind == kind;
+}
+
+priv fn at_right_brace_or_end() -> bool {
+    return this->current_token.kind == lexer::TokenKind.right_brace || this->current_token.kind == lexer::TokenKind.end;
+}
+
+priv fn peek_kind() -> lexer::TokenKind {
+    var cursor: usize = this->next_token_index;
+    for (; cursor < this->tokens.size(); cursor += 1) {
+        let token_result: lexer::TokenResult = this->tokens.get(cursor);
+        if (token_result.error != runtime::Error.none) {
+            this->error_code = token_result.error;
+            return lexer::TokenKind.invalid;
+        }
+        if (token_result.token.kind != lexer::TokenKind.invalid) {
+            return token_result.token.kind;
+        }
+    }
+    return lexer::TokenKind.invalid;
+}
+
+priv fn match(kind: lexer::TokenKind) -> bool {
+    if (!this->check(kind)) {
+        return false;
+    }
+    if (kind != lexer::TokenKind.end) {
+        this->advance();
+    }
+    return true;
+}
+
+priv fn expect(kind: lexer::TokenKind) -> bool {
+    if (this->match(kind)) {
+        return true;
+    }
+    this->add_diagnostic(
+        lexer::DiagnosticKind.expected_token, this->current_token.span, kind, this->current_token.kind, 0);
+    return false;
+}
+
+priv fn enter_nesting(span: lexer::SourceSpan) -> bool {
+    if (this->nesting_depth >= ParserLimit.maximum_nesting as usize) {
+        this->add_diagnostic(lexer::DiagnosticKind.nesting_limit, span, lexer::TokenKind.invalid,
+            this->current_token.kind, this->nesting_depth);
+        return false;
+    }
+    this->nesting_depth += 1;
+    return true;
+}
+
+priv fn leave_nesting() -> void {
+    if (this->nesting_depth == 0) {
+        if (this->error_code == runtime::Error.none) {
+            this->error_code = runtime::Error.invalid_argument;
+        }
+        return;
+    }
+    this->nesting_depth -= 1;
+}
+
+priv fn mark() -> ParserMark {
+    return {
+        next_token_index = this->next_token_index, current_token = this->current_token,
+        current_token_index = this->current_token_index, previous_token = this->previous_token,
+        syntax_count = this->syntax_builder.mark(),
+        diagnostic_count = this->diagnostics.size(), nesting_depth = this->nesting_depth,
+    };
+}
+
+priv fn restore(mark: ParserMark) -> bool {
+    if (this->error_code != runtime::Error.none) {
+        return false;
+    }
+    let syntax_can_restore: bool = mark.syntax_count <= this->syntax_builder.size();
+    let diagnostics_can_restore: bool = mark.diagnostic_count <= this->diagnostics.size();
+    if (!syntax_can_restore || !diagnostics_can_restore) {
+        this->error_code = runtime::Error.invalid_argument;
+        return false;
+    }
+    this->next_token_index = mark.next_token_index;
+    this->current_token = mark.current_token;
+    this->current_token_index = mark.current_token_index;
+    this->previous_token = mark.previous_token;
+    if (!this->syntax_builder.restore(mark.syntax_count)) {
+        this->error_code = this->syntax_builder.error();
+        return false;
+    }
+    let diagnostic_error: runtime::Error = this->diagnostics.truncate(mark.diagnostic_count);
+    if (diagnostic_error != runtime::Error.none) {
+        this->error_code = diagnostic_error;
+        return false;
+    }
+    this->nesting_depth = mark.nesting_depth;
+    return true;
+}
+
+}

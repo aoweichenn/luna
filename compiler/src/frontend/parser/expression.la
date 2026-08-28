@@ -1,698 +1,152 @@
-module luna.bootstrap.frontend.parser.expression;
+module luna.compiler.parser;
 
-import luna.compiler.lexer as lexer;
-import luna.compiler.syntax as syntax;
-import luna.runtime;
-import luna.std.ascii as ascii;
+impl Parser {
 
-fn parser_is_builtin_type(kind: lexer::TokenKind) -> bool {
-    var builtin: [15]lexer::TokenKind = {};
-    builtin[0] = lexer::TokenKind.keyword_bool;
-    builtin[1] = lexer::TokenKind.keyword_i8;
-    builtin[2] = lexer::TokenKind.keyword_i16;
-    builtin[3] = lexer::TokenKind.keyword_i32;
-    builtin[4] = lexer::TokenKind.keyword_i64;
-    builtin[5] = lexer::TokenKind.keyword_isize;
-    builtin[6] = lexer::TokenKind.keyword_u8;
-    builtin[7] = lexer::TokenKind.keyword_u16;
-    builtin[8] = lexer::TokenKind.keyword_u32;
-    builtin[9] = lexer::TokenKind.keyword_u64;
-    builtin[10] = lexer::TokenKind.keyword_usize;
-    builtin[11] = lexer::TokenKind.keyword_f32;
-    builtin[12] = lexer::TokenKind.keyword_f64;
-    builtin[13] = lexer::TokenKind.keyword_void;
-    builtin[14] = lexer::TokenKind.keyword_va_list;
-    var index: usize = 0;
-    while (index < 15) {
-        if (kind == builtin[index]) {
-            return true;
-        }
-        index += 1;
-    }
-    return false;
+priv fn parse_expression() -> usize {
+    return this->parse_conditional_expression();
 }
 
-fn parser_parse_integer_token(state: *state::State, token: lexer::Token) -> bool {
-    var index: usize = 0;
-    var base: u64 = 10;
-    if (token.span.length >= 2 && state->source.data[token.span.offset] == '0') {
-        let prefix: u8 = state->source.data[token.span.offset + 1];
-        if (prefix == 'b' || prefix == 'B') {
-            base = 2;
-            index = 2;
-        } else if (prefix == 'o' || prefix == 'O') {
-            base = 8;
-            index = 2;
-        } else if (prefix == 'x' || prefix == 'X') {
-            base = 16;
-            index = 2;
-        }
-    }
-
-    var value: u64 = 0;
-    var saw_digit: bool = false;
-    var previous_separator: bool = false;
-    while (index < token.span.length) {
-        let byte: u8 = state->source.data[token.span.offset + index];
-        if (byte == '_') {
-            if (!saw_digit || previous_separator) {
-                state::parser_add_diagnostic(
-                    state, lexer::DiagnosticKind.invalid_integer, token.span, lexer::TokenKind.integer, token.kind, 1);
-                return false;
-            }
-            previous_separator = true;
-            index += 1;
-            continue;
-        }
-
-        var digit: u64 = 0;
-        if (!ascii::digit_value(byte, base, &digit)) {
-            state::parser_add_diagnostic(
-                state, lexer::DiagnosticKind.invalid_integer, token.span, lexer::TokenKind.integer, token.kind, 2);
-            return false;
-        }
-        if (value > (18446744073709551615 - digit) / base) {
-            state::parser_add_diagnostic(
-                state, lexer::DiagnosticKind.invalid_integer, token.span, lexer::TokenKind.integer, token.kind, 3);
-            return false;
-        }
-        value = value * base + digit;
-        saw_digit = true;
-        previous_separator = false;
-        index += 1;
-    }
-    if (!saw_digit || previous_separator) {
-        state::parser_add_diagnostic(
-            state, lexer::DiagnosticKind.invalid_integer, token.span, lexer::TokenKind.integer, token.kind, 4);
-        return false;
-    }
-    return true;
+priv fn at_aggregate_end() -> bool {
+    return this->current_token.kind == lexer::TokenKind.right_brace || this->current_token.kind == lexer::TokenKind.end;
 }
 
-fn parser_scan_float_digits(state: *state::State, token: lexer::Token, start: usize, hexadecimal: bool) -> usize {
-    var index: usize = start;
-    var saw_digit: bool = false;
-    var previous_separator: bool = false;
-    for (; index < token.span.length;) {
-        let byte: u8 = state->source.data[token.span.offset + index];
-        let digit_matches: bool = hexadecimal ? ascii::is_hex_digit(byte) : ascii::is_decimal_digit(byte);
-        if (digit_matches) {
-            saw_digit = true;
-            previous_separator = false;
-            index += 1;
-            continue;
-        }
-        if (byte == '_') {
-            let separator_has_prefix: bool = saw_digit && !previous_separator;
-            let separator_has_suffix: bool = index + 1 < token.span.length;
-            if (!separator_has_prefix || !separator_has_suffix) {
-                return syntax::no_index();
-            }
-            let next: u8 = state->source.data[token.span.offset + index + 1];
-            if (!ascii::is_hex_digit(next)) {
-                if (hexadecimal || !ascii::is_decimal_digit(next)) {
-                    return syntax::no_index();
-                }
-            }
-            previous_separator = true;
-            index += 1;
-            continue;
-        }
-        break;
-    }
-    if (!saw_digit || previous_separator) {
-        return syntax::no_index();
-    }
-    return index;
-}
-
-fn parser_has_hex_prefix(state: *state::State, token: lexer::Token) -> bool {
-    if (token.span.length < 2) {
-        return false;
-    }
-    if (state->source.data[token.span.offset] != '0') {
-        return false;
-    }
-    let prefix: u8 = state->source.data[token.span.offset + 1];
-    return prefix == 'x' || prefix == 'X';
-}
-
-fn parser_validate_hex_float(state: *state::State, token: lexer::Token) -> bool {
+priv fn parse_aggregate_initializer(left_brace: lexer::Token, left_brace_index: usize) -> usize {
     let none: usize = syntax::no_index();
-    var index: usize = 2;
-    var saw_mantissa: bool = false;
-    let integer_end: usize = parser_scan_float_digits(state, token, index, true);
-    if (integer_end != none) {
-        saw_mantissa = true;
-        index = integer_end;
-    }
-    if (index < token.span.length && state->source.data[token.span.offset + index] == '.') {
-        let fraction_end: usize = parser_scan_float_digits(state, token, index + 1, true);
-        if (fraction_end == none) {
-            state::parser_add_diagnostic(
-                state, lexer::DiagnosticKind.invalid_floating, token.span, lexer::TokenKind.floating, token.kind, 0);
-            return false;
-        }
-        saw_mantissa = true;
-        index = fraction_end;
-    }
-    var valid: bool = saw_mantissa;
-    if (valid && index < token.span.length) {
-        let exponent: u8 = state->source.data[token.span.offset + index];
-        if (exponent == 'p' || exponent == 'P') {
-            index += 1;
-            if (index < token.span.length) {
-                let sign: u8 = state->source.data[token.span.offset + index];
-                if (sign == '+' || sign == '-') {
-                    index += 1;
-                }
-            }
-            index = parser_scan_float_digits(state, token, index, false);
-            valid = index == token.span.length;
-        } else {
-            valid = false;
-        }
-    } else {
-        valid = false;
-    }
-    if (!valid) {
-        state::parser_add_diagnostic(
-            state, lexer::DiagnosticKind.invalid_floating, token.span, lexer::TokenKind.floating, token.kind, 0);
-        return false;
-    }
-    return true;
-}
-
-fn parser_validate_float(state: *state::State, token: lexer::Token) -> bool {
-    if (parser_has_hex_prefix(state, token)) {
-        return parser_validate_hex_float(state, token);
-    }
-    let none: usize = syntax::no_index();
-    var index: usize = parser_scan_float_digits(state, token, 0, false);
-    var has_fraction: bool = false;
-    var has_exponent: bool = false;
-    let fraction_position_is_valid: bool = index != none && index < token.span.length;
-    if (fraction_position_is_valid && state->source.data[token.span.offset + index] == '.') {
-        has_fraction = true;
-        index = parser_scan_float_digits(state, token, index + 1, false);
-    }
-    if (index != none && index < token.span.length) {
-        let exponent: u8 = state->source.data[token.span.offset + index];
-        if (exponent == 'e' || exponent == 'E') {
-            has_exponent = true;
-            index += 1;
-            if (index < token.span.length) {
-                let sign: u8 = state->source.data[token.span.offset + index];
-                if (sign == '+' || sign == '-') {
-                    index += 1;
-                }
-            }
-            index = parser_scan_float_digits(state, token, index, false);
-        }
-    }
-    let consumed_all: bool = index != none && index == token.span.length;
-    let has_floating_shape: bool = has_fraction || has_exponent;
-    if (!consumed_all || !has_floating_shape) {
-        state::parser_add_diagnostic(
-            state, lexer::DiagnosticKind.invalid_floating, token.span, lexer::TokenKind.floating, token.kind, 0);
-        return false;
-    }
-    return true;
-}
-
-// Parses the `:: segment` tail of a qualified path after the first
-// identifier. The node's token_index names the last segment; every preceding
-// segment becomes a name_expression child in source order, so qualified
-// names need no new node kinds. Sema accepts exactly one qualifier segment
-// and diagnoses longer chains itself (parse errors are not diagnosable).
-fn parser_parse_qualified_name(
-    state: *state::State, first: lexer::Token, first_index: usize, kind: syntax::SyntaxKind) -> usize {
-    let node: usize = state::parser_new_node(state, kind, first.span, first_index);
-    var segment: lexer::Token = first;
-    var segment_index: usize = first_index;
-    while (state->error == runtime::Error.none && state->current.kind == lexer::TokenKind.colon_colon) {
-        state::parser_advance(state);
-        let name: lexer::Token = state->current;
-        let name_index: usize = state->current_index;
-        if (!state::parser_expect(
-                state, lexer::TokenKind.identifier)) {
-            break;
-        }
-        state::parser_add_child(
-            state, node, state::parser_new_node(state, syntax::SyntaxKind.name_expression, segment.span,
-                segment_index));
-        segment = name;
-        segment_index = name_index;
-        if (!state::parser_set_node_token(state, node, name_index)) {
-            return syntax::no_index();
-        }
-        state::parser_set_node_span(state, node, state::parser_join_spans(first.span, name.span));
-    }
-    return node;
-}
-
-fn parser_match_generic_greater(state: *state::State) -> bool {
-    if (state::parser_match(state, lexer::TokenKind.greater)) {
-        return true;
-    }
-    if (state->current.kind != lexer::TokenKind.shift_right) {
-        return state::parser_expect(state, lexer::TokenKind.greater);
-    }
-    let combined: lexer::Token = state->current;
-    state->previous = {
-        kind = lexer::TokenKind.greater, span = {
-            offset = combined.span.offset, length = 1, line = combined.span.line, column = combined.span.column,
-        },
-    };
-    state->current = {
-        kind = lexer::TokenKind.greater, span = {
-            offset = combined.span.offset + 1, length = 1, line = combined.span.line, column = combined.span.column + 1,
-        },
-    };
-    return true;
-}
-
-fn parser_parse_generic_arguments(state: *state::State) -> usize {
-    let none: usize = syntax::no_index();
-    let start: lexer::Token = state->current;
-    let start_index: usize = state->current_index;
-    if (!state::parser_match(state, lexer::TokenKind.less)) {
-        return none;
-    }
-    let arguments: usize = state::parser_new_node(state, syntax::SyntaxKind.generic_arguments, start.span, start_index);
-    if (!state::parser_enter_nesting(state, start.span)) {
-        return arguments;
-    }
-    for (; state->error == runtime::Error.none;) {
-        let argument: usize = parser_parse_type(state);
-        if (argument != none) {
-            state::parser_add_child(state, arguments, argument);
-        }
-        if (!state::parser_match(state, lexer::TokenKind.comma)) {
-            break;
-        }
-    }
-    parser_match_generic_greater(state);
-    state::parser_set_node_span(state, arguments, state::parser_join_spans(start.span, state->previous.span));
-    state::parser_leave_nesting(state);
-    return arguments;
-}
-
-fn parser_finish_type(state: *state::State, base: usize, leading_const: bool, allow_reference: bool) -> usize {
-    let none: usize = syntax::no_index();
-    if (base == none) {
-        return none;
-    }
-    if (!allow_reference) {
-        return base;
-    }
-    let base_node: syntax::SyntaxNode = state::parser_node(state, base);
-    if (base_node.kind == syntax::SyntaxKind.invalid) {
-        return none;
-    }
-    var suffix_offset: usize = base_node.span.offset + base_node.span.length;
-    var read_only: bool = leading_const;
-    if (state::parser_match(state, lexer::TokenKind.keyword_const)) {
-        if (read_only) {
-            state::parser_add_diagnostic(
-                state, lexer::DiagnosticKind.expected_type, state->previous.span,
-                lexer::TokenKind.ampersand, lexer::TokenKind.keyword_const, 0);
-        }
-        read_only = true;
-        suffix_offset = state->previous.span.offset + state->previous.span.length;
-    }
-    let lvalue_reference: bool = state->current.kind == lexer::TokenKind.ampersand;
-    let rvalue_reference: bool = state->current.kind == lexer::TokenKind.logical_and;
-    let reference_token: bool = lvalue_reference || rvalue_reference;
-    let adjacent: bool = state->current.span.offset == suffix_offset;
-    if (!reference_token || !adjacent) {
-        if (read_only) {
-            state::parser_add_diagnostic(
-                state, lexer::DiagnosticKind.expected_type, state->current.span,
-                lexer::TokenKind.ampersand, state->current.kind, 0);
-        }
-        return base;
-    }
-    let operation: lexer::Token = state->current;
-    let operation_index: usize = state->current_index;
-    state::parser_advance(state);
-    let reference: usize = state::parser_new_node(
-        state, syntax::SyntaxKind.type_reference,
-        state::parser_join_spans(base_node.span, operation.span), operation_index);
-    if (read_only) {
-        state::parser_add_node_flags(state, reference, syntax::SyntaxFlag.read_only as usize);
-    }
-    if (rvalue_reference) {
-        state::parser_add_node_flags(state, reference, syntax::SyntaxFlag.rvalue_reference as usize);
-    }
-    state::parser_add_child(state, reference, base);
-    return reference;
-}
-
-fn parser_parse_type_active(state: *state::State, allow_reference: bool) -> usize {
-    let none: usize = syntax::no_index();
-    let start: lexer::Token = state->current;
-    let start_index: usize = state->current_index;
-    if (!state::parser_enter_nesting(state, start.span)) {
-        return none;
-    }
-    let leading_const: bool = state::parser_match(state, lexer::TokenKind.keyword_const);
-
-    var callable_kind: syntax::SyntaxKind = syntax::SyntaxKind.invalid;
-    if (state::parser_match(state, lexer::TokenKind.keyword_method)) {
-        state::parser_expect(state, lexer::TokenKind.keyword_fn);
-        callable_kind = syntax::SyntaxKind.type_method_function;
-    } else if (state::parser_match(state, lexer::TokenKind.keyword_fn)) {
-        callable_kind = syntax::SyntaxKind.type_function;
-    }
-    if (callable_kind != syntax::SyntaxKind.invalid) {
-        let node: usize = state::parser_new_node(state, callable_kind, start.span, start_index);
-        state::parser_expect(state, lexer::TokenKind.left_parenthesis);
-        if (state->current.kind != lexer::TokenKind.right_parenthesis) {
-            while (state->error == runtime::Error.none) {
-                // A `...` tail marks a variadic signature; the semantic layer
-                // rejects it on every non-function mount (fn-pointer types // included) with invalid_variadic.
-                if (state->current.kind == lexer::TokenKind.dot_dot_dot) {
-                    state::parser_advance(state);
-                    state::parser_add_node_flags(state, node, syntax::SyntaxFlag.variadic as usize);
-                    break;
-                }
-                let parameter: usize = parser_parse_type(state);
-                if (parameter != none) {
-                    state::parser_add_child(state, node, parameter);
-                }
-                if (!state::parser_match(
-                        state, lexer::TokenKind.comma)) {
-                    break;
-                }
-            }
-        }
-        state::parser_expect(state, lexer::TokenKind.right_parenthesis);
-        if (state::parser_match(
-                state, lexer::TokenKind.arrow)) {
-            state::parser_add_node_flags(state, node, syntax::SyntaxFlag.has_return_type as usize);
-            let return_type: usize = parser_parse_type(state);
-            if (return_type != none) {
-                state::parser_add_child(state, node, return_type);
-            }
-        }
-        let result: usize = parser_finish_type(state, node, leading_const, allow_reference);
-        state::parser_leave_nesting(state);
-        return result;
+    if (this->match(lexer::TokenKind.right_brace)) {
+        return this->new_node(syntax::SyntaxKind.zero_initializer,
+            join_spans(left_brace.span, this->previous_token.span), left_brace_index);
     }
 
-    if (state::parser_match(state, lexer::TokenKind.star)) {
-        let node: usize = state::parser_new_node(state, syntax::SyntaxKind.type_pointer, start.span, start_index);
-        var seen_const: bool = false;
-        var seen_volatile: bool = false;
-        var qualifiers_done: bool = false;
-        while (!qualifiers_done && state->error == runtime::Error.none) {
-            if (state->current.kind == lexer::TokenKind.keyword_const) {
-                if (seen_const) {
-                    state::parser_add_diagnostic(
-                        state, lexer::DiagnosticKind.expected_type, state->current.span,
-                        lexer::TokenKind.identifier, state->current.kind, 0);
-                    qualifiers_done = true;
-                } else {
-                    seen_const = true;
-                    state::parser_add_node_flags(state, node, syntax::SyntaxFlag.read_only as usize);
-                    state::parser_advance(state);
-                }
-            } else if (state->current.kind == lexer::TokenKind.keyword_volatile) {
-                if (seen_volatile) {
-                    state::parser_add_diagnostic(
-                        state, lexer::DiagnosticKind.expected_type, state->current.span,
-                        lexer::TokenKind.identifier, state->current.kind, 0);
-                    qualifiers_done = true;
-                } else {
-                    seen_volatile = true;
-                    state::parser_add_node_flags(state, node, syntax::SyntaxFlag.volatile_ as usize);
-                    state::parser_advance(state);
-                }
-            } else {
-                qualifiers_done = true;
-            }
-        }
-        let pointee: usize = parser_parse_type_active(state, false);
-        if (pointee != none) {
-            state::parser_add_child(state, node, pointee);
-            let pointee_node: syntax::SyntaxNode = state::parser_node(state, pointee);
-            if (pointee_node.kind != syntax::SyntaxKind.invalid) {
-                state::parser_set_node_span(state, node, state::parser_join_spans(start.span, pointee_node.span));
-            }
-        }
-        let result: usize = parser_finish_type(state, node, leading_const, allow_reference);
-        state::parser_leave_nesting(state);
-        return result;
-    }
-
-    if (state::parser_match(
-            state, lexer::TokenKind.left_bracket)) {
-        let node: usize = state::parser_new_node(state, syntax::SyntaxKind.type_array, start.span, start_index);
-        if (state->current.kind == lexer::TokenKind.question) {
-            state::parser_add_node_flags(state, node, syntax::SyntaxFlag.flexible as usize);
-            state::parser_advance(state);
-        } else {
-            let count_expression: usize = parser_parse_expression(state);
-            if (count_expression != none) {
-                state::parser_add_child(state, node, count_expression);
-            }
-        }
-        state::parser_expect(state, lexer::TokenKind.right_bracket);
-        let element: usize = parser_parse_type_active(state, false);
-        if (element != none) {
-            state::parser_add_child(state, node, element);
-            let element_node: syntax::SyntaxNode = state::parser_node(state, element);
-            if (element_node.kind != syntax::SyntaxKind.invalid) {
-                state::parser_set_node_span(state, node, state::parser_join_spans(start.span, element_node.span));
-            }
-        }
-        let result: usize = parser_finish_type(state, node, leading_const, allow_reference);
-        state::parser_leave_nesting(state);
-        return result;
-    }
-
-    var kind: syntax::SyntaxKind = syntax::SyntaxKind.invalid;
-    if (state->current.kind == lexer::TokenKind.identifier) {
-        kind = syntax::SyntaxKind.type_named;
-    } else if (parser_is_builtin_type(
-            state->current.kind)) {
-        kind = syntax::SyntaxKind.type_builtin;
-    }
-    if (kind == syntax::SyntaxKind.invalid) {
-        state::parser_add_diagnostic(
-            state, lexer::DiagnosticKind.expected_type, state->current.span, lexer::TokenKind.identifier,
-            state->current.kind, 0);
-        if (state->current.kind != lexer::TokenKind.end) {
-            state::parser_advance(state);
-        }
-        state::parser_leave_nesting(state);
-        return state::parser_new_node(state, syntax::SyntaxKind.invalid, start.span, start_index);
-    }
-
-    if (kind == syntax::SyntaxKind.type_named) {
-        let named: lexer::Token = state->current;
-        let named_index: usize = state->current_index;
-        state::parser_advance(state);
-        let named_node: usize = parser_parse_qualified_name(state, named, named_index, kind);
-        if (state->current.kind == lexer::TokenKind.less) {
-            let arguments: usize = parser_parse_generic_arguments(state);
-            let named_value: syntax::SyntaxNode = state::parser_node(state, named_node);
-            let arguments_value: syntax::SyntaxNode = state::parser_node(state, arguments);
-            if (named_value.kind == syntax::SyntaxKind.invalid || arguments_value.kind == syntax::SyntaxKind.invalid) {
-                state::parser_leave_nesting(state);
-                return none;
-            }
-            let generic: usize = state::parser_new_node(
-                state, syntax::SyntaxKind.type_generic, named_value.span, named_value.token_index);
-            state::parser_add_child(state, generic, named_node);
-            state::parser_add_child(state, generic, arguments);
-            state::parser_set_node_span(
-                state, generic, state::parser_join_spans(named_value.span, arguments_value.span));
-            let result: usize = parser_finish_type(state, generic, leading_const, allow_reference);
-            state::parser_leave_nesting(state);
-            return result;
-        }
-        let result: usize = parser_finish_type(state, named_node, leading_const, allow_reference);
-        state::parser_leave_nesting(state);
-        return result;
-    }
-
-    let node: usize = state::parser_new_node(state, kind, state->current.span, state->current_index);
-    state::parser_advance(state);
-    let result: usize = parser_finish_type(state, node, leading_const, allow_reference);
-    state::parser_leave_nesting(state);
-    return result;
-}
-
-fn parser_parse_type(state: *state::State) -> usize {
-    return parser_parse_type_active(state, true);
-}
-
-fn parser_parse_expression(state: *state::State) -> usize {
-    return parser_parse_conditional_expression(state);
-}
-
-fn parser_at_aggregate_end(state: *state::State) -> bool {
-    return state->current.kind == lexer::TokenKind.right_brace || state->current.kind == lexer::TokenKind.end;
-}
-
-fn parser_parse_aggregate_initializer(state: *state::State, left_brace: lexer::Token,
-    left_brace_index: usize) -> usize {
-    let none: usize = syntax::no_index();
-    if (state::parser_match(
-            state, lexer::TokenKind.right_brace)) {
-        return state::parser_new_node(
-            state, syntax::SyntaxKind.zero_initializer,
-            state::parser_join_spans(left_brace.span, state->previous.span), left_brace_index);
-    }
-
-    let initializer: usize = state::parser_new_node(
-        state, syntax::SyntaxKind.aggregate_initializer, left_brace.span, left_brace_index);
-    if (!state::parser_enter_nesting(
-            state, left_brace.span)) {
+    let initializer: usize = this->new_node(syntax::SyntaxKind.aggregate_initializer, left_brace.span,
+        left_brace_index);
+    if (!this->enter_nesting(left_brace.span)) {
         return initializer;
     }
-    for (; state->error == runtime::Error.none && !parser_at_aggregate_end(state);) {
-        let offset_before: usize = state->current.span.offset;
-        if (state->current.kind == lexer::TokenKind.left_bracket) {
-            let bracket: lexer::Token = state->current;
-            let bracket_index: usize = state->current_index;
-            state::parser_advance(state);
-            let element: usize = state::parser_new_node(
-                state, syntax::SyntaxKind.initializer_element, bracket.span, bracket_index);
-            state::parser_add_node_flags(state, element, syntax::SyntaxFlag.indexed as usize);
-            let index: usize = parser_parse_expression(state);
+    for (; this->error_code == runtime::Error.none && !this->at_aggregate_end();) {
+        let offset_before: usize = this->current_token.span.offset;
+        if (this->current_token.kind == lexer::TokenKind.left_bracket) {
+            let bracket: lexer::Token = this->current_token;
+            let bracket_index: usize = this->current_token_index;
+            this->advance();
+            let element: usize = this->new_node(syntax::SyntaxKind.initializer_element, bracket.span, bracket_index);
+            this->add_node_flags(element, syntax::SyntaxFlag.indexed as usize);
+            let index: usize = this->parse_expression();
             if (index != none) {
-                state::parser_add_child(state, element, index);
+                this->add_child(element, index);
             }
-            state::parser_expect(state, lexer::TokenKind.right_bracket);
-            state::parser_expect(state, lexer::TokenKind.equal);
-            let indexed_value: usize = parser_parse_expression(state);
+            this->expect(lexer::TokenKind.right_bracket);
+            this->expect(lexer::TokenKind.equal);
+            let indexed_value: usize = this->parse_expression();
             if (indexed_value != none) {
-                state::parser_add_child(state, element, indexed_value);
-                let value_node: syntax::SyntaxNode = state::parser_node(state, indexed_value);
+                this->add_child(element, indexed_value);
+                let value_node: syntax::SyntaxNode = this->node(indexed_value);
                 if (value_node.kind != syntax::SyntaxKind.invalid) {
-                    state::parser_set_node_span(state, element, state::parser_join_spans(bracket.span,
-                        value_node.span));
+                    this->set_node_span(element, join_spans(bracket.span, value_node.span));
                 }
             }
-            state::parser_add_child(state, initializer, element);
-        } else if (state->current.kind == lexer::TokenKind.identifier &&
-            state::parser_token_at(state, state->current_index + 1).kind == lexer::TokenKind.equal) {
-            let name: lexer::Token = state->current;
-            let name_index: usize = state->current_index;
-            state::parser_advance(state);
-            let field: usize = state::parser_new_node(state, syntax::SyntaxKind.initializer_field, name.span,
-                name_index);
-            state::parser_expect(state, lexer::TokenKind.equal);
-            let value: usize = parser_parse_expression(state);
+            this->add_child(initializer, element);
+        } else if (this->current_token.kind == lexer::TokenKind.identifier &&
+            this->token_at(this->current_token_index + 1).kind == lexer::TokenKind.equal) {
+            let name: lexer::Token = this->current_token;
+            let name_index: usize = this->current_token_index;
+            this->advance();
+            let field: usize = this->new_node(syntax::SyntaxKind.initializer_field, name.span, name_index);
+            this->expect(lexer::TokenKind.equal);
+            let value: usize = this->parse_expression();
             if (value != none) {
-                state::parser_add_child(state, field, value);
-                let value_node: syntax::SyntaxNode = state::parser_node(state, value);
+                this->add_child(field, value);
+                let value_node: syntax::SyntaxNode = this->node(value);
                 if (value_node.kind != syntax::SyntaxKind.invalid) {
-                    state::parser_set_node_span(state, field, state::parser_join_spans(name.span, value_node.span));
+                    this->set_node_span(field, join_spans(name.span, value_node.span));
                 }
             }
-            state::parser_add_child(state, initializer, field);
+            this->add_child(initializer, field);
         } else {
-            let value_index: usize = state->current_index;
-            let value: usize = parser_parse_expression(state);
+            let value_index: usize = this->current_token_index;
+            let value: usize = this->parse_expression();
             if (value != none) {
-                let value_node: syntax::SyntaxNode = state::parser_node(state, value);
-                let element: usize = state::parser_new_node(
-                    state, syntax::SyntaxKind.initializer_element,
-                    value_node.kind == syntax::SyntaxKind.invalid ? state->previous.span : value_node.span,
+                let value_node: syntax::SyntaxNode = this->node(value);
+                let element: usize = this->new_node(syntax::SyntaxKind.initializer_element,
+                    value_node.kind == syntax::SyntaxKind.invalid ? this->previous_token.span : value_node.span,
                         value_index);
-                state::parser_add_child(state, element, value);
-                state::parser_add_child(state, initializer, element);
-            } else if (state->current.kind != lexer::TokenKind.end) {
-                state::parser_advance(state);
+                this->add_child(element, value);
+                this->add_child(initializer, element);
+            } else if (this->current_token.kind != lexer::TokenKind.end) {
+                this->advance();
             }
         }
 
-        if (!state::parser_match(
-                state, lexer::TokenKind.comma)) {
+        if (!this->match(lexer::TokenKind.comma)) {
             break;
         }
-        if (state->current.kind == lexer::TokenKind.right_brace) {
+        if (this->current_token.kind == lexer::TokenKind.right_brace) {
             break;
         }
-        if (state->current.span.offset == offset_before && state->current.kind != lexer::TokenKind.end) {
-            state::parser_advance(state);
+        if (this->current_token.span.offset == offset_before && this->current_token.kind != lexer::TokenKind.end) {
+            this->advance();
         }
     }
-    state::parser_expect(state, lexer::TokenKind.right_brace);
-    state::parser_set_node_span(state, initializer, state::parser_join_spans(left_brace.span, state->previous.span));
-    state::parser_leave_nesting(state);
+    this->expect(lexer::TokenKind.right_brace);
+    this->set_node_span(initializer, join_spans(left_brace.span, this->previous_token.span));
+    this->leave_nesting();
     return initializer;
 }
 
-fn parser_parse_call(
-    state: *state::State, callee: usize, left_parenthesis: lexer::Token, left_parenthesis_index: usize) -> usize {
+priv fn parse_call(callee: usize, left_parenthesis: lexer::Token, left_parenthesis_index: usize) -> usize {
     let none: usize = syntax::no_index();
-    let callee_node: syntax::SyntaxNode = state::parser_node(state, callee);
+    let callee_node: syntax::SyntaxNode = this->node(callee);
     let start_span: lexer::SourceSpan = callee_node.kind == syntax::SyntaxKind.invalid ? left_parenthesis.span :
         callee_node.span;
-    let call: usize = state::parser_new_node(state, syntax::SyntaxKind.call_expression, start_span,
-        left_parenthesis_index);
-    state::parser_add_child(state, call, callee);
-    if (!state::parser_enter_nesting(
-            state, left_parenthesis.span)) {
+    let call: usize = this->new_node(syntax::SyntaxKind.call_expression, start_span, left_parenthesis_index);
+    this->add_child(call, callee);
+    if (!this->enter_nesting(left_parenthesis.span)) {
         return call;
     }
-    if (state->current.kind != lexer::TokenKind.right_parenthesis) {
-        while (state->error == runtime::Error.none) {
-            let argument: usize = parser_parse_expression(state);
+    if (this->current_token.kind != lexer::TokenKind.right_parenthesis) {
+        while (this->error_code == runtime::Error.none) {
+            let argument: usize = this->parse_expression();
             if (argument != none) {
-                state::parser_add_child(state, call, argument);
+                this->add_child(call, argument);
             }
-            if (!state::parser_match(
-                    state, lexer::TokenKind.comma)) {
+            if (!this->match(lexer::TokenKind.comma)) {
                 break;
             }
         }
     }
-    state::parser_expect(state, lexer::TokenKind.right_parenthesis);
-    state::parser_set_node_span(state, call, state::parser_join_spans(start_span, state->previous.span));
-    state::parser_leave_nesting(state);
+    this->expect(lexer::TokenKind.right_parenthesis);
+    this->set_node_span(call, join_spans(start_span, this->previous_token.span));
+    this->leave_nesting();
     return call;
 }
 
-fn parser_parse_intrinsic_expression(state: *state::State, at_sign: lexer::Token) -> usize {
+priv fn parse_intrinsic_expression(at_sign: lexer::Token) -> usize {
     let none: usize = syntax::no_index();
-    let name_index: usize = state->current_index;
-    let intrinsic: usize = state::parser_new_node(state, syntax::SyntaxKind.intrinsic_expression, at_sign.span,
-        name_index);
-    if (state::parser_expect(state, lexer::TokenKind.identifier) &&
-        state::parser_expect(
-            state, lexer::TokenKind.left_parenthesis)) {
-        if (!state::parser_enter_nesting(
-                state, at_sign.span)) {
+    let name_index: usize = this->current_token_index;
+    let intrinsic: usize = this->new_node(syntax::SyntaxKind.intrinsic_expression, at_sign.span, name_index);
+    if (this->expect(lexer::TokenKind.identifier) && this->expect(lexer::TokenKind.left_parenthesis)) {
+        if (!this->enter_nesting(at_sign.span)) {
             return intrinsic;
         }
-        if (state->current.kind != lexer::TokenKind.right_parenthesis) {
-            while (state->error == runtime::Error.none) {
-                let argument: usize = parser_parse_expression(state);
+        if (this->current_token.kind != lexer::TokenKind.right_parenthesis) {
+            while (this->error_code == runtime::Error.none) {
+                let argument: usize = this->parse_expression();
                 if (argument != none) {
-                    state::parser_add_child(state, intrinsic, argument);
+                    this->add_child(intrinsic, argument);
                 }
-                if (!state::parser_match(
-                        state, lexer::TokenKind.comma)) {
+                if (!this->match(lexer::TokenKind.comma)) {
                     break;
                 }
             }
         }
-        state::parser_expect(state, lexer::TokenKind.right_parenthesis);
-        state::parser_leave_nesting(state);
+        this->expect(lexer::TokenKind.right_parenthesis);
+        this->leave_nesting();
     }
-    state::parser_set_node_span(state, intrinsic, state::parser_join_spans(at_sign.span, state->previous.span));
+    this->set_node_span(intrinsic, join_spans(at_sign.span, this->previous_token.span));
     return intrinsic;
 }
 
-fn parser_parse_layout_query(state: *state::State, keyword: lexer::Token, keyword_index: usize) -> usize {
-    if (!state::parser_enter_nesting(
-            state, keyword.span)) {
+priv fn parse_layout_query(keyword: lexer::Token, keyword_index: usize) -> usize {
+    if (!this->enter_nesting(keyword.span)) {
         return syntax::no_index();
     }
     var kind: syntax::SyntaxKind = syntax::SyntaxKind.sizeof_expression;
@@ -701,285 +155,247 @@ fn parser_parse_layout_query(state: *state::State, keyword: lexer::Token, keywor
     } else if (keyword.kind == lexer::TokenKind.keyword_offsetof) {
         kind = syntax::SyntaxKind.offsetof_expression;
     }
-    let query: usize = state::parser_new_node(state, kind, keyword.span, keyword_index);
-    state::parser_expect(state, lexer::TokenKind.left_parenthesis);
+    let query: usize = this->new_node(kind, keyword.span, keyword_index);
+    this->expect(lexer::TokenKind.left_parenthesis);
     var operand: usize = syntax::no_index();
-    if (state->current.kind == lexer::TokenKind.at_sign) {
-        // A layout query also takes an intrinsic operand (e.g. sizeof(@embed("path"))); the semantic
-        // pass then reads the layout of the lowered expression's type instead of a type node.
-        let at_sign: lexer::Token = state->current;
-        state::parser_advance(state);
-        operand = parser_parse_intrinsic_expression(state, at_sign);
+    if (this->current_token.kind == lexer::TokenKind.at_sign) {
+        // 布局查询也接受内建表达式操作数；语义阶段从降级后表达式的类型读取布局。
+        let at_sign: lexer::Token = this->current_token;
+        this->advance();
+        operand = this->parse_intrinsic_expression(at_sign);
     } else {
-        operand = parser_parse_type(state);
+        operand = this->parse_type();
     }
     if (operand != syntax::no_index()) {
-        state::parser_add_child(state, query, operand);
+        this->add_child(query, operand);
     }
     if (keyword.kind == lexer::TokenKind.keyword_offsetof) {
-        state::parser_expect(state, lexer::TokenKind.comma);
-        let member: lexer::Token = state->current;
-        let member_index: usize = state->current_index;
-        if (state::parser_expect(
-                state, lexer::TokenKind.identifier)) {
-            let member_node: usize = state::parser_new_node(
-                state, syntax::SyntaxKind.name_expression, member.span, member_index);
-            state::parser_add_child(state, query, member_node);
+        this->expect(lexer::TokenKind.comma);
+        let member: lexer::Token = this->current_token;
+        let member_index: usize = this->current_token_index;
+        if (this->expect(lexer::TokenKind.identifier)) {
+            let member_node: usize = this->new_node(syntax::SyntaxKind.name_expression, member.span, member_index);
+            this->add_child(query, member_node);
         }
-        while (state::parser_match(state, lexer::TokenKind.dot)) {
-            let nested: lexer::Token = state->current;
-            let nested_index: usize = state->current_index;
-            if (!state::parser_expect(
-                    state, lexer::TokenKind.identifier)) {
+        while (this->match(lexer::TokenKind.dot)) {
+            let nested: lexer::Token = this->current_token;
+            let nested_index: usize = this->current_token_index;
+            if (!this->expect(lexer::TokenKind.identifier)) {
                 break;
             }
-            let nested_node: usize = state::parser_new_node(
-                state, syntax::SyntaxKind.name_expression, nested.span, nested_index);
-            state::parser_add_child(state, query, nested_node);
+            let nested_node: usize = this->new_node(syntax::SyntaxKind.name_expression, nested.span, nested_index);
+            this->add_child(query, nested_node);
         }
     }
-    state::parser_expect(state, lexer::TokenKind.right_parenthesis);
-    state::parser_set_node_span(state, query, state::parser_join_spans(keyword.span, state->previous.span));
-    state::parser_leave_nesting(state);
+    this->expect(lexer::TokenKind.right_parenthesis);
+    this->set_node_span(query, join_spans(keyword.span, this->previous_token.span));
+    this->leave_nesting();
     return query;
 }
 
-fn parser_parse_va_arg_expression(state: *state::State, keyword: lexer::Token, keyword_index: usize) -> usize {
-    if (!state::parser_enter_nesting(
-            state, keyword.span)) {
+priv fn parse_va_arg_expression(keyword: lexer::Token, keyword_index: usize) -> usize {
+    if (!this->enter_nesting(keyword.span)) {
         return syntax::no_index();
     }
-    let query: usize = state::parser_new_node(state, syntax::SyntaxKind.va_arg_expression, keyword.span, keyword_index);
-    state::parser_expect(state, lexer::TokenKind.left_parenthesis);
-    let list_expression: usize = parser_parse_expression(state);
+    let query: usize = this->new_node(syntax::SyntaxKind.va_arg_expression, keyword.span, keyword_index);
+    this->expect(lexer::TokenKind.left_parenthesis);
+    let list_expression: usize = this->parse_expression();
     if (list_expression != syntax::no_index()) {
-        state::parser_add_child(state, query, list_expression);
+        this->add_child(query, list_expression);
     }
-    state::parser_expect(state, lexer::TokenKind.comma);
-    let type_node: usize = parser_parse_type(state);
+    this->expect(lexer::TokenKind.comma);
+    let type_node: usize = this->parse_type();
     if (type_node != syntax::no_index()) {
-        state::parser_add_child(state, query, type_node);
+        this->add_child(query, type_node);
     }
-    state::parser_expect(state, lexer::TokenKind.right_parenthesis);
-    state::parser_set_node_span(state, query, state::parser_join_spans(keyword.span, state->previous.span));
-    state::parser_leave_nesting(state);
+    this->expect(lexer::TokenKind.right_parenthesis);
+    this->set_node_span(query, join_spans(keyword.span, this->previous_token.span));
+    this->leave_nesting();
     return query;
 }
 
-fn parser_is_layout_keyword(kind: lexer::TokenKind) -> bool {
-    switch (kind) {
-    case lexer::TokenKind.keyword_sizeof {
-        return true;
+priv fn parse_string_expression(token: lexer::Token, token_index: usize) -> usize {
+    this->advance();
+    let node: usize = this->new_node(syntax::SyntaxKind.string_expression, token.span, token_index);
+    for (; is_string_token(this->current_token.kind);) {
+        let part: lexer::Token = this->current_token;
+        let part_index: usize = this->current_token_index;
+        this->advance();
+        this->add_child(node, this->new_node(syntax::SyntaxKind.string_expression, part.span, part_index));
+        this->set_node_span(node, join_spans(token.span, this->previous_token.span));
     }
-    case lexer::TokenKind.keyword_alignof {
-        return true;
+    return node;
+}
+
+priv fn parse_parenthesized_expression(token: lexer::Token, token_index: usize) -> usize {
+    this->advance();
+    if (!this->enter_nesting(token.span)) {
+        return syntax::no_index();
     }
-    case lexer::TokenKind.keyword_offsetof {
-        return true;
+    let expression: usize = this->parse_expression();
+    this->expect(lexer::TokenKind.right_parenthesis);
+    let node: usize = this->new_node(syntax::SyntaxKind.parenthesized_expression,
+        join_spans(token.span, this->previous_token.span), token_index);
+    if (expression != syntax::no_index()) {
+        this->add_child(node, expression);
+    }
+    this->leave_nesting();
+    return node;
+}
+
+priv fn parse_primary_expression() -> usize {
+    let token: lexer::Token = this->current_token;
+    let token_index: usize = this->current_token_index;
+
+    switch (token.kind) {
+    case lexer::TokenKind.keyword_va_arg {
+        this->advance();
+        return this->parse_va_arg_expression(token, token_index);
+    }
+    case lexer::TokenKind.keyword_sizeof, lexer::TokenKind.keyword_alignof, lexer::TokenKind.keyword_offsetof {
+        this->advance();
+        return this->parse_layout_query(token, token_index);
+    }
+    case lexer::TokenKind.at_sign {
+        this->advance();
+        return this->parse_intrinsic_expression(token);
+    }
+    case lexer::TokenKind.integer {
+        this->advance();
+        this->parse_integer_token(token);
+        return this->new_node(syntax::SyntaxKind.integer_expression, token.span, token_index);
+    }
+    case lexer::TokenKind.floating {
+        this->advance();
+        this->validate_float(token);
+        return this->new_node(syntax::SyntaxKind.floating_expression, token.span, token_index);
+    }
+    case lexer::TokenKind.character {
+        this->advance();
+        return this->new_node(syntax::SyntaxKind.character_expression, token.span, token_index);
+    }
+    case lexer::TokenKind.keyword_true, lexer::TokenKind.keyword_false {
+        this->advance();
+        return this->new_node(syntax::SyntaxKind.boolean_expression, token.span, token_index);
+    }
+    case lexer::TokenKind.string, lexer::TokenKind.string_u16, lexer::TokenKind.string_u32 {
+        return this->parse_string_expression(token, token_index);
+    }
+    case lexer::TokenKind.keyword_null {
+        this->advance();
+        return this->new_node(syntax::SyntaxKind.null_expression, token.span, token_index);
+    }
+    case lexer::TokenKind.keyword_this {
+        this->advance();
+        return this->new_node(syntax::SyntaxKind.this_expression, token.span, token_index);
+    }
+    case lexer::TokenKind.keyword_super {
+        this->advance();
+        return this->new_node(syntax::SyntaxKind.super_expression, token.span, token_index);
+    }
+    case lexer::TokenKind.left_brace {
+        this->advance();
+        return this->parse_aggregate_initializer(token, token_index);
+    }
+    case lexer::TokenKind.identifier {
+        this->advance();
+        return this->parse_qualified_name(token, token_index, syntax::SyntaxKind.name_expression);
+    }
+    case lexer::TokenKind.left_parenthesis {
+        return this->parse_parenthesized_expression(token, token_index);
     }
     default {
-        return false;
+        this->add_diagnostic(lexer::DiagnosticKind.expected_expression, token.span,
+            lexer::TokenKind.identifier, token.kind, 0);
+        if (token.kind != lexer::TokenKind.end) {
+            this->advance();
+        }
+        return this->new_node(syntax::SyntaxKind.invalid, token.span, token_index);
     }
     }
 }
 
-fn parser_is_string_token(kind: lexer::TokenKind) -> bool {
-    switch (kind) {
-    case lexer::TokenKind.string {
-        return true;
-    }
-    case lexer::TokenKind.string_u16 {
-        return true;
-    }
-    case lexer::TokenKind.string_u32 {
-        return true;
-    }
-    default {
-        return false;
-    }
-    }
-}
-
-fn parser_parse_primary_expression(state: *state::State) -> usize {
-    let token: lexer::Token = state->current;
-    let token_index: usize = state->current_index;
-    if (token.kind == lexer::TokenKind.keyword_va_arg) {
-        state::parser_advance(state);
-        return parser_parse_va_arg_expression(state, token, token_index);
-    }
-    if (parser_is_layout_keyword(token.kind)) {
-        state::parser_advance(state);
-        return parser_parse_layout_query(state, token, token_index);
-    }
-    if (token.kind == lexer::TokenKind.at_sign) {
-        state::parser_advance(state);
-        return parser_parse_intrinsic_expression(state, token);
-    }
-    if (token.kind == lexer::TokenKind.integer) {
-        state::parser_advance(state);
-        parser_parse_integer_token(state, token);
-        return state::parser_new_node(state, syntax::SyntaxKind.integer_expression, token.span, token_index);
-    }
-    if (token.kind == lexer::TokenKind.floating) {
-        state::parser_advance(state);
-        parser_validate_float(state, token);
-        return state::parser_new_node(state, syntax::SyntaxKind.floating_expression, token.span, token_index);
-    }
-    if (token.kind == lexer::TokenKind.character) {
-        state::parser_advance(state);
-        return state::parser_new_node(state, syntax::SyntaxKind.character_expression, token.span, token_index);
-    }
-    if (token.kind == lexer::TokenKind.keyword_true || token.kind == lexer::TokenKind.keyword_false) {
-        state::parser_advance(state);
-        return state::parser_new_node(state, syntax::SyntaxKind.boolean_expression, token.span, token_index);
-    }
-    if (parser_is_string_token(token.kind)) {
-        state::parser_advance(state);
-        let node: usize = state::parser_new_node(state, syntax::SyntaxKind.string_expression, token.span, token_index);
-        for (; parser_is_string_token(state->current.kind);) {
-            let part: lexer::Token = state->current;
-            let part_index: usize = state->current_index;
-            state::parser_advance(state);
-            state::parser_add_child(
-                state, node, state::parser_new_node(state, syntax::SyntaxKind.string_expression, part.span,
-                    part_index));
-            state::parser_set_node_span(state, node, state::parser_join_spans(token.span, state->previous.span));
-        }
-        return node;
-    }
-    if (token.kind == lexer::TokenKind.keyword_null) {
-        state::parser_advance(state);
-        return state::parser_new_node(state, syntax::SyntaxKind.null_expression, token.span, token_index);
-    }
-    if (token.kind == lexer::TokenKind.keyword_this) {
-        state::parser_advance(state);
-        return state::parser_new_node(state, syntax::SyntaxKind.this_expression, token.span, token_index);
-    }
-    if (token.kind == lexer::TokenKind.keyword_super) {
-        state::parser_advance(state);
-        return state::parser_new_node(state, syntax::SyntaxKind.super_expression, token.span, token_index);
-    }
-    if (token.kind == lexer::TokenKind.left_brace) {
-        state::parser_advance(state);
-        return parser_parse_aggregate_initializer(state, token, token_index);
-    }
-    if (token.kind == lexer::TokenKind.identifier) {
-        state::parser_advance(state);
-        return parser_parse_qualified_name(state, token, token_index, syntax::SyntaxKind.name_expression);
-    }
-    if (token.kind == lexer::TokenKind.left_parenthesis) {
-        state::parser_advance(state);
-        if (!state::parser_enter_nesting(
-                state, token.span)) {
-            return syntax::no_index();
-        }
-        let expression: usize = parser_parse_expression(state);
-        state::parser_expect(state, lexer::TokenKind.right_parenthesis);
-        let node: usize = state::parser_new_node(
-            state, syntax::SyntaxKind.parenthesized_expression,
-            state::parser_join_spans(token.span, state->previous.span), token_index);
-        if (expression != syntax::no_index()) {
-            state::parser_add_child(state, node, expression);
-        }
-        state::parser_leave_nesting(state);
-        return node;
-    }
-
-    state::parser_add_diagnostic(
-        state, lexer::DiagnosticKind.expected_expression, token.span, lexer::TokenKind.identifier, token.kind, 0);
-    if (token.kind != lexer::TokenKind.end) {
-        state::parser_advance(state);
-    }
-    return state::parser_new_node(state, syntax::SyntaxKind.invalid, token.span, token_index);
-}
-
-fn parser_parse_postfix_expression(state: *state::State) -> usize {
+priv fn parse_postfix_expression() -> usize {
     let none: usize = syntax::no_index();
-    var expression: usize = parser_parse_primary_expression(state);
-    for (; expression != none && state->error == runtime::Error.none;) {
-        if (state->current.kind == lexer::TokenKind.less) {
-            var expression_node: syntax::SyntaxNode = state::parser_node(state, expression);
+    var expression: usize = this->parse_primary_expression();
+    for (; expression != none && this->error_code == runtime::Error.none;) {
+        if (this->current_token.kind == lexer::TokenKind.less) {
+            var expression_node: syntax::SyntaxNode = this->node(expression);
             let generic_base: bool = expression_node.kind == syntax::SyntaxKind.name_expression ||
                 expression_node.kind == syntax::SyntaxKind.member_expression;
             if (generic_base) {
-                let mark: state::Mark = state::parser_mark(state);
-                let diagnostic_count: usize = state->diagnostics.size();
-                let arguments: usize = parser_parse_generic_arguments(state);
-                let member_postfix: bool = state->current.kind == lexer::TokenKind.dot ||
-                    state->current.kind == lexer::TokenKind.arrow;
-                let postfix_follows: bool = state->current.kind == lexer::TokenKind.left_parenthesis || member_postfix;
-                let parsed: bool = arguments != none && state->diagnostics.size() == diagnostic_count;
+                let mark: ParserMark = this->mark();
+                let diagnostic_count: usize = this->diagnostics.size();
+                let arguments: usize = this->parse_generic_arguments();
+                let member_postfix: bool = this->current_token.kind == lexer::TokenKind.dot ||
+                    this->current_token.kind == lexer::TokenKind.arrow;
+                let postfix_follows: bool = this->current_token.kind == lexer::TokenKind.left_parenthesis ||
+                    member_postfix;
+                let parsed: bool = arguments != none && this->diagnostics.size() == diagnostic_count;
                 if (parsed && postfix_follows) {
-                    expression_node = state::parser_node(state, expression);
-                    let arguments_node: syntax::SyntaxNode = state::parser_node(state, arguments);
+                    expression_node = this->node(expression);
+                    let arguments_node: syntax::SyntaxNode = this->node(arguments);
                     if (expression_node.kind == syntax::SyntaxKind.invalid ||
                         arguments_node.kind == syntax::SyntaxKind.invalid) {
                         return none;
                     }
                     let expression_value: syntax::SyntaxNode = expression_node;
                     let arguments_value: syntax::SyntaxNode = arguments_node;
-                    let generic: usize = state::parser_new_node(
-                        state, syntax::SyntaxKind.generic_expression, expression_value.span,
+                    let generic: usize = this->new_node(syntax::SyntaxKind.generic_expression, expression_value.span,
                         expression_value.token_index);
-                    state::parser_add_child(state, generic, expression);
-                    state::parser_add_child(state, generic, arguments);
-                    state::parser_set_node_span(
-                        state, generic, state::parser_join_spans(expression_value.span, arguments_value.span));
+                    this->add_child(generic, expression);
+                    this->add_child(generic, arguments);
+                    this->set_node_span(generic, join_spans(expression_value.span, arguments_value.span));
                     expression = generic;
                     continue;
                 }
-                state::parser_restore(state, mark);
+                this->restore(mark);
             }
         }
-        if (state->current.kind == lexer::TokenKind.left_parenthesis) {
-            let operation_token: lexer::Token = state->current;
-            let operation_index: usize = state->current_index;
-            state::parser_advance(state);
-            expression = parser_parse_call(state, expression, operation_token, operation_index);
+        if (this->current_token.kind == lexer::TokenKind.left_parenthesis) {
+            let operation_token: lexer::Token = this->current_token;
+            let operation_index: usize = this->current_token_index;
+            this->advance();
+            expression = this->parse_call(expression, operation_token, operation_index);
             continue;
         }
-        if (state->current.kind == lexer::TokenKind.left_bracket) {
-            let operation_token: lexer::Token = state->current;
-            let operation_index: usize = state->current_index;
-            state::parser_advance(state);
-            if (!state::parser_enter_nesting(
-                    state, operation_token.span)) {
+        if (this->current_token.kind == lexer::TokenKind.left_bracket) {
+            let operation_token: lexer::Token = this->current_token;
+            let operation_index: usize = this->current_token_index;
+            this->advance();
+            if (!this->enter_nesting(operation_token.span)) {
                 return expression;
             }
-            let index: usize = parser_parse_expression(state);
-            state::parser_expect(state, lexer::TokenKind.right_bracket);
-            let expression_node: syntax::SyntaxNode = state::parser_node(state, expression);
+            let index: usize = this->parse_expression();
+            this->expect(lexer::TokenKind.right_bracket);
+            let expression_node: syntax::SyntaxNode = this->node(expression);
             let start_span: lexer::SourceSpan = expression_node.kind == syntax::SyntaxKind.invalid ?
                 operation_token.span : expression_node.span;
-            let indexed: usize = state::parser_new_node(
-                state, syntax::SyntaxKind.index_expression,
-                state::parser_join_spans(start_span, state->previous.span), operation_index);
-            state::parser_add_child(state, indexed, expression);
+            let indexed: usize = this->new_node(syntax::SyntaxKind.index_expression,
+                join_spans(start_span, this->previous_token.span), operation_index);
+            this->add_child(indexed, expression);
             if (index != none) {
-                state::parser_add_child(state, indexed, index);
+                this->add_child(indexed, index);
             }
-            state::parser_leave_nesting(state);
+            this->leave_nesting();
             expression = indexed;
             continue;
         }
-        if (state->current.kind == lexer::TokenKind.dot || state->current.kind == lexer::TokenKind.arrow) {
-            let operation_token: lexer::Token = state->current;
-            let operation_index: usize = state->current_index;
-            state::parser_advance(state);
-            let name: lexer::Token = state->current;
-            let name_index: usize = state->current_index;
-            let expression_node: syntax::SyntaxNode = state::parser_node(state, expression);
+        if (this->current_token.kind == lexer::TokenKind.dot || this->current_token.kind == lexer::TokenKind.arrow) {
+            let operation_token: lexer::Token = this->current_token;
+            let operation_index: usize = this->current_token_index;
+            this->advance();
+            let name: lexer::Token = this->current_token;
+            let name_index: usize = this->current_token_index;
+            let expression_node: syntax::SyntaxNode = this->node(expression);
             let start_span: lexer::SourceSpan = expression_node.kind == syntax::SyntaxKind.invalid ?
                 operation_token.span : expression_node.span;
-            let member: usize = state::parser_new_node(
-                state, syntax::SyntaxKind.member_expression, start_span, operation_index);
-            state::parser_add_child(state, member, expression);
-            if (state::parser_expect(
-                    state, lexer::TokenKind.identifier)) {
-                let name_node: usize = state::parser_new_node(
-                    state, syntax::SyntaxKind.name_expression, name.span, name_index);
-                state::parser_add_child(state, member, name_node);
-                state::parser_set_node_span(state, member, state::parser_join_spans(start_span, name.span));
+            let member: usize = this->new_node(syntax::SyntaxKind.member_expression, start_span, operation_index);
+            this->add_child(member, expression);
+            if (this->expect(lexer::TokenKind.identifier)) {
+                let name_node: usize = this->new_node(syntax::SyntaxKind.name_expression, name.span, name_index);
+                this->add_child(member, name_node);
+                this->set_node_span(member, join_spans(start_span, name.span));
             }
             expression = member;
             continue;
@@ -989,221 +405,150 @@ fn parser_parse_postfix_expression(state: *state::State) -> usize {
     return expression;
 }
 
-fn parser_is_unary_operator(kind: lexer::TokenKind) -> bool {
-    return kind == lexer::TokenKind.plus || kind == lexer::TokenKind.minus || kind == lexer::TokenKind.bang ||
-        kind == lexer::TokenKind.tilde || kind == lexer::TokenKind.star || kind == lexer::TokenKind.ampersand;
-}
-
-fn parser_parse_unary_expression(state: *state::State) -> usize {
-    if (!parser_is_unary_operator(
-            state->current.kind)) {
-        return parser_parse_postfix_expression(state);
+priv fn parse_unary_expression() -> usize {
+    if (!is_unary_operator(
+            this->current_token.kind)) {
+        return this->parse_postfix_expression();
     }
-    let operation_token: lexer::Token = state->current;
-    let operation_index: usize = state->current_index;
-    if (!state::parser_enter_nesting(
-            state, operation_token.span)) {
+    let operation_token: lexer::Token = this->current_token;
+    let operation_index: usize = this->current_token_index;
+    if (!this->enter_nesting(operation_token.span)) {
         return syntax::no_index();
     }
-    state::parser_advance(state);
-    let operand: usize = parser_parse_unary_expression(state);
-    state::parser_leave_nesting(state);
-    let node: usize = state::parser_new_node(
-        state, syntax::SyntaxKind.unary_expression, operation_token.span, operation_index);
+    this->advance();
+    let operand: usize = this->parse_unary_expression();
+    this->leave_nesting();
+    let node: usize = this->new_node(syntax::SyntaxKind.unary_expression, operation_token.span, operation_index);
     if (operand != syntax::no_index()) {
-        state::parser_add_child(state, node, operand);
-        let operand_node: syntax::SyntaxNode = state::parser_node(state, operand);
+        this->add_child(node, operand);
+        let operand_node: syntax::SyntaxNode = this->node(operand);
         if (operand_node.kind != syntax::SyntaxKind.invalid) {
-            state::parser_set_node_span(state, node, state::parser_join_spans(operation_token.span, operand_node.span));
+            this->set_node_span(node, join_spans(operation_token.span, operand_node.span));
         }
     }
     return node;
 }
 
-fn parser_parse_cast_expression(state: *state::State) -> usize {
+priv fn parse_cast_expression() -> usize {
     let none: usize = syntax::no_index();
-    var expression: usize = parser_parse_unary_expression(state);
-    while (expression != none && state->current.kind == lexer::TokenKind.keyword_as) {
-        let operation_token: lexer::Token = state->current;
-        let operation_index: usize = state->current_index;
-        state::parser_advance(state);
-        let target: usize = parser_parse_type(state);
-        let expression_node: syntax::SyntaxNode = state::parser_node(state, expression);
+    var expression: usize = this->parse_unary_expression();
+    while (expression != none && this->current_token.kind == lexer::TokenKind.keyword_as) {
+        let operation_token: lexer::Token = this->current_token;
+        let operation_index: usize = this->current_token_index;
+        this->advance();
+        let target: usize = this->parse_type();
+        let expression_node: syntax::SyntaxNode = this->node(expression);
         var target_node: syntax::SyntaxNode = {};
         if (target != none) {
-            target_node = state::parser_node(state, target);
+            target_node = this->node(target);
         }
         var span: lexer::SourceSpan = operation_token.span;
         if (expression_node.kind != syntax::SyntaxKind.invalid && target_node.kind != syntax::SyntaxKind.invalid) {
-            span = state::parser_join_spans(expression_node.span, target_node.span);
+            span = join_spans(expression_node.span, target_node.span);
         }
-        let cast: usize = state::parser_new_node(state, syntax::SyntaxKind.cast_expression, span, operation_index);
-        state::parser_add_child(state, cast, expression);
+        let cast: usize = this->new_node(syntax::SyntaxKind.cast_expression, span, operation_index);
+        this->add_child(cast, expression);
         if (target != none) {
-            state::parser_add_child(state, cast, target);
+            this->add_child(cast, target);
         }
         expression = cast;
     }
     return expression;
 }
 
-fn parser_binary_precedence(kind: lexer::TokenKind) -> usize {
-    switch (kind) {
-    case lexer::TokenKind.logical_or {
-        return 1;
-    }
-    case lexer::TokenKind.logical_and {
-        return 2;
-    }
-    case lexer::TokenKind.pipe {
-        return 3;
-    }
-    case lexer::TokenKind.caret {
-        return 4;
-    }
-    case lexer::TokenKind.ampersand {
-        return 5;
-    }
-    case lexer::TokenKind.equal_equal {
-        return 6;
-    }
-    case lexer::TokenKind.bang_equal {
-        return 6;
-    }
-    case lexer::TokenKind.less {
-        return 7;
-    }
-    case lexer::TokenKind.less_equal {
-        return 7;
-    }
-    case lexer::TokenKind.greater {
-        return 7;
-    }
-    case lexer::TokenKind.greater_equal {
-        return 7;
-    }
-    case lexer::TokenKind.shift_left {
-        return 8;
-    }
-    case lexer::TokenKind.shift_right {
-        return 8;
-    }
-    case lexer::TokenKind.plus {
-        return 9;
-    }
-    case lexer::TokenKind.minus {
-        return 9;
-    }
-    case lexer::TokenKind.star {
-        return 10;
-    }
-    case lexer::TokenKind.slash {
-        return 10;
-    }
-    case lexer::TokenKind.percent {
-        return 10;
-    }
-    default {
-        return 0;
-    }
-    }
-}
-
-fn parser_parse_binary_expression(state: *state::State, minimum_precedence: usize) -> usize {
+priv fn parse_binary_expression(minimum_precedence: usize) -> usize {
     let none: usize = syntax::no_index();
-    var left: usize = parser_parse_cast_expression(state);
+    var left: usize = this->parse_cast_expression();
     if (left == none) {
         return none;
     }
-    while (state->error == runtime::Error.none) {
-        let precedence: usize = parser_binary_precedence(state->current.kind);
+    while (this->error_code == runtime::Error.none) {
+        let precedence: usize = binary_precedence(this->current_token.kind);
         if (precedence < minimum_precedence) {
             break;
         }
-        let operation_token: lexer::Token = state->current;
-        let operation_index: usize = state->current_index;
-        state::parser_advance(state);
-        let right: usize = parser_parse_binary_expression(state, precedence + 1);
+        let operation_token: lexer::Token = this->current_token;
+        let operation_index: usize = this->current_token_index;
+        this->advance();
+        let right: usize = this->parse_binary_expression(precedence + 1);
         if (right == none) {
             return left;
         }
-        let left_node: syntax::SyntaxNode = state::parser_node(state, left);
-        let right_node: syntax::SyntaxNode = state::parser_node(state, right);
+        let left_node: syntax::SyntaxNode = this->node(left);
+        let right_node: syntax::SyntaxNode = this->node(right);
         var span: lexer::SourceSpan = operation_token.span;
         if (left_node.kind != syntax::SyntaxKind.invalid && right_node.kind != syntax::SyntaxKind.invalid) {
-            span = state::parser_join_spans(left_node.span, right_node.span);
+            span = join_spans(left_node.span, right_node.span);
         }
-        let binary: usize = state::parser_new_node(state, syntax::SyntaxKind.binary_expression, span, operation_index);
-        state::parser_add_child(state, binary, left);
-        state::parser_add_child(state, binary, right);
+        let binary: usize = this->new_node(syntax::SyntaxKind.binary_expression, span, operation_index);
+        this->add_child(binary, left);
+        this->add_child(binary, right);
         left = binary;
     }
     return left;
 }
 
-fn parser_parse_conditional_expression(state: *state::State) -> usize {
+priv fn parse_conditional_expression() -> usize {
     let none: usize = syntax::no_index();
-    let condition: usize = parser_parse_binary_expression(state, 1);
-    if (condition == none || state->current.kind != lexer::TokenKind.question) {
+    let condition: usize = this->parse_binary_expression(1);
+    if (condition == none || this->current_token.kind != lexer::TokenKind.question) {
         return condition;
     }
-    let question: lexer::Token = state->current;
-    let question_index: usize = state->current_index;
-    state::parser_advance(state);
-    if (!state::parser_enter_nesting(
-            state, question.span)) {
+    let question: lexer::Token = this->current_token;
+    let question_index: usize = this->current_token_index;
+    this->advance();
+    if (!this->enter_nesting(question.span)) {
         return condition;
     }
-    let then_expression: usize = parser_parse_expression(state);
-    state::parser_expect(state, lexer::TokenKind.colon);
-    let else_expression: usize = parser_parse_conditional_expression(state);
-    state::parser_leave_nesting(state);
-    let condition_node: syntax::SyntaxNode = state::parser_node(state, condition);
+    let then_expression: usize = this->parse_expression();
+    this->expect(lexer::TokenKind.colon);
+    let else_expression: usize = this->parse_conditional_expression();
+    this->leave_nesting();
+    let condition_node: syntax::SyntaxNode = this->node(condition);
     var else_node: syntax::SyntaxNode = {};
     if (else_expression != none) {
-        else_node = state::parser_node(state, else_expression);
+        else_node = this->node(else_expression);
     }
     var span: lexer::SourceSpan = question.span;
     if (condition_node.kind != syntax::SyntaxKind.invalid && else_node.kind != syntax::SyntaxKind.invalid) {
-        span = state::parser_join_spans(condition_node.span, else_node.span);
+        span = join_spans(condition_node.span, else_node.span);
     }
-    let conditional: usize = state::parser_new_node(state, syntax::SyntaxKind.conditional_expression, span,
-        question_index);
-    state::parser_add_child(state, conditional, condition);
+    let conditional: usize = this->new_node(syntax::SyntaxKind.conditional_expression, span, question_index);
+    this->add_child(conditional, condition);
     if (then_expression != none) {
-        state::parser_add_child(state, conditional, then_expression);
+        this->add_child(conditional, then_expression);
     }
     if (else_expression != none) {
-        state::parser_add_child(state, conditional, else_expression);
+        this->add_child(conditional, else_expression);
     }
     return conditional;
 }
 
-fn parser_parse_switch_label(state: *state::State) -> usize {
-    if (state->current.kind == lexer::TokenKind.identifier) {
-        return parser_parse_postfix_expression(state);
+priv fn parse_switch_label() -> usize {
+    if (this->current_token.kind == lexer::TokenKind.identifier) {
+        return this->parse_postfix_expression();
     }
     let none: usize = syntax::no_index();
-    var sign: lexer::Token = state::parser_invalid_token();
+    var sign: lexer::Token = invalid_token();
     var sign_index: usize = none;
-    if (state->current.kind == lexer::TokenKind.plus || state->current.kind == lexer::TokenKind.minus) {
-        sign = state->current;
-        sign_index = state->current_index;
-        state::parser_advance(state);
+    if (this->current_token.kind == lexer::TokenKind.plus || this->current_token.kind == lexer::TokenKind.minus) {
+        sign = this->current_token;
+        sign_index = this->current_token_index;
+        this->advance();
     }
-    let literal: lexer::Token = state->current;
-    let literal_index: usize = state->current_index;
-    if (!state::parser_expect(state, lexer::TokenKind.integer)) {
+    let literal: lexer::Token = this->current_token;
+    let literal_index: usize = this->current_token_index;
+    if (!this->expect(lexer::TokenKind.integer)) {
         return none;
     }
-    parser_parse_integer_token(state, literal);
-    let literal_node: usize = state::parser_new_node(
-        state, syntax::SyntaxKind.integer_expression, literal.span, literal_index);
+    this->parse_integer_token(literal);
+    let literal_node: usize = this->new_node(syntax::SyntaxKind.integer_expression, literal.span, literal_index);
     if (sign_index == none) {
         return literal_node;
     }
-    let unary: usize = state::parser_new_node(
-        state, syntax::SyntaxKind.unary_expression, state::parser_join_spans(sign.span, literal.span), sign_index);
-    state::parser_add_child(state, unary, literal_node);
+    let unary: usize = this->new_node(syntax::SyntaxKind.unary_expression, join_spans(sign.span, literal.span),
+        sign_index);
+    this->add_child(unary, literal_node);
     return unary;
+}
 }

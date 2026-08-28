@@ -313,7 +313,9 @@ the archived Luna 0 self-hosting milestone named `M4` above.
       `luna.compiler.x86.*` modules, with one interface and multiple
       implementation files per module
 - [ ] standard-library RAII migration and `luna.runtime` decomposition
-- [ ] frontend, semantic pipeline, backend and command-service state classes
+- [x] object-oriented Lexer, Syntax and Parser with one modern module each
+- [ ] semantic-pipeline state classes and module contraction
+- [x] backend and command-service state classes
 - [ ] remaining `luna.bootstrap.*` namespace/module contraction
 
 ## Explicitly deferred

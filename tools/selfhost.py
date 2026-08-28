@@ -158,16 +158,17 @@ LIBRARIES = {
         "frontend/syntax/builder",
         "frontend/syntax/verify",
     ),
-    "parser_state": compiler_module("luna.bootstrap.frontend.parser.state", "frontend/parser/state"),
-    "parser_expression": compiler_module("luna.bootstrap.frontend.parser.expression", "frontend/parser/expression"),
-    "parser_statements": compiler_module("luna.bootstrap.frontend.parser.statements", "frontend/parser/statements"),
-    "parser_declarations": compiler_module(
-        "luna.bootstrap.frontend.parser.declarations",
-        "frontend/parser/declarations",
-    ),
     "parser": compiler_module(
-        "luna.bootstrap.frontend.parser",
+        "luna.compiler.parser",
         "frontend/parser/facade",
+        "frontend/parser/session",
+        "frontend/parser/rules",
+        "frontend/parser/literals",
+        "frontend/parser/types",
+        "frontend/parser/expression",
+        "frontend/parser/statements",
+        "frontend/parser/classes",
+        "frontend/parser/declarations",
     ),
     "type": compiler_module("luna.bootstrap.middleend.type", "middleend/type"),
     "ir": compiler_module("luna.bootstrap.middleend.ir", "middleend/ir"),
@@ -1454,6 +1455,7 @@ def execute_frontend_tests(
     cases = (
         ("frontend-lexer-contract", "lexer.la", "keywords/tokens/spans/diagnostics/RAII"),
         ("frontend-syntax-contract", "syntax.la", "builder/tree/view/move/restore"),
+        ("frontend-parser-contract", "parser.la", "session/tree/diagnostics/rollback/move"),
     )
     passed = 0
     failed: list[str] = []

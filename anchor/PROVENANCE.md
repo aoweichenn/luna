@@ -748,3 +748,49 @@ its 146,877-byte object has SHA-256
 `7e84c13e9b503aa0db4e5a9edbae175754e0a23c9a99d17fa0b4d26306ec0fc7`.
 The promoted executable is 4,986,707 bytes with SHA-256
 `77f0e575626bad58f91caa59fc2f6261d7b68cffcca6192ed9bcd11124a3d979`.
+
+## 2026-08-28: promotion to the RAII Parser toolchain
+
+The anchor now contains the stage-fixed `luna` executable from the Parser
+modernization snapshot accompanying this provenance note. The five historical
+`luna.bootstrap.frontend.parser*` modules are replaced atomically by one
+`luna.compiler.parser` module, one 85-line interface and nine same-module
+implementation units. No state, expression, statement or declaration
+forwarding module remains.
+
+A private `Parser` class now owns source and token views, token traversal,
+`SyntaxBuilder`, diagnostics, sticky failure and nesting state. Every operation
+that depends on the parsing session is a bound method; `ParserMark` is only a
+passive rollback value. `ParseResult` and `FrontendResult` retain move-aware
+RAII ownership. Aggregate parsing uses a non-owning `method fn` strategy to
+select field or class-member parsing without passing a raw state pointer.
+
+Primary-expression, statement and top-level declaration dispatch use closed
+`switch` statements. Token classifications and operator precedence are
+centralized in one rules unit. Bounded traversal uses `for`; the remaining
+`while` loops consume parser state. The dedicated Parser contract covers tree
+shape, generic-versus-less-than rollback, exact recovery diagnostics, invalid
+token views and moved-from lifetimes. Lexer and Syntax contracts remain green.
+
+Remote x86-64 verification on isolated `caw` contracted the graph from 72 to
+68 modules and from 62 to 58 library objects. `verify --fresh` built the full
+transition, next and fixed graph in 56.05 seconds at 33,384 KiB maximum RSS;
+every next/fixed assembly, object and executable artifact was byte-identical.
+Audit and formatting gates were green, and a focused scan of 11 files found no
+condition above two logical clauses. The expanded suite passed 450/450 with no
+failures or skips in 5.34 seconds at 26,560 KiB maximum RSS.
+
+With the preceding anchor compiling both source shapes, the old five-module
+Parser compiled sequentially in a median 1.379638 seconds and produced
+2,176,417 total assembly bytes. The final single module compiled in a median
+2.482031 seconds and produced 1,993,549 assembly bytes. Assembly volume fell
+by about 8.4%, while compile time rose about 79.9% because the unoptimized
+compiler now processes one larger declaration domain. This cost is recorded
+without restoring false dependency modules or adding premature optimization.
+
+The final Parser assembly has SHA-256
+`e3c97c2d4c58526fad2e375408ef01310af2a2aab07d62be6215935f8d34db69`;
+its 756,785-byte object has SHA-256
+`23f32b330d098d95719aabf9b9241d528992e7dd022972b1540f74d7ed0fabf0`.
+The promoted executable is 4,998,995 bytes with SHA-256
+`1b10d3581f344af84de632990460e8479fe384e8d26245ede01376c203335694`.

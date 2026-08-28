@@ -4,6 +4,10 @@
 > this document describe the archived reconstruction. Current interfaces and
 > implementations live under `compiler/include/` and `compiler/src/` and are
 > compiled from source by `tools/selfhost.py`.
+>
+> The current pure-Luna frontend is `luna.compiler.lexer`,
+> `luna.compiler.syntax` and `luna.compiler.parser`; their RAII contracts are
+> recorded in `lexer.md`, `syntax.md` and `parser.md`.
 
 The first self-hosting frontend stage is implemented in Luna and compiled
 directly to x86-64 objects. It does not translate through C, call the hosted

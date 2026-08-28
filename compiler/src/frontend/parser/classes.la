@@ -1,0 +1,281 @@
+module luna.compiler.parser;
+
+type MemberParser = method fn(usize) -> usize;
+
+impl Parser {
+
+priv fn at_member_list_end() -> bool {
+    return this->current_token.kind == lexer::TokenKind.right_brace || this->current_token.kind == lexer::TokenKind.end;
+}
+
+priv fn parse_field(owner: usize) -> usize {
+    let none: usize = syntax::no_index();
+    var first_attribute: usize = none;
+    var attribute_count: usize = 0;
+    this->parse_attributes(&first_attribute, &attribute_count);
+    let name: lexer::Token = this->current_token;
+    let name_index: usize = this->current_token_index;
+    if (name.kind == lexer::TokenKind.keyword_struct || name.kind == lexer::TokenKind.keyword_union) {
+        this->advance();
+        let field: usize = this->new_node(syntax::SyntaxKind.field_declaration, name.span, name_index);
+        this->add_node_flags(field, syntax::SyntaxFlag.anonymous as usize);
+        let declaration: usize = this->new_node(name.kind == lexer::TokenKind.keyword_struct ?
+            syntax::SyntaxKind.structure_declaration : syntax::SyntaxKind.union_declaration, name.span, name_index);
+        this->add_child(field, declaration);
+        this->expect(lexer::TokenKind.left_brace);
+        if (!this->enter_nesting(name.span)) {
+            this->attach_attributes(owner, first_attribute, attribute_count);
+            return field;
+        }
+        for (; this->error_code == runtime::Error.none && !this->at_right_brace_or_end();) {
+            let index_before: usize = this->current_token_index;
+            let nested: usize = this->parse_field(declaration);
+            if (nested != none) {
+                this->add_child(declaration, nested);
+            }
+            if (this->current_token_index == index_before && this->current_token.kind != lexer::TokenKind.end) {
+                this->advance();
+            }
+        }
+        this->expect(lexer::TokenKind.right_brace);
+        this->leave_nesting();
+        this->set_node_span(declaration, join_spans(name.span, this->previous_token.span));
+        this->attach_attributes(field, first_attribute, attribute_count);
+        this->set_node_span(field, join_spans(name.span, this->previous_token.span));
+        return field;
+    }
+    if (!this->expect(lexer::TokenKind.identifier)) {
+        this->attach_attributes(owner, first_attribute, attribute_count);
+        return none;
+    }
+    let field: usize = this->new_node(syntax::SyntaxKind.field_declaration, name.span, name_index);
+    this->expect(lexer::TokenKind.colon);
+    let type_node: usize = this->parse_type();
+    if (type_node != none) {
+        this->add_child(field, type_node);
+    }
+    var trailing_attribute: usize = none;
+    var trailing_count: usize = 0;
+    this->parse_attributes(&trailing_attribute, &trailing_count);
+    this->expect(lexer::TokenKind.semicolon);
+    this->attach_attributes(field, first_attribute, attribute_count);
+    this->attach_attributes(field, trailing_attribute, trailing_count);
+    this->set_node_span(field, join_spans(name.span, this->previous_token.span));
+    return field;
+}
+
+priv fn parse_operator_declaration(start: lexer::Token, flags: usize) -> usize {
+    let operation_token: lexer::Token = this->current_token;
+    let operation_index: usize = this->current_token_index;
+    if (!operator_token_is_supported(operation_token.kind)) {
+        this->add_diagnostic(lexer::DiagnosticKind.expected_declaration, operation_token.span,
+            lexer::TokenKind.minus, operation_token.kind, 0);
+        if (operation_token.kind != lexer::TokenKind.end) {
+            this->advance();
+        }
+        return syntax::no_index();
+    }
+    this->advance();
+    return this->parse_function_with_name(start, flags | (syntax::SyntaxFlag.operator_method as usize),
+        syntax::no_index(), 0, operation_token, operation_index);
+}
+
+priv fn parse_friend_declaration() -> usize {
+    let none: usize = syntax::no_index();
+    let start: lexer::Token = this->current_token;
+    let start_index: usize = this->current_token_index;
+    this->advance();
+    this->expect(lexer::TokenKind.keyword_class);
+    let declaration: usize = this->new_node(syntax::SyntaxKind.friend_declaration, start.span, start_index);
+    let target: usize = this->parse_type();
+    if (target != none) {
+        this->add_child(declaration, target);
+    }
+    this->expect(lexer::TokenKind.semicolon);
+    this->set_node_span(declaration, join_spans(start.span, this->previous_token.span));
+    return declaration;
+}
+
+priv fn parse_class_member(owner: usize) -> usize {
+    if (this->current_token.kind == lexer::TokenKind.keyword_friend) {
+        return this->parse_friend_declaration();
+    }
+    let access_token: lexer::Token = this->current_token;
+    let access: usize = access_flag(access_token.kind);
+    if (access == syntax::SyntaxFlag.none as usize) {
+        return this->parse_field(owner);
+    }
+    this->advance();
+    var flags: usize = access | (syntax::SyntaxFlag.member_function as usize);
+    switch (this->current_token.kind) {
+    case lexer::TokenKind.keyword_static {
+        this->advance();
+        flags |= syntax::SyntaxFlag.static_method as usize;
+        this->expect(lexer::TokenKind.keyword_fn);
+        return this->parse_function_declaration(access_token, flags, syntax::no_index(), 0);
+    }
+    case lexer::TokenKind.keyword_virtual {
+        this->advance();
+        flags |= syntax::SyntaxFlag.virtual_method as usize;
+        if (this->match(lexer::TokenKind.keyword_final)) {
+            flags |= syntax::SyntaxFlag.final_method as usize;
+        }
+        this->expect(lexer::TokenKind.keyword_fn);
+        return this->parse_function_declaration(access_token, flags, syntax::no_index(), 0);
+    }
+    case lexer::TokenKind.keyword_abstract {
+        this->advance();
+        flags |= syntax::SyntaxFlag.abstract_method as usize;
+        this->expect(lexer::TokenKind.keyword_fn);
+        return this->parse_function_declaration(access_token, flags, syntax::no_index(), 0);
+    }
+    case lexer::TokenKind.keyword_override {
+        this->advance();
+        flags |= syntax::SyntaxFlag.override_method as usize;
+        if (this->match(lexer::TokenKind.keyword_final)) {
+            flags |= syntax::SyntaxFlag.final_method as usize;
+        }
+        this->expect(lexer::TokenKind.keyword_fn);
+        return this->parse_function_declaration(access_token, flags, syntax::no_index(), 0);
+    }
+    case lexer::TokenKind.keyword_fn {
+        this->advance();
+        return this->parse_function_declaration(access_token, flags, syntax::no_index(), 0);
+    }
+    case lexer::TokenKind.keyword_operator {
+        this->advance();
+        return this->parse_operator_declaration(access_token, flags);
+    }
+    default {}
+    }
+    if (this->current_token.kind == lexer::TokenKind.identifier &&
+        this->identifier_text_is(this->current_token, "init", 4)) {
+        flags |= syntax::SyntaxFlag.constructor as usize;
+        return this->parse_function_declaration(access_token, flags, syntax::no_index(), 0);
+    }
+    if (this->current_token.kind == lexer::TokenKind.identifier &&
+        this->identifier_text_is(this->current_token, "deinit", 6)) {
+        flags |= syntax::SyntaxFlag.destructor as usize;
+        return this->parse_function_declaration(access_token, flags, syntax::no_index(), 0);
+    }
+    let field: usize = this->parse_field(owner);
+    if (field != syntax::no_index()) {
+        this->add_node_flags(field, access);
+    }
+    return field;
+}
+
+priv fn parse_aggregate_declaration(start: lexer::Token, declaration_kind: syntax::SyntaxKind, flags: usize,
+    first_attribute: usize, attribute_count: usize, member_parser: MemberParser) -> usize {
+    let none: usize = syntax::no_index();
+    let name: lexer::Token = this->current_token;
+    let name_index: usize = this->current_token_index;
+    this->expect(lexer::TokenKind.identifier);
+    let declaration: usize = this->new_node(declaration_kind, start.span, name_index);
+    this->add_node_flags(declaration, flags);
+    let generic_parameters: usize = this->parse_generic_parameters();
+    if (generic_parameters != none) {
+        this->add_child(declaration, generic_parameters);
+    }
+    if (declaration_kind == syntax::SyntaxKind.class_declaration && this->match(lexer::TokenKind.colon)) {
+        this->add_node_flags(declaration, syntax::SyntaxFlag.has_base as usize);
+        let base_type: usize = this->parse_type();
+        if (base_type != none) {
+            this->add_child(declaration, base_type);
+        }
+    }
+    this->expect(lexer::TokenKind.left_brace);
+    for (; this->error_code == runtime::Error.none && !this->at_member_list_end();) {
+        let index_before: usize = this->current_token_index;
+        let member: usize = member_parser(declaration);
+        if (member != none) {
+            this->add_child(declaration, member);
+        }
+        if (this->current_token_index == index_before && this->current_token.kind != lexer::TokenKind.end) {
+            this->advance();
+        }
+    }
+    this->expect(lexer::TokenKind.right_brace);
+    this->attach_attributes(declaration, first_attribute, attribute_count);
+    this->set_node_span(declaration, join_spans(start.span, this->previous_token.span));
+    return declaration;
+}
+
+priv fn parse_opaque_class_declaration(start: lexer::Token, flags: usize, first_attribute: usize,
+    attribute_count: usize) -> usize {
+    let name: lexer::Token = this->current_token;
+    let name_index: usize = this->current_token_index;
+    this->expect(lexer::TokenKind.identifier);
+    let declaration: usize = this->new_node(syntax::SyntaxKind.class_declaration, start.span, name_index);
+    this->add_node_flags(declaration, flags | (syntax::SyntaxFlag.opaque_class as usize));
+    let generic_parameters: usize = this->parse_generic_parameters();
+    if (generic_parameters != syntax::no_index()) {
+        this->add_child(declaration, generic_parameters);
+    }
+    this->expect(lexer::TokenKind.semicolon);
+    this->attach_attributes(declaration, first_attribute, attribute_count);
+    this->set_node_span(declaration, join_spans(start.span, this->previous_token.span));
+    return declaration;
+}
+
+priv fn parse_impl_member(owner: usize) -> usize {
+    let none: usize = syntax::no_index();
+    let start: lexer::Token = this->current_token;
+    var flags: usize = syntax::SyntaxFlag.member_function as usize;
+    if (this->match(lexer::TokenKind.keyword_priv)) {
+        flags |= syntax::SyntaxFlag.private_access as usize;
+    }
+    if (this->match(lexer::TokenKind.keyword_static)) {
+        flags |= syntax::SyntaxFlag.static_method as usize;
+    }
+    if (this->match(lexer::TokenKind.keyword_fn)) {
+        return this->parse_function_declaration(start, flags, none, 0);
+    }
+    if (this->match(lexer::TokenKind.keyword_operator)) {
+        return this->parse_operator_declaration(start, flags);
+    }
+    if (this->current_token.kind == lexer::TokenKind.identifier &&
+        this->identifier_text_is(this->current_token, "init", 4)) {
+        flags |= syntax::SyntaxFlag.constructor as usize;
+        return this->parse_function_declaration(start, flags, none, 0);
+    }
+    if (this->current_token.kind == lexer::TokenKind.identifier &&
+        this->identifier_text_is(this->current_token, "deinit", 6)) {
+        flags |= syntax::SyntaxFlag.destructor as usize;
+        return this->parse_function_declaration(start, flags, none, 0);
+    }
+    this->add_diagnostic(lexer::DiagnosticKind.expected_declaration, this->current_token.span,
+        lexer::TokenKind.keyword_fn, this->current_token.kind, owner);
+    if (this->current_token.kind != lexer::TokenKind.end) {
+        this->advance();
+    }
+    return none;
+}
+
+priv fn parse_impl_declaration(start: lexer::Token, flags: usize, first_attribute: usize,
+    attribute_count: usize) -> usize {
+    let none: usize = syntax::no_index();
+    let declaration: usize = this->new_node(syntax::SyntaxKind.impl_declaration, start.span, this->current_token_index);
+    this->add_node_flags(declaration, flags);
+    let owner_type: usize = this->parse_type();
+    if (owner_type != none) {
+        this->add_child(declaration, owner_type);
+    }
+    this->expect(lexer::TokenKind.left_brace);
+    for (; this->error_code == runtime::Error.none && !this->at_member_list_end();) {
+        let index_before: usize = this->current_token_index;
+        let method_node: usize = this->parse_impl_member(declaration);
+        if (method_node != none) {
+            this->add_child(declaration, method_node);
+        }
+        if (this->current_token_index == index_before && this->current_token.kind != lexer::TokenKind.end) {
+            this->advance();
+        }
+    }
+    this->expect(lexer::TokenKind.right_brace);
+    this->attach_attributes(declaration, first_attribute, attribute_count);
+    this->set_node_span(declaration, join_spans(start.span, this->previous_token.span));
+    return declaration;
+}
+
+}

@@ -1,0 +1,296 @@
+module luna.compiler.parser;
+
+impl Parser {
+
+// 限定路径沿用现有节点类型：末段保存在 token_index，前导段按源码顺序保存为子节点。
+// Parser 保留完整路径形状，语义阶段再限制限定段数量并给出可定位诊断。
+priv fn parse_qualified_name(first: lexer::Token, first_index: usize, kind: syntax::SyntaxKind) -> usize {
+    let node: usize = this->new_node(kind, first.span, first_index);
+    var segment: lexer::Token = first;
+    var segment_index: usize = first_index;
+    while (this->error_code == runtime::Error.none && this->current_token.kind == lexer::TokenKind.colon_colon) {
+        this->advance();
+        let name: lexer::Token = this->current_token;
+        let name_index: usize = this->current_token_index;
+        if (!this->expect(lexer::TokenKind.identifier)) {
+            break;
+        }
+        this->add_child(node, this->new_node(syntax::SyntaxKind.name_expression, segment.span, segment_index));
+        segment = name;
+        segment_index = name_index;
+        if (!this->set_node_token(node, name_index)) {
+            return syntax::no_index();
+        }
+        this->set_node_span(node, join_spans(first.span, name.span));
+    }
+    return node;
+}
+
+priv fn match_generic_greater() -> bool {
+    if (this->match(lexer::TokenKind.greater)) {
+        return true;
+    }
+    if (this->current_token.kind != lexer::TokenKind.shift_right) {
+        return this->expect(lexer::TokenKind.greater);
+    }
+    let combined: lexer::Token = this->current_token;
+    this->previous_token = {
+        kind = lexer::TokenKind.greater, span = {
+            offset = combined.span.offset, length = 1, line = combined.span.line, column = combined.span.column,
+        },
+    };
+    this->current_token = {
+        kind = lexer::TokenKind.greater, span = {
+            offset = combined.span.offset + 1, length = 1, line = combined.span.line, column = combined.span.column + 1,
+        },
+    };
+    return true;
+}
+
+priv fn parse_generic_arguments() -> usize {
+    let none: usize = syntax::no_index();
+    let start: lexer::Token = this->current_token;
+    let start_index: usize = this->current_token_index;
+    if (!this->match(lexer::TokenKind.less)) {
+        return none;
+    }
+    let arguments: usize = this->new_node(syntax::SyntaxKind.generic_arguments, start.span, start_index);
+    if (!this->enter_nesting(start.span)) {
+        return arguments;
+    }
+    for (; this->error_code == runtime::Error.none;) {
+        let argument: usize = this->parse_type();
+        if (argument != none) {
+            this->add_child(arguments, argument);
+        }
+        if (!this->match(lexer::TokenKind.comma)) {
+            break;
+        }
+    }
+    this->match_generic_greater();
+    this->set_node_span(arguments, join_spans(start.span, this->previous_token.span));
+    this->leave_nesting();
+    return arguments;
+}
+
+priv fn finish_type(base: usize, leading_const: bool, allow_reference: bool) -> usize {
+    let none: usize = syntax::no_index();
+    if (base == none) {
+        return none;
+    }
+    if (!allow_reference) {
+        return base;
+    }
+    let base_node: syntax::SyntaxNode = this->node(base);
+    if (base_node.kind == syntax::SyntaxKind.invalid) {
+        return none;
+    }
+    var suffix_offset: usize = base_node.span.offset + base_node.span.length;
+    var read_only: bool = leading_const;
+    if (this->match(lexer::TokenKind.keyword_const)) {
+        if (read_only) {
+            this->add_diagnostic(lexer::DiagnosticKind.expected_type, this->previous_token.span,
+                lexer::TokenKind.ampersand, lexer::TokenKind.keyword_const, 0);
+        }
+        read_only = true;
+        suffix_offset = this->previous_token.span.offset + this->previous_token.span.length;
+    }
+    let lvalue_reference: bool = this->current_token.kind == lexer::TokenKind.ampersand;
+    let rvalue_reference: bool = this->current_token.kind == lexer::TokenKind.logical_and;
+    let reference_token: bool = lvalue_reference || rvalue_reference;
+    let adjacent: bool = this->current_token.span.offset == suffix_offset;
+    if (!reference_token || !adjacent) {
+        if (read_only) {
+            this->add_diagnostic(lexer::DiagnosticKind.expected_type, this->current_token.span,
+                lexer::TokenKind.ampersand, this->current_token.kind, 0);
+        }
+        return base;
+    }
+    let operation: lexer::Token = this->current_token;
+    let operation_index: usize = this->current_token_index;
+    this->advance();
+    let reference: usize = this->new_node(syntax::SyntaxKind.type_reference,
+        join_spans(base_node.span, operation.span), operation_index);
+    if (read_only) {
+        this->add_node_flags(reference, syntax::SyntaxFlag.read_only as usize);
+    }
+    if (rvalue_reference) {
+        this->add_node_flags(reference, syntax::SyntaxFlag.rvalue_reference as usize);
+    }
+    this->add_child(reference, base);
+    return reference;
+}
+
+priv fn parse_type_active(allow_reference: bool) -> usize {
+    let none: usize = syntax::no_index();
+    let start: lexer::Token = this->current_token;
+    let start_index: usize = this->current_token_index;
+    if (!this->enter_nesting(start.span)) {
+        return none;
+    }
+    let leading_const: bool = this->match(lexer::TokenKind.keyword_const);
+
+    var callable_kind: syntax::SyntaxKind = syntax::SyntaxKind.invalid;
+    if (this->match(lexer::TokenKind.keyword_method)) {
+        this->expect(lexer::TokenKind.keyword_fn);
+        callable_kind = syntax::SyntaxKind.type_method_function;
+    } else if (this->match(lexer::TokenKind.keyword_fn)) {
+        callable_kind = syntax::SyntaxKind.type_function;
+    }
+    if (callable_kind != syntax::SyntaxKind.invalid) {
+        let node: usize = this->new_node(callable_kind, start.span, start_index);
+        this->expect(lexer::TokenKind.left_parenthesis);
+        if (this->current_token.kind != lexer::TokenKind.right_parenthesis) {
+            while (this->error_code == runtime::Error.none) {
+                // `...` 只记录可变参数形状；语义阶段统一拒绝出现在非函数挂载点的情况。
+                if (this->current_token.kind == lexer::TokenKind.dot_dot_dot) {
+                    this->advance();
+                    this->add_node_flags(node, syntax::SyntaxFlag.variadic as usize);
+                    break;
+                }
+                let parameter: usize = this->parse_type();
+                if (parameter != none) {
+                    this->add_child(node, parameter);
+                }
+                if (!this->match(lexer::TokenKind.comma)) {
+                    break;
+                }
+            }
+        }
+        this->expect(lexer::TokenKind.right_parenthesis);
+        if (this->match(lexer::TokenKind.arrow)) {
+            this->add_node_flags(node, syntax::SyntaxFlag.has_return_type as usize);
+            let return_type: usize = this->parse_type();
+            if (return_type != none) {
+                this->add_child(node, return_type);
+            }
+        }
+        let result: usize = this->finish_type(node, leading_const, allow_reference);
+        this->leave_nesting();
+        return result;
+    }
+
+    if (this->match(lexer::TokenKind.star)) {
+        let node: usize = this->new_node(syntax::SyntaxKind.type_pointer, start.span, start_index);
+        var seen_const: bool = false;
+        var seen_volatile: bool = false;
+        var qualifiers_done: bool = false;
+        while (!qualifiers_done && this->error_code == runtime::Error.none) {
+            if (this->current_token.kind == lexer::TokenKind.keyword_const) {
+                if (seen_const) {
+                    this->add_diagnostic(lexer::DiagnosticKind.expected_type, this->current_token.span,
+                        lexer::TokenKind.identifier, this->current_token.kind, 0);
+                    qualifiers_done = true;
+                } else {
+                    seen_const = true;
+                    this->add_node_flags(node, syntax::SyntaxFlag.read_only as usize);
+                    this->advance();
+                }
+            } else if (this->current_token.kind == lexer::TokenKind.keyword_volatile) {
+                if (seen_volatile) {
+                    this->add_diagnostic(lexer::DiagnosticKind.expected_type, this->current_token.span,
+                        lexer::TokenKind.identifier, this->current_token.kind, 0);
+                    qualifiers_done = true;
+                } else {
+                    seen_volatile = true;
+                    this->add_node_flags(node, syntax::SyntaxFlag.volatile_ as usize);
+                    this->advance();
+                }
+            } else {
+                qualifiers_done = true;
+            }
+        }
+        let pointee: usize = this->parse_type_active(false);
+        if (pointee != none) {
+            this->add_child(node, pointee);
+            let pointee_node: syntax::SyntaxNode = this->node(pointee);
+            if (pointee_node.kind != syntax::SyntaxKind.invalid) {
+                this->set_node_span(node, join_spans(start.span, pointee_node.span));
+            }
+        }
+        let result: usize = this->finish_type(node, leading_const, allow_reference);
+        this->leave_nesting();
+        return result;
+    }
+
+    if (this->match(lexer::TokenKind.left_bracket)) {
+        let node: usize = this->new_node(syntax::SyntaxKind.type_array, start.span, start_index);
+        if (this->current_token.kind == lexer::TokenKind.question) {
+            this->add_node_flags(node, syntax::SyntaxFlag.flexible as usize);
+            this->advance();
+        } else {
+            let count_expression: usize = this->parse_expression();
+            if (count_expression != none) {
+                this->add_child(node, count_expression);
+            }
+        }
+        this->expect(lexer::TokenKind.right_bracket);
+        let element: usize = this->parse_type_active(false);
+        if (element != none) {
+            this->add_child(node, element);
+            let element_node: syntax::SyntaxNode = this->node(element);
+            if (element_node.kind != syntax::SyntaxKind.invalid) {
+                this->set_node_span(node, join_spans(start.span, element_node.span));
+            }
+        }
+        let result: usize = this->finish_type(node, leading_const, allow_reference);
+        this->leave_nesting();
+        return result;
+    }
+
+    var kind: syntax::SyntaxKind = syntax::SyntaxKind.invalid;
+    if (this->current_token.kind == lexer::TokenKind.identifier) {
+        kind = syntax::SyntaxKind.type_named;
+    } else if (is_builtin_type(
+            this->current_token.kind)) {
+        kind = syntax::SyntaxKind.type_builtin;
+    }
+    if (kind == syntax::SyntaxKind.invalid) {
+        this->add_diagnostic(lexer::DiagnosticKind.expected_type, this->current_token.span, lexer::TokenKind.identifier,
+            this->current_token.kind, 0);
+        if (this->current_token.kind != lexer::TokenKind.end) {
+            this->advance();
+        }
+        this->leave_nesting();
+        return this->new_node(syntax::SyntaxKind.invalid, start.span, start_index);
+    }
+
+    if (kind == syntax::SyntaxKind.type_named) {
+        let named: lexer::Token = this->current_token;
+        let named_index: usize = this->current_token_index;
+        this->advance();
+        let named_node: usize = this->parse_qualified_name(named, named_index, kind);
+        if (this->current_token.kind == lexer::TokenKind.less) {
+            let arguments: usize = this->parse_generic_arguments();
+            let named_value: syntax::SyntaxNode = this->node(named_node);
+            let arguments_value: syntax::SyntaxNode = this->node(arguments);
+            if (named_value.kind == syntax::SyntaxKind.invalid || arguments_value.kind == syntax::SyntaxKind.invalid) {
+                this->leave_nesting();
+                return none;
+            }
+            let generic: usize = this->new_node(syntax::SyntaxKind.type_generic, named_value.span,
+                named_value.token_index);
+            this->add_child(generic, named_node);
+            this->add_child(generic, arguments);
+            this->set_node_span(generic, join_spans(named_value.span, arguments_value.span));
+            let result: usize = this->finish_type(generic, leading_const, allow_reference);
+            this->leave_nesting();
+            return result;
+        }
+        let result: usize = this->finish_type(named_node, leading_const, allow_reference);
+        this->leave_nesting();
+        return result;
+    }
+
+    let node: usize = this->new_node(kind, this->current_token.span, this->current_token_index);
+    this->advance();
+    let result: usize = this->finish_type(node, leading_const, allow_reference);
+    this->leave_nesting();
+    return result;
+}
+
+priv fn parse_type() -> usize {
+    return this->parse_type_active(true);
+}
+
+}

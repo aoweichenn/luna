@@ -1,7 +1,4 @@
-module luna.bootstrap.frontend.parser;
-
-import luna.bootstrap.frontend.parser.declarations as declarations;
-import luna.bootstrap.frontend.parser.state as state;
+module luna.compiler.parser;
 
 impl ParseResult {
     init(): tree_storage = syntax::SyntaxTree(), diagnostic_storage = lexer::DiagnosticBuffer() {
@@ -85,26 +82,47 @@ impl FrontendResult {
     }
 }
 
+impl Parser {
+    init(source: string_views::string_view, tokens: lexer::TokenView):
+            tokens = tokens, syntax_builder = syntax::SyntaxBuilder(tokens.size()),
+            diagnostics = lexer::DiagnosticBuffer() {
+        this->source = source;
+        this->tokens = tokens;
+        this->next_token_index = 0;
+        this->current_token = invalid_token();
+        this->current_token_index = syntax::no_index();
+        this->previous_token = invalid_token();
+        this->error_code = runtime::Error.none;
+        this->nesting_depth = 0;
+    }
+
+    fn run() {
+        this->advance();
+        if (this->error_code == runtime::Error.none) {
+            this->parse_program();
+        }
+        if (this->error_code == runtime::Error.none && !this->syntax_builder.view().is_valid()) {
+            this->error_code = runtime::Error.io;
+        }
+    }
+
+    fn take_result() -> ParseResult {
+        var tree: syntax::SyntaxTree = this->syntax_builder.take_tree();
+        return ParseResult(
+            tree as syntax::SyntaxTree&&, this->diagnostics as lexer::DiagnosticBuffer&&, this->error_code);
+    }
+
+    deinit() {
+    }
+}
+
 fn parse(source: string_views::string_view, tokens: lexer::TokenView) -> ParseResult {
-    if (!state::parser_input_is_valid(source, tokens)) {
+    if (!input_is_valid(source, tokens)) {
         return ParseResult();
     }
-    var parser_state: state::State = {
-        source = source, tokens = tokens, cursor = 0, current = state::parser_invalid_token(),
-        current_index = syntax::no_index(), previous = state::parser_invalid_token(),
-        builder = syntax::SyntaxBuilder(tokens.size()), diagnostics = lexer::DiagnosticBuffer(),
-        error = runtime::Error.none, nesting_depth = 0,
-    };
-    state::parser_advance(&parser_state);
-    if (parser_state.error == runtime::Error.none) {
-        declarations::parse_program(&parser_state);
-    }
-    if (parser_state.error == runtime::Error.none && !parser_state.builder.view().is_valid()) {
-        parser_state.error = runtime::Error.io;
-    }
-    var tree: syntax::SyntaxTree = parser_state.builder.take_tree();
-    return ParseResult(
-        tree as syntax::SyntaxTree&&, parser_state.diagnostics as lexer::DiagnosticBuffer&&, parser_state.error);
+    var session: Parser = Parser(source, tokens);
+    session.run();
+    return session.take_result();
 }
 
 fn frontend_parse(source: string_views::string_view) -> FrontendResult {
