@@ -10,7 +10,7 @@
 
 1. 可模块化正例组成少量 suite module graph，每个 suite 只编译、汇编和链接一次；
 2. 编译期负例与信号/入口/源码路径敏感正例保持独立；
-3. CLI、relocation、callable identity 和 FFI 等专用套件保持各自的现有协议。
+3. frontend、CLI、relocation、callable identity 和 FFI 等专用套件保持各自的模块协议。
 
 ## `TestSuite`
 
@@ -57,6 +57,11 @@ harness 对满足以下条件的 expectation 自动生成少量大 suite 文件�
 - 重复使用同一 case 文件但采用不同单元顺序的 expectation。
 
 这些任务仍使用独立工作目录，并与 suite 一起进入有界并行 worker pool。
+
+Lexer 契约属于 frontend 专用协议：消费端只携带 `luna.compiler.lexer` 接口独立编译，再链接 stage 中
+单独生成的 `lexer.lo` 与真实依赖对象。这样同时验证公开 ABI、RAII 析构和模块链接，避免把 Lexer
+实现与消费端错误地揉进一个源模块编译。一个大用例内部覆盖全部关键字、标点、字面量、trivia、span 和
+诊断，不为每个 Token 启动一次工具链。
 
 ## 失败与确定性
 

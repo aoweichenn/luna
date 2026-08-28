@@ -1,0 +1,182 @@
+module luna.compiler.lexer;
+
+fn source_is_valid(source: string_views::string_view) -> bool {
+    if (!string_views::is_valid_utf8(source)) {
+        return false;
+    }
+    for (var index: usize = 0; index < source.length; index += 1) {
+        if (source.data[index] == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+impl Lexer {
+    init(source: string_views::string_view): keywords = KeywordTable(), result = LexResult() {
+        this->source = source;
+        this->offset = 0;
+        this->line = 1;
+        this->column = 1;
+        this->result.error_code = source_is_valid(source) ? runtime::Error.none : runtime::Error.invalid_argument;
+    }
+
+    priv fn at_end() const -> bool {
+        return this->offset >= this->source.length;
+    }
+
+    priv fn ready() const -> bool {
+        return this->result.error_code == runtime::Error.none;
+    }
+
+    priv fn peek() const -> u8 {
+        return this->at_end() ? 0 : this->source.data[this->offset];
+    }
+
+    priv fn peek_next() const -> u8 {
+        if (this->offset == this->source.length) {
+            return 0;
+        }
+        return this->source.length - this->offset < 2 ? 0 : this->source.data[this->offset + 1];
+    }
+
+    priv fn advance() -> u8 {
+        if (this->at_end()) {
+            return 0;
+        }
+        let byte: u8 = this->source.data[this->offset];
+        this->offset += 1;
+        if (byte == '\n') {
+            this->line += 1;
+            this->column = 1;
+        } else {
+            this->column += 1;
+        }
+        return byte;
+    }
+
+    priv fn match(expected: u8) -> bool {
+        if (this->peek() != expected) {
+            return false;
+        }
+        this->advance();
+        return true;
+    }
+
+    priv fn span(start_offset: usize, start_line: usize, start_column: usize) const -> SourceSpan {
+        return {
+            offset = start_offset, length = this->offset - start_offset, line = start_line, column = start_column,
+        };
+    }
+
+    priv fn fail(error: runtime::Error) -> bool {
+        if (this->result.error_code == runtime::Error.none) {
+            this->result.error_code = error;
+        }
+        return false;
+    }
+
+    priv fn add_diagnostic(kind: DiagnosticKind, span: SourceSpan, detail: usize) -> bool {
+        if (!this->ready()) {
+            return false;
+        }
+        let error: runtime::Error = this->result.diagnostic_storage.add({
+            kind = kind, span = span, expected = TokenKind.invalid, found = TokenKind.invalid, detail = detail,
+        });
+        return error == runtime::Error.none ? true : this->fail(error);
+    }
+
+    priv fn add_token(kind: TokenKind, start_offset: usize, start_line: usize, start_column: usize) -> bool {
+        if (!this->ready()) {
+            return false;
+        }
+        let span: SourceSpan = this->span(start_offset, start_line, start_column);
+        let token_is_oversized: bool = span.length > LexerLimit.maximum_token_length as usize;
+        let token_kind: TokenKind = token_is_oversized ? TokenKind.invalid : kind;
+        let token_count: usize = this->result.token_storage.size();
+        if (token_count >= LexerLimit.maximum_tokens as usize) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        let error: runtime::Error = this->result.token_storage.push_back({kind = token_kind, span = span});
+        if (error != runtime::Error.none) {
+            return this->fail(error);
+        }
+        if (!token_is_oversized) {
+            return true;
+        }
+        return this->add_diagnostic(DiagnosticKind.resource_limit, span, LexerLimit.maximum_token_length as usize);
+    }
+
+    priv fn starts_line_comment() const -> bool {
+        return this->peek() == '/' && this->peek_next() == '/';
+    }
+
+    priv fn starts_block_comment() const -> bool {
+        return this->peek() == '/' && this->peek_next() == '*';
+    }
+
+    priv fn ends_block_comment() const -> bool {
+        return this->peek() == '*' && this->peek_next() == '/';
+    }
+
+    priv fn skip_trivia() {
+        for (; !this->at_end() && this->ready();) {
+            let byte: u8 = this->peek();
+            let horizontal_space: bool = byte == ' ' || byte == '\t';
+            let vertical_space: bool = byte == '\r' || byte == '\n';
+            if (horizontal_space || vertical_space) {
+                this->advance();
+                continue;
+            }
+            if (this->starts_line_comment()) {
+                for (; !this->at_end() && this->peek() != '\n';) {
+                    this->advance();
+                }
+                continue;
+            }
+            if (!this->starts_block_comment()) {
+                return;
+            }
+
+            let start_offset: usize = this->offset;
+            let start_line: usize = this->line;
+            let start_column: usize = this->column;
+            this->advance();
+            this->advance();
+            for (; !this->at_end() && !this->ends_block_comment();) {
+                this->advance();
+            }
+            if (this->at_end()) {
+                this->add_diagnostic(
+                    DiagnosticKind.unterminated_block_comment, this->span(start_offset, start_line, start_column), 0);
+                return;
+            }
+            this->advance();
+            this->advance();
+        }
+    }
+
+    fn run() {
+        for (; this->ready();) {
+            if (!this->scan_token()) {
+                return;
+            }
+            let tokens: TokenView = this->result.tokens();
+            let last: TokenResult = tokens.get(tokens.size() - 1);
+            if (last.error != runtime::Error.none) {
+                this->fail(last.error);
+                return;
+            }
+            if (last.token.kind == TokenKind.end) {
+                return;
+            }
+        }
+    }
+
+    fn take_result() -> LexResult {
+        return this->result as LexResult&&;
+    }
+
+    deinit() {
+    }
+}

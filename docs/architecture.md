@@ -115,7 +115,7 @@ standard ELF64 relocatable object. `luna link` consumes both supported object
 forms and emits the final static ELF64 image. The three commands are provided
 by one freestanding executable while their implementation modules remain
 independent. No stage invokes a host assembler or linker. See the
-[unified driver contract](unified-tool-driver.md).
+[unified driver contract](tools.md).
 
 ## Frontend
 

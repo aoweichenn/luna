@@ -31,49 +31,62 @@ fn input_empty(executable: bool) -> Input {
 }
 
 fn input_storage_is_valid(input: Input) -> bool {
-    return bytes::is_valid(input.units) && bytes::is_valid(input.paths) && input.units.length % sizeof(Unit) == 0 &&
-        input.unit_count <= Limit.maximum_modules as usize * 2 && input.unit_count == input.units.length / sizeof(Unit);
+    let buffers_are_valid: bool = bytes::is_valid(input.units) && bytes::is_valid(input.paths);
+    let storage_is_shaped: bool = input.units.length % sizeof(Unit) == 0 &&
+        input.unit_count == input.units.length / sizeof(Unit);
+    if (!buffers_are_valid || !storage_is_shaped) {
+        return false;
+    }
+    return input.unit_count <= Limit.maximum_modules as usize * 2;
 }
 
 fn source_is_valid(source: string_views::string_view) -> bool {
     if (!string_views::is_valid_utf8(source)) {
         return false;
     }
-    var index: usize = 0;
-    while (index < source.length) {
+    for (var index: usize = 0; index < source.length; index += 1) {
         if (source.data[index] == 0) {
             return false;
         }
-        index += 1;
     }
     return true;
 }
 
 fn unit_is_valid(unit: Unit) -> bool {
-    return source_is_valid(unit.source) && lexer::token_buffer_is_valid(unit.tokens) &&
-        syntax::syntax_tree_is_valid(unit.tree) && unit.tokens.count == unit.tree.token_count;
+    let source_and_tokens_are_valid: bool = source_is_valid(unit.source) && unit.tokens.is_valid();
+    let tree_and_count_are_valid: bool = syntax::syntax_tree_is_valid(unit.tree) &&
+        unit.tokens.size() == unit.tree.token_count;
+    return source_and_tokens_are_valid && tree_and_count_are_valid;
 }
 
 fn input_is_valid(input: Input) -> bool {
-    if (!input_storage_is_valid(input) || input.unit_count == 0 || input.unit_count >
-            Limit.maximum_modules as usize * 2) {
+    let has_valid_storage: bool = input_storage_is_valid(input) && input.unit_count != 0;
+    let count_is_valid: bool = input.unit_count <= Limit.maximum_modules as usize * 2;
+    if (!has_valid_storage || !count_is_valid) {
         return false;
     }
     let units: *const Unit = input.units.data as *const Unit;
-    var index: usize = 0;
-    while (index < input.unit_count) {
-        if (!unit_is_valid(units[index]) || units[index].path_length > input.paths.length || units[index].path_offset >
-                input.paths.length - units[index].path_length) {
+    for (var index: usize = 0; index < input.unit_count; index += 1) {
+        let path_length_is_valid: bool = units[index].path_length <= input.paths.length;
+        let path_offset_is_valid: bool = path_length_is_valid &&
+            units[index].path_offset <= input.paths.length - units[index].path_length;
+        if (!unit_is_valid(units[index]) || !path_offset_is_valid) {
             return false;
         }
-        index += 1;
     }
     return true;
 }
 
 fn input_add(input: *Input, unit: Unit, path: string_views::string_view) -> bool {
-    if (input == null || !input_storage_is_valid(*input) || !unit_is_valid(unit) ||
-        (path.length != 0 && path.data == null) || input->unit_count >= Limit.maximum_modules as usize * 2) {
+    if (input == null) {
+        return false;
+    }
+    if (!input_storage_is_valid(*input) || !unit_is_valid(unit)) {
+        return false;
+    }
+    let path_is_valid: bool = path.data != null || path.length == 0;
+    let has_capacity: bool = input->unit_count < Limit.maximum_modules as usize * 2;
+    if (!path_is_valid || !has_capacity) {
         return false;
     }
     var record: Unit = unit;
@@ -157,8 +170,10 @@ fn add_diagnostic(
 }
 
 fn result_is_success(result: Result) -> bool {
-    return result.error == runtime::Error.none && result.diagnostics.count == 0 &&
-        type_info::table_is_valid(result.types, true) && ir_check::is_valid(result.ir, result.types);
+    let status_is_success: bool = result.error == runtime::Error.none && result.diagnostics.count == 0;
+    let stores_are_valid: bool = type_info::table_is_valid(result.types, true) &&
+        ir_check::is_valid(result.ir, result.types);
+    return status_is_success && stores_are_valid;
 }
 
 fn release_error(current: runtime::Error, next: runtime::Error) -> runtime::Error {
@@ -166,8 +181,9 @@ fn release_error(current: runtime::Error, next: runtime::Error) -> runtime::Erro
 }
 
 fn result_release(result: Result) -> runtime::Error {
-    if (!diagnostics_storage_is_valid(result.diagnostics) ||
-        !type_info::table_storage_is_valid(result.types) || !ir::storage_is_valid(result.ir)) {
+    let diagnostics_are_valid: bool = diagnostics_storage_is_valid(result.diagnostics);
+    let stores_are_valid: bool = type_info::table_storage_is_valid(result.types) && ir::storage_is_valid(result.ir);
+    if (!diagnostics_are_valid || !stores_are_valid) {
         return runtime::Error.invalid_argument;
     }
     var error: runtime::Error = type_info::table_release(result.types);
@@ -389,11 +405,21 @@ fn token(context: *Context, unit_index: usize, token_index: usize) -> lexer::Tok
             kind = lexer::TokenKind.invalid, span = empty_span(),
         };
     }
-    let result: lexer::TokenResult = lexer::token_buffer_get(unit->tokens, token_index);
+    let result: lexer::TokenResult = unit->tokens.get(token_index);
     if (result.error != runtime::Error.none) {
         context->error = result.error;
     }
     return result.token;
+}
+
+fn source_span_is_valid(unit: *const Unit, span: lexer::SourceSpan) -> bool {
+    if (unit == null) {
+        return false;
+    }
+    if (span.offset > unit->source.length) {
+        return false;
+    }
+    return span.length <= unit->source.length - span.offset;
 }
 
 fn text_equal(
@@ -404,18 +430,16 @@ fn text_equal(
     }
     let left: *const Unit = input_unit(context, left_unit);
     let right: *const Unit = input_unit(context, right_unit);
-    if (left == null || right == null || left_span.offset > left->source.length || left_span.length >
-            left->source.length - left_span.offset || right_span.offset > right->source.length || right_span.length >
-            right->source.length - right_span.offset) {
+    let left_is_valid: bool = source_span_is_valid(left, left_span);
+    let right_is_valid: bool = source_span_is_valid(right, right_span);
+    if (!left_is_valid || !right_is_valid) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    var index: usize = 0;
-    while (index < left_span.length) {
+    for (var index: usize = 0; index < left_span.length; index += 1) {
         if (left->source.data[left_span.offset + index] != right->source.data[right_span.offset + index]) {
             return false;
         }
-        index += 1;
     }
     return true;
 }
@@ -469,7 +493,11 @@ fn module_names_equal(
 fn parse_unsigned(context: *Context, unit_index: usize, token_index: usize, value: *u64) -> bool {
     let token: lexer::Token = token(context, unit_index, token_index);
     let unit: *const Unit = input_unit(context, unit_index);
-    if (token.kind != lexer::TokenKind.integer || value == null || token.span.length == 0) {
+    let token_and_output_are_valid: bool = token.kind == lexer::TokenKind.integer && value != null;
+    if (unit == null || !token_and_output_are_valid) {
+        return false;
+    }
+    if (token.span.length == 0) {
         return false;
     }
     var base: u64 = 10;
@@ -488,10 +516,9 @@ fn parse_unsigned(context: *Context, unit_index: usize, token_index: usize, valu
         }
     }
     var result: u64 = 0;
-    while (index < token.span.length) {
+    for (; index < token.span.length; index += 1) {
         let byte: u8 = unit->source.data[token.span.offset + index];
         if (byte == '_') {
-            index += 1;
             continue;
         }
         var digit: u64 = 0;
@@ -502,7 +529,6 @@ fn parse_unsigned(context: *Context, unit_index: usize, token_index: usize, valu
             return false;
         }
         result = result * base + digit;
-        index += 1;
     }
     *value = result;
     return true;
@@ -516,7 +542,11 @@ fn parse_unsigned(context: *Context, unit_index: usize, token_index: usize, valu
 fn decode_character(context: *Context, unit_index: usize, token_index: usize, value: *u64) -> bool {
     let token: lexer::Token = token(context, unit_index, token_index);
     let unit: *const Unit = input_unit(context, unit_index);
-    if (token.kind != lexer::TokenKind.character || value == null || token.span.length < 3) {
+    let token_and_output_are_valid: bool = token.kind == lexer::TokenKind.character && value != null;
+    if (unit == null || !token_and_output_are_valid) {
+        return false;
+    }
+    if (token.span.length < 3) {
         return false;
     }
     var code: u64 = 0;
@@ -542,7 +572,10 @@ fn decode_character(context: *Context, unit_index: usize, token_index: usize, va
         } else if (escape == '0') {
             code = 0;
             next = 3;
-        } else if (escape == '\\' || escape == '\x27' || escape == '"') {
+        } else if (escape == '\\' || escape == '\x27') {
+            code = escape as u64;
+            next = 3;
+        } else if (escape == '"') {
             code = escape as u64;
             next = 3;
         } else if (escape == 'x') {

@@ -19,7 +19,7 @@ fn parser_invalid_token() -> lexer::Token {
 }
 
 fn parser_token_at(state: *State, index: usize) -> lexer::Token {
-    let result: lexer::TokenResult = lexer::token_buffer_get(state->tokens, index);
+    let result: lexer::TokenResult = state->tokens.get(index);
     if (result.error != runtime::Error.none) {
         if (state->error == runtime::Error.none) {
             state->error = result.error;
@@ -65,18 +65,19 @@ fn parser_source_is_valid(source: string_views::string_view) -> bool {
     return true;
 }
 
-fn parser_input_is_valid(source: string_views::string_view, tokens: lexer::TokenBuffer) -> bool {
-    let buffers_are_valid: bool = parser_source_is_valid(source) && lexer::token_buffer_is_valid(tokens);
-    if (!buffers_are_valid || tokens.count == 0) {
+fn parser_input_is_valid(source: string_views::string_view, tokens: lexer::TokenView) -> bool {
+    let buffers_are_valid: bool = parser_source_is_valid(source) && tokens.is_valid();
+    if (!buffers_are_valid || tokens.empty()) {
         return false;
     }
 
+    let token_count: usize = tokens.size();
     var previous_end: usize = 0;
     var scan_offset: usize = 0;
     var scan_line: usize = 1;
     var scan_column: usize = 1;
-    for (var index: usize = 0; index < tokens.count; index += 1) {
-        let token_result: lexer::TokenResult = lexer::token_buffer_get(tokens, index);
+    for (var index: usize = 0; index < token_count; index += 1) {
+        let token_result: lexer::TokenResult = tokens.get(index);
         if (token_result.error != runtime::Error.none) {
             return false;
         }
@@ -86,20 +87,19 @@ fn parser_input_is_valid(source: string_views::string_view, tokens: lexer::Token
         if (!kind_is_valid || !source_is_valid) {
             return false;
         }
-        while (scan_offset < token.span.offset) {
+        for (; scan_offset < token.span.offset; scan_offset += 1) {
             if (source.data[scan_offset] == '\n') {
                 scan_line += 1;
                 scan_column = 1;
             } else {
                 scan_column += 1;
             }
-            scan_offset += 1;
         }
         if (token.span.line != scan_line || token.span.column != scan_column) {
             return false;
         }
         previous_end = token.span.offset + token.span.length;
-        if (index + 1 == tokens.count) {
+        if (index + 1 == token_count) {
             let end_token_is_valid: bool = token.kind == lexer::TokenKind.end && token.span.length == 0;
             return end_token_is_valid && token.span.offset == source.length;
         }
@@ -129,14 +129,11 @@ fn parser_add_diagnostic(
     if (state->error != runtime::Error.none) {
         return false;
     }
-    let added: lexer::DiagnosticBufferResult =
-        lexer::diagnostic_buffer_add(
-            state->diagnostics, {
-                kind = kind, span = span, expected = expected, found = found, detail = detail,
-            });
-    state->diagnostics = added.buffer;
-    state->error = added.error;
-    return added.error == runtime::Error.none;
+    let error: runtime::Error = state->diagnostics.add({
+        kind = kind, span = span, expected = expected, found = found, detail = detail,
+    });
+    state->error = error;
+    return error == runtime::Error.none;
 }
 
 fn parser_new_node(state: *State, kind: syntax::SyntaxKind, span: lexer::SourceSpan, token_index: usize) -> usize {
@@ -208,15 +205,17 @@ fn parser_add_child(state: *State, parent_index: usize, child_index: usize) -> b
     if (state->error != runtime::Error.none) {
         return false;
     }
-    if (parent_index >= state->tree.count || child_index >= state->tree.count || parent_index == child_index) {
+    let indices_are_valid: bool = parent_index < state->tree.count && child_index < state->tree.count;
+    if (!indices_are_valid || parent_index == child_index) {
         if (state->error == runtime::Error.none) {
             state->error = runtime::Error.invalid_argument;
         }
         return false;
     }
     let nodes: *syntax::SyntaxNode = state->tree.storage.data as *syntax::SyntaxNode;
-    if (nodes[child_index].parent != none || nodes[child_index].next_sibling != none ||
-        nodes[parent_index].child_count == ParserLimit.maximum_size as usize) {
+    let child_is_detached: bool = nodes[child_index].parent == none && nodes[child_index].next_sibling == none;
+    let parent_has_capacity: bool = nodes[parent_index].child_count != ParserLimit.maximum_size as usize;
+    if (!child_is_detached || !parent_has_capacity) {
         if (state->error == runtime::Error.none) {
             state->error = runtime::Error.invalid_argument;
         }
@@ -238,8 +237,8 @@ fn parser_advance(state: *State) -> void {
         return;
     }
     state->previous = state->current;
-    while (state->cursor < state->tokens.count) {
-        let token_result: lexer::TokenResult = lexer::token_buffer_get(state->tokens, state->cursor);
+    for (; state->cursor < state->tokens.size();) {
+        let token_result: lexer::TokenResult = state->tokens.get(state->cursor);
         if (token_result.error != runtime::Error.none) {
             state->error = token_result.error;
             return;
@@ -260,8 +259,8 @@ fn parser_check(state: *State, kind: lexer::TokenKind) -> bool {
 
 fn parser_peek_kind(state: *State) -> lexer::TokenKind {
     var cursor: usize = state->cursor;
-    while (cursor < state->tokens.count) {
-        let token_result: lexer::TokenResult = lexer::token_buffer_get(state->tokens, cursor);
+    for (; cursor < state->tokens.size(); cursor += 1) {
+        let token_result: lexer::TokenResult = state->tokens.get(cursor);
         if (token_result.error != runtime::Error.none) {
             state->error = token_result.error;
             return lexer::TokenKind.invalid;
@@ -269,7 +268,6 @@ fn parser_peek_kind(state: *State) -> lexer::TokenKind {
         if (token_result.token.kind != lexer::TokenKind.invalid) {
             return token_result.token.kind;
         }
-        cursor += 1;
     }
     return lexer::TokenKind.invalid;
 }
@@ -317,8 +315,7 @@ fn parser_mark(state: *State) -> Mark {
     return {
         cursor = state->cursor, current = state->current, current_index = state->current_index,
         previous = state->previous, tree_length = state->tree.storage.length, tree_count = state->tree.count,
-        diagnostic_length = state->diagnostics.storage.length, diagnostic_count = state->diagnostics.count,
-        nesting_depth = state->nesting_depth,
+        diagnostic_count = state->diagnostics.size(), nesting_depth = state->nesting_depth,
     };
 }
 
@@ -327,8 +324,7 @@ fn parser_restore(state: *State, mark: Mark) -> bool {
         return false;
     }
     let tree_can_restore: bool = mark.tree_length <= state->tree.storage.length && mark.tree_count <= state->tree.count;
-    let diagnostics_can_restore: bool = mark.diagnostic_length <= state->diagnostics.storage.length &&
-        mark.diagnostic_count <= state->diagnostics.count;
+    let diagnostics_can_restore: bool = mark.diagnostic_count <= state->diagnostics.size();
     if (!tree_can_restore || !diagnostics_can_restore) {
         state->error = runtime::Error.invalid_argument;
         return false;
@@ -339,8 +335,11 @@ fn parser_restore(state: *State, mark: Mark) -> bool {
     state->previous = mark.previous;
     state->tree.storage.length = mark.tree_length;
     state->tree.count = mark.tree_count;
-    state->diagnostics.storage.length = mark.diagnostic_length;
-    state->diagnostics.count = mark.diagnostic_count;
+    let diagnostic_error: runtime::Error = state->diagnostics.truncate(mark.diagnostic_count);
+    if (diagnostic_error != runtime::Error.none) {
+        state->error = diagnostic_error;
+        return false;
+    }
     state->nesting_depth = mark.nesting_depth;
     return true;
 }

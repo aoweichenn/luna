@@ -1,0 +1,164 @@
+module luna.compiler.lexer;
+
+fn empty_span() -> SourceSpan {
+    return {offset = 0, length = 0, line = 0, column = 0};
+}
+
+fn invalid_token() -> Token {
+    return {kind = TokenKind.invalid, span = empty_span()};
+}
+
+fn invalid_diagnostic() -> Diagnostic {
+    return {
+        kind = DiagnosticKind.unexpected_character, span = empty_span(),
+        expected = TokenKind.invalid, found = TokenKind.invalid, detail = 0,
+    };
+}
+
+impl TokenView {
+    init(data: *const Token, count: usize) {
+        this->data_pointer = data;
+        this->element_count = count;
+    }
+
+    fn is_valid() const -> bool {
+        return this->data_pointer != null || this->element_count == 0;
+    }
+
+    fn empty() const -> bool {
+        return this->element_count == 0;
+    }
+
+    fn size() const -> usize {
+        return this->element_count;
+    }
+
+    fn get(index: usize) const -> TokenResult {
+        if (!this->is_valid() || index >= this->element_count) {
+            return {token = invalid_token(), error = runtime::Error.invalid_argument};
+        }
+        return {token = this->data_pointer[index], error = runtime::Error.none};
+    }
+}
+
+impl DiagnosticView {
+    init(data: *const Diagnostic, count: usize) {
+        this->data_pointer = data;
+        this->element_count = count;
+    }
+
+    fn is_valid() const -> bool {
+        return this->data_pointer != null || this->element_count == 0;
+    }
+
+    fn empty() const -> bool {
+        return this->element_count == 0;
+    }
+
+    fn size() const -> usize {
+        return this->element_count;
+    }
+
+    fn get(index: usize) const -> DiagnosticResult {
+        if (!this->is_valid() || index >= this->element_count) {
+            return {diagnostic = invalid_diagnostic(), error = runtime::Error.invalid_argument};
+        }
+        return {diagnostic = this->data_pointer[index], error = runtime::Error.none};
+    }
+}
+
+impl DiagnosticBuffer {
+    init(): values = vector::vector<Diagnostic>() {
+    }
+
+    init(other: DiagnosticBuffer&&): values = other.values as vector::vector<Diagnostic>&& {
+    }
+
+    fn is_valid() const -> bool {
+        return this->values.is_valid() && this->values.size() <= LexerLimit.maximum_diagnostics as usize;
+    }
+
+    fn empty() const -> bool {
+        return this->values.empty();
+    }
+
+    fn size() const -> usize {
+        return this->values.size();
+    }
+
+    fn add(diagnostic: Diagnostic) -> runtime::Error {
+        if (!this->is_valid()) {
+            return runtime::Error.invalid_argument;
+        }
+        if (this->values.size() >= LexerLimit.maximum_diagnostics as usize) {
+            return runtime::Error.out_of_memory;
+        }
+        return this->values.push_back(diagnostic);
+    }
+
+    fn truncate(count: usize) -> runtime::Error {
+        return this->values.truncate(count);
+    }
+
+    fn view() const -> DiagnosticView {
+        let data: *const Diagnostic = this->values.empty() ? null : &this->values.get(0);
+        return DiagnosticView(data, this->values.size());
+    }
+
+    deinit() {
+    }
+}
+
+impl LexResult {
+    init(): token_storage = vector::vector<Token>(), diagnostic_storage = DiagnosticBuffer() {
+        this->error_code = runtime::Error.invalid_argument;
+    }
+
+    init(other: LexResult&&): token_storage = other.token_storage as vector::vector<Token>&&,
+            diagnostic_storage = other.diagnostic_storage as DiagnosticBuffer&& {
+        this->error_code = other.error_code;
+    }
+
+    fn is_valid() const -> bool {
+        let tokens_are_valid: bool = this->token_storage.is_valid() &&
+            this->token_storage.size() <= LexerLimit.maximum_tokens as usize;
+        if (!tokens_are_valid || !this->diagnostic_storage.is_valid()) {
+            return false;
+        }
+        if (this->error_code != runtime::Error.none) {
+            return true;
+        }
+        let tokens: TokenView = this->tokens();
+        if (tokens.empty()) {
+            return false;
+        }
+        let last: TokenResult = tokens.get(tokens.size() - 1);
+        return last.error == runtime::Error.none && last.token.kind == TokenKind.end;
+    }
+
+    fn tokens() const -> TokenView {
+        let data: *const Token = this->token_storage.empty() ? null : &this->token_storage.get(0);
+        return TokenView(data, this->token_storage.size());
+    }
+
+    fn diagnostics() const -> DiagnosticView {
+        return this->diagnostic_storage.view();
+    }
+
+    fn view() const -> LexView {
+        return {tokens = this->tokens(), diagnostics = this->diagnostics(), error = this->error_code};
+    }
+
+    fn error() const -> runtime::Error {
+        return this->error_code;
+    }
+
+    deinit() {
+    }
+}
+
+fn lex(source: string_views::string_view) -> LexResult {
+    var lexer: Lexer = Lexer(source);
+    lexer.run();
+    return lexer.take_result();
+}

@@ -1,7 +1,7 @@
 module luna.bootstrap.frontend.parser.expression;
 
-import luna.bootstrap.frontend.lexer as lexer;
 import luna.bootstrap.frontend.syntax as syntax;
+import luna.compiler.lexer as lexer;
 import luna.runtime;
 import luna.std.ascii as ascii;
 
@@ -93,21 +93,26 @@ fn parser_scan_float_digits(state: *state::State, token: lexer::Token, start: us
     var index: usize = start;
     var saw_digit: bool = false;
     var previous_separator: bool = false;
-    while (index < token.span.length) {
+    for (; index < token.span.length;) {
         let byte: u8 = state->source.data[token.span.offset + index];
-        if ((hexadecimal && ascii::is_hex_digit(byte)) || (!hexadecimal && ascii::is_decimal_digit(byte))) {
+        let digit_matches: bool = hexadecimal ? ascii::is_hex_digit(byte) : ascii::is_decimal_digit(byte);
+        if (digit_matches) {
             saw_digit = true;
             previous_separator = false;
             index += 1;
             continue;
         }
         if (byte == '_') {
-            if (!saw_digit || previous_separator || index + 1 >= token.span.length) {
+            let separator_has_prefix: bool = saw_digit && !previous_separator;
+            let separator_has_suffix: bool = index + 1 < token.span.length;
+            if (!separator_has_prefix || !separator_has_suffix) {
                 return syntax::syntax_no_index();
             }
             let next: u8 = state->source.data[token.span.offset + index + 1];
-            if (!ascii::is_hex_digit(next) && (hexadecimal || !ascii::is_decimal_digit(next))) {
-                return syntax::syntax_no_index();
+            if (!ascii::is_hex_digit(next)) {
+                if (hexadecimal || !ascii::is_decimal_digit(next)) {
+                    return syntax::syntax_no_index();
+                }
             }
             previous_separator = true;
             index += 1;
@@ -119,6 +124,17 @@ fn parser_scan_float_digits(state: *state::State, token: lexer::Token, start: us
         return syntax::syntax_no_index();
     }
     return index;
+}
+
+fn parser_has_hex_prefix(state: *state::State, token: lexer::Token) -> bool {
+    if (token.span.length < 2) {
+        return false;
+    }
+    if (state->source.data[token.span.offset] != '0') {
+        return false;
+    }
+    let prefix: u8 = state->source.data[token.span.offset + 1];
+    return prefix == 'x' || prefix == 'X';
 }
 
 fn parser_validate_hex_float(state: *state::State, token: lexer::Token) -> bool {
@@ -168,15 +184,15 @@ fn parser_validate_hex_float(state: *state::State, token: lexer::Token) -> bool 
 }
 
 fn parser_validate_float(state: *state::State, token: lexer::Token) -> bool {
-    if (token.span.length >= 2 && state->source.data[token.span.offset] == '0' &&
-        (state->source.data[token.span.offset + 1] == 'x' || state->source.data[token.span.offset + 1] == 'X')) {
+    if (parser_has_hex_prefix(state, token)) {
         return parser_validate_hex_float(state, token);
     }
     let none: usize = syntax::syntax_no_index();
     var index: usize = parser_scan_float_digits(state, token, 0, false);
     var has_fraction: bool = false;
     var has_exponent: bool = false;
-    if (index != none && index < token.span.length && state->source.data[token.span.offset + index] == '.') {
+    let fraction_position_is_valid: bool = index != none && index < token.span.length;
+    if (fraction_position_is_valid && state->source.data[token.span.offset + index] == '.') {
         has_fraction = true;
         index = parser_scan_float_digits(state, token, index + 1, false);
     }
@@ -194,7 +210,9 @@ fn parser_validate_float(state: *state::State, token: lexer::Token) -> bool {
             index = parser_scan_float_digits(state, token, index, false);
         }
     }
-    if (index == none || index != token.span.length || (!has_fraction && !has_exponent)) {
+    let consumed_all: bool = index != none && index == token.span.length;
+    let has_floating_shape: bool = has_fraction || has_exponent;
+    if (!consumed_all || !has_floating_shape) {
         state::parser_add_diagnostic(
             state, lexer::DiagnosticKind.invalid_floating, token.span, lexer::TokenKind.floating, token.kind, 0);
         return false;
@@ -519,6 +537,10 @@ fn parser_parse_expression(state: *state::State) -> usize {
     return parser_parse_conditional_expression(state);
 }
 
+fn parser_at_aggregate_end(state: *state::State) -> bool {
+    return state->current.kind == lexer::TokenKind.right_brace || state->current.kind == lexer::TokenKind.end;
+}
+
 fn parser_parse_aggregate_initializer(state: *state::State, left_brace: lexer::Token,
     left_brace_index: usize) -> usize {
     let none: usize = syntax::syntax_no_index();
@@ -535,8 +557,7 @@ fn parser_parse_aggregate_initializer(state: *state::State, left_brace: lexer::T
             state, left_brace.span)) {
         return initializer;
     }
-    while (state->error == runtime::Error.none && state->current.kind != lexer::TokenKind.right_brace &&
-        state->current.kind != lexer::TokenKind.end) {
+    for (; state->error == runtime::Error.none && !parser_at_aggregate_end(state);) {
         let offset_before: usize = state->current.span.offset;
         if (state->current.kind == lexer::TokenKind.left_bracket) {
             let bracket: lexer::Token = state->current;
@@ -747,6 +768,40 @@ fn parser_parse_va_arg_expression(state: *state::State, keyword: lexer::Token, k
     return query;
 }
 
+fn parser_is_layout_keyword(kind: lexer::TokenKind) -> bool {
+    switch (kind) {
+    case lexer::TokenKind.keyword_sizeof {
+        return true;
+    }
+    case lexer::TokenKind.keyword_alignof {
+        return true;
+    }
+    case lexer::TokenKind.keyword_offsetof {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn parser_is_string_token(kind: lexer::TokenKind) -> bool {
+    switch (kind) {
+    case lexer::TokenKind.string {
+        return true;
+    }
+    case lexer::TokenKind.string_u16 {
+        return true;
+    }
+    case lexer::TokenKind.string_u32 {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
 fn parser_parse_primary_expression(state: *state::State) -> usize {
     let token: lexer::Token = state->current;
     let token_index: usize = state->current_index;
@@ -754,8 +809,7 @@ fn parser_parse_primary_expression(state: *state::State) -> usize {
         state::parser_advance(state);
         return parser_parse_va_arg_expression(state, token, token_index);
     }
-    if (token.kind == lexer::TokenKind.keyword_sizeof || token.kind == lexer::TokenKind.keyword_alignof ||
-        token.kind == lexer::TokenKind.keyword_offsetof) {
+    if (parser_is_layout_keyword(token.kind)) {
         state::parser_advance(state);
         return parser_parse_layout_query(state, token, token_index);
     }
@@ -781,12 +835,10 @@ fn parser_parse_primary_expression(state: *state::State) -> usize {
         state::parser_advance(state);
         return state::parser_new_node(state, syntax::SyntaxKind.boolean_expression, token.span, token_index);
     }
-    if (token.kind == lexer::TokenKind.string || token.kind == lexer::TokenKind.string_u16 ||
-        token.kind == lexer::TokenKind.string_u32) {
+    if (parser_is_string_token(token.kind)) {
         state::parser_advance(state);
         let node: usize = state::parser_new_node(state, syntax::SyntaxKind.string_expression, token.span, token_index);
-        while (state->current.kind == lexer::TokenKind.string || state->current.kind == lexer::TokenKind.string_u16 ||
-            state->current.kind == lexer::TokenKind.string_u32) {
+        for (; parser_is_string_token(state->current.kind);) {
             let part: lexer::Token = state->current;
             let part_index: usize = state->current_index;
             state::parser_advance(state);
@@ -853,12 +905,12 @@ fn parser_parse_postfix_expression(state: *state::State) -> usize {
                 expression_node->kind == syntax::SyntaxKind.member_expression;
             if (generic_base) {
                 let mark: state::Mark = state::parser_mark(state);
-                let diagnostic_count: usize = state->diagnostics.count;
+                let diagnostic_count: usize = state->diagnostics.size();
                 let arguments: usize = parser_parse_generic_arguments(state);
                 let member_postfix: bool = state->current.kind == lexer::TokenKind.dot ||
                     state->current.kind == lexer::TokenKind.arrow;
                 let postfix_follows: bool = state->current.kind == lexer::TokenKind.left_parenthesis || member_postfix;
-                let parsed: bool = arguments != none && state->diagnostics.count == diagnostic_count;
+                let parsed: bool = arguments != none && state->diagnostics.size() == diagnostic_count;
                 if (parsed && postfix_follows) {
                     expression_node = state::parser_node_pointer(state, expression);
                     let arguments_node: *syntax::SyntaxNode = state::parser_node_pointer(state, arguments);
@@ -996,38 +1048,65 @@ fn parser_parse_cast_expression(state: *state::State) -> usize {
 }
 
 fn parser_binary_precedence(kind: lexer::TokenKind) -> usize {
-    if (kind == lexer::TokenKind.logical_or) {
+    switch (kind) {
+    case lexer::TokenKind.logical_or {
         return 1;
     }
-    if (kind == lexer::TokenKind.logical_and) {
+    case lexer::TokenKind.logical_and {
         return 2;
     }
-    if (kind == lexer::TokenKind.pipe) {
+    case lexer::TokenKind.pipe {
         return 3;
     }
-    if (kind == lexer::TokenKind.caret) {
+    case lexer::TokenKind.caret {
         return 4;
     }
-    if (kind == lexer::TokenKind.ampersand) {
+    case lexer::TokenKind.ampersand {
         return 5;
     }
-    if (kind == lexer::TokenKind.equal_equal || kind == lexer::TokenKind.bang_equal) {
+    case lexer::TokenKind.equal_equal {
         return 6;
     }
-    if (kind == lexer::TokenKind.less || kind == lexer::TokenKind.less_equal ||
-        kind == lexer::TokenKind.greater || kind == lexer::TokenKind.greater_equal) {
+    case lexer::TokenKind.bang_equal {
+        return 6;
+    }
+    case lexer::TokenKind.less {
         return 7;
     }
-    if (kind == lexer::TokenKind.shift_left || kind == lexer::TokenKind.shift_right) {
+    case lexer::TokenKind.less_equal {
+        return 7;
+    }
+    case lexer::TokenKind.greater {
+        return 7;
+    }
+    case lexer::TokenKind.greater_equal {
+        return 7;
+    }
+    case lexer::TokenKind.shift_left {
         return 8;
     }
-    if (kind == lexer::TokenKind.plus || kind == lexer::TokenKind.minus) {
+    case lexer::TokenKind.shift_right {
+        return 8;
+    }
+    case lexer::TokenKind.plus {
         return 9;
     }
-    if (kind == lexer::TokenKind.star || kind == lexer::TokenKind.slash || kind == lexer::TokenKind.percent) {
+    case lexer::TokenKind.minus {
+        return 9;
+    }
+    case lexer::TokenKind.star {
         return 10;
     }
-    return 0;
+    case lexer::TokenKind.slash {
+        return 10;
+    }
+    case lexer::TokenKind.percent {
+        return 10;
+    }
+    default {
+        return 0;
+    }
+    }
 }
 
 fn parser_parse_binary_expression(state: *state::State, minimum_precedence: usize) -> usize {

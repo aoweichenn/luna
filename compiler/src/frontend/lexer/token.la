@@ -1,0 +1,164 @@
+module luna.compiler.lexer;
+
+impl Lexer {
+    priv fn scan_token() -> bool {
+        this->skip_trivia();
+        if (!this->ready()) {
+            return false;
+        }
+
+        let start_offset: usize = this->offset;
+        let start_line: usize = this->line;
+        let start_column: usize = this->column;
+        if (this->at_end()) {
+            return this->add_token(TokenKind.end, start_offset, start_line, start_column);
+        }
+
+        let token_count: usize = this->result.tokens().size();
+        if (token_count >= (LexerLimit.maximum_tokens as usize) - 1) {
+            let span: SourceSpan = this->span(start_offset, start_line, start_column);
+            if (!this->add_diagnostic(
+                    DiagnosticKind.resource_limit, span, LexerLimit.maximum_tokens as usize)) {
+                return false;
+            }
+            for (; !this->at_end();) {
+                this->advance();
+            }
+            return this->add_token(TokenKind.end, this->offset, this->line, this->column);
+        }
+
+        let byte: u8 = this->advance();
+        if (byte == 'u' && this->wide_string_kind() != TokenKind.invalid) {
+            return this->scan_wide_string(start_offset, start_line, start_column);
+        }
+        if (is_ascii_letter(byte) || byte == '_') {
+            return this->scan_identifier(start_offset, start_line, start_column);
+        }
+        if (is_decimal_digit(byte)) {
+            return this->scan_number(start_offset, start_line, start_column);
+        }
+
+        var kind: TokenKind = TokenKind.invalid;
+        switch (byte as Ascii) {
+        case Ascii.left_parenthesis {
+            kind = TokenKind.left_parenthesis;
+        }
+        case Ascii.right_parenthesis {
+            kind = TokenKind.right_parenthesis;
+        }
+        case Ascii.left_brace {
+            kind = TokenKind.left_brace;
+        }
+        case Ascii.right_brace {
+            kind = TokenKind.right_brace;
+        }
+        case Ascii.left_bracket {
+            kind = TokenKind.left_bracket;
+        }
+        case Ascii.right_bracket {
+            kind = TokenKind.right_bracket;
+        }
+        case Ascii.comma {
+            kind = TokenKind.comma;
+        }
+        case Ascii.dot {
+            if (this->match('.')) {
+                kind = this->match('.') ? TokenKind.dot_dot_dot : TokenKind.invalid;
+            } else {
+                kind = TokenKind.dot;
+            }
+        }
+        case Ascii.semicolon {
+            kind = TokenKind.semicolon;
+        }
+        case Ascii.colon {
+            kind = this->match(':') ? TokenKind.colon_colon : TokenKind.colon;
+        }
+        case Ascii.question {
+            kind = TokenKind.question;
+        }
+        case Ascii.at_sign {
+            kind = TokenKind.at_sign;
+        }
+        case Ascii.tilde {
+            kind = TokenKind.tilde;
+        }
+        case Ascii.plus {
+            kind = this->match('=') ? TokenKind.plus_equal : TokenKind.plus;
+        }
+        case Ascii.minus {
+            if (this->match('>')) {
+                kind = TokenKind.arrow;
+            } else {
+                kind = this->match('=') ? TokenKind.minus_equal : TokenKind.minus;
+            }
+        }
+        case Ascii.star {
+            kind = this->match('=') ? TokenKind.star_equal : TokenKind.star;
+        }
+        case Ascii.slash {
+            kind = this->match('=') ? TokenKind.slash_equal : TokenKind.slash;
+        }
+        case Ascii.percent {
+            kind = this->match('=') ? TokenKind.percent_equal : TokenKind.percent;
+        }
+        case Ascii.ampersand {
+            if (this->match('&')) {
+                kind = TokenKind.logical_and;
+            } else {
+                kind = this->match('=') ? TokenKind.ampersand_equal : TokenKind.ampersand;
+            }
+        }
+        case Ascii.pipe {
+            if (this->match('|')) {
+                kind = TokenKind.logical_or;
+            } else {
+                kind = this->match('=') ? TokenKind.pipe_equal : TokenKind.pipe;
+            }
+        }
+        case Ascii.caret {
+            kind = this->match('=') ? TokenKind.caret_equal : TokenKind.caret;
+        }
+        case Ascii.bang {
+            kind = this->match('=') ? TokenKind.bang_equal : TokenKind.bang;
+        }
+        case Ascii.equal {
+            kind = this->match('=') ? TokenKind.equal_equal : TokenKind.equal;
+        }
+        case Ascii.less {
+            if (this->match('<')) {
+                kind = this->match('=') ? TokenKind.shift_left_equal : TokenKind.shift_left;
+            } else {
+                kind = this->match('=') ? TokenKind.less_equal : TokenKind.less;
+            }
+        }
+        case Ascii.greater {
+            if (this->match('>')) {
+                kind = this->match('=') ? TokenKind.shift_right_equal : TokenKind.shift_right;
+            } else {
+                kind = this->match('=') ? TokenKind.greater_equal : TokenKind.greater;
+            }
+        }
+        case Ascii.double_quote {
+            return this->scan_quoted(
+                '"', TokenKind.string, DiagnosticKind.unterminated_string, start_offset, start_line, start_column);
+        }
+        case Ascii.single_quote {
+            return this->scan_quoted(
+                '\x27', TokenKind.character, DiagnosticKind.unterminated_character,
+                start_offset, start_line, start_column);
+        }
+        default {
+        }
+        }
+
+        if (!this->add_token(kind, start_offset, start_line, start_column)) {
+            return false;
+        }
+        if (kind != TokenKind.invalid) {
+            return true;
+        }
+        return this->add_diagnostic(
+            DiagnosticKind.unexpected_character, this->span(start_offset, start_line, start_column), 0);
+    }
+}

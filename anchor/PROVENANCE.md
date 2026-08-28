@@ -653,3 +653,53 @@ and
 `09a52ee70e72522c7b8d2c39df588d8291683470c9befe9502abcede66260cae`.
 The promoted executable is 4,884,298 bytes with SHA-256
 `ca1b1c80e8c03b7d0a56b880ce5ef18f69a3fb35fa41e18b3445b28cb1c9d786`.
+
+## 2026-08-28: promotion to the RAII Lexer toolchain
+
+The anchor now contains the stage-fixed `luna` executable from the Lexer
+modernization snapshot accompanying this provenance note. The historical
+`luna.bootstrap.frontend.lexer` module and its public byte-buffer ownership
+records are replaced by `luna.compiler.lexer`, one narrow interface and five
+same-module facade, session, keyword, literal and token implementation units.
+
+`Lexer` owns its source cursor, source position, one session-wide
+`KeywordTable` and a sticky result. `LexResult` and `DiagnosticBuffer` are
+move-only RAII resources over typed vectors, while `TokenView` and
+`DiagnosticView` make borrowing explicit. Token, source-span and diagnostic
+records remain passive values. Keyword matching is table-driven, punctuation
+uses a strongly typed ASCII enum and `switch`, and bounded scans use `for`.
+All 28 direct consumers migrated atomically; no compatibility forwarding
+module remains.
+
+The necessary parser boundary now returns move-only `ParseResult` and
+`FrontendResult` resources without otherwise replacing the recursive-descent
+passes. A private Tools `FrontendStorage` owns the multi-unit token,
+diagnostic and syntax-node pools and exposes stable views to semantic
+analysis, replacing the former shallow `FrontendResult[64]` array. The
+frontend source tree now contains only lexer, parser and syntax directories.
+Closed token-kind mappings use `switch`, and a dedicated scan confirmed that
+every changed frontend/control condition contains at most two logical
+clauses.
+
+Remote x86-64 verification on isolated `caw` built the complete 72-module,
+62-library-object graph through `stage-transition`, `stage-next` and
+`stage-fixed` with `verify --fresh` in 61.59 seconds at 34,368 KiB maximum
+RSS. Every next/fixed assembly, object and executable artifact was
+byte-identical. Audit and formatting gates were green. The expanded final
+suite passed 448/448 with no failures or skips in 4.90 seconds at 27,200 KiB
+maximum RSS.
+
+The separately compiled Lexer contract links the real module object and
+covers all 67 keywords, 46 punctuation/operator forms, literals, trivia,
+exact spans, structured diagnostics, invalid UTF-8/NUL and RAII cleanup. With
+the preceding anchor compiling both source shapes, the old Lexer median was
+0.263503 seconds and 490,491 assembly bytes; the RAII Lexer median was
+0.525948 seconds and 805,721 bytes. This unoptimized structural cost is
+recorded rather than hidden by premature tuning.
+
+The final Lexer assembly has SHA-256
+`4b69e57ee46d0d6ef10e9b96d54801d5807fa0e21d06ad9990b55d242ed4f3f8`;
+its 280,701-byte object has SHA-256
+`6d0b203f92b94d605681c77233264022142d2154e9035a4820cd95df71b84f38`.
+The promoted executable is 4,962,131 bytes with SHA-256
+`ed19edea6b21ffd169850d079b674e866a61088249bb227ff5fbd0061fbc0f37`.

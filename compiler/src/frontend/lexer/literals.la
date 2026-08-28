@@ -1,0 +1,161 @@
+module luna.compiler.lexer;
+
+fn is_sign(byte: u8) -> bool {
+    return byte == '+' || byte == '-';
+}
+
+fn is_exponent_marker(base: usize, byte: u8) -> bool {
+    if (base == 10) {
+        return byte == 'e' || byte == 'E';
+    }
+    if (base == 16) {
+        return byte == 'p' || byte == 'P';
+    }
+    return false;
+}
+
+impl Lexer {
+    priv fn scan_identifier(start_offset: usize, start_line: usize, start_column: usize) -> bool {
+        for (; is_identifier_byte(this->peek());) {
+            this->advance();
+        }
+        let length: usize = this->offset - start_offset;
+        let kind: TokenKind = this->keywords.lookup(this->source, start_offset, length);
+        return this->add_token(kind, start_offset, start_line, start_column);
+    }
+
+    priv fn scan_digits(base: usize) {
+        for (; digit_matches_base(this->peek(), base) || this->peek() == '_';) {
+            this->advance();
+        }
+    }
+
+    priv fn number_base(start_offset: usize) -> usize {
+        if (this->source.data[start_offset] != '0') {
+            return 10;
+        }
+        let prefix: Ascii = this->peek() as Ascii;
+        switch (prefix) {
+        case Ascii.lower_b {
+            this->advance();
+            return 2;
+        }
+        case Ascii.upper_b {
+            this->advance();
+            return 2;
+        }
+        case Ascii.lower_o {
+            this->advance();
+            return 8;
+        }
+        case Ascii.upper_o {
+            this->advance();
+            return 8;
+        }
+        case Ascii.lower_x {
+            this->advance();
+            return 16;
+        }
+        case Ascii.upper_x {
+            this->advance();
+            return 16;
+        }
+        default {
+            return 10;
+        }
+        }
+    }
+
+    priv fn scan_fraction(base: usize) -> bool {
+        if (this->peek() != '.') {
+            return false;
+        }
+        if (!digit_matches_base(this->peek_next(), base)) {
+            return false;
+        }
+        this->advance();
+        this->scan_digits(base);
+        return true;
+    }
+
+    priv fn scan_exponent(base: usize) -> bool {
+        if (!is_exponent_marker(base, this->peek())) {
+            return false;
+        }
+        this->advance();
+        if (is_sign(this->peek())) {
+            this->advance();
+        }
+        this->scan_digits(10);
+        return true;
+    }
+
+    priv fn scan_number(start_offset: usize, start_line: usize, start_column: usize) -> bool {
+        let base: usize = this->number_base(start_offset);
+        this->scan_digits(base);
+        var is_floating: bool = false;
+        if (base == 10 || base == 16) {
+            is_floating = this->scan_fraction(base);
+            if (this->scan_exponent(base)) {
+                is_floating = true;
+            }
+        }
+        let kind: TokenKind = is_floating ? TokenKind.floating : TokenKind.integer;
+        return this->add_token(kind, start_offset, start_line, start_column);
+    }
+
+    priv fn scan_quoted(
+        quote: u8, kind: TokenKind, diagnostic_kind: DiagnosticKind,
+        start_offset: usize, start_line: usize, start_column: usize) -> bool {
+        var terminated: bool = false;
+        for (; !this->at_end();) {
+            let byte: u8 = this->advance();
+            if (byte == quote) {
+                terminated = true;
+                break;
+            }
+            if (byte == '\\' && !this->at_end()) {
+                this->advance();
+                continue;
+            }
+            if (byte == '\n') {
+                break;
+            }
+        }
+
+        let token_kind: TokenKind = terminated ? kind : TokenKind.invalid;
+        if (!this->add_token(token_kind, start_offset, start_line, start_column)) {
+            return false;
+        }
+        if (terminated) {
+            return true;
+        }
+        return this->add_diagnostic(diagnostic_kind, this->span(start_offset, start_line, start_column), 0);
+    }
+
+    priv fn wide_string_kind() const -> TokenKind {
+        if (this->source.length - this->offset < 3) {
+            return TokenKind.invalid;
+        }
+        if (this->source.data[this->offset + 2] != '"') {
+            return TokenKind.invalid;
+        }
+        let first: u8 = this->source.data[this->offset];
+        let second: u8 = this->source.data[this->offset + 1];
+        if (first == '1' && second == '6') {
+            return TokenKind.string_u16;
+        }
+        return first == '3' && second == '2' ? TokenKind.string_u32 : TokenKind.invalid;
+    }
+
+    priv fn scan_wide_string(start_offset: usize, start_line: usize, start_column: usize) -> bool {
+        let kind: TokenKind = this->wide_string_kind();
+        if (kind == TokenKind.invalid) {
+            return false;
+        }
+        this->advance();
+        this->advance();
+        this->advance();
+        return this->scan_quoted('"', kind, DiagnosticKind.unterminated_string, start_offset, start_line, start_column);
+    }
+}

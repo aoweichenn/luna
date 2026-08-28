@@ -88,14 +88,12 @@ fn compile_fixed_version() -> runtime::Error {
     return error == runtime::Error.none ? release_error : error;
 }
 
-fn release_source(source: bytes::Buffer, frontend: parser::FrontendResult) -> runtime::Error {
-    let frontend_error: runtime::Error = parser::frontend_result_release(frontend);
-    let source_error: runtime::Error = bytes::release(source);
-    return first_error(frontend_error, source_error);
+fn release_source(source: bytes::Buffer) -> runtime::Error {
+    return bytes::release(source);
 }
 
-fn release_sources(sources: *bytes::Buffer, frontends: *parser::FrontendResult, count: usize) -> runtime::Error {
-    if (sources == null || frontends == null) {
+fn release_sources(sources: *bytes::Buffer, count: usize) -> runtime::Error {
+    if (sources == null) {
         return runtime::Error.invalid_argument;
     }
     if (count > CompileLimit.maximum_units as usize) {
@@ -104,34 +102,59 @@ fn release_sources(sources: *bytes::Buffer, frontends: *parser::FrontendResult, 
     var error: runtime::Error = runtime::Error.none;
     for (var remaining: usize = count; remaining != 0; remaining -= 1) {
         let index: usize = remaining - 1;
-        let release_error: runtime::Error = release_source(sources[index], frontends[index]);
+        let release_error: runtime::Error = release_source(sources[index]);
         error = first_error(error, release_error);
     }
     return error;
 }
 
-fn load_source(
-    path: path::Path, result_source: *bytes::Buffer, result_frontend: *parser::FrontendResult) -> runtime::Error {
-    if (!path::is_valid(path) || result_source == null) {
-        return runtime::Error.invalid_argument;
+fn load_source(path: path::Path, storage: *FrontendStorage, result_source: *bytes::Buffer) -> FrontendViewResult {
+    if (storage == null || result_source == null) {
+        return {frontend = invalid_frontend_view(), error = runtime::Error.invalid_argument};
     }
-    if (result_frontend == null) {
-        return runtime::Error.invalid_argument;
+    if (!path::is_valid(path)) {
+        return {frontend = invalid_frontend_view(), error = runtime::Error.invalid_argument};
     }
     let source: bytes::BufferResult = io::read_file_limited(path, CompileLimit.maximum_source_bytes as usize);
     if (source.error != runtime::Error.none) {
-        return source.error;
+        return {frontend = invalid_frontend_view(), error = source.error};
     }
     let view: string_views::string_view_result = string_views::from_bytes(source.buffer.data as *const u8,
         source.buffer.length);
     if (view.error != runtime::Error.none) {
         bytes::release(source.buffer);
-        return view.error;
+        return {frontend = invalid_frontend_view(), error = view.error};
     }
+    let index: usize = storage->size();
     let frontend: parser::FrontendResult = parser::frontend_parse(view.view);
+    let frontend_view: parser::FrontendView = frontend.view();
+    if (frontend_view.error != runtime::Error.none) {
+        bytes::release(source.buffer);
+        return {frontend = invalid_frontend_view(), error = frontend_view.error};
+    }
+    let storage_error: runtime::Error = storage->add(frontend);
+    if (storage_error != runtime::Error.none) {
+        bytes::release(source.buffer);
+        return {frontend = invalid_frontend_view(), error = storage_error};
+    }
+    let stored: FrontendViewResult = storage->get(index);
+    if (stored.error != runtime::Error.none) {
+        bytes::release(source.buffer);
+        return stored;
+    }
     *result_source = source.buffer;
-    *result_frontend = frontend;
-    return runtime::Error.none;
+    return stored;
+}
+
+fn source_exists(path: path::Path) -> runtime::Error {
+    if (!path::is_valid(path)) {
+        return runtime::Error.invalid_argument;
+    }
+    let source: bytes::BufferResult = io::read_file_limited(path, 0);
+    if (source.error != runtime::Error.none) {
+        return source.error;
+    }
+    return bytes::release(source.buffer);
 }
 
 fn diagnostic_is_resource(diagnostic: lexer::Diagnostic) -> bool {
@@ -139,40 +162,40 @@ fn diagnostic_is_resource(diagnostic: lexer::Diagnostic) -> bool {
         diagnostic.kind == lexer::DiagnosticKind.resource_limit;
 }
 
-fn select_frontend_diagnostic(frontend: parser::FrontendResult, lexical: *bool) -> lexer::DiagnosticResult {
+fn select_frontend_diagnostic(frontend: parser::FrontendView, lexical: *bool) -> lexer::DiagnosticResult {
     if (lexical == null) {
         return {
             diagnostic = {}, error = runtime::Error.invalid_argument,
         };
     }
-    for (var index: usize = 0; index < frontend.lex.diagnostics.count; index += 1) {
-        let diagnostic: lexer::DiagnosticResult = lexer::diagnostic_buffer_get(frontend.lex.diagnostics, index);
+    for (var index: usize = 0; index < frontend.lex.diagnostics.size(); index += 1) {
+        let diagnostic: lexer::DiagnosticResult = frontend.lex.diagnostics.get(index);
         if (diagnostic.error != runtime::Error.none || diagnostic_is_resource(diagnostic.diagnostic)) {
             *lexical = true;
             return diagnostic;
         }
     }
-    for (var index: usize = 0; index < frontend.parse.diagnostics.count; index += 1) {
-        let diagnostic: lexer::DiagnosticResult = lexer::diagnostic_buffer_get(frontend.parse.diagnostics, index);
+    for (var index: usize = 0; index < frontend.parse.diagnostics.size(); index += 1) {
+        let diagnostic: lexer::DiagnosticResult = frontend.parse.diagnostics.get(index);
         if (diagnostic.error != runtime::Error.none || diagnostic_is_resource(diagnostic.diagnostic)) {
             *lexical = false;
             return diagnostic;
         }
     }
-    if (frontend.lex.diagnostics.count != 0) {
+    if (!frontend.lex.diagnostics.empty()) {
         *lexical = true;
-        return lexer::diagnostic_buffer_get(frontend.lex.diagnostics, 0);
+        return frontend.lex.diagnostics.get(0);
     }
-    if (frontend.parse.diagnostics.count != 0) {
+    if (!frontend.parse.diagnostics.empty()) {
         *lexical = false;
-        return lexer::diagnostic_buffer_get(frontend.parse.diagnostics, 0);
+        return frontend.parse.diagnostics.get(0);
     }
     return {
         diagnostic = {}, error = runtime::Error.not_found,
     };
 }
 
-fn frontend_status(frontend: parser::FrontendResult) -> i32 {
+fn frontend_status(frontend: parser::FrontendView) -> i32 {
     if (frontend.error == runtime::Error.out_of_memory) {
         return CompileStatus.resource_limit as i32;
     }
@@ -192,7 +215,7 @@ fn print_message(message: strings::string const&) -> runtime::Error {
     return view.error == runtime::Error.none ? io::print_error(view.view) : view.error;
 }
 
-fn report_frontend(frontend: parser::FrontendResult) -> runtime::Error {
+fn report_frontend(frontend: parser::FrontendView) -> runtime::Error {
     var lexical: bool = false;
     let result: lexer::DiagnosticResult = select_frontend_diagnostic(frontend, &lexical);
     if (result.error == runtime::Error.not_found) {
@@ -231,7 +254,7 @@ fn report_resource(label: *const u8, label_maximum_length: usize, unit_index: us
 }
 
 fn add_semantic_input(
-    input: *context::Input, source: bytes::Buffer, frontend: parser::FrontendResult,
+    input: *context::Input, source: bytes::Buffer, frontend: parser::FrontendView,
         path: string_views::string_view) -> bool {
     if (input == null) {
         return false;
@@ -314,7 +337,7 @@ impl CompileCommand {
         return CompileStatus.input_error as i32;
     }
     var sources: [64]bytes::Buffer = {};
-    var frontends: [64]parser::FrontendResult = {};
+    var frontends: FrontendStorage = FrontendStorage();
     var source_count: usize = 0;
     var total_source_bytes: usize = 0;
     let expected_count: usize = fixed_protocol ? CompileLimit.maximum_units as usize : input_count;
@@ -323,17 +346,19 @@ impl CompileCommand {
         if (fixed_protocol) {
             path = compile_fixed_unit_path(source_count);
             if (path.error != runtime::Error.none) {
-                release_sources(&sources[0], &frontends[0], source_count);
+                release_sources(&sources[0], source_count);
                 return CompileStatus.input_error as i32;
             }
         }
         let source_path: path::Path = fixed_protocol ? path.path : input_paths[source_count];
-        var error: runtime::Error = load_source(source_path, &sources[source_count], &frontends[source_count]);
+        let loaded: FrontendViewResult = load_source(source_path, &frontends, &sources[source_count]);
+        var error: runtime::Error = loaded.error;
         let source_loaded: bool = error == runtime::Error.none;
         if (fixed_protocol) {
             let path_error: runtime::Error = path::release(path.path);
             if (source_loaded && path_error != runtime::Error.none) {
-                release_source(sources[source_count], frontends[source_count]);
+                release_source(sources[source_count]);
+                sources[source_count] = bytes::empty();
                 error = path_error;
             }
         }
@@ -341,9 +366,13 @@ impl CompileCommand {
             break;
         }
         if (error != runtime::Error.none) {
-            release_sources(&sources[0], &frontends[0], source_count);
+            release_sources(&sources[0], source_count);
             if (error == runtime::Error.out_of_memory) {
-                report_resource("source", 8, source_count, CompileLimit.maximum_source_bytes as usize);
+                if (frontends.is_valid()) {
+                    report_resource("source", 8, source_count, CompileLimit.maximum_source_bytes as usize);
+                } else {
+                    report_resource("frontend", 16, source_count, CompileLimit.maximum_frontend_diagnostics as usize);
+                }
                 return CompileStatus.resource_limit as i32;
             }
             return CompileStatus.input_error as i32;
@@ -352,24 +381,25 @@ impl CompileCommand {
         let source_length: usize = sources[source_count - 1].length;
         if (source_length > (CompileLimit.maximum_total_source_bytes as usize) - total_source_bytes) {
             report_resource("total", 8, source_count - 1, CompileLimit.maximum_total_source_bytes as usize);
-            release_sources(&sources[0], &frontends[0], source_count);
+            release_sources(&sources[0], source_count);
             return CompileStatus.resource_limit as i32;
         }
         total_source_bytes += source_length;
-        let frontend: parser::FrontendResult = frontends[source_count - 1];
-        let diagnostics_exist: bool = frontend.lex.diagnostics.count != 0 || frontend.parse.diagnostics.count != 0;
-        if (frontend.error != runtime::Error.none || diagnostics_exist) {
-            let status: i32 = frontend_status(frontend);
+        let frontend_view: parser::FrontendView = loaded.frontend;
+        let diagnostics_exist: bool = !frontend_view.lex.diagnostics.empty() ||
+            !frontend_view.parse.diagnostics.empty();
+        if (frontend_view.error != runtime::Error.none || diagnostics_exist) {
+            let status: i32 = frontend_status(frontend_view);
             var lexical: bool = false;
-            let diagnostic: lexer::DiagnosticResult = select_frontend_diagnostic(frontend, &lexical);
+            let diagnostic: lexer::DiagnosticResult = select_frontend_diagnostic(frontend_view, &lexical);
             let has_resource_diagnostic: bool = diagnostic.error == runtime::Error.none && diagnostic.diagnostic.kind ==
                     lexer::DiagnosticKind.resource_limit;
-            if (frontend.error == runtime::Error.out_of_memory && !has_resource_diagnostic) {
+            if (frontend_view.error == runtime::Error.out_of_memory && !has_resource_diagnostic) {
                 report_resource("frontend", 16, source_count - 1, CompileLimit.maximum_frontend_diagnostics as usize);
             } else {
-                report_frontend(frontend);
+                report_frontend(frontend_view);
             }
-            release_sources(&sources[0], &frontends[0], source_count);
+            release_sources(&sources[0], source_count);
             return status;
         }
     }
@@ -377,27 +407,19 @@ impl CompileCommand {
         return CompileStatus.input_error as i32;
     }
     if (fixed_protocol && source_count == CompileLimit.maximum_units as usize) {
-        var excess_source: bytes::Buffer = bytes::empty();
-        var excess_frontend: parser::FrontendResult = {};
         let excess_path: path::PathResult = compile_fixed_unit_path(source_count);
         var excess_error: runtime::Error = excess_path.error;
         var excess_present: bool = false;
         if (excess_path.error == runtime::Error.none) {
-            excess_error = load_source(excess_path.path, &excess_source, &excess_frontend);
+            excess_error = source_exists(excess_path.path);
             excess_present = excess_error == runtime::Error.none;
             let path_error: runtime::Error = path::release(excess_path.path);
             if (excess_error == runtime::Error.none) {
                 excess_error = path_error;
             }
         }
-        if (excess_present) {
-            let release_error: runtime::Error = release_source(excess_source, excess_frontend);
-            if (excess_error == runtime::Error.none) {
-                excess_error = release_error;
-            }
-        }
         if (excess_present || excess_error != runtime::Error.not_found) {
-            release_sources(&sources[0], &frontends[0], source_count);
+            release_sources(&sources[0], source_count);
             return CompileStatus.unit_limit as i32;
         }
     }
@@ -405,25 +427,28 @@ impl CompileCommand {
     var input: context::Input = context::input_empty(executable);
     var added: bool = true;
     for (var index: usize = 0; index < source_count && added; index += 1) {
-        if (fixed_protocol) {
+        let frontend: FrontendViewResult = frontends.get(index);
+        if (frontend.error != runtime::Error.none) {
+            added = false;
+        } else if (fixed_protocol) {
             let path: path::PathResult = compile_fixed_unit_path(index);
             if (path.error != runtime::Error.none) {
                 added = false;
             } else {
                 let path_view: string_views::string_view_result = path::view(path.path);
                 added = path_view.error == runtime::Error.none &&
-                    add_semantic_input(&input, sources[index], frontends[index], path_view.view);
+                    add_semantic_input(&input, sources[index], frontend.frontend, path_view.view);
                 added = path::release(path.path) == runtime::Error.none && added;
             }
         } else {
             let path_view: string_views::string_view_result = path::view(input_paths[index]);
             added = path_view.error == runtime::Error.none &&
-                add_semantic_input(&input, sources[index], frontends[index], path_view.view);
+                add_semantic_input(&input, sources[index], frontend.frontend, path_view.view);
         }
     }
     if (!added) {
         context::input_release(input);
-        release_sources(&sources[0], &frontends[0], source_count);
+        release_sources(&sources[0], source_count);
         return CompileStatus.semantic_error as i32;
     }
 
@@ -437,7 +462,7 @@ impl CompileCommand {
         }
         context::result_release(semantic);
         context::input_release(input);
-        release_sources(&sources[0], &frontends[0], source_count);
+        release_sources(&sources[0], source_count);
         return status;
     }
     let backend: codegen::BackendResult = codegen::emit_assembly(input, semantic.ir, semantic.types);
@@ -448,7 +473,7 @@ impl CompileCommand {
         codegen::backend_release(backend);
         context::result_release(semantic);
         context::input_release(input);
-        release_sources(&sources[0], &frontends[0], source_count);
+        release_sources(&sources[0], source_count);
         return backend_status;
     }
 
@@ -458,7 +483,7 @@ impl CompileCommand {
     let backend_error: runtime::Error = codegen::backend_release(backend);
     let semantic_error: runtime::Error = context::result_release(semantic);
     let input_error: runtime::Error = context::input_release(input);
-    let sources_error: runtime::Error = release_sources(&sources[0], &frontends[0], source_count);
+    let sources_error: runtime::Error = release_sources(&sources[0], source_count);
     if (write_error != runtime::Error.none) {
         return CompileStatus.output_error as i32;
     }

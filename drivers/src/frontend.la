@@ -1,0 +1,287 @@
+module luna.tools;
+
+import luna.bootstrap.frontend.syntax as syntax;
+import luna.std.vector as vector;
+
+struct FrontendRecord {
+    token_offset: usize;
+    token_count: usize;
+    lexical_diagnostic_offset: usize;
+    lexical_diagnostic_count: usize;
+    node_offset: usize;
+    node_count: usize;
+    tree_token_count: usize;
+    tree_root: usize;
+    parse_diagnostic_offset: usize;
+    parse_diagnostic_count: usize;
+    lexical_error: runtime::Error;
+    parse_error: runtime::Error;
+    frontend_error: runtime::Error;
+}
+
+struct StoredToken {
+    value: lexer::Token;
+}
+
+struct StoredDiagnostic {
+    value: lexer::Diagnostic;
+}
+
+struct StoredNode {
+    value: syntax::SyntaxNode;
+}
+
+struct FrontendViewResult {
+    frontend: parser::FrontendView;
+    error: runtime::Error;
+}
+
+class FrontendStorage {
+    priv tokens: vector::vector<StoredToken>;
+    priv lexical_diagnostics: vector::vector<StoredDiagnostic>;
+    priv nodes: vector::vector<StoredNode>;
+    priv parse_diagnostics: vector::vector<StoredDiagnostic>;
+    priv records: vector::vector<FrontendRecord>;
+    priv error_code: runtime::Error;
+
+    pub init();
+    pub fn is_valid() const -> bool;
+    pub fn size() const -> usize;
+    pub fn add(frontend: parser::FrontendResult const&) -> runtime::Error;
+    pub fn get(index: usize) -> FrontendViewResult;
+    pub deinit();
+}
+
+fn append_frontend_diagnostics(
+    destination: *vector::vector<StoredDiagnostic>, source: lexer::DiagnosticView) -> runtime::Error {
+    if (destination == null || !source.is_valid()) {
+        return runtime::Error.invalid_argument;
+    }
+    for (var index: usize = 0; index < source.size(); index += 1) {
+        let diagnostic: lexer::DiagnosticResult = source.get(index);
+        if (diagnostic.error != runtime::Error.none) {
+            return diagnostic.error;
+        }
+        let error: runtime::Error = destination->push_back({value = diagnostic.diagnostic});
+        if (error != runtime::Error.none) {
+            return error;
+        }
+    }
+    return runtime::Error.none;
+}
+
+fn invalid_frontend_view() -> parser::FrontendView {
+    let diagnostics: lexer::DiagnosticView = lexer::DiagnosticView(null, 0);
+    return {
+        lex = {
+            tokens = lexer::TokenView(null, 0), diagnostics = diagnostics, error = runtime::Error.invalid_argument,
+        }, parse = {
+            tree = syntax::syntax_tree_empty(), diagnostics = diagnostics, error = runtime::Error.invalid_argument,
+        }, error = runtime::Error.invalid_argument,
+    };
+}
+
+impl FrontendStorage {
+    init(): tokens = vector::vector<StoredToken>(), lexical_diagnostics = vector::vector<StoredDiagnostic>(),
+            nodes = vector::vector<StoredNode>(), parse_diagnostics = vector::vector<StoredDiagnostic>(),
+            records = vector::vector<FrontendRecord>() {
+        this->error_code = runtime::Error.none;
+    }
+
+    priv fn fail(error: runtime::Error) -> runtime::Error {
+        if (this->error_code == runtime::Error.none) {
+            this->error_code = error;
+        }
+        return error;
+    }
+
+    fn is_valid() const -> bool {
+        if (!this->tokens.is_valid() || !this->lexical_diagnostics.is_valid()) {
+            return false;
+        }
+        if (!this->nodes.is_valid() || !this->parse_diagnostics.is_valid()) {
+            return false;
+        }
+        return this->records.is_valid() && this->error_code == runtime::Error.none;
+    }
+
+    fn size() const -> usize {
+        return this->records.size();
+    }
+
+    priv fn reserve(current: usize, added: usize, capacity: *usize) -> runtime::Error {
+        if (capacity == null) {
+            return runtime::Error.invalid_argument;
+        }
+        return @add_overflow(current, added, capacity) ? runtime::Error.out_of_memory : runtime::Error.none;
+    }
+
+    priv fn reserve_for(frontend: parser::FrontendView) -> runtime::Error {
+        var token_capacity: usize = 0;
+        var lexical_capacity: usize = 0;
+        var node_capacity: usize = 0;
+        var parse_capacity: usize = 0;
+        var error: runtime::Error = this->reserve(this->tokens.size(), frontend.lex.tokens.size(), &token_capacity);
+        if (error == runtime::Error.none) {
+            error = this->reserve(this->lexical_diagnostics.size(), frontend.lex.diagnostics.size(), &lexical_capacity);
+        }
+        if (error == runtime::Error.none) {
+            error = this->reserve(this->nodes.size(), frontend.parse.tree.count, &node_capacity);
+        }
+        if (error == runtime::Error.none) {
+            error = this->reserve(this->parse_diagnostics.size(), frontend.parse.diagnostics.size(), &parse_capacity);
+        }
+        if (error != runtime::Error.none) {
+            return this->fail(error);
+        }
+        error = this->tokens.reserve(token_capacity);
+        if (error == runtime::Error.none) {
+            error = this->lexical_diagnostics.reserve(lexical_capacity);
+        }
+        if (error == runtime::Error.none) {
+            error = this->nodes.reserve(node_capacity);
+        }
+        if (error == runtime::Error.none) {
+            error = this->parse_diagnostics.reserve(parse_capacity);
+        }
+        return error == runtime::Error.none ? error : this->fail(error);
+    }
+
+    priv fn append_tokens(source: lexer::TokenView) -> runtime::Error {
+        for (var index: usize = 0; index < source.size(); index += 1) {
+            let token: lexer::TokenResult = source.get(index);
+            if (token.error != runtime::Error.none) {
+                return token.error;
+            }
+            let error: runtime::Error = this->tokens.push_back({value = token.token});
+            if (error != runtime::Error.none) {
+                return error;
+            }
+        }
+        return runtime::Error.none;
+    }
+
+    priv fn append_nodes(tree: syntax::SyntaxTree) -> runtime::Error {
+        for (var index: usize = 0; index < tree.count; index += 1) {
+            let node: syntax::SyntaxNodeResult = syntax::syntax_tree_get(tree, index);
+            if (node.error != runtime::Error.none) {
+                return node.error;
+            }
+            let error: runtime::Error = this->nodes.push_back({value = node.node});
+            if (error != runtime::Error.none) {
+                return error;
+            }
+        }
+        return runtime::Error.none;
+    }
+
+    priv fn rollback(record: FrontendRecord) {
+        this->tokens.truncate(record.token_offset);
+        this->lexical_diagnostics.truncate(record.lexical_diagnostic_offset);
+        this->nodes.truncate(record.node_offset);
+        this->parse_diagnostics.truncate(record.parse_diagnostic_offset);
+    }
+
+    fn add(frontend: parser::FrontendResult const&) -> runtime::Error {
+        if (!this->is_valid()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let view: parser::FrontendView = frontend.view();
+        let lexical_views_are_valid: bool = view.lex.tokens.is_valid() && view.lex.diagnostics.is_valid();
+        let parse_view_is_valid: bool = view.parse.diagnostics.is_valid() &&
+            syntax::syntax_tree_is_valid(view.parse.tree);
+        if (!lexical_views_are_valid || !parse_view_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (view.error != runtime::Error.none || view.lex.error != runtime::Error.none) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (view.parse.error != runtime::Error.none) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+
+        let record: FrontendRecord = {
+            token_offset = this->tokens.size(), token_count = view.lex.tokens.size(),
+            lexical_diagnostic_offset = this->lexical_diagnostics.size(),
+            lexical_diagnostic_count = view.lex.diagnostics.size(),
+            node_offset = this->nodes.size(), node_count = view.parse.tree.count,
+            tree_token_count = view.parse.tree.token_count, tree_root = view.parse.tree.root,
+            parse_diagnostic_offset = this->parse_diagnostics.size(),
+            parse_diagnostic_count = view.parse.diagnostics.size(),
+            lexical_error = view.lex.error, parse_error = view.parse.error, frontend_error = view.error,
+        };
+        var error: runtime::Error = this->reserve_for(view);
+        if (error == runtime::Error.none) {
+            error = this->append_tokens(view.lex.tokens);
+        }
+        if (error == runtime::Error.none) {
+            error = append_frontend_diagnostics(&this->lexical_diagnostics, view.lex.diagnostics);
+        }
+        if (error == runtime::Error.none) {
+            error = this->append_nodes(view.parse.tree);
+        }
+        if (error == runtime::Error.none) {
+            error = append_frontend_diagnostics(&this->parse_diagnostics, view.parse.diagnostics);
+        }
+        if (error == runtime::Error.none) {
+            error = this->records.push_back(record);
+        }
+        if (error != runtime::Error.none) {
+            this->rollback(record);
+            return this->fail(error);
+        }
+        return runtime::Error.none;
+    }
+
+    priv fn token_view(record: FrontendRecord) -> lexer::TokenView {
+        let data: *const lexer::Token = record.token_count == 0 ? null :
+            &this->tokens.get(record.token_offset).value as *const lexer::Token;
+        return lexer::TokenView(data, record.token_count);
+    }
+
+    priv fn lexical_diagnostic_view(record: FrontendRecord) -> lexer::DiagnosticView {
+        let data: *const lexer::Diagnostic = record.lexical_diagnostic_count == 0 ? null :
+            &this->lexical_diagnostics.get(record.lexical_diagnostic_offset).value as *const lexer::Diagnostic;
+        return lexer::DiagnosticView(data, record.lexical_diagnostic_count);
+    }
+
+    priv fn parse_diagnostic_view(record: FrontendRecord) -> lexer::DiagnosticView {
+        let data: *const lexer::Diagnostic = record.parse_diagnostic_count == 0 ? null :
+            &this->parse_diagnostics.get(record.parse_diagnostic_offset).value as *const lexer::Diagnostic;
+        return lexer::DiagnosticView(data, record.parse_diagnostic_count);
+    }
+
+    priv fn syntax_tree(record: FrontendRecord) -> syntax::SyntaxTree {
+        var byte_length: usize = 0;
+        if (@mul_overflow(record.node_count, sizeof(syntax::SyntaxNode), &byte_length)) {
+            return syntax::syntax_tree_empty();
+        }
+        let data: *u8 = record.node_count == 0 ? null :
+            &this->nodes.get(record.node_offset).value as *syntax::SyntaxNode as *u8;
+        return {
+            storage = {data = data, length = byte_length, capacity = byte_length},
+            count = record.node_count, token_count = record.tree_token_count, root = record.tree_root,
+        };
+    }
+
+    fn get(index: usize) -> FrontendViewResult {
+        if (!this->is_valid() || index >= this->records.size()) {
+            return {frontend = invalid_frontend_view(), error = runtime::Error.invalid_argument};
+        }
+        let record: FrontendRecord = this->records.get(index);
+        let lexical_diagnostics: lexer::DiagnosticView = this->lexical_diagnostic_view(record);
+        let parse_diagnostics: lexer::DiagnosticView = this->parse_diagnostic_view(record);
+        return {
+            frontend = {
+                lex = {
+                    tokens = this->token_view(record), diagnostics = lexical_diagnostics, error = record.lexical_error,
+                }, parse = {
+                    tree = this->syntax_tree(record), diagnostics = parse_diagnostics, error = record.parse_error,
+                }, error = record.frontend_error,
+            }, error = runtime::Error.none,
+        };
+    }
+
+    deinit() {
+    }
+}

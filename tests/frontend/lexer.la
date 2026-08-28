@@ -1,0 +1,246 @@
+module tests.lexer_contract;
+
+import luna.compiler.lexer as lexer;
+import luna.runtime;
+import luna.std.string_view as string_views;
+
+enum TestLimit: usize {
+    keyword_count = 67, punctuation_count = 46, literal_count = 12,
+}
+
+fn verify_sequence(
+    source: string_views::string_view, expected: *const lexer::TokenKind,
+    lengths: *const usize, count: usize) -> bool {
+    if (expected == null || lengths == null) {
+        return false;
+    }
+    let result: lexer::LexResult = lexer::lex(source);
+    if (result.error() != runtime::Error.none || !result.diagnostics().empty()) {
+        return false;
+    }
+    let tokens: lexer::TokenView = result.tokens();
+    if (!result.is_valid() || tokens.size() != count + 1) {
+        return false;
+    }
+
+    var offset: usize = 0;
+    for (var index: usize = 0; index < count; index += 1) {
+        let token: lexer::TokenResult = tokens.get(index);
+        if (token.error != runtime::Error.none || token.token.kind != expected[index]) {
+            return false;
+        }
+        let span_shape_is_valid: bool = token.token.span.offset == offset &&
+            token.token.span.length == lengths[index];
+        let position_is_valid: bool = token.token.span.line == 1 &&
+            token.token.span.column == offset + 1;
+        if (!span_shape_is_valid || !position_is_valid) {
+            return false;
+        }
+        offset += lengths[index];
+        if (index + 1 < count) {
+            offset += 1;
+        }
+    }
+
+    let end: lexer::TokenResult = tokens.get(count);
+    let end_shape_is_valid: bool = end.token.kind == lexer::TokenKind.end &&
+        end.token.span.length == 0;
+    let end_offset_is_valid: bool = end.token.span.offset == source.length &&
+        end.token.span.column == source.length + 1;
+    if (end.error != runtime::Error.none || !end_shape_is_valid) {
+        return false;
+    }
+    return end_offset_is_valid;
+}
+
+fn verify_keywords() -> bool {
+    let source: string_views::string_view_result = string_views::from_c_string(
+        "as do fn i8 u8 f32 f64 for i16 i32 i64 let loop u16 u32 u64 var bool case else enum false isize null "
+        "true union usize void alignof break const continue default export extern if import module offsetof return "
+        "sizeof struct switch while assert volatile goto va_arg va_list va_start asm class pub prot priv static impl "
+        "this final virtual abstract override super operator method friend opaque",
+        512);
+    if (source.error != runtime::Error.none) {
+        return false;
+    }
+    let expected: [TestLimit.keyword_count]lexer::TokenKind = {
+        lexer::TokenKind.keyword_as, lexer::TokenKind.keyword_do, lexer::TokenKind.keyword_fn,
+        lexer::TokenKind.keyword_i8, lexer::TokenKind.keyword_u8, lexer::TokenKind.keyword_f32,
+        lexer::TokenKind.keyword_f64, lexer::TokenKind.keyword_for, lexer::TokenKind.keyword_i16,
+        lexer::TokenKind.keyword_i32, lexer::TokenKind.keyword_i64, lexer::TokenKind.keyword_let,
+        lexer::TokenKind.keyword_loop, lexer::TokenKind.keyword_u16, lexer::TokenKind.keyword_u32,
+        lexer::TokenKind.keyword_u64, lexer::TokenKind.keyword_var, lexer::TokenKind.keyword_bool,
+        lexer::TokenKind.keyword_case, lexer::TokenKind.keyword_else, lexer::TokenKind.keyword_enum,
+        lexer::TokenKind.keyword_false, lexer::TokenKind.keyword_isize, lexer::TokenKind.keyword_null,
+        lexer::TokenKind.keyword_true, lexer::TokenKind.keyword_union, lexer::TokenKind.keyword_usize,
+        lexer::TokenKind.keyword_void, lexer::TokenKind.keyword_alignof, lexer::TokenKind.keyword_break,
+        lexer::TokenKind.keyword_const, lexer::TokenKind.keyword_continue, lexer::TokenKind.keyword_default,
+        lexer::TokenKind.keyword_export, lexer::TokenKind.keyword_extern, lexer::TokenKind.keyword_if,
+        lexer::TokenKind.keyword_import, lexer::TokenKind.keyword_module, lexer::TokenKind.keyword_offsetof,
+        lexer::TokenKind.keyword_return, lexer::TokenKind.keyword_sizeof, lexer::TokenKind.keyword_struct,
+        lexer::TokenKind.keyword_switch, lexer::TokenKind.keyword_while, lexer::TokenKind.keyword_assert,
+        lexer::TokenKind.keyword_volatile, lexer::TokenKind.keyword_goto, lexer::TokenKind.keyword_va_arg,
+        lexer::TokenKind.keyword_va_list, lexer::TokenKind.keyword_va_start, lexer::TokenKind.keyword_asm,
+        lexer::TokenKind.keyword_class, lexer::TokenKind.keyword_pub, lexer::TokenKind.keyword_prot,
+        lexer::TokenKind.keyword_priv, lexer::TokenKind.keyword_static, lexer::TokenKind.keyword_impl,
+        lexer::TokenKind.keyword_this, lexer::TokenKind.keyword_final, lexer::TokenKind.keyword_virtual,
+        lexer::TokenKind.keyword_abstract, lexer::TokenKind.keyword_override, lexer::TokenKind.keyword_super,
+        lexer::TokenKind.keyword_operator, lexer::TokenKind.keyword_method, lexer::TokenKind.keyword_friend,
+        lexer::TokenKind.keyword_opaque,
+    };
+    let lengths: [TestLimit.keyword_count]usize = {
+        2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 4, 3, 3, 3, 3,
+        4, 4, 4, 4, 5, 5, 4, 4, 5, 5, 4, 7, 5, 5, 8, 7, 6, 6, 2,
+        6, 6, 8, 6, 6, 6, 6, 5, 6, 8, 4, 6, 7, 8, 3, 5, 3, 4, 4,
+        6, 4, 4, 5, 7, 8, 8, 5, 8, 6, 6, 6,
+    };
+    return verify_sequence(source.view, &expected[0], &lengths[0], TestLimit.keyword_count as usize);
+}
+
+fn verify_punctuation() -> bool {
+    let source: string_views::string_view_result = string_views::from_c_string(
+        "( ) { } [ ] , . ; : ? @ ~ + += - -> -= * *= / /= % %= & && &= | || |= ^ ^= ! != = == < << <<= "
+        "<= > >> >>= >= ... ::",
+        256);
+    if (source.error != runtime::Error.none) {
+        return false;
+    }
+    let expected: [TestLimit.punctuation_count]lexer::TokenKind = {
+        lexer::TokenKind.left_parenthesis, lexer::TokenKind.right_parenthesis,
+        lexer::TokenKind.left_brace, lexer::TokenKind.right_brace,
+        lexer::TokenKind.left_bracket, lexer::TokenKind.right_bracket,
+        lexer::TokenKind.comma, lexer::TokenKind.dot, lexer::TokenKind.semicolon,
+        lexer::TokenKind.colon, lexer::TokenKind.question, lexer::TokenKind.at_sign,
+        lexer::TokenKind.tilde, lexer::TokenKind.plus, lexer::TokenKind.plus_equal,
+        lexer::TokenKind.minus, lexer::TokenKind.arrow, lexer::TokenKind.minus_equal,
+        lexer::TokenKind.star, lexer::TokenKind.star_equal, lexer::TokenKind.slash,
+        lexer::TokenKind.slash_equal, lexer::TokenKind.percent, lexer::TokenKind.percent_equal,
+        lexer::TokenKind.ampersand, lexer::TokenKind.logical_and, lexer::TokenKind.ampersand_equal,
+        lexer::TokenKind.pipe, lexer::TokenKind.logical_or, lexer::TokenKind.pipe_equal,
+        lexer::TokenKind.caret, lexer::TokenKind.caret_equal, lexer::TokenKind.bang,
+        lexer::TokenKind.bang_equal, lexer::TokenKind.equal, lexer::TokenKind.equal_equal,
+        lexer::TokenKind.less, lexer::TokenKind.shift_left, lexer::TokenKind.shift_left_equal,
+        lexer::TokenKind.less_equal, lexer::TokenKind.greater, lexer::TokenKind.shift_right,
+        lexer::TokenKind.shift_right_equal, lexer::TokenKind.greater_equal,
+        lexer::TokenKind.dot_dot_dot, lexer::TokenKind.colon_colon,
+    };
+    let lengths: [TestLimit.punctuation_count]usize = {
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 2, 2,
+        1, 2, 1, 2, 1, 2, 1, 2, 2, 1, 2, 2, 1, 2, 1, 2, 1, 2,
+        1, 2, 3, 2, 1, 2, 3, 2, 3, 2,
+    };
+    return verify_sequence(source.view, &expected[0], &lengths[0], TestLimit.punctuation_count as usize);
+}
+
+fn verify_literals_and_trivia() -> bool {
+    let source: string_views::string_view_result = string_views::from_c_string(
+        "name_1 0b10 0o7 0x1f 12.5 0x1.fp+2 1e-3 'a' \"x\\\"y\" u16\"z\" u32\"w\" // skip\nopaque",
+        128);
+    if (source.error != runtime::Error.none) {
+        return false;
+    }
+    let result: lexer::LexResult = lexer::lex(source.view);
+    let tokens: lexer::TokenView = result.tokens();
+    if (result.error() != runtime::Error.none || !result.diagnostics().empty()) {
+        return false;
+    }
+    if (tokens.size() != TestLimit.literal_count as usize + 1) {
+        return false;
+    }
+    let expected: [TestLimit.literal_count]lexer::TokenKind = {
+        lexer::TokenKind.identifier, lexer::TokenKind.integer, lexer::TokenKind.integer,
+        lexer::TokenKind.integer, lexer::TokenKind.floating, lexer::TokenKind.floating,
+        lexer::TokenKind.floating, lexer::TokenKind.character, lexer::TokenKind.string,
+        lexer::TokenKind.string_u16, lexer::TokenKind.string_u32, lexer::TokenKind.keyword_opaque,
+    };
+    for (var index: usize = 0; index < TestLimit.literal_count as usize; index += 1) {
+        let token: lexer::TokenResult = tokens.get(index);
+        if (token.error != runtime::Error.none || token.token.kind != expected[index]) {
+            return false;
+        }
+    }
+    let decimal: lexer::TokenResult = tokens.get(4);
+    let decimal_span_is_valid: bool = decimal.token.span.offset == 21 && decimal.token.span.length == 4;
+    let decimal_position_is_valid: bool = decimal.token.span.line == 1 && decimal.token.span.column == 22;
+    if (!decimal_span_is_valid || !decimal_position_is_valid) {
+        return false;
+    }
+    let opaque_token: lexer::TokenResult = tokens.get(11);
+    let opaque_span_is_valid: bool = opaque_token.token.span.offset == 73 && opaque_token.token.span.length == 6;
+    let opaque_position_is_valid: bool = opaque_token.token.span.line == 2 && opaque_token.token.span.column == 1;
+    return opaque_span_is_valid && opaque_position_is_valid;
+}
+
+fn verify_unexpected_character() -> bool {
+    let source: string_views::string_view_result = string_views::from_c_string("..", 3);
+    let result: lexer::LexResult = lexer::lex(source.view);
+    let token: lexer::TokenResult = result.tokens().get(0);
+    let diagnostic: lexer::DiagnosticResult = result.diagnostics().get(0);
+    let token_is_valid: bool = token.token.kind == lexer::TokenKind.invalid && token.token.span.length == 2;
+    let diagnostic_is_valid: bool = diagnostic.diagnostic.kind == lexer::DiagnosticKind.unexpected_character &&
+        diagnostic.diagnostic.span.length == 2;
+    if (result.error() != runtime::Error.none || !token_is_valid) {
+        return false;
+    }
+    return diagnostic_is_valid;
+}
+
+fn verify_unterminated_comment() -> bool {
+    let source: string_views::string_view_result = string_views::from_c_string("/* open", 8);
+    let result: lexer::LexResult = lexer::lex(source.view);
+    let end: lexer::TokenResult = result.tokens().get(0);
+    let diagnostic: lexer::DiagnosticResult = result.diagnostics().get(0);
+    let end_is_valid: bool = end.token.kind == lexer::TokenKind.end && end.token.span.offset == 7;
+    let diagnostic_is_valid: bool = diagnostic.diagnostic.kind == lexer::DiagnosticKind.unterminated_block_comment &&
+        diagnostic.diagnostic.span.length == 7;
+    if (result.error() != runtime::Error.none || !end_is_valid) {
+        return false;
+    }
+    return diagnostic_is_valid;
+}
+
+fn verify_unterminated_string() -> bool {
+    let source: string_views::string_view_result = string_views::from_c_string("\"x\n", 4);
+    let result: lexer::LexResult = lexer::lex(source.view);
+    let token: lexer::TokenResult = result.tokens().get(0);
+    let end: lexer::TokenResult = result.tokens().get(1);
+    let diagnostic: lexer::DiagnosticResult = result.diagnostics().get(0);
+    let token_is_valid: bool = token.token.kind == lexer::TokenKind.invalid && token.token.span.length == 3;
+    let end_is_valid: bool = end.token.kind == lexer::TokenKind.end && end.token.span.line == 2;
+    let diagnostic_is_valid: bool = diagnostic.diagnostic.kind == lexer::DiagnosticKind.unterminated_string &&
+        diagnostic.diagnostic.span.length == 3;
+    if (!token_is_valid || !end_is_valid) {
+        return false;
+    }
+    return result.error() == runtime::Error.none && diagnostic_is_valid;
+}
+
+fn verify_invalid_source() -> bool {
+    let invalid_bytes: [2]u8 = {0, 255};
+    let nul_result: lexer::LexResult = lexer::lex({data = &invalid_bytes[0], length = 1});
+    let nul_is_rejected: bool = nul_result.error() == runtime::Error.invalid_argument &&
+        nul_result.tokens().empty();
+    let utf8_result: lexer::LexResult = lexer::lex({data = &invalid_bytes[1], length = 1});
+    let utf8_is_rejected: bool = utf8_result.error() == runtime::Error.invalid_argument &&
+        utf8_result.tokens().empty();
+    return nul_is_rejected && utf8_is_rejected;
+}
+
+fn main() -> i32 {
+    if (!verify_keywords()) {
+        return 1;
+    }
+    if (!verify_punctuation()) {
+        return 2;
+    }
+    if (!verify_literals_and_trivia()) {
+        return 3;
+    }
+    if (!verify_unexpected_character() || !verify_unterminated_comment()) {
+        return 4;
+    }
+    if (!verify_unterminated_string() || !verify_invalid_source()) {
+        return 5;
+    }
+    return 0;
+}

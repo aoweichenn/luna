@@ -13,13 +13,14 @@ assembly、LUNAOBJ1/ELF 与 executable 文件解耦。
 
 ## 领域对象
 
-模块只使用五个有真实责任的类：
+统一命令批次最初使用五个有真实责任的类；Lexer 现代化随后增加一个只服务编译命令的内部资源类：
 
 - `CommandLine`：持有 argc/argv、当前游标和 `--` 状态，统一安全 lookahead 与参数消费；
 - `ToolDriver`：根命令分类、help/version 和封闭 `switch` 分派；
 - `CompileCommand`：编译模式、输入/输出路径、固定协议和 compilation session 清理；
 - `AssembleCommand`：输入/输出路径、对象格式选择和 assembly session 清理；
-- `LinkCommand`：有界输入路径集合、输出路径、固定协议和 ObjectSet/link session 清理。
+- `LinkCommand`：有界输入路径集合、输出路径、固定协议和 ObjectSet/link session 清理；
+- `FrontendStorage`：集中拥有多源 Token、诊断和 SyntaxNode typed pools，并只向语义阶段提供稳定 view。
 
 命令类的构造函数建立空参数状态，析构统一释放已经构造的 Path。成功、用法错误和阶段错误仍返回
 原有 i32 状态，不引入异常或新的 result 外壳。诊断格式化、字节比较和 first-error 等真正无状态的
@@ -35,6 +36,7 @@ assembly、LUNAOBJ1/ELF 与 executable 文件解耦。
 | 文件 | 职责 |
 | --- | --- |
 | `cli.la` | CommandLine、命令表、共享文本/错误算法 |
+| `frontend.la` | FrontendStorage、多单元前端结果汇聚与稳定 view |
 | `compile.la` | CompileCommand、固定编译协议、诊断和 backend 输出 |
 | `assemble.la` | AssembleCommand、格式选择和原子对象输出 |
 | `link.la` | LinkCommand、Object/ELF 输入和 executable 输出 |
@@ -62,9 +64,9 @@ assembly、LUNAOBJ1/ELF 与 executable 文件解耦。
 
 | 特性 | 决定 |
 | --- | --- |
-| class/access/init/deinit | 五个命令/游标类保护解析、路径和阶段清理不变量 |
-| composition/RAII | 命令组合 CommandLine；析构释放已构造 Path，阶段资源按命令集中收尾 |
-| generics | 当前命令只使用固定 ABI 上限数组；没有真实可复用动态元素集合，不新增泛型实例 |
+| class/access/init/deinit | 命令/游标类保护解析和路径；FrontendStorage 保护多单元结果与 pool 不变量 |
+| composition/RAII | 命令组合 CommandLine；FrontendStorage 的 typed vectors 自动释放，Path 按命令集中收尾 |
+| generics | FrontendStorage 使用 typed vectors 汇聚 Token、诊断、SyntaxNode 和单元记录 |
 | move | 命令不逃逸 facade；Path 仍是迁移期句柄，不伪造无实现的 move 协议 |
 | overload/default | 三条命令语义不同；用独立类而非装饰性 overload/default |
 | operator | 命令和参数没有自然值运算 |

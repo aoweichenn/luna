@@ -144,8 +144,15 @@ LIBRARIES = {
     "string_view": library_module("luna.std.string_view", "std/string_view"),
     "path": library_module("luna.std.path", "std/path"),
     "io": library_module("luna.std.io", "std/io"),
-    "lexer": compiler_module("luna.bootstrap.frontend.lexer", "frontend/lexer"),
-    "syntax": compiler_module("luna.bootstrap.frontend.syntax", "frontend/syntax"),
+    "lexer": compiler_module(
+        "luna.compiler.lexer",
+        "frontend/lexer/facade",
+        "frontend/lexer/session",
+        "frontend/lexer/keywords",
+        "frontend/lexer/literals",
+        "frontend/lexer/token",
+    ),
+    "syntax": compiler_module("luna.bootstrap.frontend.syntax", "frontend/syntax/facade"),
     "parser_state": compiler_module("luna.bootstrap.frontend.parser.state", "frontend/parser/state"),
     "parser_expression": compiler_module("luna.bootstrap.frontend.parser.expression", "frontend/parser/expression"),
     "parser_statements": compiler_module("luna.bootstrap.frontend.parser.statements", "frontend/parser/statements"),
@@ -153,7 +160,10 @@ LIBRARIES = {
         "luna.bootstrap.frontend.parser.declarations",
         "frontend/parser/declarations",
     ),
-    "parser": compiler_module("luna.bootstrap.frontend.parser", "frontend/parser"),
+    "parser": compiler_module(
+        "luna.bootstrap.frontend.parser",
+        "frontend/parser/facade",
+    ),
     "type": compiler_module("luna.bootstrap.middleend.type", "middleend/type"),
     "ir": compiler_module("luna.bootstrap.middleend.ir", "middleend/ir"),
     "ir_verify": compiler_module("luna.bootstrap.middleend.ir.verify", "middleend/ir/verify"),
@@ -303,7 +313,7 @@ LIBRARIES = {
         "backend/x86_64/linker/writer",
         "backend/x86_64/linker/facade",
     ),
-    "tools": driver_module("luna.tools", "cli", "compile", "assemble", "link", "facade"),
+    "tools": driver_module("luna.tools", "cli", "frontend", "compile", "assemble", "link", "facade"),
 }
 
 # tool name -> driver source. Interface and object closures are derived.
@@ -1430,6 +1440,62 @@ def syscall_object(stage_bin: pathlib.Path) -> pathlib.Path:
     return stage_bin.parent / "objects" / "syscall.lo"
 
 
+def execute_frontend_tests(
+    stage_bin: pathlib.Path,
+    runner: tuple[str, ...],
+) -> tuple[int, list[str]]:
+    """单独编译 Lexer 消费端，再链接真实的模块对象。"""
+    source = ROOT / "tests" / "frontend" / "lexer.la"
+    work = ROOT / "out" / "tests" / "frontend-lexer"
+    reset(work)
+    timeout = timeout_seconds(runner)
+    name = "frontend-lexer-contract"
+    failed: list[str] = []
+    try:
+        assembly = work / "lexer.s"
+        object_file = work / "lexer.lo"
+        executable = work / "lexer"
+        require_test_success(
+            [
+                *tool(stage_bin, "compile", runner),
+                "--executable",
+                "-o",
+                assembly,
+                *driver_units(source),
+            ],
+            timeout=timeout,
+        )
+        require_test_success(
+            [*tool(stage_bin, "assemble", runner), "-o", object_file, assembly],
+            timeout=timeout,
+        )
+        link_keys = implementation_closure(driver_dependencies(source))
+        library_objects = [
+            stage_bin.parent / "objects" / f"{key}.lo" for key in link_keys
+        ]
+        require_test_success(
+            [
+                *tool(stage_bin, "link", runner),
+                "-o",
+                executable,
+                object_file,
+                *library_objects,
+            ],
+            timeout=timeout,
+        )
+        completed = test_command([*runner, executable], timeout=timeout)
+        if completed.returncode != 0:
+            raise AssertionError(
+                f"Lexer contract returned {completed.returncode}, expected 0"
+            )
+        print("PASS frontend-lexer-contract (keywords/tokens/spans/diagnostics/RAII)")
+        return 1, failed
+    except Exception as error:  # noqa: BLE001 - 汇总失败后继续执行
+        failed.append(name)
+        print(f"FAIL {name}: {error}")
+        return 0, failed
+
+
 def execute_relocation_data_tests(
     stage_bin: pathlib.Path,
     runner: tuple[str, ...],
@@ -1990,6 +2056,9 @@ def execute_tests(stage_bin: pathlib.Path, runner: tuple[str, ...], jobs: int) -
     )
     passed += identity_passed
     failed.extend(identity_failed)
+    frontend_passed, frontend_failed = execute_frontend_tests(stage_bin, runner)
+    passed += frontend_passed
+    failed.extend(frontend_failed)
     relocation_passed, relocation_failed = execute_relocation_data_tests(
         stage_bin,
         runner,
