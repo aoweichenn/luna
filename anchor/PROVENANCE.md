@@ -539,3 +539,38 @@ median wall time fell from 21.754 seconds with the preceding anchor to 0.488
 seconds with `StaticLinker`. The promoted executable is 4,794,193 bytes with
 SHA-256
 `f11c8b0325edd80374531f85a9ed65d31df437bb604958eea192236438a9ad14`.
+
+## 2026-08-28: promotion to the object-oriented Codegen toolchain
+
+The anchor now contains the stage-fixed `luna` executable from the Codegen
+RAII snapshot accompanying this provenance note. The former public ABI/frame
+byte stores and `*CodegenContext` procedure families are replaced by private
+`AbiLayout`, `FramePlan` and `CodeGenerator` classes. Typed vectors own every
+ABI and frame record, class composition owns phase order and cleanup, and
+`take_result()` transfers only the final assembly buffer. The public
+`BackendResult` consequently contains only assembly and error.
+
+The implementation is divided into ABI, frame, support, value, conversion,
+caller, callee, instruction, module and facade method families behind one
+`luna.compiler.x86.codegen` interface. Bounded traversals use `for`, closed
+opcode, register, width and escape alternatives use `switch`, and only the
+state-driven inline-assembly string scanner retains `while`. Assembly writes
+share one sticky first-error state instead of long conditional write chains;
+every condition remains within the two-clause limit. No optimizer, machine IR
+or artificial target-strategy hierarchy was introduced.
+
+Remote x86-64 verification on isolated `caw` built the complete 75-module
+graph through `stage-transition`, `stage-next` and `stage-fixed` with
+`verify --fresh` in 62.47 seconds. Every next/fixed assembly, object and
+executable artifact was byte-identical. The final suite passed 443/443 with no
+skips in 4.30 seconds; six direct Codegen/relocation probes also covered empty
+results, rejected invalid IR, deterministic repeated emission and cleanup.
+Audit and formatting gates were green.
+
+Three compilations of the unchanged `sem_funcs` module took 6.014, 6.040 and
+6.024 seconds and each reproduced the previous 3,069,988-byte assembly with
+SHA-256
+`b9f50e44fa6a98aaed59c883a0ac97858a6a5c18d6e35ce40b761a4a041e6b0c`.
+Median wall time fell from 9.565 to 6.024 seconds, about 37.0 percent. The
+promoted executable is 4,798,279 bytes with SHA-256
+`cfdacf4855d86d70925fc7766cd8fe057ceaba329655ba093eda331ac4e0b65b`.

@@ -1,90 +1,107 @@
 module luna.compiler.x86.codegen;
 
+impl CodeGenerator {
 
-fn emit_control(context: *CodegenContext, instruction: ir::Instruction) -> bool {
-    if (instruction.opcode == ir::Opcode.jump) {
-        return literal(context, "    jmp ") && block_label(context, instruction.auxiliary) && literal(context, "\n");
+priv fn emit_control( instruction: ir::Instruction) -> bool {
+    switch (instruction.opcode) {
+    case ir::Opcode.jump {
+        this->literal("    jmp ");
+        this->block_label(instruction.auxiliary);
+        this->literal("\n");
+        return this->ready();
     }
-    if (instruction.opcode == ir::Opcode.branch) {
-        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
-        let record: *const type_info::Record = type(context, values[instruction.left].type_id);
-        return record != null && load_rax(context, instruction.left, record) &&
-            literal(context, "    testl %eax, %eax\n    jne ") && block_label(context, instruction.auxiliary) &&
-            literal(context, "\n    jmp ") && block_label(context, instruction.third) && literal(context, "\n");
+    case ir::Opcode.branch {
+        let values: *const ir::Value = this->ir.values.data as *const ir::Value;
+        let record: *const type_info::Record = this->type( values[instruction.left].type_id);
+        if (record == null || !this->load_rax(instruction.left, record)) {
+            return false;
+        }
+        this->literal("    testl %eax, %eax\n    jne ");
+        this->block_label(instruction.auxiliary);
+        this->literal("\n    jmp ");
+        this->block_label(instruction.third);
+        this->literal("\n");
+        return this->ready();
     }
-    return emit_return(context, instruction);
+    case ir::Opcode.return_value, ir::Opcode.return_void {
+        return this->emit_return(instruction);
+    }
+    default {
+        return this->fail(runtime::Error.invalid_argument);
+    }
+    }
 }
 
-fn emit_instruction(context: *CodegenContext, instruction: ir::Instruction, instruction_id: usize) -> bool {
-    if (instruction.opcode == ir::Opcode.constant_integer || instruction.opcode ==
-            ir::Opcode.constant_float || instruction.opcode == ir::Opcode.constant_boolean ||
-        instruction.opcode == ir::Opcode.constant_null) {
-        return emit_constant(context, instruction);
+priv fn emit_instruction( instruction: ir::Instruction, instruction_id: usize) -> bool {
+    switch (instruction.opcode) {
+    case ir::Opcode.constant_integer, ir::Opcode.constant_float, ir::Opcode.constant_boolean, ir::Opcode.constant_null {
+        return this->emit_constant( instruction);
     }
-    if (instruction.opcode == ir::Opcode.address_of_slot || instruction.opcode ==
-            ir::Opcode.member_address || instruction.opcode == ir::Opcode.global_address ||
-        instruction.opcode == ir::Opcode.function_address || instruction.opcode == ir::Opcode.pointer_offset) {
-        return emit_address(context, instruction);
+    case ir::Opcode.address_of_slot, ir::Opcode.member_address, ir::Opcode.global_address,
+        ir::Opcode.function_address, ir::Opcode.pointer_offset {
+        return this->emit_address( instruction);
     }
-    if (instruction.opcode == ir::Opcode.zero_slot) {
-        return emit_zero(context, instruction);
+    case ir::Opcode.zero_slot {
+        return this->emit_zero( instruction);
     }
-    if (instruction.opcode == ir::Opcode.memory_copy) {
-        return emit_memory_copy(context, instruction, instruction_id);
+    case ir::Opcode.memory_copy {
+        return this->emit_memory_copy( instruction, instruction_id);
     }
-    if (instruction.opcode == ir::Opcode.load || instruction.opcode == ir::Opcode.store) {
-        return emit_slot_access(context, instruction);
+    case ir::Opcode.load, ir::Opcode.store {
+        return this->emit_slot_access( instruction);
     }
-    if (instruction.opcode == ir::Opcode.load_indirect) {
-        return emit_load_indirect(context, instruction);
+    case ir::Opcode.load_indirect {
+        return this->emit_load_indirect( instruction);
     }
-    if (instruction.opcode == ir::Opcode.store_indirect) {
-        return emit_store_indirect(context, instruction);
+    case ir::Opcode.store_indirect {
+        return this->emit_store_indirect( instruction);
     }
-    if (instruction.opcode == ir::Opcode.null_check || instruction.opcode == ir::Opcode.bounds_check) {
-        return emit_check(context, instruction, instruction_id);
+    case ir::Opcode.null_check, ir::Opcode.bounds_check {
+        return this->emit_check( instruction, instruction_id);
     }
-    if (instruction.opcode == ir::Opcode.unary_integer || instruction.opcode == ir::Opcode.unary_float ||
-        instruction.opcode == ir::Opcode.boolean_not) {
-        return emit_unary(context, instruction);
+    case ir::Opcode.unary_integer, ir::Opcode.unary_float, ir::Opcode.boolean_not {
+        return this->emit_unary( instruction);
     }
-    if (instruction.opcode == ir::Opcode.convert) {
-        return emit_convert(context, instruction, instruction_id);
+    case ir::Opcode.convert {
+        return this->emit_convert( instruction, instruction_id);
     }
-    if (instruction.opcode == ir::Opcode.binary_integer) {
-        return emit_binary_integer(context, instruction, instruction_id);
+    case ir::Opcode.binary_integer {
+        return this->emit_binary_integer( instruction, instruction_id);
     }
-    if (instruction.opcode == ir::Opcode.binary_float || instruction.opcode == ir::Opcode.float_min ||
-        instruction.opcode == ir::Opcode.float_max) {
-        return emit_binary_float(context, instruction);
+    case ir::Opcode.binary_float, ir::Opcode.float_min, ir::Opcode.float_max {
+        return this->emit_binary_float( instruction);
     }
-    if (instruction.opcode == ir::Opcode.float_sqrt) {
-        return emit_float_sqrt(context, instruction);
+    case ir::Opcode.float_sqrt {
+        return this->emit_float_sqrt( instruction);
     }
-    if (instruction.opcode == ir::Opcode.overflow_flag) {
-        return emit_overflow_flag(context, instruction);
+    case ir::Opcode.overflow_flag {
+        return this->emit_overflow_flag( instruction);
     }
-    if (instruction.opcode == ir::Opcode.compare) {
-        return emit_compare(context, instruction);
+    case ir::Opcode.compare {
+        return this->emit_compare( instruction);
     }
-    if (instruction.opcode == ir::Opcode.call) {
-        return emit_call(context, instruction, instruction_id);
+    case ir::Opcode.call {
+        return this->emit_call( instruction, instruction_id);
     }
-    if (instruction.opcode == ir::Opcode.call_indirect) {
-        return emit_call_indirect(context, instruction, instruction_id);
+    case ir::Opcode.call_indirect {
+        return this->emit_call_indirect( instruction, instruction_id);
     }
-    if (instruction.opcode == ir::Opcode.va_list_start) {
-        return emit_va_start(context, instruction);
+    case ir::Opcode.va_list_start {
+        return this->emit_va_start( instruction);
     }
-    if (instruction.opcode == ir::Opcode.va_list_arg) {
-        return emit_va_arg(context, instruction, instruction_id);
+    case ir::Opcode.va_list_arg {
+        return this->emit_va_arg( instruction, instruction_id);
     }
-    if (instruction.opcode == ir::Opcode.jump || instruction.opcode == ir::Opcode.branch ||
-        instruction.opcode == ir::Opcode.return_value || instruction.opcode == ir::Opcode.return_void) {
-        return emit_control(context, instruction);
+    case ir::Opcode.jump, ir::Opcode.branch, ir::Opcode.return_value, ir::Opcode.return_void {
+        return this->emit_control( instruction);
     }
-    if (instruction.opcode == ir::Opcode.unreachable) {
-        return literal(context, "    ud2\n");
+    case ir::Opcode.unreachable {
+        return this->literal( "    ud2\n");
     }
-    return fail(context, runtime::Error.invalid_argument);
+    default {
+        return this->fail( runtime::Error.invalid_argument);
+    }
+    }
+}
+
 }

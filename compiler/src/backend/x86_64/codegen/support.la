@@ -8,69 +8,75 @@ enum SourceEncoding: usize {
     raw, hexadecimal,
 }
 
-fn no_id() -> usize {
+impl CodeGenerator {
+
+priv fn ready() const -> bool {
+    return this->error == runtime::Error.none;
+}
+
+priv fn no_id() -> usize {
     return CodegenLimit.maximum_size as usize;
 }
 
-fn fail(context: *CodegenContext, error: runtime::Error) -> bool {
-    if (context != null && context->error == runtime::Error.none) {
-        context->error = error;
+priv fn fail( error: runtime::Error) -> bool {
+    if (this->error == runtime::Error.none) {
+        this->error = error;
     }
     return false;
 }
 
-fn append_assembly(context: *CodegenContext, data: *const u8, length: usize) -> bool {
-    if (context == null || context->error != runtime::Error.none) {
+priv fn append_assembly( data: *const u8, length: usize) -> bool {
+    if (this->error != runtime::Error.none) {
         return false;
     }
     let maximum_size: usize = CodegenLimit.maximum_assembly_size as usize;
-    if (context->assembly.size() > maximum_size || length > maximum_size - context->assembly.size()) {
-        return fail(context, runtime::Error.out_of_memory);
+    if (this->assembly.size() > maximum_size || length > maximum_size - this->assembly.size()) {
+        return this->fail( runtime::Error.out_of_memory);
     }
-    let error: runtime::Error = context->assembly.append(data, length);
-    return error == runtime::Error.none ? true : fail(context, error);
+    let error: runtime::Error = this->assembly.append(data, length);
+    return error == runtime::Error.none ? true : this->fail( error);
 }
 
-fn literal(context: *CodegenContext, literal: *const u8) -> bool {
-    if (context == null || context->error != runtime::Error.none) {
+priv fn literal( literal: *const u8) -> bool {
+    if (this->error != runtime::Error.none) {
         return false;
     }
     let view: string_views::string_view_result =
         string_views::from_c_string(literal, CodegenLimit.maximum_literal_size as usize);
     if (view.error != runtime::Error.none) {
-        return fail(context, view.error);
+        return this->fail( view.error);
     }
-    return append_assembly(context, view.view.data, view.view.length);
+    return this->append_assembly( view.view.data, view.view.length);
 }
 
-fn append_usize(context: *CodegenContext, value: usize) -> bool {
-    if (context == null || context->error != runtime::Error.none) {
+priv fn append_usize( value: usize) -> bool {
+    if (this->error != runtime::Error.none) {
         return false;
     }
     var digits: [20]u8 = {};
     let converted: charconv::to_chars_result = charconv::to_chars(&digits[0], &digits[0] + 20 as usize, value);
     if (converted.error != runtime::Error.none) {
-        return fail(context, converted.error);
+        return this->fail( converted.error);
     }
-    return append_assembly(context, &digits[0] as *const u8, converted.ptr - &digits[0]);
+    return this->append_assembly( &digits[0] as *const u8, converted.ptr - &digits[0]);
 }
 
-fn hex(context: *CodegenContext, value: u64, digits: usize) -> bool {
-    if (context == null || context->error != runtime::Error.none) {
+priv fn hex( value: u64, digits: usize) -> bool {
+    if (this->error != runtime::Error.none) {
         return false;
     }
     if (digits == 0 || digits > 16) {
-        return fail(context, runtime::Error.invalid_argument);
+        return this->fail( runtime::Error.invalid_argument);
     }
     var converted_digits: [16]u8 = {};
     let converted: charconv::to_chars_result =
         charconv::to_chars(&converted_digits[0], &converted_digits[0] + 16 as usize, value, 16);
     if (converted.error != runtime::Error.none) {
-        return fail(context, converted.error);
+        return this->fail( converted.error);
     }
     let converted_size: usize = converted.ptr - &converted_digits[0];
     if (converted_size > digits) {
-        return fail(context, runtime::Error.invalid_argument);
+        return this->fail( runtime::Error.invalid_argument);
     }
     var output: [16]u8 = {};
     let padding_size: usize = digits - converted_size;
@@ -80,32 +86,32 @@ fn hex(context: *CodegenContext, value: u64, digits: usize) -> bool {
     for (var index: usize = 0; index < converted_size; index += 1) {
         output[padding_size + index] = converted_digits[index];
     }
-    return append_assembly(context, &output[0] as *const u8, digits);
+    return this->append_assembly( &output[0] as *const u8, digits);
 }
 
-fn source_range_is_valid(unit: *const context::Unit, span: lexer::SourceSpan) -> bool {
+priv fn source_range_is_valid(unit: *const context::Unit, span: lexer::SourceSpan) -> bool {
     if (unit == null) {
         return false;
     }
     return checked::range_is_valid(span.offset, span.length, unit->source.length);
 }
 
-fn append_source(context: *CodegenContext, data: *const u8, length: usize, encoding: SourceEncoding) -> bool {
-    let pointers_are_valid: bool = context != null && data != null;
-    let writer_is_active: bool = pointers_are_valid && context->error == runtime::Error.none;
+priv fn append_source( data: *const u8, length: usize, encoding: SourceEncoding) -> bool {
+    let pointers_are_valid: bool = data != null;
+    let writer_is_active: bool = pointers_are_valid && this->error == runtime::Error.none;
     let request_is_valid: bool = writer_is_active && length != 0;
     if (!request_is_valid) {
-        return fail(context, runtime::Error.invalid_argument);
+        return this->fail( runtime::Error.invalid_argument);
     }
     var appended: bool = false;
     switch (encoding) {
     case SourceEncoding.raw {
-        appended = append_assembly(context, data, length);
+        appended = this->append_assembly( data, length);
     }
     case SourceEncoding.hexadecimal {
         appended = true;
         for (var index: usize = 0; index < length && appended; index += 1) {
-            appended = hex(context, data[index] as u64, SymbolFormat.hex_byte_digits as usize);
+            appended = this->hex( data[index] as u64, SymbolFormat.hex_byte_digits as usize);
         }
     }
     }
@@ -115,30 +121,30 @@ fn append_source(context: *CodegenContext, data: *const u8, length: usize, encod
     return true;
 }
 
-fn type(context: *CodegenContext, type_id: usize) -> *const type_info::Record {
-    if (context == null || type_id >= context->types.type_count) {
-        fail(context, runtime::Error.invalid_argument);
+priv fn type( type_id: usize) -> *const type_info::Record {
+    if (type_id >= this->types.type_count) {
+        this->fail( runtime::Error.invalid_argument);
         return null;
     }
-    let records: *const type_info::Record = context->types.types.data as
+    let records: *const type_info::Record = this->types.types.data as
             *const type_info::Record;
     return &records[type_id];
 }
 
-fn unit(context: *CodegenContext, unit_id: usize) -> *const context::Unit {
-    if (context == null || unit_id >= context->semantic_input.unit_count) {
-        fail(context, runtime::Error.invalid_argument);
+priv fn unit( unit_id: usize) -> *const context::Unit {
+    if (unit_id >= this->semantic_input.unit_count) {
+        this->fail( runtime::Error.invalid_argument);
         return null;
     }
-    let units: *const context::Unit = context->semantic_input.units.data as
+    let units: *const context::Unit = this->semantic_input.units.data as
             *const context::Unit;
     return &units[unit_id];
 }
 
-fn token(context: *CodegenContext, unit_id: usize, token_id: usize) -> lexer::Token {
-    let unit: *const context::Unit = unit(context, unit_id);
+priv fn token( unit_id: usize, token_id: usize) -> lexer::Token {
+    let unit: *const context::Unit = this->unit( unit_id);
     if (unit == null || token_id >= unit->tokens.count) {
-        fail(context, runtime::Error.invalid_argument);
+        this->fail( runtime::Error.invalid_argument);
         return {
             kind = lexer::TokenKind.invalid, span = {
                 offset = 0, length = 0, line = 0, column = 0,
@@ -149,10 +155,10 @@ fn token(context: *CodegenContext, unit_id: usize, token_id: usize) -> lexer::To
     return tokens[token_id];
 }
 
-fn node(context: *CodegenContext, unit_id: usize, node_id: usize) -> syntax::SyntaxNode {
-    let unit: *const context::Unit = unit(context, unit_id);
+priv fn node( unit_id: usize, node_id: usize) -> syntax::SyntaxNode {
+    let unit: *const context::Unit = this->unit( unit_id);
     if (unit == null || node_id >= unit->tree.count) {
-        fail(context, runtime::Error.invalid_argument);
+        this->fail( runtime::Error.invalid_argument);
         return {
             kind = syntax::SyntaxKind.invalid, span = {
                 offset = 0, length = 0, line = 0, column = 0,
@@ -164,17 +170,18 @@ fn node(context: *CodegenContext, unit_id: usize, node_id: usize) -> syntax::Syn
     return nodes[node_id];
 }
 
-fn append_token_hex(context: *CodegenContext, unit_id: usize, token_id: usize) -> bool {
-    let unit: *const context::Unit = unit(context, unit_id);
-    let token: lexer::Token = token(context, unit_id, token_id);
-    let token_is_valid: bool = token.kind == lexer::TokenKind.identifier && source_range_is_valid(unit, token.span);
+priv fn append_token_hex( unit_id: usize, token_id: usize) -> bool {
+    let unit: *const context::Unit = this->unit( unit_id);
+    let token: lexer::Token = this->token( unit_id, token_id);
+    let token_is_valid: bool = token.kind == lexer::TokenKind.identifier && this->source_range_is_valid(unit,
+        token.span);
     if (!token_is_valid) {
-        return fail(context, runtime::Error.invalid_argument);
+        return this->fail( runtime::Error.invalid_argument);
     }
-    return append_source(context, &unit->source.data[token.span.offset], token.span.length, SourceEncoding.hexadecimal);
+    return this->append_source( &unit->source.data[token.span.offset], token.span.length, SourceEncoding.hexadecimal);
 }
 
-fn token_is_operator_name(kind: lexer::TokenKind) -> bool {
+priv fn token_is_operator_name(kind: lexer::TokenKind) -> bool {
     switch (kind) {
     case lexer::TokenKind.plus, lexer::TokenKind.minus,
         lexer::TokenKind.star, lexer::TokenKind.slash, lexer::TokenKind.percent,
@@ -190,163 +197,176 @@ fn token_is_operator_name(kind: lexer::TokenKind) -> bool {
     }
 }
 
-fn append_function_name_hex(context: *CodegenContext, unit_id: usize, token_id: usize) -> bool {
-    let unit: *const context::Unit = unit(context, unit_id);
-    let token: lexer::Token = token(context, unit_id, token_id);
-    let name_is_valid: bool = token.kind == lexer::TokenKind.identifier || token_is_operator_name(token.kind);
-    if (!name_is_valid || !source_range_is_valid(unit, token.span)) {
-        return fail(context, runtime::Error.invalid_argument);
+priv fn append_function_name_hex( unit_id: usize, token_id: usize) -> bool {
+    let unit: *const context::Unit = this->unit( unit_id);
+    let token: lexer::Token = this->token( unit_id, token_id);
+    let name_is_valid: bool = token.kind == lexer::TokenKind.identifier || this->token_is_operator_name(token.kind);
+    if (!name_is_valid || !this->source_range_is_valid(unit, token.span)) {
+        return this->fail( runtime::Error.invalid_argument);
     }
-    return append_source(context, &unit->source.data[token.span.offset], token.span.length, SourceEncoding.hexadecimal);
+    return this->append_source( &unit->source.data[token.span.offset], token.span.length, SourceEncoding.hexadecimal);
 }
 
-fn append_module_hex(context: *CodegenContext, unit_id: usize) -> bool {
-    let unit: *const context::Unit = unit(context, unit_id);
+priv fn append_module_hex( unit_id: usize) -> bool {
+    let unit: *const context::Unit = this->unit( unit_id);
     if (unit == null) {
         return false;
     }
-    let root: syntax::SyntaxNode = node(context, unit_id, unit->tree.root);
-    let declaration: syntax::SyntaxNode = node(context, unit_id, root.first_child);
+    let root: syntax::SyntaxNode = this->node( unit_id, unit->tree.root);
+    let declaration: syntax::SyntaxNode = this->node( unit_id, root.first_child);
     let root_is_valid: bool = root.kind == syntax::SyntaxKind.program;
     let declaration_is_valid: bool =
         declaration.kind == syntax::SyntaxKind.module_declaration && declaration.child_count != 0;
     if (!root_is_valid || !declaration_is_valid) {
-        return fail(context, runtime::Error.invalid_argument);
+        return this->fail( runtime::Error.invalid_argument);
     }
     var child: usize = declaration.first_child;
     for (var index: usize = 0;
-        index < declaration.child_count && context->error == runtime::Error.none;
+        index < declaration.child_count && this->error == runtime::Error.none;
         index += 1) {
-        let name: syntax::SyntaxNode = node(context, unit_id, child);
+        let name: syntax::SyntaxNode = this->node( unit_id, child);
         if (name.kind != syntax::SyntaxKind.name_expression) {
-            return fail(context, runtime::Error.invalid_argument);
+            return this->fail( runtime::Error.invalid_argument);
         }
         if (index != 0) {
-            hex(context, SymbolFormat.module_separator as usize as u64, SymbolFormat.hex_byte_digits as usize);
+            this->hex( SymbolFormat.module_separator as usize as u64, SymbolFormat.hex_byte_digits as usize);
         }
-        append_token_hex(context, unit_id, name.token_index);
+        this->append_token_hex( unit_id, name.token_index);
         child = name.next_sibling;
     }
-    return context->error == runtime::Error.none;
+    return this->error == runtime::Error.none;
 }
 
-fn function_signature_is_valid(context: *CodegenContext, function: ir::Function) -> bool {
+priv fn function_signature_is_valid( function: ir::Function) -> bool {
     let length_is_valid: bool = function.signature_length != 0;
     let range_is_valid: bool = checked::range_is_valid(
-        function.signature_offset, function.signature_length, context->ir.callable_signatures.length);
+        function.signature_offset, function.signature_length, this->ir.callable_signatures.length);
     return length_is_valid && range_is_valid;
 }
 
-fn append_mangled_function_symbol(context: *CodegenContext, function_id: usize) -> bool {
-    let functions: *const ir::Function = context->ir.functions.data as
+priv fn append_mangled_function_symbol( function_id: usize) -> bool {
+    let functions: *const ir::Function = this->ir.functions.data as
             *const ir::Function;
     let function: ir::Function = functions[function_id];
-    if (!function_signature_is_valid(context, function)) {
-        return fail(context, runtime::Error.invalid_argument);
+    if (!this->function_signature_is_valid( function)) {
+        return this->fail( runtime::Error.invalid_argument);
     }
-    literal(context, "_L");
-    append_module_hex(context, function.declaration_unit);
-    literal(context, "_");
-    append_function_name_hex(context, function.declaration_unit, function.name_token);
-    literal(context, "__");
-    append_source(
-        context, (&context->ir.callable_signatures.data[function.signature_offset]) as *const u8,
+    this->literal( "_L");
+    this->append_module_hex( function.declaration_unit);
+    this->literal( "_");
+    this->append_function_name_hex( function.declaration_unit, function.name_token);
+    this->literal( "__");
+    this->append_source( (&this->ir.callable_signatures.data[function.signature_offset]) as *const u8,
         function.signature_length, SourceEncoding.hexadecimal);
-    return context->error == runtime::Error.none;
+    return this->error == runtime::Error.none;
 }
 
-fn append_export_name(context: *CodegenContext, function: ir::Function) -> bool {
-    let unit: *const context::Unit = unit(context, function.export_name_unit);
-    let token: lexer::Token = token(context, function.export_name_unit, function.export_name_token);
+priv fn append_export_name( function: ir::Function) -> bool {
+    let unit: *const context::Unit = this->unit( function.export_name_unit);
+    let token: lexer::Token = this->token( function.export_name_unit, function.export_name_token);
     let length_is_valid: bool = token.span.length >= SymbolFormat.quoted_delimiter_bytes as usize;
-    let token_is_valid: bool = length_is_valid && source_range_is_valid(unit, token.span);
+    let token_is_valid: bool = length_is_valid && this->source_range_is_valid(unit, token.span);
     if (!token_is_valid) {
-        return fail(context, runtime::Error.invalid_argument);
+        return this->fail( runtime::Error.invalid_argument);
     }
     let content_offset: usize = token.span.offset + SymbolFormat.quoted_prefix_bytes as usize;
     let content_length: usize = token.span.length - SymbolFormat.quoted_delimiter_bytes as usize;
-    return append_source(context, &unit->source.data[content_offset], content_length, SourceEncoding.raw);
+    return this->append_source( &unit->source.data[content_offset], content_length, SourceEncoding.raw);
 }
 
-fn append_external_name(context: *CodegenContext, function: ir::Function) -> bool {
-    let unit: *const context::Unit = unit(context, function.declaration_unit);
-    let token: lexer::Token = token(context, function.declaration_unit, function.name_token);
-    let token_is_valid: bool = token.kind == lexer::TokenKind.identifier && source_range_is_valid(unit, token.span);
+priv fn append_external_name( function: ir::Function) -> bool {
+    let unit: *const context::Unit = this->unit( function.declaration_unit);
+    let token: lexer::Token = this->token( function.declaration_unit, function.name_token);
+    let token_is_valid: bool = token.kind == lexer::TokenKind.identifier && this->source_range_is_valid(unit,
+        token.span);
     if (!token_is_valid) {
-        return fail(context, runtime::Error.invalid_argument);
+        return this->fail( runtime::Error.invalid_argument);
     }
-    return append_source(context, &unit->source.data[token.span.offset], token.span.length, SourceEncoding.raw);
+    return this->append_source( &unit->source.data[token.span.offset], token.span.length, SourceEncoding.raw);
 }
 
-fn append_function_symbol(context: *CodegenContext, function_id: usize) -> bool {
-    if (context == null || function_id >= context->ir.function_count) {
-        return fail(context, runtime::Error.invalid_argument);
+priv fn append_function_symbol( function_id: usize) -> bool {
+    if (function_id >= this->ir.function_count) {
+        return this->fail( runtime::Error.invalid_argument);
     }
-    let functions: *const ir::Function = context->ir.functions.data as
+    let functions: *const ir::Function = this->ir.functions.data as
             *const ir::Function;
     let function: ir::Function = functions[function_id];
-    if (function.export_name_token != no_id()) {
-        return append_export_name(context, function);
+    if (function.export_name_token != this->no_id()) {
+        return this->append_export_name( function);
     }
     switch (function.linkage) {
     case ir::Linkage.external_c {
-        return append_external_name(context, function);
+        return this->append_external_name( function);
     }
     default {
-        return append_mangled_function_symbol(context, function_id);
+        return this->append_mangled_function_symbol( function_id);
     }
     }
 }
 
-fn storage(context: *CodegenContext, kind: StorageKind, source_id: usize) -> Storage {
-    let found: StorageResult = storage_find(context->frames, context->current_function, kind, source_id);
+priv fn storage( kind: StorageKind, source_id: usize) -> Storage {
+    let found: StorageResult = this->frames.find_storage(this->current_function, kind, source_id);
     if (found.error != runtime::Error.none) {
-        fail(context, found.error);
+        this->fail( found.error);
     }
     return found.storage;
 }
 
-fn append_stack(context: *CodegenContext, storage: Storage) -> bool {
-    let frame: FrameResult = get(context->frames, context->current_function);
+priv fn append_stack( storage: Storage) -> bool {
+    let frame: FrameResult = this->frames.frame_at(this->current_function);
     if (frame.error == runtime::Error.none && frame.frame.dynamic_alignment != 0) {
         // 序言已经把 rsp 向下对齐到 frame 的动态边界，因此 storage 从 rsp 寻址：
         // 反转 frame 相对偏移（rsp = aligned_base - frame_size），再计入 rsp 下方仍存活的
         // outgoing call 参数区。
-        return append_usize(context, context->call_frame_depth + frame.frame.frame_size_bytes - storage.offset_bytes) &&
-            literal(context, "(%rsp)");
+        this->append_usize(this->call_frame_depth + frame.frame.frame_size_bytes - storage.offset_bytes);
+        this->literal("(%rsp)");
+        return this->ready();
     }
-    return literal(context, "-") && append_usize(context, storage.offset_bytes) && literal(context, "(%rbp)");
+    this->literal("-");
+    this->append_usize(storage.offset_bytes);
+    this->literal("(%rbp)");
+    return this->ready();
 }
 
-fn append_value(context: *CodegenContext, value_id: usize) -> bool {
-    let storage: Storage = storage(context, StorageKind.value, value_id);
-    return context->error == runtime::Error.none && append_stack(context, storage);
+priv fn append_value( value_id: usize) -> bool {
+    let storage: Storage = this->storage( StorageKind.value, value_id);
+    return this->error == runtime::Error.none && this->append_stack( storage);
 }
 
-fn append_slot(context: *CodegenContext, slot_id: usize) -> bool {
-    let storage: Storage = storage(context, StorageKind.slot, slot_id);
-    return context->error == runtime::Error.none && append_stack(context, storage);
+priv fn append_slot( slot_id: usize) -> bool {
+    let storage: Storage = this->storage( StorageKind.slot, slot_id);
+    return this->error == runtime::Error.none && this->append_stack( storage);
 }
 
-fn block_label(context: *CodegenContext, block_id: usize) -> bool {
-    return literal(context, ".Lbf") && append_usize(context, context->current_function) &&
-        literal(context, "_bb") && append_usize(context, block_id);
+priv fn block_label( block_id: usize) -> bool {
+    this->literal(".Lbf");
+    this->append_usize(this->current_function);
+    this->literal("_bb");
+    this->append_usize(block_id);
+    return this->ready();
 }
 
-fn return_label(context: *CodegenContext) -> bool {
-    return literal(context, ".Lbf") && append_usize(context, context->current_function) && literal(context, "_return");
+priv fn return_label() -> bool {
+    this->literal(".Lbf");
+    this->append_usize(this->current_function);
+    this->literal("_return");
+    return this->ready();
 }
 
-fn instruction_label(context: *CodegenContext, instruction_id: usize, suffix: *const u8) -> bool {
-    return literal(context, ".Lbi") && append_usize(context, instruction_id) &&
-        literal(context, "_") && literal(context, suffix);
+priv fn instruction_label( instruction_id: usize, suffix: *const u8) -> bool {
+    this->literal(".Lbi");
+    this->append_usize(instruction_id);
+    this->literal("_");
+    this->literal(suffix);
+    return this->ready();
 }
 
-fn append_global_label(context: *CodegenContext, global_id: usize) -> bool {
-    return literal(context, ".Lbg") && append_usize(context, global_id);
+priv fn append_global_label( global_id: usize) -> bool {
+    return this->literal( ".Lbg") && this->append_usize( global_id);
 }
 
-fn bit_width(record: *const type_info::Record) -> usize {
+priv fn bit_width(record: *const type_info::Record) -> usize {
     if (record == null) {
         return 0;
     }
@@ -362,95 +382,118 @@ fn bit_width(record: *const type_info::Record) -> usize {
     return type_info::bit_width(record->kind);
 }
 
-fn is_signed(context: *CodegenContext, record: *const type_info::Record) -> bool {
+priv fn is_signed( record: *const type_info::Record) -> bool {
     if (record == null) {
         return false;
     }
     if (record->kind == type_info::Kind.enumeration) {
-        let underlying: *const type_info::Record = type(context, record->element_type);
+        let underlying: *const type_info::Record = this->type( record->element_type);
         return underlying != null && type_info::is_signed_integer(underlying->kind);
     }
     return type_info::is_signed_integer(record->kind);
 }
 
-fn load_integer(
-    context: *CodegenContext, value_id: usize, record: *const type_info::Record,
+priv fn load_integer( value_id: usize, record: *const type_info::Record,
     destination_32: *const u8, destination_64: *const u8, signed_value: bool) -> bool {
-    let width: usize = bit_width(record);
+    let width: usize = this->bit_width(record);
     var mnemonic: *const u8 = null;
     var destination: *const u8 = destination_32;
-    if (signed_value && width == 8) {
-        mnemonic = "    movsbl ";
-    } else if (signed_value && width == 16) {
-        mnemonic = "    movswl ";
-    } else if (signed_value && width == 32 && destination_64 != null) {
-        mnemonic = "    movslq ";
-        destination = destination_64;
-    } else if (width <= 32) {
-        mnemonic = "    movl ";
-    } else if (width == 64) {
+    switch (width) {
+    case 8 {
+        mnemonic = signed_value ? "    movsbl " : "    movl ";
+    }
+    case 16 {
+        mnemonic = signed_value ? "    movswl " : "    movl ";
+    }
+    case 32 {
+        let extend_to_64: bool = signed_value && destination_64 != null;
+        if (extend_to_64) {
+            mnemonic = "    movslq ";
+            destination = destination_64;
+        } else {
+            mnemonic = "    movl ";
+        }
+    }
+    case 64 {
         mnemonic = "    movq ";
         destination = destination_64;
-    } else {
-        return fail(context, runtime::Error.invalid_argument);
     }
-    return literal(context, mnemonic) && append_value(context, value_id) && literal(context, ", ") &&
-        literal(context, destination) && literal(context, "\n");
+    default {
+        return this->fail( runtime::Error.invalid_argument);
+    }
+    }
+    this->literal(mnemonic);
+    this->append_value(value_id);
+    this->literal(", ");
+    this->literal(destination);
+    this->literal("\n");
+    return this->ready();
 }
 
-fn load_rax(context: *CodegenContext, value_id: usize, record: *const type_info::Record) -> bool {
-    return load_integer(context, value_id, record, "%eax", "%rax", false);
+priv fn load_rax( value_id: usize, record: *const type_info::Record) -> bool {
+    return this->load_integer( value_id, record, "%eax", "%rax", false);
 }
 
-fn load_rcx(context: *CodegenContext, value_id: usize, record: *const type_info::Record) -> bool {
-    return load_integer(context, value_id, record, "%ecx", "%rcx", false);
+priv fn load_rcx( value_id: usize, record: *const type_info::Record) -> bool {
+    return this->load_integer( value_id, record, "%ecx", "%rcx", false);
 }
 
-fn load_signed_rax(context: *CodegenContext, value_id: usize, record: *const type_info::Record) -> bool {
-    let width: usize = bit_width(record);
+priv fn load_signed_rax( value_id: usize, record: *const type_info::Record) -> bool {
+    let width: usize = this->bit_width(record);
     let mnemonic: *const u8 = width == 8 ? "    movsbq " : width == 16 ? "    movswq " : width == 32 ? "    movslq " :
         width == 64 ? "    movq " : null;
     if (mnemonic == null) {
-        return fail(context, runtime::Error.invalid_argument);
+        return this->fail( runtime::Error.invalid_argument);
     }
-    return literal(context, mnemonic) && append_value(context, value_id) && literal(context, ", %rax\n");
+    this->literal(mnemonic);
+    this->append_value(value_id);
+    this->literal(", %rax\n");
+    return this->ready();
 }
 
-fn store_rax(context: *CodegenContext, result: usize, record: *const type_info::Record) -> bool {
-    let width: usize = bit_width(record);
-    if (width == 8 &&
-        !literal(
-            context, "    andl $255, %eax\n")) {
+priv fn store_rax( result: usize, record: *const type_info::Record) -> bool {
+    let width: usize = this->bit_width(record);
+    if (width == 8 && !this->literal( "    andl $255, %eax\n")) {
         return false;
     }
-    if (width == 16 &&
-        !literal(
-            context, "    andl $65535, %eax\n")) {
+    if (width == 16 && !this->literal( "    andl $65535, %eax\n")) {
         return false;
     }
-    return literal(context, width <= 32 ? "    movl %eax, " : "    movq %rax, ") &&
-        append_value(context, result) && literal(context, "\n");
+    this->literal(width <= 32 ? "    movl %eax, " : "    movq %rax, ");
+    this->append_value(result);
+    this->literal("\n");
+    return this->ready();
 }
 
-fn float_move(record: *const type_info::Record) -> *const u8 {
+priv fn float_move(record: *const type_info::Record) -> *const u8 {
     if (record == null) {
         return null;
     }
     return record->kind == type_info::Kind.float_32 ? "movss" : "movsd";
 }
 
-fn load_xmm(context: *CodegenContext, value_id: usize, record: *const type_info::Record,
-    register_name: *const u8) -> bool {
-    let mnemonic: *const u8 = float_move(record);
-    return literal(context, "    ") && literal(context, mnemonic) &&
-        literal(context, " ") && append_value(context, value_id) &&
-        literal(context, ", ") && literal(context, register_name) && literal(context, "\n");
+priv fn load_xmm( value_id: usize, record: *const type_info::Record, register_name: *const u8) -> bool {
+    let mnemonic: *const u8 = this->float_move(record);
+    this->literal("    ");
+    this->literal(mnemonic);
+    this->literal(" ");
+    this->append_value(value_id);
+    this->literal(", ");
+    this->literal(register_name);
+    this->literal("\n");
+    return this->ready();
 }
 
-fn store_xmm(context: *CodegenContext, result: usize, record: *const type_info::Record,
-    register_name: *const u8) -> bool {
-    let mnemonic: *const u8 = float_move(record);
-    return literal(context, "    ") && literal(context, mnemonic) &&
-        literal(context, " ") && literal(context, register_name) &&
-        literal(context, ", ") && append_value(context, result) && literal(context, "\n");
+priv fn store_xmm( result: usize, record: *const type_info::Record, register_name: *const u8) -> bool {
+    let mnemonic: *const u8 = this->float_move(record);
+    this->literal("    ");
+    this->literal(mnemonic);
+    this->literal(" ");
+    this->literal(register_name);
+    this->literal(", ");
+    this->append_value(result);
+    this->literal("\n");
+    return this->ready();
+}
+
 }

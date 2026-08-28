@@ -1,0 +1,407 @@
+module luna.compiler.x86.codegen;
+
+enum EscapeSequence: u8 {
+    newline = 'n', carriage_return = 'r', horizontal_tab = 't', zero = '0',
+}
+
+impl CodeGenerator {
+
+priv fn emit_global_header( global: ir::Global, global_id: usize) -> bool {
+    this->literal( global.read_only ? "    .section .rodata,\"a\",@progbits\n" : "    .data\n");
+    this->literal( "    .balign ");
+    this->append_usize( global.alignment_bytes);
+    this->literal( "\n    .type ");
+    this->append_global_label( global_id);
+    this->literal( ", @object\n");
+    this->append_global_label( global_id);
+    this->literal( ":\n");
+    return this->error == runtime::Error.none;
+}
+
+priv fn emit_global_bytes( global: ir::Global, first: usize, count: usize) -> bool {
+    for (var index: usize = 0; index < count && this->error == runtime::Error.none; index += 1) {
+        let value: u8 = this->ir.global_bytes.data[global.byte_offset + first + index];
+        this->literal( "    .byte 0x");
+        this->hex( value as u64, 2);
+        this->literal( "\n");
+    }
+    return this->error == runtime::Error.none;
+}
+
+priv fn emit_global_reference( reference: ir::GlobalReference) -> bool {
+    this->literal( "    .quad ");
+    switch (reference.kind) {
+    case ir::GlobalReferenceKind.function {
+        this->append_function_symbol( reference.target_id);
+    }
+    case ir::GlobalReferenceKind.global {
+        this->append_global_label( reference.target_id);
+    }
+    default {
+        this->error = runtime::Error.invalid_argument;
+    }
+    }
+    this->literal( "\n");
+    return this->error == runtime::Error.none;
+}
+
+priv fn emit_global_initializer( global: ir::Global) -> bool {
+    if (global.reference_count == 0) {
+        return this->emit_global_bytes( global, 0, global.byte_count);
+    }
+    let references: *const ir::GlobalReference = this->ir.global_references.data as
+            *const ir::GlobalReference;
+    let address_bytes: usize = ir::Limit.function_address_bytes as usize;
+    let reference_end: usize = global.first_reference + global.reference_count;
+    var byte_offset: usize = 0;
+    for (var index: usize = global.first_reference;
+        index < reference_end && this->error == runtime::Error.none;
+        index += 1) {
+        let reference: ir::GlobalReference = references[index];
+        this->emit_global_bytes( global, byte_offset, reference.byte_offset - byte_offset);
+        this->emit_global_reference( reference);
+        byte_offset = reference.byte_offset + address_bytes;
+    }
+    this->emit_global_bytes( global, byte_offset, global.byte_count - byte_offset);
+    return this->error == runtime::Error.none;
+}
+
+priv fn emit_global_footer( global_id: usize) -> bool {
+    this->literal( "    .size ");
+    this->append_global_label( global_id);
+    this->literal( ", .-");
+    this->append_global_label( global_id);
+    this->literal( "\n\n");
+    return this->error == runtime::Error.none;
+}
+
+priv fn emit_globals() -> bool {
+    let globals: *const ir::Global = this->ir.globals.data as *const ir::Global;
+    for (var global_id: usize = 0;
+        global_id < this->ir.global_count && this->error == runtime::Error.none;
+        global_id += 1) {
+        let global: ir::Global = globals[global_id];
+        this->emit_global_header( global, global_id);
+        this->emit_global_initializer( global);
+        this->emit_global_footer( global_id);
+    }
+    return this->error == runtime::Error.none;
+}
+
+priv fn emit_declarations() -> bool {
+    let functions: *const ir::Function = this->ir.functions.data as
+            *const ir::Function;
+    var emitted: bool = false;
+    for (var function_id: usize = 0; function_id < this->ir.function_count; function_id += 1) {
+        let function: ir::Function = functions[function_id];
+        if (!function.has_body) {
+            this->literal("    .extern ");
+            this->append_function_symbol(function_id);
+            this->literal("\n");
+            if (!this->ready()) {
+                return false;
+            }
+            emitted = true;
+        }
+    }
+    return !emitted || this->literal( "\n");
+}
+
+priv fn emit_entry() -> bool {
+    if (this->ir.entry_function == ir::no_id()) {
+        return true;
+    }
+    let functions: *const ir::Function = this->ir.functions.data as
+            *const ir::Function;
+    let has_command_line_parameters: bool = functions[this->ir.entry_function].parameter_count == 2;
+    this->literal("    .globl _start\n    .type _start, @function\n_start:\n    xorl %ebp, %ebp\n");
+    if (has_command_line_parameters) {
+        this->literal("    movq (%rsp), %rdi\n    leaq 8(%rsp), %rsi\n");
+    }
+    this->literal("    andq $-16, %rsp\n    subq $16, %rsp\n    movl $0x1f80, (%rsp)\n"
+        "    ldmxcsr (%rsp)\n    addq $16, %rsp\n    call ");
+    this->append_function_symbol(this->ir.entry_function);
+    this->literal("\n    movl %eax, %edi\n    movl $60, %eax\n    syscall\n    .size _start, .-_start\n\n");
+    return this->ready();
+}
+
+priv fn append_byte( value: u8) -> bool {
+    return this->append_assembly( &value as *const u8, 1);
+}
+
+priv fn hex_digit(byte: u8) -> usize {
+    return ascii::hex_value(byte);
+}
+
+// 把一个 code point 按 UTF-8 编码追加到输出；asm body 只接受普通宽度字符串，
+// 与语义阶段的 width-1 解码保持一致。
+priv fn append_code_point( code_point: usize) -> bool {
+    if (code_point < 128) {
+        return this->append_byte( code_point as u8);
+    }
+    if (code_point < 2048) {
+        this->append_byte(((code_point >> 6) + 192) as u8);
+        this->append_byte(((code_point & 63) + 128) as u8);
+        return this->ready();
+    }
+    if (code_point < 65536) {
+        this->append_byte(((code_point >> 12) + 224) as u8);
+        this->append_byte((((code_point >> 6) & 63) + 128) as u8);
+        this->append_byte(((code_point & 63) + 128) as u8);
+        return this->ready();
+    }
+    this->append_byte(((code_point >> 18) + 240) as u8);
+    this->append_byte((((code_point >> 12) & 63) + 128) as u8);
+    this->append_byte((((code_point >> 6) & 63) + 128) as u8);
+    this->append_byte(((code_point & 63) + 128) as u8);
+    return this->ready();
+}
+
+// 把 asm fn body 中一个包含引号的普通字符串 token 解码到输出，并处理常规转义；
+// 语义阶段已经保证 body 只包含普通字符串。
+priv fn append_asm_string( unit_id: usize, token_id: usize) -> bool {
+    let unit: *const context::Unit = this->unit( unit_id);
+    let token: lexer::Token = this->token( unit_id, token_id);
+    if (unit == null) {
+        return this->fail(runtime::Error.invalid_argument);
+    }
+    if (token.kind != lexer::TokenKind.string || token.span.length < 2) {
+        return this->fail(runtime::Error.invalid_argument);
+    }
+    let range_is_valid: bool = token.span.offset <= unit->source.length &&
+        token.span.length <= unit->source.length - token.span.offset;
+    if (!range_is_valid) {
+        return this->fail( runtime::Error.invalid_argument);
+    }
+    var index: usize = 1;
+    while (index + 1 < token.span.length && this->error == runtime::Error.none) {
+        var byte: u8 = unit->source.data[token.span.offset + index];
+        if (byte != '\\') {
+            if (!this->append_byte( byte)) {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+        index += 1;
+        byte = unit->source.data[token.span.offset + index];
+        if (byte == 'x') {
+            if (index + 3 >= token.span.length) {
+                return this->fail( runtime::Error.invalid_argument);
+            }
+            let high: usize = this->hex_digit(unit->source.data[token.span.offset + index + 1]);
+            let low: usize = this->hex_digit(unit->source.data[token.span.offset + index + 2]);
+            if (high >= 16 || low >= 16) {
+                return this->fail(runtime::Error.invalid_argument);
+            }
+            if (!this->append_byte((high * 16 + low) as u8)) {
+                return this->fail( runtime::Error.invalid_argument);
+            }
+            index += 3;
+            continue;
+        }
+        if (byte == 'u') {
+            var code_point: usize = 0;
+            index += 1;
+            if (index + 1 >= token.span.length || unit->source.data[token.span.offset + index] != '{') {
+                return this->fail( runtime::Error.invalid_argument);
+            }
+            index += 1;
+            while (index + 1 < token.span.length && unit->source.data[token.span.offset + index] != '}') {
+                let digit: usize = this->hex_digit(unit->source.data[token.span.offset + index]);
+                if (digit >= 16) {
+                    return this->fail( runtime::Error.invalid_argument);
+                }
+                code_point = code_point * 16 + digit;
+                index += 1;
+            }
+            if (index + 1 >= token.span.length) {
+                return this->fail( runtime::Error.invalid_argument);
+            }
+            index += 1;
+            if (!this->append_code_point( code_point)) {
+                return false;
+            }
+            continue;
+        }
+        let escape: EscapeSequence = byte as EscapeSequence;
+        switch (escape) {
+        case EscapeSequence.newline {
+            byte = '\n';
+        }
+        case EscapeSequence.carriage_return {
+            byte = '\r';
+        }
+        case EscapeSequence.horizontal_tab {
+            byte = '\t';
+        }
+        case EscapeSequence.zero {
+            byte = 0;
+        }
+        default {}
+        }
+        if (!this->append_byte( byte)) {
+            return false;
+        }
+        index += 1;
+    }
+    return this->error == runtime::Error.none;
+}
+
+// 把 asm fn body 中解码后的字符串依次拼入输出；语义阶段已经验证其中没有其他内容。
+priv fn emit_asm_body( function: ir::Function) -> bool {
+    let unit_id: usize = function.asm_body_unit;
+    let body: syntax::SyntaxNode = this->node( unit_id, function.asm_body_node);
+    if (body.kind != syntax::SyntaxKind.string_expression) {
+        return this->fail( runtime::Error.invalid_argument);
+    }
+    if (!this->append_asm_string( unit_id, body.token_index)) {
+        return false;
+    }
+    var part: usize = body.first_child;
+    for (var index: usize = 0; index < body.child_count && this->error == runtime::Error.none; index += 1) {
+        let part_node: syntax::SyntaxNode = this->node( unit_id, part);
+        if (part_node.kind != syntax::SyntaxKind.string_expression) {
+            return this->fail( runtime::Error.invalid_argument);
+        }
+        if (!this->append_asm_string( unit_id, part_node.token_index)) {
+            return false;
+        }
+        part = part_node.next_sibling;
+    }
+    return this->error == runtime::Error.none;
+}
+
+priv fn emit_function( function_id: usize) -> bool {
+    let functions: *const ir::Function = this->ir.functions.data as
+            *const ir::Function;
+    let blocks: *const ir::Block = this->ir.blocks.data as *const ir::Block;
+    let instructions: *const ir::Instruction = this->ir.instructions.data as
+            *const ir::Instruction;
+    let abi_functions: *const Function = this->abi.function_data();
+    let frames: *const Frame = this->frames.frame_data();
+    let function: ir::Function = functions[function_id];
+    if (!function.has_body) {
+        return true;
+    }
+    this->current_function = function_id;
+    this->call_frame_depth = 0;
+    let exports_primary: bool = function.linkage == ir::Linkage.module_export ||
+        function.export_name_token != this->no_id();
+    let exports_alias: bool = function.linkage == ir::Linkage.module_export &&
+        function.export_name_token != this->no_id();
+    if (exports_primary) {
+        this->literal("    .globl ");
+        this->append_function_symbol(function_id);
+        this->literal("\n");
+        if (!this->ready()) {
+            return false;
+        }
+    }
+    // 带 @export_name 的导出定义同时响应两个名字：extern 消费者按原样导出符号解析，
+    // module 消费者则引用 mangled module symbol，因为它看不到实现上的 export name。
+    if (exports_alias) {
+        this->literal("    .globl ");
+        this->append_mangled_function_symbol(function_id);
+        this->literal("\n");
+        if (!this->ready()) {
+            return false;
+        }
+    }
+    this->literal("    .p2align 4\n    .type ");
+    this->append_function_symbol(function_id);
+    this->literal(", @function\n");
+    this->append_function_symbol(function_id);
+    this->literal(":\n");
+    if (!this->ready()) {
+        return false;
+    }
+    if (exports_alias) {
+        this->append_mangled_function_symbol(function_id);
+        this->literal(":\n");
+        if (!this->ready()) {
+            return false;
+        }
+    }
+    // asm fn 是 naked 函数：解码后的 body 直接跟在 label 后，寄存器使用、栈纪律和返回序列
+    // 均由作者负责；luna-as 只验证并编码每条指令。
+    if (function.asm_body_node != this->no_id()) {
+        if (!this->emit_asm_body(function)) {
+            return false;
+        }
+        this->literal("    .size ");
+        this->append_function_symbol(function_id);
+        this->literal(", .-");
+        this->append_function_symbol(function_id);
+        this->literal("\n\n");
+        return this->ready();
+    }
+    if (!this->literal( "    pushq %rbp\n    movq %rsp, %rbp\n")) {
+        return false;
+    }
+    if (frames[function_id].dynamic_alignment != 0) {
+        this->literal("    andq $-");
+        this->append_usize(frames[function_id].dynamic_alignment);
+        this->literal(", %rsp\n");
+        if (!this->ready()) {
+            return false;
+        }
+    }
+    if (frames[function_id].frame_size_bytes != 0) {
+        this->literal("    subq $");
+        this->append_usize(frames[function_id].frame_size_bytes);
+        this->literal(", %rsp\n");
+        if (!this->ready()) {
+            return false;
+        }
+    }
+    // 可变参数序言必须在任何代码覆盖参数寄存器前完成保存；后续 parameter home 会复用
+    // %rax/%r10/%r11 和 SSE 临时寄存器。
+    if (function.variadic && !this->emit_register_save( function_id)) {
+        return false;
+    }
+    if (!this->emit_parameters( function, abi_functions[function_id])) {
+        return false;
+    }
+    for (var block_index: usize = 0; block_index < function.block_count; block_index += 1) {
+        let block_id: usize = function.first_block + block_index;
+        let block: ir::Block = blocks[block_id];
+        if (!this->block_label( block_id) || !this->literal( ":\n")) {
+            return false;
+        }
+        var instruction_id: usize = block.first_instruction;
+        for (var instruction_index: usize = 0;
+            instruction_index < block.instruction_count;
+            instruction_index += 1) {
+            if (instruction_id >= this->ir.instruction_count ||
+                !this->emit_instruction( instructions[instruction_id], instruction_id)) {
+                return this->fail( runtime::Error.invalid_argument);
+            }
+            instruction_id = instructions[instruction_id].next_instruction;
+        }
+    }
+    this->return_label();
+    this->literal(":\n    leave\n    ret\n    .size ");
+    this->append_function_symbol(function_id);
+    this->literal(", .-");
+    this->append_function_symbol(function_id);
+    this->literal("\n\n");
+    return this->ready();
+}
+
+priv fn emit_module() -> bool {
+    if (!this->emit_globals() || !this->emit_declarations()) {
+        return false;
+    }
+    if (!this->literal( "    .text\n") || !this->emit_entry()) {
+        return false;
+    }
+    for (var function_id: usize = 0; function_id < this->ir.function_count; function_id += 1) {
+        if (!this->emit_function( function_id)) {
+            return false;
+        }
+    }
+    return this->literal( "    .section .note.GNU-stack,\"\",@progbits\n");
+}
+
+}

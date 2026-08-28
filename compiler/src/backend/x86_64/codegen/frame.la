@@ -7,79 +7,98 @@ enum FrameLimit: usize {
     maximum_frame_size = 2147483647, register_save_area_size = 176, register_save_area_alignment = 16,
 }
 
-fn frame_no_id() -> usize {
+impl FramePlan {
+    init(): frames = vector::vector<Frame>(), storage = vector::vector<Storage>() {
+        this->error_code = runtime::Error.none;
+    }
+
+    priv fn ready() const -> bool {
+        return this->error_code == runtime::Error.none;
+    }
+
+    priv fn fail(error: runtime::Error) -> bool {
+        if (this->ready()) {
+            this->error_code = error;
+        }
+        return false;
+    }
+
+    priv fn no_id() const -> usize {
     return FrameLimit.maximum_size as usize;
 }
 
-fn plan_empty()
-    -> Plan {
-    return {
-        frames = bytes::empty(), frame_count = 0, storage = bytes::empty(), storage_count = 0,
-        error = runtime::Error.none,
-    };
+    fn error() const -> runtime::Error {
+        return this->error_code;
 }
 
-fn plan_storage_is_valid(plan: Plan) -> bool {
-    return bytes::is_valid(plan.frames) && bytes::is_valid(plan.storage) && plan.frames.length % sizeof(Frame) == 0 &&
-        plan.storage.length % sizeof(Storage) == 0 && plan.frame_count ==
-            plan.frames.length / sizeof(Frame) && plan.storage_count == plan.storage.length / sizeof(Storage);
+    fn frame_count() const -> usize {
+        return this->frames.size();
+    }
+
+    fn storage_count() const -> usize {
+        return this->storage.size();
+    }
+
+    fn frame_data() const -> *const Frame {
+        return this->frames.as_span().data();
+    }
+
+    fn storage_data() const -> *const Storage {
+        return this->storage.as_span().data();
+    }
+
+    priv fn storage_is_valid() const -> bool {
+        return this->frames.is_valid() && this->storage.is_valid();
 }
 
-fn frame_align_up(value: usize, alignment: usize) -> usize {
+priv fn frame_align_up(value: usize, alignment: usize) -> usize {
     var result: usize = 0;
-    return checked::align_up(value, alignment, &result) ? result : frame_no_id();
+    return checked::align_up(value, alignment, &result) ? result : this->no_id();
 }
 
-fn append_storage(plan: *Plan, storage: Storage) -> bool {
-    if (plan == null || plan->error != runtime::Error.none) {
+priv fn append_storage(storage: Storage) -> bool {
+    if (!this->ready()) {
         return false;
     }
-    let appended: bytes::BufferResult =
-        bytes::append(plan->storage, (&storage) as *const Storage as *const u8, sizeof(Storage));
-    plan->storage = appended.buffer;
-    plan->error = appended.error;
-    if (appended.error == runtime::Error.none) {
-        plan->storage_count += 1;
-        return true;
+    let error: runtime::Error = this->storage.push_back(storage);
+    if (error != runtime::Error.none) {
+        return this->fail(error);
     }
-    return false;
+    return true;
 }
 
-fn append_frame(plan: *Plan, frame: Frame) -> bool {
-    if (plan == null || plan->error != runtime::Error.none) {
+priv fn append_frame(frame: Frame) -> bool {
+    if (!this->ready()) {
         return false;
     }
-    let appended: bytes::BufferResult =
-        bytes::append(plan->frames, (&frame) as *const Frame as *const u8, sizeof(Frame));
-    plan->frames = appended.buffer;
-    plan->error = appended.error;
-    if (appended.error == runtime::Error.none) {
-        plan->frame_count += 1;
-        return true;
+    let error: runtime::Error = this->frames.push_back(frame);
+    if (error != runtime::Error.none) {
+        return this->fail(error);
     }
-    return false;
+    return true;
 }
 
-fn add_storage(
-    plan: *Plan, frame: *Frame, function_id: usize, kind: StorageKind,
+priv fn add_storage(frame: *Frame, function_id: usize, kind: StorageKind,
     source_id: usize, type_id: usize, size_bytes: usize, alignment_bytes: usize, current_offset: *usize) -> bool {
-    if (plan == null || frame == null || current_offset == null || size_bytes == 0 || alignment_bytes == 0) {
+    if (frame == null || current_offset == null) {
+        return false;
+    }
+    if (size_bytes == 0 || alignment_bytes == 0) {
         return false;
     }
     var end: usize = 0;
     if (!checked::add(*current_offset, size_bytes, &end)) {
         return false;
     }
-    let offset: usize = frame_align_up(end, alignment_bytes);
-    if (offset == frame_no_id()) {
+    let offset: usize = this->frame_align_up(end, alignment_bytes);
+    if (offset == this->no_id()) {
         return false;
     }
     let storage: Storage = {
         function_id = function_id, kind = kind, source_id = source_id, type_id = type_id, offset_bytes = offset,
         size_bytes = size_bytes, alignment_bytes = alignment_bytes,
     };
-    if (!append_storage(
-            plan, storage)) {
+    if (!this->append_storage( storage)) {
         return false;
     }
     *current_offset = offset;
@@ -87,52 +106,43 @@ fn add_storage(
     return true;
 }
 
-fn add_slots(
-    plan: *Plan, frame: *Frame, ir: ir::Store, types: type_info::Table,
+priv fn add_slots(frame: *Frame, ir: ir::Store, types: type_info::Table,
     function_id: usize, current_offset: *usize) -> bool {
     let slots: *const ir::Slot = ir.slots.data as *const ir::Slot;
     let records: *const type_info::Record = types.types.data as *const type_info::Record;
-    var slot_id: usize = 0;
-    while (slot_id < ir.slot_count) {
+    for (var slot_id: usize = 0; slot_id < ir.slot_count; slot_id += 1) {
         let slot: ir::Slot = slots[slot_id];
         if (slot.function_id == function_id) {
             let record: type_info::Record = records[slot.type_id];
             let memory: bool = type_info::is_memory(record.kind);
             let natural_alignment: usize = memory ? record.alignment_bytes : FrameLimit.scalar_home_alignment as usize;
             let alignment: usize = slot.alignment_bytes > natural_alignment ? slot.alignment_bytes : natural_alignment;
-            if (!add_storage(
-                    plan, frame, function_id, StorageKind.slot, slot_id, slot.type_id, memory ?
+            if (!this->add_storage( frame, function_id, StorageKind.slot, slot_id, slot.type_id, memory ?
                         record.size_bytes : FrameLimit.scalar_home_size
                             as usize, alignment, current_offset)) {
                 return false;
             }
         }
-        slot_id += 1;
     }
     return true;
 }
 
-fn add_values(
-    plan: *Plan, frame: *Frame, ir: ir::Store, function: ir::Function,
+priv fn add_values(frame: *Frame, ir: ir::Store, function: ir::Function,
     function_id: usize, current_offset: *usize) -> bool {
-    var index: usize = 0;
-    while (index < function.value_count) {
+    for (var index: usize = 0; index < function.value_count; index += 1) {
         let value_id: usize = function.first_value + index;
         let values: *const ir::Value = ir.values.data as *const ir::Value;
-        if (!add_storage(
-                plan, frame, function_id, StorageKind.value, value_id, values[value_id].type_id,
+        if (!this->add_storage( frame, function_id, StorageKind.value, value_id, values[value_id].type_id,
                     FrameLimit.scalar_home_size
                     as usize, FrameLimit.scalar_home_alignment
                     as usize, current_offset)) {
             return false;
         }
-        index += 1;
     }
     return true;
 }
 
-fn add_call_results(
-    plan: *Plan, frame: *Frame, ir: ir::Store, types: type_info::Table,
+priv fn add_call_results(frame: *Frame, ir: ir::Store, types: type_info::Table,
     function_id: usize, current_offset: *usize) -> bool {
     let instructions: *const ir::Instruction = ir.instructions.data as *const ir::Instruction;
     let blocks: *const ir::Block = ir.blocks.data as *const ir::Block;
@@ -145,8 +155,7 @@ fn add_call_results(
         let stores_result: bool = owned_call && requires_storage;
         if (stores_result && type_info::is_memory(records[instruction.type_id].kind)) {
             let record: type_info::Record = records[instruction.type_id];
-            if (!add_storage(
-                    plan, frame, function_id, StorageKind.aggregate_call_result, instruction.result,
+            if (!this->add_storage( frame, function_id, StorageKind.aggregate_call_result, instruction.result,
                     instruction.type_id, record.size_bytes, record.alignment_bytes, current_offset)) {
                 return false;
             }
@@ -155,167 +164,136 @@ fn add_call_results(
     return true;
 }
 
-fn plan_build(ir: ir::Store, types: type_info::Table, abi: Abi) -> PlanResult {
-    var plan: Plan = plan_empty();
-    if (!ir_check::is_valid(ir, types) || !is_valid(abi, ir, types)) {
-        return {
-            plan = plan, error = runtime::Error.invalid_argument,
-        };
+fn build(ir: ir::Store, types: type_info::Table, abi: AbiLayout const&) -> bool {
+    if (!ir_check::is_valid(ir, types) || !abi.is_valid(ir, types)) {
+        return this->fail(runtime::Error.invalid_argument);
+    }
+    if (!this->frames.empty() || !this->storage.empty()) {
+        return this->fail(runtime::Error.invalid_argument);
     }
     let functions: *const ir::Function = ir.functions.data as *const ir::Function;
-    let abi_functions: *const Function = abi.functions.data as *const Function;
-    var function_id: usize = 0;
-    while (function_id < ir.function_count && plan.error == runtime::Error.none) {
+    let abi_functions: *const Function = abi.function_data();
+    for (var function_id: usize = 0; function_id < ir.function_count && this->ready(); function_id += 1) {
         let function: ir::Function = functions[function_id];
         var frame: Frame = {
-            function_id = function_id, first_storage = function.has_body ? plan.storage_count :
-                frame_no_id(), storage_count = 0, frame_size_bytes = 0, dynamic_alignment = 0,
+            function_id = function_id, first_storage = function.has_body ? this->storage_count() :
+                this->no_id(), storage_count = 0, frame_size_bytes = 0, dynamic_alignment = 0,
         };
         var offset: usize = 0;
-        if (function.has_body && (!add_slots(&plan, &frame, ir, types, function_id, &offset) ||
-                !add_values(&plan, &frame, ir, function, function_id, &offset) ||
-                !add_call_results(
-                    &plan, &frame, ir, types, function_id, &offset))) {
-            if (plan.error == runtime::Error.none) {
-                plan.error = runtime::Error.invalid_argument;
+        if (function.has_body) {
+            if (!this->add_slots(&frame, ir, types, function_id, &offset)) {
+                return this->ready() ? this->fail(runtime::Error.invalid_argument) : false;
             }
-            break;
+            if (!this->add_values(&frame, ir, function, function_id, &offset)) {
+                return this->ready() ? this->fail(runtime::Error.invalid_argument) : false;
+            }
+            if (!this->add_call_results(&frame, ir, types, function_id, &offset)) {
+                return this->ready() ? this->fail(runtime::Error.invalid_argument) : false;
+            }
         }
-        if (function.has_body && abi_functions[function_id].hidden_return_pointer &&
-            !add_storage(
-                &plan, &frame, function_id, StorageKind.hidden_return_pointer, function_id,
-                function.return_type, 8, 8, &offset)) {
-            if (plan.error == runtime::Error.none) {
-                plan.error = runtime::Error.invalid_argument;
+        let needs_return_pointer: bool = function.has_body && abi_functions[function_id].hidden_return_pointer;
+        if (needs_return_pointer) {
+            if (!this->add_storage(&frame, function_id, StorageKind.hidden_return_pointer, function_id,
+                    function.return_type, 8, 8, &offset)) {
+                return this->ready() ? this->fail(runtime::Error.invalid_argument) : false;
             }
-            break;
         }
         // 可变参数函数序言把入参寄存器保存到 System V register save area：
         // +0..+40 为六个通用寄存器槽，+48..+175 为八个 16 字节 SSE 槽。
-        if (function.has_body && function.variadic &&
-            !add_storage(
-                &plan, &frame, function_id, StorageKind.register_save_area, function_id,
-                function.return_type, FrameLimit.register_save_area_size as usize,
-                FrameLimit.register_save_area_alignment as usize, &offset)) {
-            if (plan.error == runtime::Error.none) {
-                plan.error = runtime::Error.invalid_argument;
+        if (function.has_body && function.variadic) {
+            if (!this->add_storage(&frame, function_id, StorageKind.register_save_area, function_id,
+                    function.return_type, FrameLimit.register_save_area_size as usize,
+                    FrameLimit.register_save_area_alignment as usize, &offset)) {
+                return this->ready() ? this->fail(runtime::Error.invalid_argument) : false;
             }
-            break;
         }
         if (function.has_body) {
-            let storage: *const Storage = plan.storage.data as *const Storage;
-            var storage_index: usize = 0;
-            while (storage_index < frame.storage_count) {
+            let storage: *const Storage = this->storage_data();
+            for (var storage_index: usize = 0; storage_index < frame.storage_count; storage_index += 1) {
                 let alignment: usize = storage[frame.first_storage + storage_index].alignment_bytes;
                 if (alignment > frame.dynamic_alignment) {
                     frame.dynamic_alignment = alignment;
                 }
-                storage_index += 1;
             }
             if (frame.dynamic_alignment <= (FrameLimit.stack_alignment as usize)) {
                 frame.dynamic_alignment = 0;
             }
         }
-        frame.frame_size_bytes = frame_align_up(offset, FrameLimit.stack_alignment as usize);
-        if (frame.frame_size_bytes == frame_no_id() ||
-            frame.frame_size_bytes > FrameLimit.maximum_frame_size as usize ||
-            !append_frame(
-                &plan, frame)) {
-            if (plan.error == runtime::Error.none) {
-                plan.error = runtime::Error.invalid_argument;
-            }
-            break;
+        frame.frame_size_bytes = this->frame_align_up(offset, FrameLimit.stack_alignment as usize);
+        if (frame.frame_size_bytes == this->no_id() ||
+            frame.frame_size_bytes > FrameLimit.maximum_frame_size as usize) {
+            return this->fail(runtime::Error.invalid_argument);
         }
-        function_id += 1;
+        if (!this->append_frame(frame)) {
+            return this->ready() ? this->fail(runtime::Error.invalid_argument) : false;
+        }
     }
-    if (plan.error != runtime::Error.none) {
-        let error: runtime::Error = plan.error;
-        plan_release(plan);
-        return {
-            plan = plan_empty(), error = error,
-        };
-    }
-    return {
-        plan = plan, error = runtime::Error.none,
-    };
+    return this->ready();
 }
 
-fn plan_equal(left: Plan, right: Plan) -> bool {
-    return left.error == right.error && left.frame_count == right.frame_count &&
-        left.storage_count == right.storage_count &&
-        bytes::equal(left.frames, right.frames.data as *const u8, right.frames.length) &&
-        bytes::equal(left.storage, right.storage.data as *const u8, right.storage.length);
-}
-
-fn plan_is_valid(plan: Plan, ir: ir::Store, types: type_info::Table, abi: Abi) -> bool {
-    if (plan.error != runtime::Error.none || !plan_storage_is_valid(plan)) {
+fn is_valid(ir: ir::Store, types: type_info::Table, abi: AbiLayout const&) const -> bool {
+    if (!this->ready() || !this->storage_is_valid()) {
         return false;
     }
-    let expected: PlanResult = plan_build(ir, types, abi);
-    let valid: bool = expected.error == runtime::Error.none && plan_equal(plan, expected.plan);
-    plan_release(expected.plan);
-    return valid;
+    let inputs_are_valid: bool = ir_check::is_valid(ir, types) && abi.is_valid(ir, types);
+    return inputs_are_valid && this->frame_count() == ir.function_count;
 }
 
-fn invalid()
+priv fn invalid() const
     -> Frame {
-    let none: usize = frame_no_id();
+    let none: usize = this->no_id();
     return {
         function_id = none, first_storage = none, storage_count = 0, frame_size_bytes = 0, dynamic_alignment = 0,
     };
 }
 
-fn storage_invalid()
+priv fn storage_invalid() const
     -> Storage {
-    let none: usize = frame_no_id();
+    let none: usize = this->no_id();
     return {
         function_id = none, kind = StorageKind.invalid, source_id = none, type_id = none,
         offset_bytes = 0, size_bytes = 0, alignment_bytes = 0,
     };
 }
 
-fn get(plan: Plan, function_id: usize) -> FrameResult {
-    if (!plan_storage_is_valid(plan) || function_id >= plan.frame_count) {
+fn frame_at(function_id: usize) const -> FrameResult {
+    if (!this->storage_is_valid() || function_id >= this->frame_count()) {
         return {
-            frame = invalid(), error = runtime::Error.invalid_argument,
+            frame = this->invalid(), error = runtime::Error.invalid_argument,
         };
     }
     return {
-        frame = (plan.frames.data as *const Frame)[function_id], error = runtime::Error.none,
+        frame = this->frames.get(function_id), error = runtime::Error.none,
     };
 }
 
-fn storage_find(plan: Plan, function_id: usize, kind: StorageKind, source_id: usize) -> StorageResult {
-    if (!plan_storage_is_valid(plan) || function_id >= plan.frame_count || kind == StorageKind.invalid) {
+fn find_storage(function_id: usize, kind: StorageKind, source_id: usize) const -> StorageResult {
+    if (!this->storage_is_valid() || function_id >= this->frame_count()) {
         return {
-            storage = storage_invalid(), error = runtime::Error.invalid_argument,
+            storage = this->storage_invalid(), error = runtime::Error.invalid_argument,
         };
     }
-    let frame: Frame = (plan.frames.data as *const Frame)[function_id];
-    let storage: *const Storage = plan.storage.data as *const Storage;
-    var index: usize = 0;
-    while (index < frame.storage_count) {
+    if (kind == StorageKind.invalid) {
+        return {
+            storage = this->storage_invalid(), error = runtime::Error.invalid_argument,
+        };
+    }
+    let frame: Frame = this->frames.get(function_id);
+    let storage: *const Storage = this->storage_data();
+    for (var index: usize = 0; index < frame.storage_count; index += 1) {
         let candidate: Storage = storage[frame.first_storage + index];
         if (candidate.kind == kind && candidate.source_id == source_id) {
             return {
                 storage = candidate, error = runtime::Error.none,
             };
         }
-        index += 1;
     }
     return {
-        storage = storage_invalid(), error = runtime::Error.not_found,
+        storage = this->storage_invalid(), error = runtime::Error.not_found,
     };
 }
 
-fn plan_release(plan: Plan) -> runtime::Error {
-    if (!plan_storage_is_valid(plan)) {
-        return runtime::Error.invalid_argument;
-    }
-    var error: runtime::Error = bytes::release(plan.frames);
-    let storage_error: runtime::Error = bytes::release(plan.storage);
-    if (error == runtime::Error.none) {
-        error = storage_error;
-    }
-    return error;
+deinit() {
+}
+
 }

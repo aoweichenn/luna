@@ -1,0 +1,207 @@
+module luna.compiler.x86.codegen;
+
+impl CodeGenerator {
+
+priv fn float_power_bits(record: *const type_info::Record, exponent: usize, negative: bool) -> u64 {
+    if (record->kind == type_info::Kind.float_32) {
+        let sign: u64 = negative ? 2147483648 : 0;
+        return sign | ((exponent as u64 + 127) << 23);
+    }
+    let sign: u64 = negative ? 9223372036854775808 : 0;
+    return sign | ((exponent as u64 + 1023) << 52);
+}
+
+priv fn float_maximum_bits(record: *const type_info::Record, integer_width: usize) -> u64 {
+    let precision: usize = record->kind == type_info::Kind.float_32 ? 24 : 53;
+    let fraction_width: usize = record->kind == type_info::Kind.float_32 ? 23 : 52;
+    let bias: usize = record->kind == type_info::Kind.float_32 ? 127 : 1023;
+    let fraction: u64 = ((1 as u64 << ((integer_width - 1) as u64)) - 1) << ((precision - integer_width) as u64);
+    return (((integer_width - 1 + bias) as u64) << (fraction_width as u64)) | fraction;
+}
+
+priv fn emit_float_bits_xmm1( record: *const type_info::Record, bits: u64) -> bool {
+    if (record->kind == type_info::Kind.float_32) {
+        this->literal("    movl $0x");
+        this->hex(bits & 4294967295, 8);
+        this->literal(", %eax\n    movd %eax, %xmm1\n");
+        return this->ready();
+    }
+    this->literal("    movabsq $0x");
+    this->hex(bits, 16);
+    this->literal(", %rax\n    movq %rax, %xmm1\n");
+    return this->ready();
+}
+
+priv fn emit_integer_conversion( instruction: ir::Instruction, source: *const type_info::Record,
+    target: *const type_info::Record) -> bool {
+    let source_width: usize = this->bit_width(source);
+    let target_width: usize = this->bit_width(target);
+    let signed_source: bool = this->is_signed( source);
+    // 有符号源扩展到任意更宽目标时都需要符号扩展，而不只是扩展到 64 位。
+    // value home 已做零掩码，普通 movl 会把负 i8/i16 解释成较大的正 i32。
+    let requires_sign_extension: bool = signed_source && source_width < 64;
+    if (requires_sign_extension && target_width > source_width) {
+        if (!this->load_signed_rax( instruction.left, source)) {
+            return false;
+        }
+    } else if (!this->load_rax( instruction.left, source)) {
+        return false;
+    }
+    return this->store_rax( instruction.result, target);
+}
+
+priv fn emit_integer_to_float( instruction: ir::Instruction, source: *const type_info::Record,
+    target: *const type_info::Record, instruction_id: usize) -> bool {
+    let source_width: usize = this->bit_width(source);
+    let signed_source: bool = this->is_signed( source);
+    let convert: *const u8 = target->kind == type_info::Kind.float_32 ? "    cvtsi2ssq %rax, %xmm0\n" :
+            "    cvtsi2sdq %rax, %xmm0\n";
+    let add: *const u8 = target->kind == type_info::Kind.float_32 ? "    addss %xmm0, %xmm0\n" :
+            "    addsd %xmm0, %xmm0\n";
+    let is_narrow_signed: bool = signed_source && source_width < 64;
+    if (is_narrow_signed) {
+        if (!this->load_signed_rax( instruction.left, source)) {
+            return false;
+        }
+    } else if (!this->load_rax( instruction.left, source)) {
+        return false;
+    }
+    if (signed_source || source_width < 64) {
+        if (!this->literal( convert)) {
+            return false;
+        }
+    } else {
+        this->literal("    testq %rax, %rax\n    js ");
+        this->instruction_label(instruction_id, "uitofp_large");
+        this->literal("\n");
+        this->literal(convert);
+        this->literal("    jmp ");
+        this->instruction_label(instruction_id, "uitofp_done");
+        this->literal("\n");
+        this->instruction_label(instruction_id, "uitofp_large");
+        this->literal(":\n    movq %rax, %rdx\n    shrq $1, %rax\n    andl $1, %edx\n    orq %rdx, %rax\n");
+        this->literal(convert);
+        this->literal(add);
+        this->instruction_label(instruction_id, "uitofp_done");
+        this->literal(":\n");
+        if (!this->ready()) {
+            return false;
+        }
+    }
+    return this->store_xmm( instruction.result, target, "%xmm0");
+}
+
+priv fn emit_float_range_check( instruction: ir::Instruction, source: *const type_info::Record,
+    target: *const type_info::Record, instruction_id: usize) -> bool {
+    let target_width: usize = this->bit_width(target);
+    let signed_target: bool = this->is_signed( target);
+    let bound_exponent: usize = signed_target ? target_width - 1 : target_width;
+    let maximum_width: usize = signed_target ? target_width - 1 : target_width;
+    let precision: usize = source->kind == type_info::Kind.float_32 ? 24 : 53;
+    let exact_maximum: bool = maximum_width <= precision;
+    let lower_bits: u64 = signed_target ? this->float_power_bits(source, bound_exponent, true) : 0;
+    let upper_bits: u64 = exact_maximum ? this->float_maximum_bits(source, maximum_width) :
+        this->float_power_bits(source, bound_exponent, false);
+    let compare: *const u8 = source->kind == type_info::Kind.float_32 ? "    ucomiss %xmm1, %xmm0\n" :
+            "    ucomisd %xmm1, %xmm0\n";
+    if (!this->emit_float_bits_xmm1(source, lower_bits)) {
+        return false;
+    }
+    this->literal(compare);
+    this->literal("    jb ");
+    this->instruction_label(instruction_id, "fptoi_trap");
+    this->literal("\n");
+    if (!this->emit_float_bits_xmm1(source, upper_bits)) {
+        return false;
+    }
+    this->literal(compare);
+    this->literal(exact_maximum ? "    ja " : "    jae ");
+    this->instruction_label(instruction_id, "fptoi_trap");
+    this->literal("\n");
+    return this->ready();
+}
+
+priv fn emit_float_to_integer( instruction: ir::Instruction, source: *const type_info::Record,
+    target: *const type_info::Record, instruction_id: usize) -> bool {
+    if (!this->load_xmm( instruction.left, source, "%xmm0") ||
+        !this->emit_float_range_check( instruction, source, target, instruction_id)) {
+        return false;
+    }
+    let target_width: usize = this->bit_width(target);
+    let signed_target: bool = this->is_signed( target);
+    let convert_32: *const u8 = source->kind == type_info::Kind.float_32 ? "    cvttss2si %xmm0, %eax\n" :
+            "    cvttsd2si %xmm0, %eax\n";
+    let convert_64: *const u8 = source->kind == type_info::Kind.float_32 ? "    cvttss2siq %xmm0, %rax\n" :
+            "    cvttsd2siq %xmm0, %rax\n";
+    if (signed_target) {
+        if (!this->literal( target_width == 64 ? convert_64 : convert_32)) {
+            return false;
+        }
+    } else if (target_width < 64) {
+        if (!this->literal( convert_64)) {
+            return false;
+        }
+    } else {
+        let split_bits: u64 = this->float_power_bits(source, 63, false);
+        if (!this->emit_float_bits_xmm1(source, split_bits)) {
+            return false;
+        }
+        this->literal(source->kind == type_info::Kind.float_32 ? "    ucomiss %xmm1, %xmm0\n" :
+            "    ucomisd %xmm1, %xmm0\n");
+        this->literal("    jb ");
+        this->instruction_label(instruction_id, "fptoi_low");
+        this->literal(source->kind == type_info::Kind.float_32 ? "\n    subss %xmm1, %xmm0\n" :
+            "\n    subsd %xmm1, %xmm0\n");
+        this->literal(convert_64);
+        this->literal("    movabsq $0x8000000000000000, %rdx\n    orq %rdx, %rax\n    jmp ");
+        this->instruction_label(instruction_id, "fptoi_converted");
+        this->literal("\n");
+        this->instruction_label(instruction_id, "fptoi_low");
+        this->literal(":\n");
+        this->literal(convert_64);
+        this->instruction_label(instruction_id, "fptoi_converted");
+        this->literal(":\n");
+        if (!this->ready()) {
+            return false;
+        }
+    }
+    if (!this->store_rax(instruction.result, target)) {
+        return false;
+    }
+    this->literal("    jmp ");
+    this->instruction_label(instruction_id, "fptoi_done");
+    this->literal("\n");
+    this->instruction_label(instruction_id, "fptoi_trap");
+    this->literal(":\n    ud2\n");
+    this->instruction_label(instruction_id, "fptoi_done");
+    this->literal(":\n");
+    return this->ready();
+}
+
+priv fn emit_convert( instruction: ir::Instruction, instruction_id: usize) -> bool {
+    let values: *const ir::Value = this->ir.values.data as *const ir::Value;
+    let source: *const type_info::Record = this->type( values[instruction.left].type_id);
+    let target: *const type_info::Record = this->type( instruction.type_id);
+    if (source == null || target == null) {
+        return false;
+    }
+    let source_is_float: bool = type_info::is_float(source->kind);
+    let target_is_float: bool = type_info::is_float(target->kind);
+    if (target_is_float) {
+        if (source_is_float) {
+            if (!this->load_xmm(instruction.left, source, "%xmm0")) {
+                return false;
+            }
+            this->literal(source->kind == type_info::Kind.float_32 ? "    cvtss2sd %xmm0, %xmm0\n" :
+                "    cvtsd2ss %xmm0, %xmm0\n");
+            return this->ready() && this->store_xmm(instruction.result, target, "%xmm0");
+        }
+        return this->emit_integer_to_float( instruction, source, target, instruction_id);
+    }
+    if (source_is_float) {
+        return this->emit_float_to_integer( instruction, source, target, instruction_id);
+    }
+    return this->emit_integer_conversion( instruction, source, target);
+}
+
+}

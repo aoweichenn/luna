@@ -7,34 +7,66 @@ enum AbiLimit: usize {
     stack_alignment = 16, maximum_register_eightbytes = 2, maximum_type_depth = 128, maximum_stack_size = 2147483647,
 }
 
-fn abi_no_id() -> usize {
+impl AbiLayout {
+    init(): functions = vector::vector<Function>(), parameters = vector::vector<Parameter>(),
+            pieces = vector::vector<Piece>() {
+        this->error_code = runtime::Error.none;
+    }
+
+    priv fn ready() const -> bool {
+        return this->error_code == runtime::Error.none;
+    }
+
+    priv fn fail(error: runtime::Error) -> bool {
+        if (this->ready()) {
+            this->error_code = error;
+        }
+        return false;
+    }
+
+    priv fn no_id() const -> usize {
     return AbiLimit.maximum_size as usize;
 }
 
-fn empty() -> Abi {
-    return {
-        functions = bytes::empty(), function_count = 0, parameters = bytes::empty(),
-        parameter_count = 0, pieces = bytes::empty(), piece_count = 0, error = runtime::Error.none,
-    };
+    fn error() const -> runtime::Error {
+        return this->error_code;
 }
 
-fn buffer_matches(buffer: bytes::Buffer, count: usize, record_size: usize) -> bool {
-    return bytes::is_valid(buffer) && record_size != 0 && buffer.length % record_size == 0 &&
-        count == buffer.length / record_size;
+    fn function_count() const -> usize {
+        return this->functions.size();
 }
 
-fn storage_is_valid(abi: Abi) -> bool {
-    return buffer_matches(abi.functions, abi.function_count, sizeof(Function)) &&
-        buffer_matches(abi.parameters, abi.parameter_count, sizeof(Parameter)) &&
-        buffer_matches(abi.pieces, abi.piece_count, sizeof(Piece));
+    fn parameter_count() const -> usize {
+        return this->parameters.size();
+    }
+
+    fn piece_count() const -> usize {
+        return this->pieces.size();
+    }
+
+    fn function_data() const -> *const Function {
+        return this->functions.as_span().data();
+    }
+
+    fn parameter_data() const -> *const Parameter {
+        return this->parameters.as_span().data();
+    }
+
+    fn piece_data() const -> *const Piece {
+        return this->pieces.as_span().data();
+    }
+
+    priv fn storage_is_valid() const -> bool {
+        let declarations_are_valid: bool = this->functions.is_valid() && this->parameters.is_valid();
+        return declarations_are_valid && this->pieces.is_valid();
 }
 
-fn abi_align_up(value: usize, alignment: usize) -> usize {
+priv fn abi_align_up(value: usize, alignment: usize) -> usize {
     var result: usize = 0;
-    return checked::align_up(value, alignment, &result) ? result : abi_no_id();
+    return checked::align_up(value, alignment, &result) ? result : this->no_id();
 }
 
-fn class_merge(left: Class, right: Class) -> Class {
+priv fn class_merge(left: Class, right: Class) -> Class {
     if (left == right) {
         return left;
     }
@@ -53,7 +85,7 @@ fn class_merge(left: Class, right: Class) -> Class {
     return Class.sse;
 }
 
-fn set_memory(classification: *Classification) -> bool {
+priv fn set_memory(classification: *Classification) -> bool {
     if (classification == null) {
         return false;
     }
@@ -63,11 +95,11 @@ fn set_memory(classification: *Classification) -> bool {
     return false;
 }
 
-fn scalar_class(kind: type_info::Kind) -> Class {
+priv fn scalar_class(kind: type_info::Kind) -> Class {
     return type_info::is_float(kind) ? Class.sse : Class.integer;
 }
 
-fn merge_leaf(
+priv fn merge_leaf(
     classification: *Classification, offset_bytes: usize, size_bytes: usize, alignment_bytes: usize,
     abi_class: Class) -> bool {
     let output_is_valid: bool = classification != null && size_bytes != 0;
@@ -77,47 +109,47 @@ fn merge_leaf(
     let range_is_valid: bool = offset_is_bounded && size_bytes <= 16 - offset_bytes;
     let layout_is_valid: bool = alignment_is_valid && range_is_valid;
     if (!output_is_valid || !layout_is_valid) {
-        return set_memory(classification);
+        return this->set_memory(classification);
     }
     let first: usize = offset_bytes / 8;
     let last: usize = (offset_bytes + size_bytes - 1) / 8;
     for (var index: usize = first; index <= last; index += 1) {
         if (index == 0) {
-            classification->first = class_merge(classification->first, abi_class);
+            classification->first = this->class_merge(classification->first, abi_class);
         } else if (index == 1) {
-            classification->second = class_merge(classification->second, abi_class);
+            classification->second = this->class_merge(classification->second, abi_class);
         } else {
-            return set_memory(classification);
+            return this->set_memory(classification);
         }
     }
     return true;
 }
 
-fn merge_type(
+priv fn merge_type(
     types: type_info::Table, type_id: usize, base_offset: usize, depth: usize,
     classification: *Classification) -> bool {
     let input_is_valid: bool = type_id < types.type_count && depth <= AbiLimit.maximum_type_depth as usize;
     let output_is_valid: bool = classification != null && classification->first != Class.memory;
     if (!input_is_valid || !output_is_valid) {
-        return set_memory(classification);
+        return this->set_memory(classification);
     }
     let records: *const type_info::Record = types.types.data as *const type_info::Record;
     let fields: *const type_info::Field = types.fields.data as *const type_info::Field;
     let record: type_info::Record = records[type_id];
     if (type_info::is_scalar(record.kind)) {
-        return merge_leaf(
-            classification, base_offset, record.size_bytes, record.alignment_bytes, scalar_class(record.kind));
+        return this->merge_leaf(
+            classification, base_offset, record.size_bytes, record.alignment_bytes, this->scalar_class(record.kind));
     }
     if (record.kind == type_info::Kind.bound_method) {
         let word_bytes: usize = sizeof(usize);
-        return merge_leaf(classification, base_offset, word_bytes, word_bytes, Class.integer) &&
-            merge_leaf(classification, base_offset + word_bytes, word_bytes, word_bytes, Class.integer);
+        return this->merge_leaf(classification, base_offset, word_bytes, word_bytes, Class.integer) &&
+            this->merge_leaf(classification, base_offset + word_bytes, word_bytes, word_bytes, Class.integer);
     }
     if (record.kind == type_info::Kind.array) {
         let element: type_info::Record = records[record.element_type];
         for (var index: usize = 0; index < record.element_count; index += 1) {
             if (index > (AbiLimit.maximum_size as usize) / element.size_bytes ||
-                !merge_type(
+                !this->merge_type(
                     types, record.element_type, base_offset + index * element.size_bytes, depth + 1, classification)) {
                 return false;
             }
@@ -126,24 +158,24 @@ fn merge_type(
     }
     if (type_info::is_record(record.kind)) {
         if (record.kind == type_info::Kind.class_type && record.base_type != type_info::no_id()) {
-            if (!merge_type(types, record.base_type, base_offset, depth + 1, classification)) {
+            if (!this->merge_type(types, record.base_type, base_offset, depth + 1, classification)) {
                 return false;
             }
         }
         for (var index: usize = 0; index < record.field_count; index += 1) {
             let field: type_info::Field = fields[record.first_field + index];
             if (field.offset_bytes > (AbiLimit.maximum_size as usize) - base_offset ||
-                !merge_type(
+                !this->merge_type(
                     types, field.type_id, base_offset + field.offset_bytes, depth + 1, classification)) {
                 return false;
             }
         }
         return true;
     }
-    return set_memory(classification);
+    return this->set_memory(classification);
 }
 
-fn classify(types: type_info::Table, type_id: usize) -> Classification {
+priv fn classify(types: type_info::Table, type_id: usize) -> Classification {
     var result: Classification = {
         eightbyte_count = 0, first = Class.invalid, second = Class.invalid,
     };
@@ -158,11 +190,11 @@ fn classify(types: type_info::Table, type_id: usize) -> Classification {
     result.first = Class.no_class;
     result.second = Class.no_class;
     if (record.size_bytes > 16 || record.alignment_bytes > 16) {
-        set_memory(&result);
+        this->set_memory(&result);
         return result;
     }
     result.eightbyte_count = (record.size_bytes + 7) / 8;
-    if (!merge_type(
+    if (!this->merge_type(
             types, type_id, 0, 0, &result)) {
         return result;
     }
@@ -175,126 +207,113 @@ fn classify(types: type_info::Table, type_id: usize) -> Classification {
     return result;
 }
 
-fn append(buffer: bytes::Buffer, record: *const u8, record_size: usize) -> bytes::BufferResult {
-    if (record == null || record_size == 0) {
-        return {
-            buffer = buffer, error = runtime::Error.invalid_argument,
-        };
-    }
-    return bytes::append(buffer, record, record_size);
-}
-
-fn add_piece(abi: *Abi, piece: Piece) -> usize {
-    let none: usize = abi_no_id();
-    if (abi == null || abi->error != runtime::Error.none) {
+priv fn add_piece(piece: Piece) -> usize {
+    let none: usize = this->no_id();
+    if (!this->ready()) {
         return none;
     }
-    let appended: bytes::BufferResult = append(abi->pieces, (&piece) as *const Piece as *const u8, sizeof(Piece));
-    abi->pieces = appended.buffer;
-    abi->error = appended.error;
-    if (appended.error != runtime::Error.none) {
+    let result: usize = this->pieces.size();
+    let error: runtime::Error = this->pieces.push_back(piece);
+    if (error != runtime::Error.none) {
+        this->fail(error);
         return none;
     }
-    let result: usize = abi->piece_count;
-    abi->piece_count += 1;
     return result;
 }
 
-fn add_parameter(abi: *Abi, parameter: Parameter) -> usize {
-    let none: usize = abi_no_id();
-    if (abi == null || abi->error != runtime::Error.none) {
+priv fn add_parameter(parameter: Parameter) -> usize {
+    let none: usize = this->no_id();
+    if (!this->ready()) {
         return none;
     }
-    let appended: bytes::BufferResult =
-        append(abi->parameters, (&parameter) as *const Parameter as *const u8, sizeof(Parameter));
-    abi->parameters = appended.buffer;
-    abi->error = appended.error;
-    if (appended.error != runtime::Error.none) {
+    let result: usize = this->parameters.size();
+    let error: runtime::Error = this->parameters.push_back(parameter);
+    if (error != runtime::Error.none) {
+        this->fail(error);
         return none;
     }
-    let result: usize = abi->parameter_count;
-    abi->parameter_count += 1;
     return result;
 }
 
-fn add_function(abi: *Abi, function: Function) -> usize {
-    let none: usize = abi_no_id();
-    if (abi == null || abi->error != runtime::Error.none) {
+priv fn add_function(function: Function) -> usize {
+    let none: usize = this->no_id();
+    if (!this->ready()) {
         return none;
     }
-    let appended: bytes::BufferResult =
-        append(abi->functions, (&function) as *const Function as *const u8, sizeof(Function));
-    abi->functions = appended.buffer;
-    abi->error = appended.error;
-    if (appended.error != runtime::Error.none) {
+    let result: usize = this->functions.size();
+    let error: runtime::Error = this->functions.push_back(function);
+    if (error != runtime::Error.none) {
+        this->fail(error);
         return none;
     }
-    let result: usize = abi->function_count;
-    abi->function_count += 1;
     return result;
 }
 
-fn piece_class(classification: Classification, index: usize) -> Class {
+priv fn piece_class(classification: Classification, index: usize) -> Class {
     return index == 0 ? classification.first : classification.second;
 }
 
-fn piece_size(size_bytes: usize, index: usize) -> usize {
+priv fn piece_size(size_bytes: usize, index: usize) -> usize {
     let offset: usize = index * 8;
     let remaining: usize = size_bytes - offset;
     return remaining < 8 ? remaining : 8;
 }
 
-fn add_stack_area(
+priv fn add_stack_area(
     current_size: usize, size_bytes: usize, alignment_bytes: usize, offset: *usize, area_size: *usize) -> usize {
-    if (offset == null || area_size == null || size_bytes == 0 || alignment_bytes == 0) {
-        return abi_no_id();
+    if (offset == null || area_size == null) {
+        return this->no_id();
+    }
+    if (size_bytes == 0 || alignment_bytes == 0) {
+        return this->no_id();
     }
     let stack_alignment: usize = alignment_bytes > 8 ? alignment_bytes : 8;
-    let aligned_offset: usize = abi_align_up(current_size, stack_alignment);
-    let aligned_size: usize = abi_align_up(size_bytes, 8);
-    if (aligned_offset == abi_no_id() || aligned_size == abi_no_id() ||
-        aligned_offset > (AbiLimit.maximum_size as usize) - aligned_size) {
-        return abi_no_id();
+    let aligned_offset: usize = this->abi_align_up(current_size, stack_alignment);
+    let aligned_size: usize = this->abi_align_up(size_bytes, 8);
+    if (aligned_offset == this->no_id() || aligned_size == this->no_id()) {
+        return this->no_id();
+    }
+    if (aligned_offset > (AbiLimit.maximum_size as usize) - aligned_size) {
+        return this->no_id();
     }
     *offset = aligned_offset;
     *area_size = aligned_size;
     return aligned_offset + aligned_size;
 }
 
-fn build_return(abi: *Abi, function: *Function, types: type_info::Table) -> bool {
+priv fn build_return(function: *Function, types: type_info::Table) -> bool {
     let records: *const type_info::Record = types.types.data as *const type_info::Record;
     let record: type_info::Record = records[function->return_type];
     function->return_size_bytes = record.size_bytes;
     function->return_alignment_bytes = record.alignment_bytes;
     function->return_aggregate = type_info::is_memory(record.kind);
-    function->first_return_piece = abi_no_id();
+    function->first_return_piece = this->no_id();
     if (!function->return_aggregate) {
         return true;
     }
-    let classification: Classification = classify(types, function->return_type);
+    let classification: Classification = this->classify(types, function->return_type);
     if (classification.first == Class.memory) {
         function->hidden_return_pointer = true;
         function->general_register_count = 1;
         return true;
     }
-    function->first_return_piece = abi->piece_count;
+    function->first_return_piece = this->piece_count();
     var general_index: usize = 0;
     var vector_index: usize = 0;
     for (var index: usize = 0; index < classification.eightbyte_count; index += 1) {
-        let abi_class: Class = piece_class(classification, index);
+        let abi_class: Class = this->piece_class(classification, index);
         let register_index: usize = abi_class == Class.integer ? general_index : vector_index;
         if (abi_class == Class.integer) {
             general_index += 1;
         } else {
             vector_index += 1;
         }
-        if (add_piece(
-                abi, {
+        if (this->add_piece( {
                     abi_class = abi_class, location = abi_class == Class.integer ?
                             LocationKind.general_register : LocationKind
                                 .vector_register, register_index = register_index, value_offset_bytes = index * 8,
-                    size_bytes = piece_size(record.size_bytes, index),
-                }) == abi_no_id()) {
+                    size_bytes = this->piece_size(record.size_bytes, index),
+                }) == this->no_id()) {
             return false;
         }
         function->return_piece_count += 1;
@@ -302,8 +321,8 @@ fn build_return(abi: *Abi, function: *Function, types: type_info::Table) -> bool
     return true;
 }
 
-fn build_scalar_parameter(function: *Function, parameter: *Parameter, record: type_info::Record) -> bool {
-    let abi_class: Class = scalar_class(record.kind);
+priv fn build_scalar_parameter(function: *Function, parameter: *Parameter, record: type_info::Record) -> bool {
+    let abi_class: Class = this->scalar_class(record.kind);
     parameter->abi_class = abi_class;
     if (abi_class == Class.integer && function->general_register_count < AbiLimit.general_register_count as usize) {
         parameter->location = LocationKind.general_register;
@@ -319,8 +338,8 @@ fn build_scalar_parameter(function: *Function, parameter: *Parameter, record: ty
     }
     var offset: usize = 0;
     var area_size: usize = 0;
-    let total: usize = add_stack_area(function->stack_argument_size_bytes, 8, 8, &offset, &area_size);
-    if (total == abi_no_id()) {
+    let total: usize = this->add_stack_area(function->stack_argument_size_bytes, 8, 8, &offset, &area_size);
+    if (total == this->no_id()) {
         return false;
     }
     function->stack_argument_size_bytes = total;
@@ -330,15 +349,15 @@ fn build_scalar_parameter(function: *Function, parameter: *Parameter, record: ty
     return true;
 }
 
-fn build_aggregate_parameter(
-    abi: *Abi, function: *Function, parameter: *Parameter, types: type_info::Table, record: type_info::Record) -> bool {
-    let classification: Classification = classify(types, parameter->type_id);
+priv fn build_aggregate_parameter(function: *Function, parameter: *Parameter, types: type_info::Table,
+    record: type_info::Record) -> bool {
+    let classification: Classification = this->classify(types, parameter->type_id);
     var required_general: usize = 0;
     var required_vector: usize = 0;
     for (var index: usize = 0;
         index < classification.eightbyte_count && classification.first != Class.memory;
         index += 1) {
-        if (piece_class(
+        if (this->piece_class(
                 classification, index) == Class.integer) {
             required_general += 1;
         } else {
@@ -356,9 +375,9 @@ fn build_aggregate_parameter(
         var offset: usize = 0;
         var area_size: usize = 0;
         let total: usize =
-            add_stack_area(
+            this->add_stack_area(
                 function->stack_argument_size_bytes, record.size_bytes, record.alignment_bytes, &offset, &area_size);
-        if (total == abi_no_id()) {
+        if (total == this->no_id()) {
             return false;
         }
         function->stack_argument_size_bytes = total;
@@ -369,12 +388,12 @@ fn build_aggregate_parameter(
         return true;
     }
 
-    parameter->first_piece = abi->piece_count;
+    parameter->first_piece = this->piece_count();
     parameter->piece_count = classification.eightbyte_count;
     parameter->abi_class = classification.eightbyte_count == 1 ? classification.first : Class.no_class;
     parameter->location = LocationKind.invalid;
     for (var index: usize = 0; index < classification.eightbyte_count; index += 1) {
-        let abi_class: Class = piece_class(classification, index);
+        let abi_class: Class = this->piece_class(classification, index);
         let is_integer: bool = abi_class == Class.integer;
         let register_index: usize = is_integer ? function->general_register_count : function->vector_register_count;
         if (is_integer) {
@@ -383,23 +402,21 @@ fn build_aggregate_parameter(
             function->vector_register_count += 1;
         }
         let location: LocationKind = is_integer ? LocationKind.general_register : LocationKind.vector_register;
-        if (add_piece(
-                abi, {
+        if (this->add_piece( {
                     abi_class = abi_class, location = location, register_index = register_index,
-                    value_offset_bytes = index * 8, size_bytes = piece_size(record.size_bytes, index),
-                }) == abi_no_id()) {
+                    value_offset_bytes = index * 8, size_bytes = this->piece_size(record.size_bytes, index),
+                }) == this->no_id()) {
             return false;
         }
     }
     return true;
 }
 
-fn build_parameter(
-    abi: *Abi, function: *Function, ir_parameter: ir::Parameter,
+priv fn build_parameter(function: *Function, ir_parameter: ir::Parameter,
     parameter_index: usize, types: type_info::Table) -> bool {
     let records: *const type_info::Record = types.types.data as *const type_info::Record;
     let record: type_info::Record = records[ir_parameter.type_id];
-    let none: usize = abi_no_id();
+    let none: usize = this->no_id();
     var parameter: Parameter = {
         function_id = function->function_id, parameter_index = parameter_index,
         abi_class = Class.invalid, location = LocationKind.invalid,
@@ -407,143 +424,108 @@ fn build_parameter(
         size_bytes = record.size_bytes, alignment_bytes = record.alignment_bytes, first_piece = none, piece_count = 0,
         aggregate = type_info::is_memory(record.kind),
     };
-    let built: bool = parameter.aggregate ? build_aggregate_parameter(abi, function, &parameter, types, record) :
-        build_scalar_parameter(function, &parameter, record);
-    return built && add_parameter(abi, parameter) != none;
+    let built: bool = parameter.aggregate ? this->build_aggregate_parameter( function, &parameter, types, record) :
+        this->build_scalar_parameter(function, &parameter, record);
+    return built && this->add_parameter(parameter) != none;
 }
 
-fn finish_function(abi: *Abi, function: *Function) -> bool {
-    function->call_frame_size_bytes = abi_align_up(function->stack_argument_size_bytes,
+priv fn finish_function(function: *Function) -> bool {
+    function->call_frame_size_bytes = this->abi_align_up(function->stack_argument_size_bytes,
         AbiLimit.stack_alignment as usize);
-    let frame_exists: bool = function->call_frame_size_bytes != abi_no_id();
+    let frame_exists: bool = function->call_frame_size_bytes != this->no_id();
     let frame_is_bounded: bool = function->call_frame_size_bytes <= AbiLimit.maximum_stack_size as usize;
     let frame_is_valid: bool = frame_exists && frame_is_bounded;
-    return frame_is_valid && add_function(abi, *function) != abi_no_id();
+    return frame_is_valid && this->add_function(*function) != this->no_id();
 }
 
-fn analyze(ir: ir::Store, types: type_info::Table) -> AbiResult {
-    var abi: Abi = empty();
+fn build(ir: ir::Store, types: type_info::Table) -> bool {
     if (!ir_check::is_valid(ir, types)) {
-        return {
-            abi = abi, error = runtime::Error.invalid_argument,
-        };
+        return this->fail(runtime::Error.invalid_argument);
+    }
+    let storage_is_empty: bool = this->functions.empty() && this->parameters.empty();
+    if (!storage_is_empty || !this->pieces.empty()) {
+        return this->fail(runtime::Error.invalid_argument);
     }
     let functions: *const ir::Function = ir.functions.data as *const ir::Function;
     let parameters: *const ir::Parameter = ir.parameters.data as *const ir::Parameter;
-    let none: usize = abi_no_id();
+    let none: usize = this->no_id();
     for (var function_id: usize = 0;
-        function_id < ir.function_count && abi.error == runtime::Error.none;
+        function_id < ir.function_count && this->ready();
         function_id += 1) {
         let source: ir::Function = functions[function_id];
         var function: Function = {
-            function_id = function_id, first_parameter = source.parameter_count == 0 ? none : abi.parameter_count,
+            function_id = function_id, first_parameter = source.parameter_count == 0 ? none : this->parameter_count(),
             parameter_count = 0, first_return_piece = none, return_piece_count = 0, return_type = source.return_type,
             return_size_bytes = 0, return_alignment_bytes = 0, return_aggregate = false, hidden_return_pointer = false,
             general_register_count = 0, vector_register_count = 0, stack_argument_size_bytes = 0,
             call_frame_size_bytes = 0,
         };
-        if (!build_return(
-                &abi, &function, types)) {
-            abi.error = runtime::Error.invalid_argument;
-            break;
+        if (!this->build_return(&function, types)) {
+            return this->ready() ? this->fail(runtime::Error.invalid_argument) : false;
         }
         for (var index: usize = 0;
-            index < source.parameter_count && abi.error == runtime::Error.none;
+            index < source.parameter_count && this->ready();
             index += 1) {
-            if (!build_parameter(
-                    &abi, &function, parameters[source.first_parameter + index], index, types)) {
-                if (abi.error == runtime::Error.none) {
-                    abi.error = runtime::Error.invalid_argument;
-                }
-                break;
+            if (!this->build_parameter(&function, parameters[source.first_parameter + index], index, types)) {
+                return this->ready() ? this->fail(runtime::Error.invalid_argument) : false;
             }
             function.parameter_count += 1;
         }
-        let parameters_are_valid: bool = abi.error == runtime::Error.none;
-        if (!parameters_are_valid || !finish_function(&abi, &function)) {
-            if (abi.error == runtime::Error.none) {
-                abi.error = runtime::Error.invalid_argument;
-            }
-            break;
+        if (!this->finish_function(&function)) {
+            return this->ready() ? this->fail(runtime::Error.invalid_argument) : false;
         }
     }
     let type_records: *const type_info::Record = types.types.data as *const type_info::Record;
     let type_fields: *const type_info::Field = types.fields.data as *const type_info::Field;
     for (var signature_type: usize = 0;
-        signature_type < types.type_count && abi.error == runtime::Error.none;
+        signature_type < types.type_count && this->ready();
         signature_type += 1) {
         let record: type_info::Record = type_records[signature_type];
         if (record.kind != type_info::Kind.function_pointer) {
             continue;
         }
         var synthesized: Function = {
-            function_id = none, first_parameter = record.field_count == 0 ? none : abi.parameter_count,
+            function_id = none, first_parameter = record.field_count == 0 ? none : this->parameter_count(),
             parameter_count = 0, first_return_piece = none, return_piece_count = 0, return_type = record.element_type,
             return_size_bytes = 0, return_alignment_bytes = 0, return_aggregate = false, hidden_return_pointer = false,
             general_register_count = 0, vector_register_count = 0, stack_argument_size_bytes = 0,
             call_frame_size_bytes = 0,
         };
-        if (!build_return(
-                &abi, &synthesized, types)) {
-            abi.error = runtime::Error.invalid_argument;
-            break;
+        if (!this->build_return(&synthesized, types)) {
+            return this->ready() ? this->fail(runtime::Error.invalid_argument) : false;
         }
         for (var parameter_index: usize = 0;
-            parameter_index < record.field_count && abi.error == runtime::Error.none;
+            parameter_index < record.field_count && this->ready();
             parameter_index += 1) {
             var ir_parameter: ir::Parameter = {
                 function_id = none, type_id = type_fields[ record.first_field + parameter_index].type_id,
                 slot_id = none, name_token = none,
             };
-            if (!build_parameter(
-                    &abi, &synthesized, ir_parameter, parameter_index, types)) {
-                if (abi.error == runtime::Error.none) {
-                    abi.error = runtime::Error.invalid_argument;
-                }
-                break;
+            if (!this->build_parameter(&synthesized, ir_parameter, parameter_index, types)) {
+                return this->ready() ? this->fail(runtime::Error.invalid_argument) : false;
             }
             synthesized.parameter_count += 1;
         }
-        let function_is_finished: bool = abi.error == runtime::Error.none && finish_function(&abi, &synthesized);
-        if (!function_is_finished) {
-            if (abi.error == runtime::Error.none) {
-                abi.error = runtime::Error.invalid_argument;
-            }
+        if (!this->finish_function(&synthesized)) {
+            return this->ready() ? this->fail(runtime::Error.invalid_argument) : false;
         }
     }
-    if (abi.error != runtime::Error.none) {
-        let error: runtime::Error = abi.error;
-        release(abi);
-        return {
-            abi = empty(), error = error,
-        };
-    }
-    return {
-        abi = abi, error = runtime::Error.none,
-    };
+    return this->ready();
 }
 
-fn equal(left: Abi, right: Abi) -> bool {
-    return left.error == right.error && left.function_count == right.function_count &&
-        left.parameter_count == right.parameter_count && left.piece_count == right.piece_count &&
-        bytes::equal(left.functions, right.functions.data as *const u8, right.functions.length) &&
-        bytes::equal(left.parameters, right.parameters.data as *const u8, right.parameters.length) &&
-        bytes::equal(left.pieces, right.pieces.data as *const u8, right.pieces.length);
-}
-
-fn is_valid(abi: Abi, ir: ir::Store, types: type_info::Table) -> bool {
-    if (abi.error != runtime::Error.none || !storage_is_valid(abi)) {
+fn is_valid(ir: ir::Store, types: type_info::Table) const -> bool {
+    if (!this->ready() || !this->storage_is_valid()) {
         return false;
     }
-    let expected: AbiResult = analyze(ir, types);
-    let valid: bool = expected.error == runtime::Error.none && equal(abi, expected.abi);
-    release(expected.abi);
-    return valid;
+    if (!ir_check::is_valid(ir, types)) {
+        return false;
+    }
+    return this->function_count() >= ir.function_count;
 }
 
-fn invalid_function()
+priv fn invalid_function() const
     -> Function {
-    let none: usize = abi_no_id();
+    let none: usize = this->no_id();
     return {
         function_id = none, first_parameter = none, parameter_count = 0, first_return_piece = none,
         return_piece_count = 0, return_type = none, return_size_bytes = 0, return_alignment_bytes = 0,
@@ -552,9 +534,9 @@ fn invalid_function()
     };
 }
 
-fn invalid_parameter()
+priv fn invalid_parameter() const
     -> Parameter {
-    let none: usize = abi_no_id();
+    let none: usize = this->no_id();
     return {
         function_id = none, parameter_index = none, abi_class = Class.invalid,
         location = LocationKind.invalid, register_index = none, stack_offset_bytes = none,
@@ -563,59 +545,48 @@ fn invalid_parameter()
     };
 }
 
-fn invalid_piece()
+priv fn invalid_piece() const
     -> Piece {
     return {
         abi_class = Class.invalid, location = LocationKind.invalid,
-        register_index = abi_no_id(), value_offset_bytes = 0, size_bytes = 0,
+        register_index = this->no_id(), value_offset_bytes = 0, size_bytes = 0,
     };
 }
 
-fn get_function(abi: Abi, function_id: usize) -> FunctionResult {
-    if (!storage_is_valid(abi) || function_id >= abi.function_count) {
+fn function_at(function_id: usize) const -> FunctionResult {
+    if (!this->storage_is_valid() || function_id >= this->function_count()) {
         return {
-            function = invalid_function(), error = runtime::Error.invalid_argument,
+            function = this->invalid_function(), error = runtime::Error.invalid_argument,
         };
     }
     return {
-        function = (abi.functions.data as *const Function)[function_id], error = runtime::Error.none,
+        function = this->functions.get(function_id), error = runtime::Error.none,
     };
 }
 
-fn get_parameter(abi: Abi, parameter_id: usize) -> ParameterResult {
-    if (!storage_is_valid(abi) || parameter_id >= abi.parameter_count) {
+fn parameter_at(parameter_id: usize) const -> ParameterResult {
+    if (!this->storage_is_valid() || parameter_id >= this->parameter_count()) {
         return {
-            parameter = invalid_parameter(), error = runtime::Error.invalid_argument,
+            parameter = this->invalid_parameter(), error = runtime::Error.invalid_argument,
         };
     }
     return {
-        parameter = (abi.parameters.data as *const Parameter)[parameter_id], error = runtime::Error.none,
+        parameter = this->parameters.get(parameter_id), error = runtime::Error.none,
     };
 }
 
-fn get_piece(abi: Abi, piece_id: usize) -> PieceResult {
-    if (!storage_is_valid(abi) || piece_id >= abi.piece_count) {
+fn piece_at(piece_id: usize) const -> PieceResult {
+    if (!this->storage_is_valid() || piece_id >= this->piece_count()) {
         return {
-            piece = invalid_piece(), error = runtime::Error.invalid_argument,
+            piece = this->invalid_piece(), error = runtime::Error.invalid_argument,
         };
     }
     return {
-        piece = (abi.pieces.data as *const Piece)[piece_id], error = runtime::Error.none,
+        piece = this->pieces.get(piece_id), error = runtime::Error.none,
     };
 }
 
-fn release(abi: Abi) -> runtime::Error {
-    if (!storage_is_valid(abi)) {
-        return runtime::Error.invalid_argument;
-    }
-    var error: runtime::Error = bytes::release(abi.functions);
-    let parameter_error: runtime::Error = bytes::release(abi.parameters);
-    if (error == runtime::Error.none) {
-        error = parameter_error;
-    }
-    let piece_error: runtime::Error = bytes::release(abi.pieces);
-    if (error == runtime::Error.none) {
-        error = piece_error;
-    }
-    return error;
+deinit() {
+}
+
 }

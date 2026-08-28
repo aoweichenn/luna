@@ -1,432 +1,74 @@
 module luna.compiler.x86.codegen;
 
 
-
-fn backend_empty()
-    -> BackendResult {
-    return {
-        assembly = bytes::empty(), abi = empty(), frames = plan_empty(), error = runtime::Error.none,
-    };
-}
-
-fn emit_global_header(context: *CodegenContext, global: ir::Global, global_id: usize) -> bool {
-    literal(context, global.read_only ? "    .section .rodata,\"a\",@progbits\n" : "    .data\n");
-    literal(context, "    .balign ");
-    append_usize(context, global.alignment_bytes);
-    literal(context, "\n    .type ");
-    append_global_label(context, global_id);
-    literal(context, ", @object\n");
-    append_global_label(context, global_id);
-    literal(context, ":\n");
-    return context->error == runtime::Error.none;
-}
-
-fn emit_global_bytes(context: *CodegenContext, global: ir::Global, first: usize, count: usize) -> bool {
-    for (var index: usize = 0; index < count && context->error == runtime::Error.none; index += 1) {
-        let value: u8 = context->ir.global_bytes.data[global.byte_offset + first + index];
-        literal(context, "    .byte 0x");
-        hex(context, value as u64, 2);
-        literal(context, "\n");
+impl CodeGenerator {
+    init(semantic_input: context::Input, ir: ir::Store, types: type_info::Table):
+            abi = AbiLayout(), frames = FramePlan(), assembly = strings::string() {
+        this->semantic_input = semantic_input;
+        this->ir = ir;
+        this->types = types;
+        this->current_function = this->no_id();
+        this->call_frame_depth = 0;
+        this->error = runtime::Error.none;
     }
-    return context->error == runtime::Error.none;
-}
 
-fn emit_global_reference(context: *CodegenContext, reference: ir::GlobalReference) -> bool {
-    literal(context, "    .quad ");
-    switch (reference.kind) {
-    case ir::GlobalReferenceKind.function {
-        append_function_symbol(context, reference.target_id);
-    }
-    case ir::GlobalReferenceKind.global {
-        append_global_label(context, reference.target_id);
-    }
-    default {
-        context->error = runtime::Error.invalid_argument;
-    }
-    }
-    literal(context, "\n");
-    return context->error == runtime::Error.none;
-}
-
-fn emit_global_initializer(context: *CodegenContext, global: ir::Global) -> bool {
-    if (global.reference_count == 0) {
-        return emit_global_bytes(context, global, 0, global.byte_count);
-    }
-    let references: *const ir::GlobalReference = context->ir.global_references.data as
-            *const ir::GlobalReference;
-    let address_bytes: usize = ir::Limit.function_address_bytes as usize;
-    let reference_end: usize = global.first_reference + global.reference_count;
-    var byte_offset: usize = 0;
-    for (var index: usize = global.first_reference;
-        index < reference_end && context->error == runtime::Error.none;
-        index += 1) {
-        let reference: ir::GlobalReference = references[index];
-        emit_global_bytes(context, global, byte_offset, reference.byte_offset - byte_offset);
-        emit_global_reference(context, reference);
-        byte_offset = reference.byte_offset + address_bytes;
-    }
-    emit_global_bytes(context, global, byte_offset, global.byte_count - byte_offset);
-    return context->error == runtime::Error.none;
-}
-
-fn emit_global_footer(context: *CodegenContext, global_id: usize) -> bool {
-    literal(context, "    .size ");
-    append_global_label(context, global_id);
-    literal(context, ", .-");
-    append_global_label(context, global_id);
-    literal(context, "\n\n");
-    return context->error == runtime::Error.none;
-}
-
-fn emit_globals(context: *CodegenContext) -> bool {
-    let globals: *const ir::Global = context->ir.globals.data as *const ir::Global;
-    for (var global_id: usize = 0;
-        global_id < context->ir.global_count && context->error == runtime::Error.none;
-        global_id += 1) {
-        let global: ir::Global = globals[global_id];
-        emit_global_header(context, global, global_id);
-        emit_global_initializer(context, global);
-        emit_global_footer(context, global_id);
-    }
-    return context->error == runtime::Error.none;
-}
-
-fn emit_declarations(context: *CodegenContext) -> bool {
-    let functions: *const ir::Function = context->ir.functions.data as
-            *const ir::Function;
-    var function_id: usize = 0;
-    var emitted: bool = false;
-    while (function_id < context->ir.function_count) {
-        let function: ir::Function = functions[function_id];
-        if (!function.has_body) {
-            if (!literal(context, "    .extern ") || !append_function_symbol(context, function_id) ||
-                !literal(
-                    context, "\n")) {
-                return false;
-            }
-            emitted = true;
+    fn run() {
+        if (!context::input_is_valid(this->semantic_input) || !ir_check::is_valid(this->ir, this->types)) {
+            this->fail(runtime::Error.invalid_argument);
+            return;
         }
-        function_id += 1;
+        if (!this->abi.build(this->ir, this->types)) {
+            this->fail(this->abi.error());
+            return;
+        }
+        if (!this->frames.build(this->ir, this->types, this->abi)) {
+            this->fail(this->frames.error());
+            return;
+        }
+        this->emit_module();
     }
-    return !emitted || literal(context, "\n");
+
+    fn take_result() -> BackendResult {
+        if (this->error != runtime::Error.none) {
+            return {assembly = bytes::empty(), error = this->error};
+        }
+        let assembly_size: usize = this->assembly.size();
+        let assembly_capacity: usize = this->assembly.capacity() + 1;
+        let assembly_data: *u8 = this->assembly.detach();
+        let result: BackendResult = {
+            assembly = {data = assembly_data, length = assembly_size, capacity = assembly_capacity},
+            error = runtime::Error.none,
+        };
+        return result;
+    }
+
+    deinit() {
+    }
 }
 
-fn emit_entry(context: *CodegenContext) -> bool {
-    if (context->ir.entry_function == ir::no_id()) {
-        return true;
-    }
-    let functions: *const ir::Function = context->ir.functions.data as
-            *const ir::Function;
-    let has_command_line_parameters: bool = functions[context->ir.entry_function].parameter_count == 2;
-    return literal(context, "    .globl _start\n    .type _start, @function\n_start:\n    xorl %ebp, %ebp\n") &&
-        (!has_command_line_parameters ||
-            literal(
-                context, "    movq (%rsp), %rdi\n    leaq 8(%rsp), %rsi\n")) &&
-        literal(
-            context, "    andq $-16, %rsp\n    subq $16, %rsp\n    movl $0x1f80, (%rsp)\n"
-            "    ldmxcsr (%rsp)\n    addq $16, %rsp\n    call "
-        ) && append_function_symbol(context, context->ir.entry_function) && literal(context,
-            "\n    movl %eax, %edi\n    movl $60, %eax\n    syscall\n    .size _start, .-_start\n\n");
-}
-
-fn append_byte(context: *CodegenContext, value: u8) -> bool {
-    return append_assembly(context, &value as *const u8, 1);
-}
-
-fn hex_digit(byte: u8) -> usize {
-    return ascii::hex_value(byte);
-}
-
-// 把一个 code point 按 UTF-8 编码追加到输出；asm body 只接受普通宽度字符串，
-// 与语义阶段的 width-1 解码保持一致。
-fn append_code_point(context: *CodegenContext, code_point: usize) -> bool {
-    if (code_point < 128) {
-        return append_byte(context, code_point as u8);
-    }
-    if (code_point < 2048) {
-        return append_byte(context, ((code_point >> 6) + 192) as u8) &&
-            append_byte(context, ((code_point & 63) + 128) as u8);
-    }
-    if (code_point < 65536) {
-        return append_byte(context, ((code_point >> 12) + 224) as u8) &&
-            append_byte(context, (((code_point >> 6) & 63) + 128) as u8) &&
-            append_byte(context, ((code_point & 63) + 128) as u8);
-    }
-    return append_byte(context, ((code_point >> 18) + 240) as u8) &&
-        append_byte(context, (((code_point >> 12) & 63) + 128) as u8) &&
-        append_byte(context, (((code_point >> 6) & 63) + 128) as u8) &&
-        append_byte(context, ((code_point & 63) + 128) as u8);
-}
-
-// 把 asm fn body 中一个包含引号的普通字符串 token 解码到输出，并处理常规转义；
-// 语义阶段已经保证 body 只包含普通字符串。
-fn append_asm_string(context: *CodegenContext, unit_id: usize, token_id: usize) -> bool {
-    let unit: *const context::Unit = unit(context, unit_id);
-    let token: lexer::Token = token(context, unit_id, token_id);
-    if (unit == null || token.kind != lexer::TokenKind.string || token.span.length < 2 ||
-        token.span.offset > unit->source.length || token.span.length > unit->source.length - token.span.offset) {
-        return fail(context, runtime::Error.invalid_argument);
-    }
-    var index: usize = 1;
-    while (index + 1 < token.span.length && context->error == runtime::Error.none) {
-        var byte: u8 = unit->source.data[token.span.offset + index];
-        if (byte != '\\') {
-            if (!append_byte(context, byte)) {
-                return false;
-            }
-            index += 1;
-            continue;
-        }
-        index += 1;
-        byte = unit->source.data[token.span.offset + index];
-        if (byte == 'x') {
-            if (index + 3 >= token.span.length) {
-                return fail(context, runtime::Error.invalid_argument);
-            }
-            let high: usize = hex_digit(unit->source.data[token.span.offset + index + 1]);
-            let low: usize = hex_digit(unit->source.data[token.span.offset + index + 2]);
-            if (high >= 16 || low >= 16 || !append_byte(context, (high * 16 + low) as u8)) {
-                return fail(context, runtime::Error.invalid_argument);
-            }
-            index += 3;
-            continue;
-        }
-        if (byte == 'u') {
-            var code_point: usize = 0;
-            index += 1;
-            if (index + 1 >= token.span.length || unit->source.data[token.span.offset + index] != '{') {
-                return fail(context, runtime::Error.invalid_argument);
-            }
-            index += 1;
-            while (index + 1 < token.span.length && unit->source.data[token.span.offset + index] != '}') {
-                let digit: usize = hex_digit(unit->source.data[token.span.offset + index]);
-                if (digit >= 16) {
-                    return fail(context, runtime::Error.invalid_argument);
-                }
-                code_point = code_point * 16 + digit;
-                index += 1;
-            }
-            if (index + 1 >= token.span.length) {
-                return fail(context, runtime::Error.invalid_argument);
-            }
-            index += 1;
-            if (!append_code_point(context, code_point)) {
-                return false;
-            }
-            continue;
-        }
-        if (byte == 'n') {
-            byte = '\n';
-        } else if (byte == 'r') {
-            byte = '\r';
-        } else if (byte == 't') {
-            byte = '\t';
-        } else if (byte == '0') {
-            byte = 0;
-        }
-        if (!append_byte(context, byte)) {
-            return false;
-        }
-        index += 1;
-    }
-    return context->error == runtime::Error.none;
-}
-
-// 把 asm fn body 中解码后的字符串依次拼入输出；语义阶段已经验证其中没有其他内容。
-fn emit_asm_body(context: *CodegenContext, function: ir::Function) -> bool {
-    let unit_id: usize = function.asm_body_unit;
-    let body: syntax::SyntaxNode = node(context, unit_id, function.asm_body_node);
-    if (body.kind != syntax::SyntaxKind.string_expression) {
-        return fail(context, runtime::Error.invalid_argument);
-    }
-    if (!append_asm_string(context, unit_id, body.token_index)) {
-        return false;
-    }
-    var part: usize = body.first_child;
-    var index: usize = 0;
-    while (index < body.child_count && context->error == runtime::Error.none) {
-        let part_node: syntax::SyntaxNode = node(context, unit_id, part);
-        if (part_node.kind != syntax::SyntaxKind.string_expression) {
-            return fail(context, runtime::Error.invalid_argument);
-        }
-        if (!append_asm_string(context, unit_id, part_node.token_index)) {
-            return false;
-        }
-        part = part_node.next_sibling;
-        index += 1;
-    }
-    return context->error == runtime::Error.none;
-}
-
-fn emit_function(context: *CodegenContext, function_id: usize) -> bool {
-    let functions: *const ir::Function = context->ir.functions.data as
-            *const ir::Function;
-    let blocks: *const ir::Block = context->ir.blocks.data as *const ir::Block;
-    let instructions: *const ir::Instruction = context->ir.instructions.data as
-            *const ir::Instruction;
-    let abi_functions: *const Function = context->abi.functions.data as
-            *const Function;
-    let frames: *const Frame = context->frames.frames.data as
-            *const Frame;
-    let function: ir::Function = functions[function_id];
-    if (!function.has_body) {
-        return true;
-    }
-    context->current_function = function_id;
-    context->call_frame_depth = 0;
-    if ((function.linkage == ir::Linkage.module_export || function.export_name_token != no_id()) &&
-        (!literal(context, "    .globl ") || !append_function_symbol(context, function_id) ||
-        !literal(context, "\n"))) {
-        return false;
-    }
-    // 带 @export_name 的导出定义同时响应两个名字：extern 消费者按原样导出符号解析，
-    // module 消费者则引用 mangled module symbol，因为它看不到实现上的 export name。
-    if (function.linkage == ir::Linkage.module_export && function.export_name_token != no_id() &&
-        (!literal(context, "    .globl ") || !append_mangled_function_symbol(context, function_id) ||
-        !literal(context, "\n"))) {
-        return false;
-    }
-    if (!literal(context, "    .p2align 4\n    .type ") || !append_function_symbol(context, function_id) ||
-        !literal(context, ", @function\n") || !append_function_symbol(context, function_id) ||
-        !literal(context, ":\n")) {
-        return false;
-    }
-    if (function.linkage == ir::Linkage.module_export && function.export_name_token != no_id() &&
-        (!append_mangled_function_symbol(context, function_id) || !literal(context, ":\n"))) {
-        return false;
-    }
-    // asm fn 是 naked 函数：解码后的 body 直接跟在 label 后，寄存器使用、栈纪律和返回序列
-    // 均由作者负责；luna-as 只验证并编码每条指令。
-    if (function.asm_body_node != no_id()) {
-        return emit_asm_body(context, function) && literal(context, "    .size ") &&
-            append_function_symbol(context, function_id) && literal(context, ", .-") &&
-            append_function_symbol(context, function_id) && literal(context, "\n\n");
-    }
-    if (!literal(context, "    pushq %rbp\n    movq %rsp, %rbp\n")) {
-        return false;
-    }
-    if (frames[function_id].dynamic_alignment != 0 && (!literal(context, "    andq $-") ||
-            !append_usize(context, frames[function_id].dynamic_alignment) || !literal(context, ", %rsp\n"))) {
-        return false;
-    }
-    if (frames[function_id].frame_size_bytes != 0 && (!literal(context, "    subq $") ||
-        !append_usize(context, frames[function_id].frame_size_bytes) ||
-        !literal(
-            context, ", %rsp\n"))) {
-        return false;
-    }
-    // 可变参数序言必须在任何代码覆盖参数寄存器前完成保存；后续 parameter home 会复用
-    // %rax/%r10/%r11 和 SSE 临时寄存器。
-    if (function.variadic && !emit_register_save(context, function_id)) {
-        return false;
-    }
-    if (!emit_parameters(
-            context, function, abi_functions[function_id])) {
-        return false;
-    }
-    var block_index: usize = 0;
-    while (block_index < function.block_count) {
-        let block_id: usize = function.first_block + block_index;
-        let block: ir::Block = blocks[block_id];
-        if (!block_label(context, block_id) || !literal(context, ":\n")) {
-            return false;
-        }
-        var instruction_id: usize = block.first_instruction;
-        var instruction_index: usize = 0;
-        while (instruction_index < block.instruction_count) {
-            if (instruction_id >= context->ir.instruction_count ||
-                !emit_instruction(
-                    context, instructions[instruction_id], instruction_id)) {
-                return fail(context, runtime::Error.invalid_argument);
-            }
-            instruction_id = instructions[instruction_id].next_instruction;
-            instruction_index += 1;
-        }
-        block_index += 1;
-    }
-    return return_label(context) && literal(context, ":\n    leave\n    ret\n    .size ") &&
-        append_function_symbol(context, function_id) && literal(context, ", .-") &&
-        append_function_symbol(context, function_id) && literal(context, "\n\n");
-}
-
-fn emit_module(context: *CodegenContext) -> bool {
-    if (!emit_globals(context) || !emit_declarations(context) ||
-        !literal(context, "    .text\n") || !emit_entry(context)) {
-        return false;
-    }
-    var function_id: usize = 0;
-    while (function_id < context->ir.function_count) {
-        if (!emit_function(
-                context, function_id)) {
-            return false;
-        }
-        function_id += 1;
-    }
-    return literal(context, "    .section .note.GNU-stack,\"\",@progbits\n");
+fn backend_empty() -> BackendResult {
+    return {assembly = bytes::empty(), error = runtime::Error.none};
 }
 
 fn backend_is_success(
     result: BackendResult, semantic_input: context::Input, ir: ir::Store, types: type_info::Table) -> bool {
-    return result.error == runtime::Error.none && result.assembly.length != 0 &&
-        bytes::is_valid(result.assembly) && context::input_is_valid(semantic_input) &&
-        ir_check::is_valid(ir, types) && is_valid(result.abi, ir, types) &&
-        plan_is_valid(result.frames, ir, types, result.abi);
+    let assembly_is_valid: bool = result.error == runtime::Error.none && result.assembly.length != 0;
+    let input_is_valid: bool = context::input_is_valid(semantic_input) && ir_check::is_valid(ir, types);
+    if (!assembly_is_valid || !input_is_valid) {
+        return false;
+    }
+    return bytes::is_valid(result.assembly);
 }
 
 fn emit_assembly(semantic_input: context::Input, ir: ir::Store, types: type_info::Table) -> BackendResult {
-    var result: BackendResult = backend_empty();
-    if (!context::input_is_valid(semantic_input) || !ir_check::is_valid(ir, types)) {
-        result.error = runtime::Error.invalid_argument;
-        return result;
-    }
-    let abi_result: AbiResult = analyze(ir, types);
-    if (abi_result.error != runtime::Error.none) {
-        result.error = abi_result.error;
-        return result;
-    }
-    result.abi = abi_result.abi;
-    let frame_result: PlanResult = plan_build(ir, types, result.abi);
-    if (frame_result.error != runtime::Error.none) {
-        release(result.abi);
-        result.abi = empty();
-        result.error = frame_result.error;
-        return result;
-    }
-    result.frames = frame_result.plan;
-    var context: CodegenContext = {
-        semantic_input = semantic_input, ir = ir, types = types, abi = result.abi, frames = result.frames,
-        assembly = strings::string(), current_function = no_id(), call_frame_depth = 0, error = runtime::Error.none,
-    };
-    if (!emit_module(&context)) {
-        let error: runtime::Error =
-            context.error == runtime::Error.none ? runtime::Error.invalid_argument : context.error;
-        plan_release(result.frames);
-        release(result.abi);
-        result = backend_empty();
-        result.error = error;
-        return result;
-    }
-    let assembly_size: usize = context.assembly.size();
-    let assembly_capacity: usize = context.assembly.capacity() + 1;
-    let assembly_data: *u8 = context.assembly.detach();
-    result.assembly = { data = assembly_data, length = assembly_size, capacity = assembly_capacity };
-    return result;
+    var generator: CodeGenerator = CodeGenerator(semantic_input, ir, types);
+    generator.run();
+    return generator.take_result();
 }
 
 fn backend_release(result: BackendResult) -> runtime::Error {
-    if (!bytes::is_valid(result.assembly) || !storage_is_valid(result.abi) ||
-        !plan_storage_is_valid(
-            result.frames)) {
+    if (!bytes::is_valid(result.assembly)) {
         return runtime::Error.invalid_argument;
     }
-    var error: runtime::Error = bytes::release(result.assembly);
-    let frame_error: runtime::Error = plan_release(result.frames);
-    if (error == runtime::Error.none) {
-        error = frame_error;
-    }
-    let abi_error: runtime::Error = release(result.abi);
-    if (error == runtime::Error.none) {
-        error = abi_error;
-    }
-    return error;
+    return bytes::release(result.assembly);
 }
