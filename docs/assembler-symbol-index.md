@@ -12,7 +12,7 @@ S、普通 fixup 数为 F，符号处理成本接近 O(S² + F×S)。`sem_funcs.
 
 ## 设计
 
-`luna.compiler.x86.symbols.SymbolTable`是汇编期间的领域类：
+`luna.compiler.x86.assembler.SymbolTable`是汇编期间的领域类：
 
 - 通过泛型`map<SymbolName, SymbolBinding>`拥有按名字排序的 symbol index；
 - `SymbolName`借用输入 assembly 中的 UTF-8 view，并用自然字节序实现`operator <`；
@@ -41,10 +41,10 @@ number 和方向扫描独立的 numeric-label 序列；它们不是当前大对�
   运行期类型层次，引入它们只会增加间接层；
 - Object、Symbol、Relocation 和 Fixup 继续使用 struct，因为它们是透明记录。
 
-SymbolTable 是 encoding 与 source 共同消费、但序列化和 ELF reader 不应依赖的独立构建边界，
-因此使用短模块`luna.compiler.x86.symbols`。object 模块只提供具有“名字已经证明唯一”前置
-条件的`append_symbol`窄接口；依赖方向为 assembler → symbols → object/std containers，
-ELF reader 继续只依赖被动 object 模型。
+SymbolTable 是 assembler 内部由 encoding 与 source 共同消费的构建状态，不是独立 import
+边界，因此声明位于唯一的`luna.compiler.x86.assembler`接口，实现在`assembler/symbols.la`。
+object 模块只提供具有“名字已经证明唯一”前置条件的`append_symbol`窄接口；依赖方向为
+assembler → object/std containers，ELF reader 继续只依赖被动 object 模型。
 
 ## 验证
 

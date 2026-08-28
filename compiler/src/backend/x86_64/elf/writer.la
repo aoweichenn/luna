@@ -1,19 +1,12 @@
-module luna.bootstrap.backend.x86_64.elf.writer;
+module luna.compiler.x86.elf;
 
-import luna.bootstrap.backend.x86_64.elf.format as format;
-import luna.runtime as runtime;
-import luna.std.binary as binary;
 
-// Writes the in-memory object model out as a standard ELF64 ET_REL so host
-// toolchains (gcc/ld) can link Luna code into C programs. The emitted layout
-// stays inside the subset the reader above accepts, so luna-as --emit elf
-// output round-trips through luna-link: section 0 is SHT_NULL, each non-empty
-// region becomes one allocated PROGBITS section (.text/.rodata/.data) or the
-// NOBITS .bss, a single SHT_SYMTAB carries locals before globals with
-// sh_info marking the first global, and each relocated region gets one
-// explicit-addend SHT_RELA section linked to the symtab. An empty
-// .note.GNU-stack keeps host linkers from assuming an executable stack. All
-// padding is zero-filled, so the output is byte deterministic.
+// 把内存对象模型写成标准 ELF64 ET_REL，使 host toolchain 能把 Luna 代码链接进 C 程序。
+// 输出严格落在 reader 支持的子集中，因此 luna-as --emit elf 可经 luna-link round-trip：
+// section 0 为 SHT_NULL；非空 region 变成已分配的 PROGBITS（.text/.rodata/.data）或
+// NOBITS .bss；单个 SHT_SYMTAB 先放 local 再放 global，sh_info 指向首个 global；每个含
+// relocation 的 region 对应一个链接到 symtab 的显式 addend SHT_RELA section。空的
+// .note.GNU-stack 阻止 host linker 假定 executable stack。padding 全部填零以保证字节确定性。
 
 enum SectionSource: usize {
     none = 0, text = 1, rodata = 2, data = 3, symtab = 4, strtab = 5, shstrtab = 6,
@@ -181,8 +174,7 @@ fn save_plan(writer: *Writer, object: object::Object, plan: *SavePlan) -> bool {
     var text_relocations: usize = 0;
     var rodata_relocations: usize = 0;
     var data_relocations: usize = 0;
-    // A region with a defined symbol needs its section even when empty, or
-    // the symbol would have no valid st_shndx.
+    // 含已定义符号的 region 即使为空也需要 section，否则该符号没有有效 st_shndx。
     var index: usize = 0;
     let symbol_total: usize = object::symbol_count(object);
     while (index < symbol_total) {
@@ -221,8 +213,7 @@ fn save_plan(writer: *Writer, object: object::Object, plan: *SavePlan) -> bool {
         } else if (result.relocation.section == object::Section.data) {
             data_relocations += 1;
         } else {
-            // Valid objects never relocate inside bss or the undefined
-            // section; reject defensively.
+            // 有效对象不会在 bss 或 undefined section 中放 relocation，这里防御性拒绝。
             return save_fail(writer, runtime::Error.invalid_argument);
         }
         index += 1;
@@ -308,17 +299,17 @@ fn save_symbol_entry(
         !emit_u8(&writer->strtab, 0)) {
         return save_fail(writer, runtime::Error.out_of_memory);
     }
-    // Undefined model symbols are always global or external; both emit as
-    // STB_GLOBAL SHN_UNDEF, the only undefined shape the reader accepts.
-    var bind: usize = format::SymbolBind.global as usize;
+    // 未定义模型符号必为 global 或 external，两者都发射成 STB_GLOBAL SHN_UNDEF；
+    // 这是 reader 接受的唯一未定义形态。
+    var bind: usize = SymbolBind.global as usize;
     if (symbol.defined && !symbol.global) {
-        bind = format::SymbolBind.local as usize;
+        bind = SymbolBind.local as usize;
     }
-    var symbol_type: usize = format::SymbolType.notype as usize;
+    var symbol_type: usize = SymbolType.notype as usize;
     if (symbol.kind == object::SymbolKind.function) {
-        symbol_type = format::SymbolType.function as usize;
+        symbol_type = SymbolType.function as usize;
     } else if (symbol.kind == object::SymbolKind.object) {
-        symbol_type = format::SymbolType.object as usize;
+        symbol_type = SymbolType.object as usize;
     }
     let info: usize = (bind << 4) | symbol_type;
     if (!emit_u32(&writer->symtab, (name_offset as u32)) ||
@@ -334,9 +325,8 @@ fn save_symbol_entry(
 }
 
 fn save_symbols(writer: *Writer, object: object::Object, plan: *SavePlan) -> bool {
-    // Symbol 0 is the mandatory all-zero entry; the string table leads with a
-    // NUL byte so st_name 0 means "no name".
-    if (!format::pad_to(&writer->symtab, format::Limit.symbol_size as usize) || !emit_u8(&writer->strtab, 0)) {
+    // Symbol 0 是强制的全零 entry；string table 以 NUL 开头，使 st_name 0 表示无名字。
+    if (!pad_to(&writer->symtab, Limit.symbol_size as usize) || !emit_u8(&writer->strtab, 0)) {
         return save_fail(writer, runtime::Error.out_of_memory);
     }
     let symbol_total: usize = object::symbol_count(object);
@@ -351,8 +341,8 @@ fn save_symbols(writer: *Writer, object: object::Object, plan: *SavePlan) -> boo
         }
         index += 1;
     }
-    // Locals first, then globals, preserving model order within each class;
-    // GNU ld requires the local block ahead of sh_info.
+    // 先 local 后 global，并在各自类别中保持模型顺序；GNU ld 要求 local block 位于
+    // sh_info 之前。
     var symtab_index: usize = 1;
     var pass: usize = 0;
     while (pass < 2) {
@@ -389,15 +379,15 @@ fn save_relocations(writer: *Writer, object: object::Object) -> bool {
         let relocation: object::Relocation = result.relocation;
         var relocation_type: usize = 0;
         if (relocation.kind == object::RelocationKind.absolute64) {
-            relocation_type = format::RelocationType.absolute64 as usize;
+            relocation_type = RelocationType.absolute64 as usize;
         } else if (relocation.kind == object::RelocationKind.pc32) {
-            relocation_type = format::RelocationType.pc32 as usize;
+            relocation_type = RelocationType.pc32 as usize;
         } else if (relocation.kind == object::RelocationKind.plt32) {
-            relocation_type = format::RelocationType.plt32 as usize;
+            relocation_type = RelocationType.plt32 as usize;
         } else if (relocation.kind == object::RelocationKind.absolute32) {
-            relocation_type = format::RelocationType.absolute32 as usize;
+            relocation_type = RelocationType.absolute32 as usize;
         } else if (relocation.kind == object::RelocationKind.signed32) {
-            relocation_type = format::RelocationType.signed32 as usize;
+            relocation_type = RelocationType.signed32 as usize;
         } else {
             return save_fail(writer, runtime::Error.invalid_argument);
         }
@@ -424,15 +414,15 @@ fn save_relocations(writer: *Writer, object: object::Object) -> bool {
 fn save_sections(writer: *Writer, object: object::Object, plan: *SavePlan) -> bool {
     if (!emit_u8(&writer->shstrtab, 0) ||
         !save_add_section(
-            writer, 0, format::SectionType.none as usize, 0, 0, 0, 0, 0, 0, SectionSource.none as usize)) {
+            writer, 0, SectionType.none as usize, 0, 0, 0, 0, 0, 0, SectionSource.none as usize)) {
         return save_fail(writer, runtime::Error.out_of_memory);
     }
     var name: usize = 0;
     if (plan->text_section != 0) {
         if (!save_section_name(writer, ".text", 5, &name) ||
             !save_add_section(
-                writer, name, format::SectionType.progbits as usize,
-                (format::SectionFlag.alloc as usize) | (format::SectionFlag.execute as usize), object.text.length, 0, 0,
+                writer, name, SectionType.progbits as usize,
+                (SectionFlag.alloc as usize) | (SectionFlag.execute as usize), object.text.length, 0, 0,
                 object.text_alignment, 0, SectionSource.text as usize)) {
             return false;
         }
@@ -440,7 +430,7 @@ fn save_sections(writer: *Writer, object: object::Object, plan: *SavePlan) -> bo
     if (plan->rodata_section != 0) {
         if (!save_section_name(writer, ".rodata", 7, &name) ||
             !save_add_section(
-                writer, name, format::SectionType.progbits as usize, format::SectionFlag.alloc as usize,
+                writer, name, SectionType.progbits as usize, SectionFlag.alloc as usize,
                 object.rodata.length, 0, 0, object.rodata_alignment, 0, SectionSource.rodata as usize)) {
             return false;
         }
@@ -448,8 +438,8 @@ fn save_sections(writer: *Writer, object: object::Object, plan: *SavePlan) -> bo
     if (plan->data_section != 0) {
         if (!save_section_name(writer, ".data", 5, &name) ||
             !save_add_section(
-                writer, name, format::SectionType.progbits as usize,
-                (format::SectionFlag.alloc as usize) | (format::SectionFlag.write as usize), object.data.length, 0, 0,
+                writer, name, SectionType.progbits as usize,
+                (SectionFlag.alloc as usize) | (SectionFlag.write as usize), object.data.length, 0, 0,
                 object.data_alignment, 0, SectionSource.data as usize)) {
             return false;
         }
@@ -457,34 +447,34 @@ fn save_sections(writer: *Writer, object: object::Object, plan: *SavePlan) -> bo
     if (plan->bss_section != 0) {
         if (!save_section_name(writer, ".bss", 4, &name) ||
             !save_add_section(
-                writer, name, format::SectionType.nobits as usize,
-                (format::SectionFlag.alloc as usize) | (format::SectionFlag.write as usize), object.bss_size, 0, 0,
+                writer, name, SectionType.nobits as usize,
+                (SectionFlag.alloc as usize) | (SectionFlag.write as usize), object.bss_size, 0, 0,
                 object.bss_alignment, 0, SectionSource.none as usize)) {
             return false;
         }
     }
     if (!save_section_name(writer, ".symtab", 7, &name) ||
         !save_add_section(
-            writer, name, format::SectionType.symtab as usize, 0, writer->symtab.length, plan->strtab_section,
-            plan->first_global, 8, format::Limit.symbol_size as usize, SectionSource.symtab as usize)) {
+            writer, name, SectionType.symtab as usize, 0, writer->symtab.length, plan->strtab_section,
+            plan->first_global, 8, Limit.symbol_size as usize, SectionSource.symtab as usize)) {
         return false;
     }
     if (!save_section_name(writer, ".strtab", 7, &name) ||
         !save_add_section(
-            writer, name, format::SectionType.strtab as usize, 0, writer->strtab.length, 0, 0, 1, 0,
+            writer, name, SectionType.strtab as usize, 0, writer->strtab.length, 0, 0, 1, 0,
             SectionSource.strtab as usize)) {
         return false;
     }
     if (!save_section_name(writer, ".shstrtab", 9, &name) ||
         !save_add_section(
-            writer, name, format::SectionType.strtab as usize, 0, 0, 0, 0, 1, 0, SectionSource.shstrtab as usize)) {
+            writer, name, SectionType.strtab as usize, 0, 0, 0, 0, 1, 0, SectionSource.shstrtab as usize)) {
         return false;
     }
     if (plan->rela_text_section != 0) {
         if (!save_section_name(writer, ".rela.text", 10, &name) ||
             !save_add_section(
-                writer, name, format::SectionType.rela as usize, 0, writer->rela_text.length,
-                plan->symtab_section, plan->text_section, 8, format::Limit.relocation_size as usize,
+                writer, name, SectionType.rela as usize, 0, writer->rela_text.length,
+                plan->symtab_section, plan->text_section, 8, Limit.relocation_size as usize,
                 SectionSource.rela_text as usize)) {
             return false;
         }
@@ -492,8 +482,8 @@ fn save_sections(writer: *Writer, object: object::Object, plan: *SavePlan) -> bo
     if (plan->rela_rodata_section != 0) {
         if (!save_section_name(writer, ".rela.rodata", 12, &name) ||
             !save_add_section(
-                writer, name, format::SectionType.rela as usize, 0, writer->rela_rodata.length,
-                plan->symtab_section, plan->rodata_section, 8, format::Limit.relocation_size as usize,
+                writer, name, SectionType.rela as usize, 0, writer->rela_rodata.length,
+                plan->symtab_section, plan->rodata_section, 8, Limit.relocation_size as usize,
                 SectionSource.rela_rodata as usize)) {
             return false;
         }
@@ -501,17 +491,17 @@ fn save_sections(writer: *Writer, object: object::Object, plan: *SavePlan) -> bo
     if (plan->rela_data_section != 0) {
         if (!save_section_name(writer, ".rela.data", 10, &name) ||
             !save_add_section(
-                writer, name, format::SectionType.rela as usize, 0, writer->rela_data.length,
-                plan->symtab_section, plan->data_section, 8, format::Limit.relocation_size as usize,
+                writer, name, SectionType.rela as usize, 0, writer->rela_data.length,
+                plan->symtab_section, plan->data_section, 8, Limit.relocation_size as usize,
                 SectionSource.rela_data as usize)) {
             return false;
         }
     }
-    // An empty non-allocated .note.GNU-stack: the reader drops it, and host
-    // linkers read it as "no executable stack required".
+    // 空且未分配的 .note.GNU-stack 会被 reader 丢弃，host linker 将其解释为不需要
+    // executable stack。
     if (!save_section_name(writer, ".note.GNU-stack", 15, &name) ||
         !save_add_section(
-            writer, name, format::SectionType.progbits as usize, 0, 0, 0, 0, 1, 0, SectionSource.none as usize)) {
+            writer, name, SectionType.progbits as usize, 0, 0, 0, 0, 1, 0, SectionSource.none as usize)) {
         return false;
     }
     let shstrtab_record: *OutputSection = save_section_at(writer, plan->shstrtab_section);
@@ -523,7 +513,7 @@ fn save_sections(writer: *Writer, object: object::Object, plan: *SavePlan) -> bo
 }
 
 fn save_layout(writer: *Writer, plan: *SavePlan) -> bool {
-    var cursor: usize = format::Limit.header_size as usize;
+    var cursor: usize = Limit.header_size as usize;
     var index: usize = 1;
     let count: usize = save_section_count(writer);
     while (index < count) {
@@ -536,12 +526,12 @@ fn save_layout(writer: *Writer, plan: *SavePlan) -> bool {
             alignment = 1;
         }
         var placed: usize = 0;
-        if (!format::align(cursor, alignment, &placed)) {
+        if (!align(cursor, alignment, &placed)) {
             return save_fail(writer, runtime::Error.out_of_memory);
         }
         section->offset = placed;
         section->alignment = alignment;
-        if (section->kind != (format::SectionType.nobits as usize)) {
+        if (section->kind != (SectionType.nobits as usize)) {
             if (section->size > (18446744073709551615 as usize) - placed) {
                 return save_fail(writer, runtime::Error.out_of_memory);
             }
@@ -550,7 +540,7 @@ fn save_layout(writer: *Writer, plan: *SavePlan) -> bool {
         index += 1;
     }
     var section_offset: usize = 0;
-    if (!format::align(cursor, 8, &section_offset)) {
+    if (!align(cursor, 8, &section_offset)) {
         return save_fail(writer, runtime::Error.out_of_memory);
     }
     plan->section_offset = section_offset;
@@ -588,10 +578,10 @@ fn save_source(writer: *Writer, object: object::Object, source: usize, content: 
 fn save_emit(writer: *Writer, object: object::Object, plan: *SavePlan, output: *bytes::Buffer) -> bool {
     if (!emit_u8(output, 127) || !emit_u8(output, 69) || !emit_u8(output, 76) || !emit_u8(output, 70) ||
         !emit_u8(output, 2) || !emit_u8(output, 1) || !emit_u8(output, 1) || !emit_u8(output, 0) ||
-        !format::pad_to(output, 16) || !emit_u16(output, 1) || !emit_u16(output, 62) || !emit_u32(output, 1) ||
+        !pad_to(output, 16) || !emit_u16(output, 1) || !emit_u16(output, 62) || !emit_u32(output, 1) ||
         !emit_u64(output, 0) || !emit_u64(output, 0) || !emit_u64(output, plan->section_offset as u64) ||
-        !emit_u32(output, 0) || !emit_u16(output, (format::Limit.header_size as usize) as u16) || !emit_u16(output,
-            0) || !emit_u16(output, 0) || !emit_u16(output, (format::Limit.section_size as usize) as u16) ||
+        !emit_u32(output, 0) || !emit_u16(output, (Limit.header_size as usize) as u16) || !emit_u16(output,
+            0) || !emit_u16(output, 0) || !emit_u16(output, (Limit.section_size as usize) as u16) ||
         !emit_u16(output, plan->section_count as u16) || !emit_u16(output, plan->shstrtab_section as u16)) {
         return save_fail(writer, runtime::Error.out_of_memory);
     }
@@ -602,8 +592,8 @@ fn save_emit(writer: *Writer, object: object::Object, plan: *SavePlan, output: *
         if (section == null) {
             return save_fail(writer, runtime::Error.invalid_argument);
         }
-        if (section->kind != (format::SectionType.nobits as usize)) {
-            if (!format::pad_to(output, section->offset)) {
+        if (section->kind != (SectionType.nobits as usize)) {
+            if (!pad_to(output, section->offset)) {
                 return save_fail(writer, runtime::Error.out_of_memory);
             }
             if (section->size != 0) {
@@ -618,7 +608,7 @@ fn save_emit(writer: *Writer, object: object::Object, plan: *SavePlan, output: *
         }
         index += 1;
     }
-    if (!format::pad_to(output, plan->section_offset)) {
+    if (!pad_to(output, plan->section_offset)) {
         return save_fail(writer, runtime::Error.out_of_memory);
     }
     index = 0;
@@ -639,7 +629,7 @@ fn save_emit(writer: *Writer, object: object::Object, plan: *SavePlan, output: *
     return true;
 }
 
-fn save(object: object::Object) -> bytes::BufferResult {
+fn save_object(object: object::Object) -> bytes::BufferResult {
     var writer: Writer = {
         sections = bytes::empty(), shstrtab = bytes::empty(), strtab = bytes::empty(),
         symtab = bytes::empty(), symbol_map = bytes::empty(), rela_text = bytes::empty(),
@@ -659,7 +649,7 @@ fn save(object: object::Object) -> bytes::BufferResult {
     var success: bool = save_plan(&writer, object, &plan) && save_symbols(&writer, object, &plan) &&
         save_relocations(&writer, object) && save_sections(&writer, object, &plan) && save_layout(&writer, &plan);
     if (success) {
-        let total: usize = plan.section_offset + plan.section_count * (format::Limit.section_size as usize);
+        let total: usize = plan.section_offset + plan.section_count * (Limit.section_size as usize);
         let reserved: bytes::BufferResult = bytes::with_capacity(total);
         if (reserved.error != runtime::Error.none) {
             success = save_fail(&writer, reserved.error);

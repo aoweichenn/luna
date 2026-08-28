@@ -1,4 +1,4 @@
-module luna.bootstrap.backend.x86_64.assembler.encoding;
+module luna.compiler.x86.assembler;
 
 fn fail(assembler: *State, error: runtime::Error) -> bool {
     if (assembler != null && assembler->error == runtime::Error.none) {
@@ -76,8 +76,7 @@ fn numeric_reference(target: text::View, number: *usize, forward: *bool) -> bool
     var value: usize = 0;
     for (var index: usize = 0; index + 1 < target.length; index += 1) {
         let digit: u8 = target.data[index];
-        if (!operands::is_decimal_digit(digit) ||
-            value > (18446744073709551615 as usize - (digit - '0') as usize) / 10) {
+        if (!is_decimal_digit(digit) || value > (18446744073709551615 as usize - (digit - '0') as usize) / 10) {
             return false;
         }
         value = value * 10 + (digit - '0') as usize;
@@ -91,7 +90,7 @@ fn bind_symbol_fixup(assembler: *State, fixup: *Fixup, target: text::View) -> bo
     if (assembler->symbol_table == null) {
         return fail(assembler, runtime::Error.invalid_argument);
     }
-    let symbol: symbols::SymbolBindingResult = assembler->symbol_table->reference(target);
+    let symbol: SymbolBindingResult = assembler->symbol_table->reference(target);
     if (symbol.error != runtime::Error.none || symbol.binding == null) {
         let error: runtime::Error = symbol.error == runtime::Error.none ? runtime::Error.invalid_argument :
             symbol.error;
@@ -133,11 +132,11 @@ fn append_symbol_address(assembler: *State, target: text::View) -> bool {
     return append_u64(assembler, 0);
 }
 
-fn rex_for_rm(operand: *const operands::Operand) -> u8 {
-    if (operand->kind == operands::OperandKind.register) {
+fn rex_for_rm(operand: *const Operand) -> u8 {
+    if (operand->kind == OperandKind.register) {
         return operand->register.code >= 8 ? 1 : 0;
     }
-    if (operand->kind != operands::OperandKind.memory || operand->memory.rip_relative) {
+    if (operand->kind != OperandKind.memory || operand->memory.rip_relative) {
         return 0;
     }
     var rex: u8 = operand->memory.base.code >= 8 ? 1 : 0;
@@ -149,7 +148,7 @@ fn rex_for_rm(operand: *const operands::Operand) -> u8 {
 
 fn emit_prefix_opcode(
     assembler: *State, legacy_prefix: u8, rex_w: bool, force_rex: bool, reg_field: u8,
-    rm: *const operands::Operand, opcode_first: u8, opcode_second: u8, opcode_count: usize) -> bool {
+    rm: *const Operand, opcode_first: u8, opcode_second: u8, opcode_count: usize) -> bool {
     if (legacy_prefix != 0 &&
         !append_u8(
             assembler, legacy_prefix)) {
@@ -169,11 +168,11 @@ fn emit_prefix_opcode(
     return append_opcode(assembler, opcode_first, opcode_second, opcode_count);
 }
 
-fn emit_modrm(assembler: *State, reg_field: u8, rm: *const operands::Operand) -> bool {
-    if (rm->kind == operands::OperandKind.register) {
+fn emit_modrm(assembler: *State, reg_field: u8, rm: *const Operand) -> bool {
+    if (rm->kind == OperandKind.register) {
         return append_u8(assembler, ((192 as u8) | ((reg_field & 7) << 3) | (rm->register.code & 7)) as u8);
     }
-    if (rm->kind != operands::OperandKind.memory) {
+    if (rm->kind != OperandKind.memory) {
         return false;
     }
     if (rm->memory.rip_relative) {
@@ -226,7 +225,7 @@ fn emit_modrm(assembler: *State, reg_field: u8, rm: *const operands::Operand) ->
 
 fn emit_rm(
     assembler: *State, legacy_prefix: u8, rex_w: bool, force_rex: bool, opcode_first: u8,
-    opcode_second: u8, opcode_count: usize, reg_field: u8, rm: *const operands::Operand) -> bool {
+    opcode_second: u8, opcode_count: usize, reg_field: u8, rm: *const Operand) -> bool {
     return emit_prefix_opcode(
             assembler, legacy_prefix, rex_w, force_rex, reg_field, rm, opcode_first, opcode_second, opcode_count) &&
         emit_modrm(assembler, reg_field, rm);
@@ -234,8 +233,8 @@ fn emit_rm(
 
 fn emit_relative(
     assembler: *State, opcode_first: u8, opcode_second: u8, opcode_count: usize,
-    operands: *const operands::Operands, kind: FixupKind) -> bool {
-    if (operands->count != 1 || operands->values[0].kind != operands::OperandKind.label ||
+    operands: *const Operands, kind: FixupKind) -> bool {
+    if (operands->count != 1 || operands->values[0].kind != OperandKind.label ||
         !append_opcode(
             assembler, opcode_first, opcode_second, opcode_count)) {
         return false;
@@ -245,7 +244,7 @@ fn emit_relative(
         append_u32(assembler, 0);
 }
 
-fn emit_indirect_transfer(assembler: *State, operand: *const operands::Operand, reg_field: u8) -> bool {
+fn emit_indirect_transfer(assembler: *State, operand: *const Operand, reg_field: u8) -> bool {
     let code: u8 = operand->register.code;
     return (code < 8 || append_u8(assembler, 65)) && append_u8(assembler, 255) &&
         append_u8(assembler, ((192 as u8) | ((reg_field & 7) << 3) | (code & 7)) as u8);
@@ -271,25 +270,24 @@ fn fits_u8(bits: u64) -> bool {
 }
 
 fn emit_binary_alu(
-    assembler: *State, operands: *const operands::Operands, width: usize, register_opcode: u8,
-        immediate_group: u8) -> bool {
-    if (operands->count != 2 || !operands::is_rm(&operands->values[1], width)) {
+    assembler: *State, operands: *const Operands, width: usize, register_opcode: u8, immediate_group: u8) -> bool {
+    if (operands->count != 2 || !is_rm(&operands->values[1], width)) {
         return false;
     }
-    let source: *const operands::Operand = &operands->values[0];
-    let destination: *const operands::Operand = &operands->values[1];
+    let source: *const Operand = &operands->values[0];
+    let destination: *const Operand = &operands->values[1];
     let byte: bool = width == 8;
     let word: bool = width == 16;
     let rex_w: bool = width == 64;
     let legacy: u8 = word ? 102 : 0;
-    if (source->kind == operands::OperandKind.immediate) {
+    if (source->kind == OperandKind.immediate) {
         if ((width == 64 && !fits_i32(source->immediate)) || (width == 32 &&
                 !fits_u32(source->immediate)) || (width == 16 && !fits_u16(source->immediate)) || (width == 8 &&
                 !fits_u8(source->immediate))) {
             return false;
         }
         if (!emit_rm(
-                assembler, legacy, rex_w, byte && destination->kind == operands::OperandKind.register &&
+                assembler, legacy, rex_w, byte && destination->kind == OperandKind.register &&
                     destination->register.code >= 4, byte ? 128 : 129, 0, 1, immediate_group, destination)) {
             return false;
         }
@@ -301,33 +299,33 @@ fn emit_binary_alu(
         }
         return append_u32(assembler, source->immediate as u32);
     }
-    if (!operands::is_gpr(source, width)) {
+    if (!is_gpr(source, width)) {
         return false;
     }
     return emit_rm(
         assembler, legacy, rex_w, byte && (source->register.code >= 4 || (destination->kind ==
-                operands::OperandKind.register && destination->register.code >= 4)), register_opcode, 0, 1,
+                OperandKind.register && destination->register.code >= 4)), register_opcode, 0, 1,
         source->register.code, destination);
 }
 
-fn emit_move(assembler: *State, operands: *const operands::Operands, width: usize) -> bool {
+fn emit_move(assembler: *State, operands: *const Operands, width: usize) -> bool {
     if (operands->count != 2) {
         return false;
     }
-    let source: *const operands::Operand = &operands->values[0];
-    let destination: *const operands::Operand = &operands->values[1];
+    let source: *const Operand = &operands->values[0];
+    let destination: *const Operand = &operands->values[1];
     let byte: bool = width == 8;
     let word: bool = width == 16;
     let rex_w: bool = width == 64;
     let legacy: u8 = word ? 102 : 0;
-    if (source->kind == operands::OperandKind.immediate) {
-        if (!operands::is_rm(destination, width) || (width == 64 && !fits_i32(source->immediate)) || (width == 32 &&
+    if (source->kind == OperandKind.immediate) {
+        if (!is_rm(destination, width) || (width == 64 && !fits_i32(source->immediate)) || (width == 32 &&
                 !fits_u32(source->immediate)) || (width == 16 && !fits_u16(source->immediate)) || (width == 8 &&
                 !fits_u8(source->immediate))) {
             return false;
         }
         if (!emit_rm(
-                assembler, legacy, rex_w, byte && destination->kind == operands::OperandKind.register &&
+                assembler, legacy, rex_w, byte && destination->kind == OperandKind.register &&
                     destination->register.code >= 4, byte ? 198 : 199, 0, 1, 0, destination)) {
             return false;
         }
@@ -339,13 +337,13 @@ fn emit_move(assembler: *State, operands: *const operands::Operands, width: usiz
         }
         return append_u32(assembler, source->immediate as u32);
     }
-    if (operands::is_gpr(source, width) && operands::is_rm(destination, width)) {
+    if (is_gpr(source, width) && is_rm(destination, width)) {
         return emit_rm(
             assembler, legacy, rex_w, byte && (source->register.code >= 4 || (destination->kind ==
-                    operands::OperandKind.register && destination->register.code >= 4)), byte ? 136 : 137, 0, 1,
+                    OperandKind.register && destination->register.code >= 4)), byte ? 136 : 137, 0, 1,
             source->register.code, destination);
     }
-    if (source->kind == operands::OperandKind.memory && operands::is_gpr(destination, width)) {
+    if (source->kind == OperandKind.memory && is_gpr(destination, width)) {
         return emit_rm(
             assembler, legacy, rex_w, byte && destination->register.code >= 4, byte ? 138 : 139, 0, 1,
             destination->register.code, source);
@@ -353,52 +351,51 @@ fn emit_move(assembler: *State, operands: *const operands::Operands, width: usiz
     return false;
 }
 
-fn emit_xmm_move(assembler: *State, operands: *const operands::Operands, double_precision: bool) -> bool {
+fn emit_xmm_move(assembler: *State, operands: *const Operands, double_precision: bool) -> bool {
     if (operands->count != 2) {
         return false;
     }
-    let source: *const operands::Operand = &operands->values[0];
-    let destination: *const operands::Operand = &operands->values[1];
+    let source: *const Operand = &operands->values[0];
+    let destination: *const Operand = &operands->values[1];
     let prefix: u8 = double_precision ? 242 : 243;
-    if (operands::is_xmm(destination) && (operands::is_xmm(source) || source->kind == operands::OperandKind.memory)) {
+    if (is_xmm(destination) && (is_xmm(source) || source->kind == OperandKind.memory)) {
         return emit_rm(assembler, prefix, false, false, 15, 16, 2, destination->register.code, source);
     }
-    if (operands::is_xmm(source) && destination->kind == operands::OperandKind.memory) {
+    if (is_xmm(source) && destination->kind == OperandKind.memory) {
         return emit_rm(assembler, prefix, false, false, 15, 17, 2, source->register.code, destination);
     }
     return false;
 }
 
-fn emit_movd_or_movq(assembler: *State, operands: *const operands::Operands, quad: bool) -> bool {
+fn emit_movd_or_movq(assembler: *State, operands: *const Operands, quad: bool) -> bool {
     if (operands->count != 2) {
         return false;
     }
-    let source: *const operands::Operand = &operands->values[0];
-    let destination: *const operands::Operand = &operands->values[1];
+    let source: *const Operand = &operands->values[0];
+    let destination: *const Operand = &operands->values[1];
     let width: usize = quad ? 64 : 32;
-    if (operands::is_gpr(source, width) && operands::is_xmm(destination)) {
+    if (is_gpr(source, width) && is_xmm(destination)) {
         return emit_rm(assembler, 102, quad, false, 15, 110, 2, destination->register.code, source);
     }
-    if (operands::is_xmm(source) && operands::is_gpr(destination, width)) {
+    if (is_xmm(source) && is_gpr(destination, width)) {
         return emit_rm(assembler, 102, quad, false, 15, 126, 2, source->register.code, destination);
     }
-    if (quad && operands::is_xmm(source) && destination->kind == operands::OperandKind.memory) {
+    if (quad && is_xmm(source) && destination->kind == OperandKind.memory) {
         return emit_rm(assembler, 102, false, false, 15, 214, 2, source->register.code, destination);
     }
-    if (quad && operands::is_xmm(destination) && (source->kind == operands::OperandKind.memory ||
-        operands::is_xmm(source))) {
+    if (quad && is_xmm(destination) && (source->kind == OperandKind.memory || is_xmm(source))) {
         return emit_rm(assembler, 243, false, false, 15, 126, 2, destination->register.code, source);
     }
     return false;
 }
 
 fn emit_extend(
-    assembler: *State, operands: *const operands::Operands, source_width: usize,
+    assembler: *State, operands: *const Operands, source_width: usize,
     destination_width: usize, sign_extend: bool) -> bool {
-    if (operands->count != 2 || !(operands->values[0].kind == operands::OperandKind.memory ||
-          operands::is_gpr(
+    if (operands->count != 2 || !(operands->values[0].kind == OperandKind.memory ||
+          is_gpr(
             &operands->values[0], source_width)) ||
-        !operands::is_gpr(
+        !is_gpr(
             &operands->values[1], destination_width)) {
         return false;
     }
@@ -407,26 +404,26 @@ fn emit_extend(
         return false;
     }
     return emit_rm(
-        assembler, 0, destination_width == 64, operands->values[0].kind == operands::OperandKind.register &&
+        assembler, 0, destination_width == 64, operands->values[0].kind == OperandKind.register &&
             source_width == 8 && operands->values[0].register.code >= 4, 15, second, 2,
         operands->values[1].register.code, &operands->values[0]);
 }
 
-fn emit_unary(assembler: *State, operands: *const operands::Operands, width: usize, group: u8) -> bool {
-    return operands->count == 1 && (operands->values[0].kind == operands::OperandKind.memory ||
-         operands::is_gpr(&operands->values[0], width)) &&
+fn emit_unary(assembler: *State, operands: *const Operands, width: usize, group: u8) -> bool {
+    return operands->count == 1 && (operands->values[0].kind == OperandKind.memory ||
+         is_gpr(&operands->values[0], width)) &&
         emit_rm(assembler, width == 16 ? 102 : 0, width == 64, false, 247, 0, 1, group, &operands->values[0]);
 }
 
-fn emit_shift(assembler: *State, operands: *const operands::Operands, width: usize, group: u8) -> bool {
-    if (operands->count != 2 || !operands::is_gpr(&operands->values[1], width)) {
+fn emit_shift(assembler: *State, operands: *const Operands, width: usize, group: u8) -> bool {
+    if (operands->count != 2 || !is_gpr(&operands->values[1], width)) {
         return false;
     }
-    if (operands->values[0].kind == operands::OperandKind.immediate && operands->values[0].immediate <= 255) {
+    if (operands->values[0].kind == OperandKind.immediate && operands->values[0].immediate <= 255) {
         return emit_rm(assembler, 0, width == 64, false, 193, 0, 1, group, &operands->values[1]) &&
             append_u8(assembler, operands->values[0].immediate as u8);
     }
-    return operands::is_gpr(&operands->values[0], 8) && operands->values[0].register.code == 1 &&
+    return is_gpr(&operands->values[0], 8) && operands->values[0].register.code == 1 &&
         emit_rm(assembler, 0, width == 64, false, 211, 0, 1, group, &operands->values[1]);
 }
 
@@ -434,37 +431,37 @@ fn condition(name: text::View, result: *u8) -> bool {
     if (result == null) {
         return false;
     }
-    if (operands::equal(name, "o", 1)) {
+    if (equal(name, "o", 1)) {
         *result = 0;
-    } else if (operands::equal(name, "no", 2)) {
+    } else if (equal(name, "no", 2)) {
         *result = 1;
-    } else if (operands::equal(name, "b", 1) || operands::equal(name, "c", 1) || operands::equal(name, "nae", 3)) {
+    } else if (equal(name, "b", 1) || equal(name, "c", 1) || equal(name, "nae", 3)) {
         *result = 2;
-    } else if (operands::equal(name, "ae", 2) || operands::equal(name, "nb", 2) || operands::equal(name, "nc", 2)) {
+    } else if (equal(name, "ae", 2) || equal(name, "nb", 2) || equal(name, "nc", 2)) {
         *result = 3;
-    } else if (operands::equal(name, "e", 1) || operands::equal(name, "z", 1)) {
+    } else if (equal(name, "e", 1) || equal(name, "z", 1)) {
         *result = 4;
-    } else if (operands::equal(name, "ne", 2) || operands::equal(name, "nz", 2)) {
+    } else if (equal(name, "ne", 2) || equal(name, "nz", 2)) {
         *result = 5;
-    } else if (operands::equal(name, "be", 2) || operands::equal(name, "na", 2)) {
+    } else if (equal(name, "be", 2) || equal(name, "na", 2)) {
         *result = 6;
-    } else if (operands::equal(name, "a", 1) || operands::equal(name, "nbe", 3)) {
+    } else if (equal(name, "a", 1) || equal(name, "nbe", 3)) {
         *result = 7;
-    } else if (operands::equal(name, "s", 1)) {
+    } else if (equal(name, "s", 1)) {
         *result = 8;
-    } else if (operands::equal(name, "ns", 2)) {
+    } else if (equal(name, "ns", 2)) {
         *result = 9;
-    } else if (operands::equal(name, "p", 1) || operands::equal(name, "pe", 2)) {
+    } else if (equal(name, "p", 1) || equal(name, "pe", 2)) {
         *result = 10;
-    } else if (operands::equal(name, "np", 2) || operands::equal(name, "po", 2)) {
+    } else if (equal(name, "np", 2) || equal(name, "po", 2)) {
         *result = 11;
-    } else if (operands::equal(name, "l", 1) || operands::equal(name, "nge", 3)) {
+    } else if (equal(name, "l", 1) || equal(name, "nge", 3)) {
         *result = 12;
-    } else if (operands::equal(name, "ge", 2) || operands::equal(name, "nl", 2)) {
+    } else if (equal(name, "ge", 2) || equal(name, "nl", 2)) {
         *result = 13;
-    } else if (operands::equal(name, "le", 2) || operands::equal(name, "ng", 2)) {
+    } else if (equal(name, "le", 2) || equal(name, "ng", 2)) {
         *result = 14;
-    } else if (operands::equal(name, "g", 1) || operands::equal(name, "nle", 3)) {
+    } else if (equal(name, "g", 1) || equal(name, "nle", 3)) {
         *result = 15;
     } else {
         return false;
@@ -472,45 +469,44 @@ fn condition(name: text::View, result: *u8) -> bool {
     return true;
 }
 
-fn emit_set(assembler: *State, operands: *const operands::Operands, condition: u8) -> bool {
-    return operands->count == 1 && operands::is_gpr(&operands->values[0], 8) &&
+fn emit_set(assembler: *State, operands: *const Operands, condition: u8) -> bool {
+    return operands->count == 1 && is_gpr(&operands->values[0], 8) &&
         emit_rm(
             assembler, 0, false, operands->values[0].register.code >= 4, 15, ((144 as u8) | condition) as u8, 2, 0,
             &operands->values[0]);
 }
 
-fn emit_sse_binary(assembler: *State, operands: *const operands::Operands, prefix: u8, operation: u8) -> bool {
-    return operands->count == 2 && (operands::is_xmm(&operands->values[0]) || operands->values[0].kind ==
-            operands::OperandKind.memory) && operands::is_xmm(&operands->values[1]) &&
+fn emit_sse_binary(assembler: *State, operands: *const Operands, prefix: u8, operation: u8) -> bool {
+    return operands->count == 2 && (is_xmm(&operands->values[0]) || operands->values[0].kind ==
+            OperandKind.memory) && is_xmm(&operands->values[1]) &&
         emit_rm(
             assembler, prefix, false, false, 15, operation, 2, operands->values[1].register.code, &operands->values[0]);
 }
 
 fn emit_conversion(
-    assembler: *State, operands: *const operands::Operands, prefix: u8, operation: u8, rex_w: bool,
-    source_xmm: bool) -> bool {
+    assembler: *State, operands: *const Operands, prefix: u8, operation: u8, rex_w: bool, source_xmm: bool) -> bool {
     if (operands->count != 2) {
         return false;
     }
     if (source_xmm) {
-        if (!(operands::is_xmm(&operands->values[0]) || operands->values[0].kind == operands::OperandKind.memory) ||
-            !operands::is_gpr(
+        if (!(is_xmm(&operands->values[0]) || operands->values[0].kind == OperandKind.memory) ||
+            !is_gpr(
                 &operands->values[1], rex_w ? 64 : 32)) {
             return false;
         }
-    } else if (!(operands::is_gpr(&operands->values[0], rex_w ? 64 : 32) ||
-        operands->values[0].kind == operands::OperandKind.memory) || !operands::is_xmm(&operands->values[1])) {
+    } else if (!(is_gpr(&operands->values[0], rex_w ? 64 : 32) ||
+        operands->values[0].kind == OperandKind.memory) || !is_xmm(&operands->values[1])) {
         return false;
     }
     return emit_rm(
         assembler, prefix, rex_w, false, 15, operation, 2, operands->values[1].register.code, &operands->values[0]);
 }
 
-fn emit_compare(assembler: *State, operands: *const operands::Operands, width: usize, compare: bool) -> bool {
-    if (operands->count != 2 || !operands::is_rm(&operands->values[1], width)) {
+fn emit_compare(assembler: *State, operands: *const Operands, width: usize, compare: bool) -> bool {
+    if (operands->count != 2 || !is_rm(&operands->values[1], width)) {
         return false;
     }
-    if (operands->values[0].kind == operands::OperandKind.immediate) {
+    if (operands->values[0].kind == OperandKind.immediate) {
         if (!compare || (width == 64 && !fits_i32(operands->values[0].immediate)) || (width == 32 &&
                 !fits_u32(operands->values[0].immediate)) || (width == 8 &&
                 !fits_u8(
@@ -519,33 +515,32 @@ fn emit_compare(assembler: *State, operands: *const operands::Operands, width: u
         }
         let byte: bool = width == 8;
         if (!emit_rm(
-                assembler, 0, width == 64, byte && operands->values[1].kind == operands::OperandKind.register &&
+                assembler, 0, width == 64, byte && operands->values[1].kind == OperandKind.register &&
                     operands->values[1].register.code >= 4, byte ? 128 : 129, 0, 1, 7, &operands->values[1])) {
             return false;
         }
         return byte ? append_u8(assembler, operands->values[0].immediate as u8) :
             append_u32(assembler, operands->values[0].immediate as u32);
     }
-    if (!operands::is_gpr(&operands->values[0], width)) {
+    if (!is_gpr(&operands->values[0], width)) {
         return false;
     }
     let opcode: u8 = compare ? (width == 8 ? 56 : 57) : (width == 8 ? 132 : 133);
     return emit_rm(
         assembler, 0, width == 64, width == 8 && (operands->values[0].register.code >= 4 || (operands->values[1].kind ==
-                operands::OperandKind.register && operands->values[1].register.code >= 4)), opcode, 0, 1,
+                OperandKind.register && operands->values[1].register.code >= 4)), opcode, 0, 1,
         operands->values[0].register.code, &operands->values[1]);
 }
 
-fn emit_imul(assembler: *State, operands: *const operands::Operands, width: usize) -> bool {
-    if (operands->count == 2 && (operands::is_gpr(&operands->values[0], width) || operands->values[0].kind ==
-            operands::OperandKind.memory) && operands::is_gpr(&operands->values[1], width)) {
+fn emit_imul(assembler: *State, operands: *const Operands, width: usize) -> bool {
+    if (operands->count == 2 && (is_gpr(&operands->values[0], width) || operands->values[0].kind ==
+            OperandKind.memory) && is_gpr(&operands->values[1], width)) {
         return emit_rm(
             assembler, 0, width == 64, false, 15, 175, 2, operands->values[1].register.code, &operands->values[0]);
     }
-    if (operands->count == 3 && operands->values[0].kind == operands::OperandKind.immediate &&
-        fits_i32(operands->values[0].immediate) && (operands::is_gpr(&operands->values[1], width) ||
-            operands->values[1].kind ==
-            operands::OperandKind.memory) && operands::is_gpr(&operands->values[2], width)) {
+    if (operands->count == 3 && operands->values[0].kind == OperandKind.immediate &&
+        fits_i32(operands->values[0].immediate) && (is_gpr(&operands->values[1], width) || operands->values[1].kind ==
+            OperandKind.memory) && is_gpr(&operands->values[2], width)) {
         return emit_rm(
                 assembler, 0, width == 64, false, 105, 0, 1, operands->values[2].register.code, &operands->values[1]) &&
             append_u32(assembler, operands->values[0].immediate as u32);
@@ -553,56 +548,54 @@ fn emit_imul(assembler: *State, operands: *const operands::Operands, width: usiz
     return false;
 }
 
-fn encode(assembler: *State, mnemonic: text::View, raw_operands: text::View,
-    operands: *const operands::Operands) -> bool {
-    if (operands::equal(mnemonic, "cld", 3)) {
+fn encode(assembler: *State, mnemonic: text::View, raw_operands: text::View, operands: *const Operands) -> bool {
+    if (equal(mnemonic, "cld", 3)) {
         return operands->count == 0 && append_u8(assembler, 252);
     }
-    if (operands::equal(mnemonic, "std", 3)) {
+    if (equal(mnemonic, "std", 3)) {
         return operands->count == 0 && append_u8(assembler, 253);
     }
-    if (operands::equal(mnemonic, "cltd", 4)) {
+    if (equal(mnemonic, "cltd", 4)) {
         return operands->count == 0 && append_u8(assembler, 153);
     }
-    if (operands::equal(mnemonic, "cqto", 4)) {
+    if (equal(mnemonic, "cqto", 4)) {
         return operands->count == 0 && append_u8(assembler, 72) && append_u8(assembler, 153);
     }
-    if (operands::equal(mnemonic, "leave", 5)) {
+    if (equal(mnemonic, "leave", 5)) {
         return operands->count == 0 && append_u8(assembler, 201);
     }
-    if (operands::equal(mnemonic, "ret", 3)) {
+    if (equal(mnemonic, "ret", 3)) {
         return operands->count == 0 && append_u8(assembler, 195);
     }
-    if (operands::equal(mnemonic, "syscall", 7)) {
+    if (equal(mnemonic, "syscall", 7)) {
         return operands->count == 0 && append_opcode(assembler, 15, 5, 2);
     }
-    if (operands::equal(mnemonic, "ud2", 3)) {
+    if (equal(mnemonic, "ud2", 3)) {
         return operands->count == 0 && append_opcode(assembler, 15, 11, 2);
     }
-    if (operands::equal(mnemonic, "rep", 3)) {
-        if (operands->count != 1 || operands->values[0].kind != operands::OperandKind.label || !append_u8(assembler,
-            243)) {
+    if (equal(mnemonic, "rep", 3)) {
+        if (operands->count != 1 || operands->values[0].kind != OperandKind.label || !append_u8(assembler, 243)) {
             return false;
         }
-        if (operands::equal(raw_operands, "movsb", 5)) {
+        if (equal(raw_operands, "movsb", 5)) {
             return append_u8(assembler, 164);
         }
-        if (operands::equal(raw_operands, "stosb", 5)) {
+        if (equal(raw_operands, "stosb", 5)) {
             return append_u8(assembler, 170);
         }
         return false;
     }
-    if (operands::equal(mnemonic, "pushq", 5)) {
-        if (operands->count != 1 || !operands::is_gpr(&operands->values[0], 64)) {
+    if (equal(mnemonic, "pushq", 5)) {
+        if (operands->count != 1 || !is_gpr(&operands->values[0], 64)) {
             return false;
         }
         let code: u8 = operands->values[0].register.code;
         return (code < 8 || append_u8(assembler, 65)) && append_u8(assembler, ((80 as u8) | (code & 7)) as u8);
     }
-    if (operands::equal(mnemonic, "call", 4) || operands::equal(mnemonic, "jmp", 3)) {
-        let is_call: bool = operands::equal(mnemonic, "call", 4);
+    if (equal(mnemonic, "call", 4) || equal(mnemonic, "jmp", 3)) {
+        let is_call: bool = equal(mnemonic, "call", 4);
         if (operands->count == 1 &&
-            operands::is_gpr(
+            is_gpr(
                 &operands->values[0], 64)) {
             return emit_indirect_transfer(assembler, &operands->values[0], is_call ? 2 : 4);
         }
@@ -612,257 +605,256 @@ fn encode(assembler: *State, mnemonic: text::View, raw_operands: text::View,
     if (mnemonic.length > 1 && mnemonic.data[0] == 'j') {
         var condition_code: u8 = 0;
         if (condition(
-                operands::slice(mnemonic, 1, mnemonic.length - 1), &condition_code)) {
+                slice(mnemonic, 1, mnemonic.length - 1), &condition_code)) {
             return emit_relative(assembler, 15, ((128 as u8) | condition_code) as u8, 2, operands, FixupKind.branch);
         }
     }
-    if (mnemonic.length > 3 && operands::starts_with(mnemonic, "set", 3)) {
+    if (mnemonic.length > 3 && starts_with(mnemonic, "set", 3)) {
         var condition_code: u8 = 0;
         if (condition(
-                operands::slice(mnemonic, 3, mnemonic.length - 3), &condition_code)) {
+                slice(mnemonic, 3, mnemonic.length - 3), &condition_code)) {
             return emit_set(assembler, operands, condition_code);
         }
     }
-    if (operands::equal(mnemonic, "movabsq", 7)) {
-        if (operands->count != 2 || operands->values[0].kind != operands::OperandKind.immediate ||
-            !operands::is_gpr(&operands->values[1], 64)) {
+    if (equal(mnemonic, "movabsq", 7)) {
+        if (operands->count != 2 || operands->values[0].kind != OperandKind.immediate ||
+            !is_gpr(&operands->values[1], 64)) {
             return false;
         }
         let code: u8 = operands->values[1].register.code;
         return append_u8(assembler, code >= 8 ? 73 : 72) && append_u8(assembler, ((184 as u8) | (code & 7)) as u8) &&
             append_u64(assembler, operands->values[0].immediate);
     }
-    if (operands::equal(mnemonic, "movb", 4)) {
+    if (equal(mnemonic, "movb", 4)) {
         return emit_move(assembler, operands, 8);
     }
-    if (operands::equal(mnemonic, "movw", 4)) {
+    if (equal(mnemonic, "movw", 4)) {
         return emit_move(assembler, operands, 16);
     }
-    if (operands::equal(mnemonic, "movl", 4)) {
+    if (equal(mnemonic, "movl", 4)) {
         return emit_move(assembler, operands, 32);
     }
-    if (operands::equal(mnemonic, "movd", 4)) {
+    if (equal(mnemonic, "movd", 4)) {
         return emit_movd_or_movq(assembler, operands, false);
     }
-    if (operands::equal(mnemonic, "movq", 4)) {
-        if ((operands->count == 2 && (operands::is_xmm(&operands->values[0]) ||
-            operands::is_xmm(&operands->values[1]))) &&
+    if (equal(mnemonic, "movq", 4)) {
+        if ((operands->count == 2 && (is_xmm(&operands->values[0]) || is_xmm(&operands->values[1]))) &&
             emit_movd_or_movq(
                 assembler, operands, true)) {
             return true;
         }
         return emit_move(assembler, operands, 64);
     }
-    if (operands::equal(mnemonic, "movss", 5)) {
+    if (equal(mnemonic, "movss", 5)) {
         return emit_xmm_move(assembler, operands, false);
     }
-    if (operands::equal(mnemonic, "movsd", 5)) {
+    if (equal(mnemonic, "movsd", 5)) {
         return emit_xmm_move(assembler, operands, true);
     }
-    if (operands::equal(mnemonic, "movzbl", 6)) {
+    if (equal(mnemonic, "movzbl", 6)) {
         return emit_extend(assembler, operands, 8, 32, false);
     }
-    if (operands::equal(mnemonic, "movsbl", 6)) {
+    if (equal(mnemonic, "movsbl", 6)) {
         return emit_extend(assembler, operands, 8, 32, true);
     }
-    if (operands::equal(mnemonic, "movsbq", 6)) {
+    if (equal(mnemonic, "movsbq", 6)) {
         return emit_extend(assembler, operands, 8, 64, true);
     }
-    if (operands::equal(mnemonic, "movswl", 6)) {
+    if (equal(mnemonic, "movswl", 6)) {
         return emit_extend(assembler, operands, 16, 32, true);
     }
-    if (operands::equal(mnemonic, "movswq", 6)) {
+    if (equal(mnemonic, "movswq", 6)) {
         return emit_extend(assembler, operands, 16, 64, true);
     }
-    if (operands::equal(mnemonic, "movzwl", 6)) {
+    if (equal(mnemonic, "movzwl", 6)) {
         return emit_extend(assembler, operands, 16, 32, false);
     }
-    if (operands::equal(mnemonic, "movslq", 6)) {
-        return operands->count == 2 && (operands::is_gpr(&operands->values[0], 32) ||
-             operands->values[0].kind == operands::OperandKind.memory) && operands::is_gpr(&operands->values[1], 64) &&
+    if (equal(mnemonic, "movslq", 6)) {
+        return operands->count == 2 && (is_gpr(&operands->values[0], 32) ||
+             operands->values[0].kind == OperandKind.memory) && is_gpr(&operands->values[1], 64) &&
             emit_rm(assembler, 0, true, false, 99, 0, 1, operands->values[1].register.code, &operands->values[0]);
     }
-    if (operands::equal(mnemonic, "leaq", 4)) {
-        return operands->count == 2 && operands->values[0].kind == operands::OperandKind.memory &&
-            operands::is_gpr(&operands->values[1], 64) &&
+    if (equal(mnemonic, "leaq", 4)) {
+        return operands->count == 2 && operands->values[0].kind == OperandKind.memory &&
+            is_gpr(&operands->values[1], 64) &&
             emit_rm(assembler, 0, true, false, 141, 0, 1, operands->values[1].register.code, &operands->values[0]);
     }
-    if (operands::equal(mnemonic, "addl", 4)) {
+    if (equal(mnemonic, "addl", 4)) {
         return emit_binary_alu(assembler, operands, 32, 1, 0);
     }
-    if (operands::equal(mnemonic, "addq", 4)) {
+    if (equal(mnemonic, "addq", 4)) {
         return emit_binary_alu(assembler, operands, 64, 1, 0);
     }
-    if (operands::equal(mnemonic, "subl", 4)) {
+    if (equal(mnemonic, "subl", 4)) {
         return emit_binary_alu(assembler, operands, 32, 41, 5);
     }
-    if (operands::equal(mnemonic, "subq", 4)) {
+    if (equal(mnemonic, "subq", 4)) {
         return emit_binary_alu(assembler, operands, 64, 41, 5);
     }
-    if (operands::equal(mnemonic, "andl", 4)) {
+    if (equal(mnemonic, "andl", 4)) {
         return emit_binary_alu(assembler, operands, 32, 33, 4);
     }
-    if (operands::equal(mnemonic, "andb", 4)) {
+    if (equal(mnemonic, "andb", 4)) {
         return emit_binary_alu(assembler, operands, 8, 32, 4);
     }
-    if (operands::equal(mnemonic, "andq", 4)) {
+    if (equal(mnemonic, "andq", 4)) {
         return emit_binary_alu(assembler, operands, 64, 33, 4);
     }
-    if (operands::equal(mnemonic, "orq", 3)) {
+    if (equal(mnemonic, "orq", 3)) {
         return emit_binary_alu(assembler, operands, 64, 9, 1);
     }
-    if (operands::equal(mnemonic, "orb", 3)) {
+    if (equal(mnemonic, "orb", 3)) {
         return emit_binary_alu(assembler, operands, 8, 8, 1);
     }
-    if (operands::equal(mnemonic, "orl", 3)) {
+    if (equal(mnemonic, "orl", 3)) {
         return emit_binary_alu(assembler, operands, 32, 9, 1);
     }
-    if (operands::equal(mnemonic, "xorl", 4)) {
+    if (equal(mnemonic, "xorl", 4)) {
         return emit_binary_alu(assembler, operands, 32, 49, 6);
     }
-    if (operands::equal(mnemonic, "xorq", 4)) {
+    if (equal(mnemonic, "xorq", 4)) {
         return emit_binary_alu(assembler, operands, 64, 49, 6);
     }
-    if (operands::equal(mnemonic, "cmpl", 4)) {
+    if (equal(mnemonic, "cmpl", 4)) {
         return emit_compare(assembler, operands, 32, true);
     }
-    if (operands::equal(mnemonic, "cmpb", 4)) {
+    if (equal(mnemonic, "cmpb", 4)) {
         return emit_compare(assembler, operands, 8, true);
     }
-    if (operands::equal(mnemonic, "cmpq", 4)) {
+    if (equal(mnemonic, "cmpq", 4)) {
         return emit_compare(assembler, operands, 64, true);
     }
-    if (operands::equal(mnemonic, "testl", 5)) {
+    if (equal(mnemonic, "testl", 5)) {
         return emit_compare(assembler, operands, 32, false);
     }
-    if (operands::equal(mnemonic, "testb", 5)) {
+    if (equal(mnemonic, "testb", 5)) {
         return emit_compare(assembler, operands, 8, false);
     }
-    if (operands::equal(mnemonic, "testq", 5)) {
+    if (equal(mnemonic, "testq", 5)) {
         return emit_compare(assembler, operands, 64, false);
     }
-    if (operands::equal(mnemonic, "negq", 4)) {
+    if (equal(mnemonic, "negq", 4)) {
         return emit_unary(assembler, operands, 64, 3);
     }
-    if (operands::equal(mnemonic, "negl", 4)) {
+    if (equal(mnemonic, "negl", 4)) {
         return emit_unary(assembler, operands, 32, 3);
     }
-    if (operands::equal(mnemonic, "notq", 4)) {
+    if (equal(mnemonic, "notq", 4)) {
         return emit_unary(assembler, operands, 64, 2);
     }
-    if (operands::equal(mnemonic, "notl", 4)) {
+    if (equal(mnemonic, "notl", 4)) {
         return emit_unary(assembler, operands, 32, 2);
     }
-    if (operands::equal(mnemonic, "divq", 4)) {
+    if (equal(mnemonic, "divq", 4)) {
         return emit_unary(assembler, operands, 64, 6);
     }
-    if (operands::equal(mnemonic, "divl", 4)) {
+    if (equal(mnemonic, "divl", 4)) {
         return emit_unary(assembler, operands, 32, 6);
     }
-    if (operands::equal(mnemonic, "idivl", 5)) {
+    if (equal(mnemonic, "idivl", 5)) {
         return emit_unary(assembler, operands, 32, 7);
     }
-    if (operands::equal(mnemonic, "idivq", 5)) {
+    if (equal(mnemonic, "idivq", 5)) {
         return emit_unary(assembler, operands, 64, 7);
     }
-    if (operands::equal(mnemonic, "imull", 5)) {
+    if (equal(mnemonic, "imull", 5)) {
         return emit_imul(assembler, operands, 32);
     }
-    if (operands::equal(mnemonic, "imulq", 5)) {
+    if (equal(mnemonic, "imulq", 5)) {
         return emit_imul(assembler, operands, 64);
     }
-    if (operands::equal(mnemonic, "shlq", 4)) {
+    if (equal(mnemonic, "shlq", 4)) {
         return emit_shift(assembler, operands, 64, 4);
     }
-    if (operands::equal(mnemonic, "shll", 4)) {
+    if (equal(mnemonic, "shll", 4)) {
         return emit_shift(assembler, operands, 32, 4);
     }
-    if (operands::equal(mnemonic, "shrq", 4)) {
+    if (equal(mnemonic, "shrq", 4)) {
         return emit_shift(assembler, operands, 64, 5);
     }
-    if (operands::equal(mnemonic, "shrl", 4)) {
+    if (equal(mnemonic, "shrl", 4)) {
         return emit_shift(assembler, operands, 32, 5);
     }
-    if (operands::equal(mnemonic, "sarl", 4)) {
+    if (equal(mnemonic, "sarl", 4)) {
         return emit_shift(assembler, operands, 32, 7);
     }
-    if (operands::equal(mnemonic, "sarq", 4)) {
+    if (equal(mnemonic, "sarq", 4)) {
         return emit_shift(assembler, operands, 64, 7);
     }
-    if (operands::equal(mnemonic, "ldmxcsr", 7)) {
-        return operands->count == 1 && operands->values[0].kind == operands::OperandKind.memory &&
+    if (equal(mnemonic, "ldmxcsr", 7)) {
+        return operands->count == 1 && operands->values[0].kind == OperandKind.memory &&
             emit_rm(assembler, 0, false, false, 15, 174, 2, 2, &operands->values[0]);
     }
-    if (operands::equal(mnemonic, "addsd", 5)) {
+    if (equal(mnemonic, "addsd", 5)) {
         return emit_sse_binary(assembler, operands, 242, 88);
     }
-    if (operands::equal(mnemonic, "mulsd", 5)) {
+    if (equal(mnemonic, "mulsd", 5)) {
         return emit_sse_binary(assembler, operands, 242, 89);
     }
-    if (operands::equal(mnemonic, "addss", 5)) {
+    if (equal(mnemonic, "addss", 5)) {
         return emit_sse_binary(assembler, operands, 243, 88);
     }
-    if (operands::equal(mnemonic, "mulss", 5)) {
+    if (equal(mnemonic, "mulss", 5)) {
         return emit_sse_binary(assembler, operands, 243, 89);
     }
-    if (operands::equal(mnemonic, "subss", 5)) {
+    if (equal(mnemonic, "subss", 5)) {
         return emit_sse_binary(assembler, operands, 243, 92);
     }
-    if (operands::equal(mnemonic, "subsd", 5)) {
+    if (equal(mnemonic, "subsd", 5)) {
         return emit_sse_binary(assembler, operands, 242, 92);
     }
-    if (operands::equal(mnemonic, "divss", 5)) {
+    if (equal(mnemonic, "divss", 5)) {
         return emit_sse_binary(assembler, operands, 243, 94);
     }
-    if (operands::equal(mnemonic, "divsd", 5)) {
+    if (equal(mnemonic, "divsd", 5)) {
         return emit_sse_binary(assembler, operands, 242, 94);
     }
-    if (operands::equal(mnemonic, "sqrtsd", 6)) {
+    if (equal(mnemonic, "sqrtsd", 6)) {
         return emit_sse_binary(assembler, operands, 242, 81);
     }
-    if (operands::equal(mnemonic, "sqrtss", 6)) {
+    if (equal(mnemonic, "sqrtss", 6)) {
         return emit_sse_binary(assembler, operands, 243, 81);
     }
-    if (operands::equal(mnemonic, "minsd", 5)) {
+    if (equal(mnemonic, "minsd", 5)) {
         return emit_sse_binary(assembler, operands, 242, 93);
     }
-    if (operands::equal(mnemonic, "minss", 5)) {
+    if (equal(mnemonic, "minss", 5)) {
         return emit_sse_binary(assembler, operands, 243, 93);
     }
-    if (operands::equal(mnemonic, "maxsd", 5)) {
+    if (equal(mnemonic, "maxsd", 5)) {
         return emit_sse_binary(assembler, operands, 242, 95);
     }
-    if (operands::equal(mnemonic, "maxss", 5)) {
+    if (equal(mnemonic, "maxss", 5)) {
         return emit_sse_binary(assembler, operands, 243, 95);
     }
-    if (operands::equal(mnemonic, "ucomiss", 7)) {
+    if (equal(mnemonic, "ucomiss", 7)) {
         return emit_sse_binary(assembler, operands, 0, 46);
     }
-    if (operands::equal(mnemonic, "ucomisd", 7)) {
+    if (equal(mnemonic, "ucomisd", 7)) {
         return emit_sse_binary(assembler, operands, 102, 46);
     }
-    if (operands::equal(mnemonic, "cvtss2sd", 8)) {
+    if (equal(mnemonic, "cvtss2sd", 8)) {
         return emit_sse_binary(assembler, operands, 243, 90);
     }
-    if (operands::equal(mnemonic, "cvtsd2ss", 8)) {
+    if (equal(mnemonic, "cvtsd2ss", 8)) {
         return emit_sse_binary(assembler, operands, 242, 90);
     }
-    if (operands::equal(mnemonic, "cvtsi2sdq", 9)) {
+    if (equal(mnemonic, "cvtsi2sdq", 9)) {
         return emit_conversion(assembler, operands, 242, 42, true, false);
     }
-    if (operands::equal(mnemonic, "cvtsi2ssq", 9)) {
+    if (equal(mnemonic, "cvtsi2ssq", 9)) {
         return emit_conversion(assembler, operands, 243, 42, true, false);
     }
-    if (operands::equal(mnemonic, "cvttss2si", 9)) {
+    if (equal(mnemonic, "cvttss2si", 9)) {
         return emit_conversion(assembler, operands, 243, 44, false, true);
     }
-    if (operands::equal(mnemonic, "cvttss2siq", 10)) {
+    if (equal(mnemonic, "cvttss2siq", 10)) {
         return emit_conversion(assembler, operands, 243, 44, true, true);
     }
-    if (operands::equal(mnemonic, "cvttsd2si", 9)) {
+    if (equal(mnemonic, "cvttsd2si", 9)) {
         return emit_conversion(assembler, operands, 242, 44, false, true);
     }
-    if (operands::equal(mnemonic, "cvttsd2siq", 10)) {
+    if (equal(mnemonic, "cvttsd2siq", 10)) {
         return emit_conversion(assembler, operands, 242, 44, true, true);
     }
     return false;

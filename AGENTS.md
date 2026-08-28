@@ -55,7 +55,10 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
 2. Land the feature behind the green `verify` + `test` gate first.
 3. Only then may compiler sources adopt the feature; re-run `verify`.
 4. Promote a verified toolchain into `anchor/` with refreshed
-   `SHA256SUMS` and a provenance note.
+   `SHA256SUMS` and a provenance note. Whenever the user asks to commit and
+   push a completed change under `library/`, `compiler/` or `drivers/`, this
+   promotion is automatic and belongs in the same pushed change; do not wait
+   for a separate reminder.
 
 ## Style
 
@@ -118,10 +121,18 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
   method families or passes, not arbitrary line counts. Empty/one-line
   implementation units and `common`, `misc`, `helpers`, `utils`, `api` or
   `model` dumping-ground files are forbidden.
+- A non-generic `.lh` is a narrow contract, not an implementation container,
+  and should normally remain below 250 lines. Keep algorithms and method
+  bodies in same-module `.la` files; only exported generic bodies may remain
+  in an interface when cross-module monomorphization requires them.
 - Directories follow the same rule in every tree: they represent either a real
   module or multiple cohesive implementation families of one substantial
   module. Collapse repeated single-child directories; do not create a
   directory for one trivial file.
+- New or rewritten directories do not mix ordinary source files with child
+  source directories: a level contains module/family directories or files,
+  not both. A real module directory may contain one facade and several
+  cohesive implementation files without creating deeper pass directories.
 - Module names are short dependency names, not file paths. The modernization
   target uses `luna.compiler.*`; the historical `luna.bootstrap.*` prefix is
   being removed and must not appear in new modules. `api`, `model`, `state`,
@@ -159,16 +170,14 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
 - `library/src/` — runtime, Linux syscall and standard-library
   implementations: allocation, byte buffers, checked arithmetic, ASCII
   classification, binary encoding, UTF-8 text, paths and file I/O.
-- `compiler/include/luna/bootstrap/` — compiler interface units,
-  mirroring the `luna.bootstrap.*` module namespace.
+- `compiler/include/luna/{bootstrap,compiler}/` — transitional historical
+  interfaces and contracted `luna.compiler.*` interfaces respectively.
 - `compiler/src/` — `frontend/` (lexer, syntax, parser over
   `parser/{state,expression,statements,declarations}`), `middleend/`
   (type, ir + `ir/verify`, sema, `semantic/*` — see Style for the
-  lowering order), `backend/x86_64/` (text, abi, frame, codegen over
-  `codegen/{support,instruction/{value,call}}`, object, elf over
-  `elf/{format,reader,writer}`, assembler over
-  `assembler/{operands,encoding,source}`, linker). Correctness-first,
-  no optimization.
+  lowering order), and `backend/x86_64/{text,codegen,object,elf,assembler,
+  linker}/`. Each backend directory is one module and contains only its
+  facade/pass implementation files. Correctness-first, no optimization.
 - `drivers/include/luna/tools/` and `drivers/src/` — the shared CLI service,
   independent compile/assemble/link command services and single freestanding
   `luna` entry point.

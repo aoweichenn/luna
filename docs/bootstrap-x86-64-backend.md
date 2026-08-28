@@ -17,15 +17,14 @@ the project-owned assembler.
 
 | Module | Responsibility |
 | --- | --- |
-| `luna.bootstrap.backend.x86_64.abi` | recursive System V classification, parameter/return pieces, register-bank rollback and stack-call areas |
-| `luna.bootstrap.backend.x86_64.frame` | deterministic homes for slots, values, aggregate call results and hidden return pointers |
-| `luna.bootstrap.backend.x86_64.text` | checked, owned assembly-byte construction |
-| `luna.bootstrap.backend.x86_64.codegen` | complete Typed IR instruction selection, function/call lowering, symbols, globals and entry-point emission |
-| `luna.bootstrap.backend.x86_64.object` | versioned, validated bootstrap sections, symbols, relocations and deterministic serialization |
-| `luna.bootstrap.backend.x86_64.assembler` | strict encoding of the compiler-owned GNU-style x86-64 dialect |
-| `luna.bootstrap.backend.x86_64.linker` | symbol resolution, relocation, W^X layout and direct static ELF64 serialization |
+| `luna.compiler.x86.codegen` | System V ABI, frame planning, Typed IR instruction selection, calls, symbols, globals and entry-point emission |
+| `luna.compiler.x86.text` | checked, owned assembly-byte construction shared by codegen and command drivers |
+| `luna.compiler.x86.object` | versioned, validated sections, symbols, relocations and deterministic serialization |
+| `luna.compiler.x86.elf` | ELF64 reader, writer and format validation |
+| `luna.compiler.x86.assembler` | operand parsing, symbol indexing and strict encoding of the compiler-owned x86-64 dialect |
+| `luna.compiler.x86.linker` | symbol resolution, relocation, W^X layout and direct static ELF64 serialization |
 
-`luna_sysroot` builds deterministic `.lmi` and `.o` files for all seven modules
+`luna_sysroot` builds deterministic `.lmi` and `.o` files for all six modules
 under:
 
 ```text

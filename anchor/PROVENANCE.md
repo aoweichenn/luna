@@ -401,3 +401,27 @@ object and executable artifact was byte-identical. The final suite passed
 one and four workers; wall time fell from 83.24 seconds to 49.44 seconds. The
 promoted executable remains 4,556,630 bytes with SHA-256
 `c2c36ff54455138416afdd2004ea2294c8cfbc68a6c375fc13e7a6987dabb500`.
+
+## 2026-08-28: promotion to the contracted-backend toolchain
+
+The anchor now contains the stage-fixed `luna` executable from the x86-64
+backend module contraction snapshot accompanying this provenance note. The
+historical 20-module `luna.bootstrap.backend.x86_64.*` graph is reduced to six
+short dependency modules under `luna.compiler.x86`: text, codegen, object,
+ELF, assembler and linker. Each module owns one interface and retains its
+facade, ABI, frame, reader, writer, operand, symbol, encoding and instruction
+families as separate implementation files.
+
+The source layout now groups each backend module in one directory containing
+only implementation files; no `x86_64` directory level mixes source files and
+child source directories. Non-generic backend interfaces remain between 13
+and 175 lines. Audit enforces this uniform migrated layout and a 250-line
+ceiling for contracted compiler interfaces.
+
+Remote x86-64 verification on `caw` used the preceding trusted anchor to build
+the transition toolchain, then rebuilt stage-next and stage-fixed with the
+indexed assembler. Every next/fixed assembly, object and executable artifact
+was byte-identical. The final test run passed 443/443 with no skips. Reassembling
+the 3,070,612-byte `sem_funcs.s` took 0.75 seconds and reproduced the transition
+object byte-for-byte. The promoted executable is 4,654,934 bytes with SHA-256
+`86a6c5e2102d036e417171102cd6e58e43be79cbccfabc80ae9b11daba1ecf0f`.

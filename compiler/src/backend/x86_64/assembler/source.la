@@ -1,15 +1,8 @@
-module luna.bootstrap.backend.x86_64.assembler.source;
+module luna.compiler.x86.assembler;
 
-import luna.bootstrap.backend.x86_64.assembler.operands as operands;
-import luna.bootstrap.backend.x86_64.object as object;
-import luna.compiler.x86.symbols as symbols;
-import luna.runtime as runtime;
-import luna.std.binary as binary;
-import luna.std.bytes as bytes;
-import luna.std.checked as checked;
 
 fn symbol_byte_is_valid(value: u8) -> bool {
-    if (operands::is_letter(value) || operands::is_decimal_digit(value)) {
+    if (is_letter(value) || is_decimal_digit(value)) {
         return true;
     }
     let punctuation: [3]u8 = { '_', '.', '$' };
@@ -27,7 +20,7 @@ fn symbol_name_is_valid(name: text::View) -> bool {
     }
     for (var index: usize = 0; index < name.length; index += 1) {
         let value: u8 = name.data[index];
-        let starts_with_digit: bool = index == 0 && operands::is_decimal_digit(value);
+        let starts_with_digit: bool = index == 0 && is_decimal_digit(value);
         if (!symbol_byte_is_valid(value) || starts_with_digit) {
             return false;
         }
@@ -35,57 +28,56 @@ fn symbol_name_is_valid(name: text::View) -> bool {
     return true;
 }
 
-fn get_symbol(assembler: *encoding::State, name: text::View) -> object::IndexResult {
+fn get_symbol(assembler: *State, name: text::View) -> object::IndexResult {
     if (assembler == null || assembler->symbol_table == null) {
         return { index = 0, found = false, error = runtime::Error.invalid_argument };
     }
-    let referenced: symbols::SymbolBindingResult = assembler->symbol_table->reference(name);
+    let referenced: SymbolBindingResult = assembler->symbol_table->reference(name);
     if (referenced.error != runtime::Error.none || referenced.binding == null) {
         let error: runtime::Error = referenced.error == runtime::Error.none ? runtime::Error.invalid_argument :
             referenced.error;
-        encoding::fail(assembler, error);
+        fail(assembler, error);
         return { index = 0, found = false, error = error };
     }
     let result: object::IndexResult = assembler->symbol_table->materialize(&assembler->object, referenced.binding);
     if (result.error != runtime::Error.none) {
-        encoding::fail(assembler, result.error);
+        fail(assembler, result.error);
     }
     return result;
 }
 
-fn define_label(assembler: *encoding::State, name: text::View) -> bool {
-    let section: *bytes::Buffer = encoding::section_buffer(assembler);
+fn define_label(assembler: *State, name: text::View) -> bool {
+    let section: *bytes::Buffer = section_buffer(assembler);
     if (section == null || name.length == 0) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     var numeric: bool = true;
     var number: usize = 0;
     for (var index: usize = 0; index < name.length; index += 1) {
-        if (!operands::is_decimal_digit(name.data[index])) {
+        if (!is_decimal_digit(name.data[index])) {
             numeric = false;
         } else if (numeric) {
             let digit: usize = (name.data[index] - 48) as usize;
             if (number > (18446744073709551615 as usize - digit) / 10) {
-                return encoding::fail(assembler, runtime::Error.invalid_argument);
+                return fail(assembler, runtime::Error.invalid_argument);
             }
             number = number * 10 + digit;
         }
     }
     if (numeric) {
-        let label: encoding::NumericLabel = {
+        let label: NumericLabel = {
             section = assembler->section, offset = section->length, number = number,
         };
         let appended: bytes::BufferResult = bytes::append(
-            assembler->numeric_labels, (&label) as *const encoding::NumericLabel as *const u8,
-                sizeof(encoding::NumericLabel));
+            assembler->numeric_labels, (&label) as *const NumericLabel as *const u8, sizeof(NumericLabel));
         assembler->numeric_labels = appended.buffer;
         if (appended.error != runtime::Error.none) {
-            return encoding::fail(assembler, appended.error);
+            return fail(assembler, appended.error);
         }
         return true;
     }
     if (!symbol_name_is_valid(name)) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     let found: object::IndexResult = get_symbol(assembler, name);
     if (found.error != runtime::Error.none) {
@@ -93,7 +85,7 @@ fn define_label(assembler: *encoding::State, name: text::View) -> bool {
     }
     let symbol: *object::Symbol = object::symbol_mut(&assembler->object, found.index);
     if (symbol == null || symbol->defined || symbol->external) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     symbol->defined = true;
     symbol->section = assembler->section;
@@ -101,10 +93,10 @@ fn define_label(assembler: *encoding::State, name: text::View) -> bool {
     return true;
 }
 
-fn mark_symbol(assembler: *encoding::State, input: text::View, external: bool) -> bool {
-    let name: text::View = operands::trim(input);
+fn mark_symbol(assembler: *State, input: text::View, external: bool) -> bool {
+    let name: text::View = trim(input);
     if (!symbol_name_is_valid(name)) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     let found: object::IndexResult = get_symbol(assembler, name);
     if (found.error != runtime::Error.none) {
@@ -112,100 +104,100 @@ fn mark_symbol(assembler: *encoding::State, input: text::View, external: bool) -
     }
     let symbol: *object::Symbol = object::symbol_mut(&assembler->object, found.index);
     if (symbol == null || (external && symbol->defined)) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     symbol->global = true;
     symbol->external = external;
     return true;
 }
 
-fn symbol_type(assembler: *encoding::State, input: text::View) -> bool {
-    let comma: usize = operands::find(input, ',');
+fn symbol_type(assembler: *State, input: text::View) -> bool {
+    let comma: usize = find(input, ',');
     if (comma == input.length) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
-    let name: text::View = operands::trim(operands::slice(input, 0, comma));
-    let kind: text::View = operands::trim(operands::slice(input, comma + 1, input.length - comma - 1));
+    let name: text::View = trim(slice(input, 0, comma));
+    let kind: text::View = trim(slice(input, comma + 1, input.length - comma - 1));
     if (!symbol_name_is_valid(name)) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     let found: object::IndexResult = get_symbol(assembler, name);
     let symbol: *object::Symbol = object::symbol_mut(&assembler->object, found.index);
     if (found.error != runtime::Error.none || symbol == null) {
         return false;
     }
-    if (operands::equal(kind, "@function", 9)) {
+    if (equal(kind, "@function", 9)) {
         symbol->kind = object::SymbolKind.function;
         return true;
     }
-    if (operands::equal(kind, "@object", 7)) {
+    if (equal(kind, "@object", 7)) {
         symbol->kind = object::SymbolKind.object;
         return true;
     }
-    return encoding::fail(assembler, runtime::Error.invalid_argument);
+    return fail(assembler, runtime::Error.invalid_argument);
 }
 
-fn symbol_size(assembler: *encoding::State, input: text::View) -> bool {
-    let comma: usize = operands::find(input, ',');
+fn symbol_size(assembler: *State, input: text::View) -> bool {
+    let comma: usize = find(input, ',');
     if (comma == input.length) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
-    let name: text::View = operands::trim(operands::slice(input, 0, comma));
-    let expression: text::View = operands::trim(operands::slice(input, comma + 1, input.length - comma - 1));
+    let name: text::View = trim(slice(input, 0, comma));
+    let expression: text::View = trim(slice(input, comma + 1, input.length - comma - 1));
     if (assembler->symbol_table == null) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     let found: object::IndexResult = assembler->symbol_table->find(name);
     let symbol: *object::Symbol = object::symbol_mut(&assembler->object, found.index);
-    let section: *bytes::Buffer = encoding::section_buffer(assembler);
+    let section: *bytes::Buffer = section_buffer(assembler);
     let lookup_is_valid: bool = found.found && found.error == runtime::Error.none;
     let symbol_is_defined: bool = symbol != null && symbol->defined;
     if (!lookup_is_valid || !symbol_is_defined) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     let section_is_valid: bool = symbol->section == assembler->section && section != null;
     let expression_length_is_valid: bool = expression.length == name.length + 2;
     if (!section_is_valid || !expression_length_is_valid) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     let expression_prefix_is_valid: bool = expression.data[0] == '.' && expression.data[1] == '-';
     if (!expression_prefix_is_valid) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     for (var index: usize = 0; index < name.length; index += 1) {
         if (expression.data[index + 2] != name.data[index]) {
-            return encoding::fail(assembler, runtime::Error.invalid_argument);
+            return fail(assembler, runtime::Error.invalid_argument);
         }
     }
     if (symbol->value > section->length) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     symbol->size = section->length - symbol->value;
     return true;
 }
 
-fn alignment(assembler: *encoding::State, input: text::View, exponent: bool) -> bool {
+fn alignment(assembler: *State, input: text::View, exponent: bool) -> bool {
     var parsed: usize = 0;
-    if (!operands::parse_usize(input, &parsed) || (exponent && parsed > 12)) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+    if (!parse_usize(input, &parsed) || (exponent && parsed > 12)) {
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     let alignment: usize = exponent ? 1 << parsed : parsed;
     let alignment_is_valid: bool = alignment != 0 && (alignment & (alignment - 1)) == 0;
     if (!alignment_is_valid) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     if (!object::set_alignment(&assembler->object, assembler->section, alignment)) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
-    let output: *bytes::Buffer = encoding::section_buffer(assembler);
+    let output: *bytes::Buffer = section_buffer(assembler);
     if (output == null) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     let remainder: usize = output->length & (alignment - 1);
     var padding: usize = remainder == 0 ? 0 : alignment - remainder;
     let fill: u8 = assembler->section == object::Section.text ? 144 : 0;
     while (padding != 0) {
-        if (!encoding::append_u8(assembler, fill)) {
+        if (!append_u8(assembler, fill)) {
             return false;
         }
         padding -= 1;
@@ -213,104 +205,102 @@ fn alignment(assembler: *encoding::State, input: text::View, exponent: bool) -> 
     return true;
 }
 
-fn symbol_address(assembler: *encoding::State, input: text::View) -> bool {
-    let name: text::View = operands::trim(input);
+fn symbol_address(assembler: *State, input: text::View) -> bool {
+    let name: text::View = trim(input);
     if (!symbol_name_is_valid(name)) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
-    return encoding::append_symbol_address(assembler, name);
+    return append_symbol_address(assembler, name);
 }
 
-fn directive(assembler: *encoding::State, line: text::View) -> bool {
+fn directive(assembler: *State, line: text::View) -> bool {
     var split: usize = 0;
-    for (; split < line.length && !operands::is_space(line.data[split]); split += 1) {}
-    let directive: text::View = operands::slice(line, 0, split);
-    let arguments: text::View = operands::trim(operands::slice(line, split, line.length - split));
-    if (operands::equal(directive, ".text", 5)) {
+    for (; split < line.length && !is_space(line.data[split]); split += 1) {}
+    let directive: text::View = slice(line, 0, split);
+    let arguments: text::View = trim(slice(line, split, line.length - split));
+    if (equal(directive, ".text", 5)) {
         assembler->section = object::Section.text;
         return true;
     }
-    if (operands::equal(directive, ".data", 5)) {
+    if (equal(directive, ".data", 5)) {
         assembler->section = object::Section.data;
         return true;
     }
-    if (operands::equal(directive, ".section", 8)) {
-        let comma: usize = operands::find(arguments, ',');
-        let name: text::View = operands::trim(operands::slice(arguments, 0,
-            comma == arguments.length ? arguments.length : comma));
-        if (operands::equal(name, ".text", 5)) {
+    if (equal(directive, ".section", 8)) {
+        let comma: usize = find(arguments, ',');
+        let name: text::View = trim(slice(arguments, 0, comma == arguments.length ? arguments.length : comma));
+        if (equal(name, ".text", 5)) {
             assembler->section = object::Section.text;
             return true;
         }
-        if (operands::equal(name, ".rodata", 7)) {
+        if (equal(name, ".rodata", 7)) {
             assembler->section = object::Section.rodata;
             return true;
         }
-        if (operands::equal(name, ".data", 5)) {
+        if (equal(name, ".data", 5)) {
             assembler->section = object::Section.data;
             return true;
         }
-        if (operands::equal(
+        if (equal(
                 name, ".note.GNU-stack", 15)) {
             assembler->section = object::Section.undefined;
             return true;
         }
-        return encoding::fail(assembler, runtime::Error.not_supported);
+        return fail(assembler, runtime::Error.not_supported);
     }
-    if (operands::equal(directive, ".globl", 6)) {
+    if (equal(directive, ".globl", 6)) {
         return mark_symbol(assembler, arguments, false);
     }
-    if (operands::equal(directive, ".extern", 7)) {
+    if (equal(directive, ".extern", 7)) {
         return mark_symbol(assembler, arguments, true);
     }
-    if (operands::equal(directive, ".type", 5)) {
+    if (equal(directive, ".type", 5)) {
         return symbol_type(assembler, arguments);
     }
-    if (operands::equal(directive, ".size", 5)) {
+    if (equal(directive, ".size", 5)) {
         return symbol_size(assembler, arguments);
     }
-    if (operands::equal(directive, ".byte", 5)) {
+    if (equal(directive, ".byte", 5)) {
         var bits: u64 = 0;
-        let value: text::View = operands::trim(arguments);
-        return operands::parse_bits(value, &bits) && encoding::fits_u8(bits) && encoding::append_u8(assembler,
-            bits as u8);
+        let value: text::View = trim(arguments);
+        return parse_bits(value, &bits) && fits_u8(bits) && append_u8(assembler, bits as u8);
     }
-    if (operands::equal(directive, ".quad", 5)) {
+    if (equal(directive, ".quad", 5)) {
         return symbol_address(assembler, arguments);
     }
-    if (operands::equal(directive, ".p2align", 8)) {
+    if (equal(directive, ".p2align", 8)) {
         return alignment(assembler, arguments, true);
     }
-    if (operands::equal(directive, ".balign", 7)) {
+    if (equal(directive, ".balign", 7)) {
         return alignment(assembler, arguments, false);
     }
-    return encoding::fail(assembler, runtime::Error.not_supported);
+    return fail(assembler, runtime::Error.not_supported);
 }
 
-fn instruction(assembler: *encoding::State, line: text::View) -> bool {
+fn instruction(assembler: *State, line: text::View) -> bool {
     if (assembler->section != object::Section.text) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     var split: usize = 0;
-    for (; split < line.length && !operands::is_space(line.data[split]); split += 1) {}
-    let mnemonic: text::View = operands::slice(line, 0, split);
-    let raw_operands: text::View = operands::trim(operands::slice(line, split, line.length - split));
-    var operands: operands::Operands = operands::empty_operands();
-    if (!operands::parse_operands(raw_operands, &operands) ||
-        !encoding::encode(
-            assembler, mnemonic, raw_operands, &operands as *const operands::Operands)) {
-        return encoding::fail(assembler, runtime::Error.not_supported);
+    for (; split < line.length && !is_space(line.data[split]); split += 1) {}
+    let mnemonic: text::View = slice(line, 0, split);
+    let raw_operands: text::View = trim(slice(line, split, line.length - split));
+    var operands: Operands = empty_operands();
+    if (!parse_operands(raw_operands, &operands) ||
+        !encode(
+            assembler, mnemonic, raw_operands, &operands as *const Operands)) {
+        return fail(assembler, runtime::Error.not_supported);
     }
     return true;
 }
 
-fn line(assembler: *encoding::State, input: text::View) -> bool {
-    let line: text::View = operands::trim(input);
+fn line(assembler: *State, input: text::View) -> bool {
+    let line: text::View = trim(input);
     if (line.length == 0) {
         return true;
     }
     if (line.data[line.length - 1] == ':') {
-        return define_label(assembler, operands::slice(line, 0, line.length - 1));
+        return define_label(assembler, slice(line, 0, line.length - 1));
     }
     if (line.data[0] == '.') {
         return directive(assembler, line);
@@ -318,33 +308,33 @@ fn line(assembler: *encoding::State, input: text::View) -> bool {
     return instruction(assembler, line);
 }
 
-fn patch(assembler: *encoding::State, fixup: encoding::Fixup, target: usize) -> bool {
+fn patch(assembler: *State, fixup: Fixup, target: usize) -> bool {
     let output: *bytes::Buffer = fixup.section == object::Section.text ? &assembler->object.text :
         fixup.section == object::Section.rodata ? &assembler->object.rodata :
         fixup.section == object::Section.data ? &assembler->object.data : null;
     var next: usize = 0;
     if (output == null || !checked::range_is_valid(fixup.offset, 4, output->length)) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     let next_is_valid: bool = checked::add(fixup.offset, 4, &next) && next <= 9223372036854775807 as usize;
     if (!next_is_valid || target > 9223372036854775807 as usize) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     let displacement: isize = target as isize - next as isize;
     if (displacement < -2147483648 || displacement > 2147483647) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     return binary::store_u32(&output->data[fixup.offset], displacement as u32);
 }
 
-fn numeric_target(assembler: *const encoding::State, fixup: encoding::Fixup, result: *usize) -> bool {
-    let labels: *const encoding::NumericLabel = assembler->numeric_labels.data as
-            *const encoding::NumericLabel;
-    let count: usize = assembler->numeric_labels.length / sizeof(encoding::NumericLabel);
+fn numeric_target(assembler: *const State, fixup: Fixup, result: *usize) -> bool {
+    let labels: *const NumericLabel = assembler->numeric_labels.data as
+            *const NumericLabel;
+    let count: usize = assembler->numeric_labels.length / sizeof(NumericLabel);
     var found: bool = false;
     var selected: usize = fixup.numeric_forward ? 18446744073709551615 as usize : 0;
     for (var index: usize = 0; index < count; index += 1) {
-        let label: encoding::NumericLabel = labels[index];
+        let label: NumericLabel = labels[index];
         let identity_matches: bool = label.section == fixup.section && label.number == fixup.numeric_label;
         if (!identity_matches) {
             continue;
@@ -370,59 +360,59 @@ fn numeric_target(assembler: *const encoding::State, fixup: encoding::Fixup, res
     return found;
 }
 
-fn resolve_fixups(assembler: *encoding::State) -> bool {
-    let fixups: *const encoding::Fixup = assembler->fixups.data as *const encoding::Fixup;
-    let count: usize = assembler->fixups.length / sizeof(encoding::Fixup);
+fn resolve_fixups(assembler: *State) -> bool {
+    let fixups: *const Fixup = assembler->fixups.data as *const Fixup;
+    let count: usize = assembler->fixups.length / sizeof(Fixup);
     for (var index: usize = 0; index < count; index += 1) {
-        let fixup: encoding::Fixup = fixups[index];
+        let fixup: Fixup = fixups[index];
         assembler->line = fixup.line;
         if (fixup.is_numeric) {
             var target: usize = 0;
-            let numeric_kind_is_valid: bool = fixup.kind != encoding::FixupKind.rip_relative;
-            let target_is_valid: bool = numeric_target(assembler as *const encoding::State, fixup, &target);
+            let numeric_kind_is_valid: bool = fixup.kind != FixupKind.rip_relative;
+            let target_is_valid: bool = numeric_target(assembler as *const State, fixup, &target);
             if (!numeric_kind_is_valid || !target_is_valid) {
-                return encoding::fail(assembler, runtime::Error.invalid_argument);
+                return fail(assembler, runtime::Error.invalid_argument);
             }
             if (!patch(assembler, fixup, target)) {
                 return false;
             }
             continue;
         }
-        let binding: *symbols::SymbolBinding = fixup.symbol;
+        let binding: *SymbolBinding = fixup.symbol;
         if (binding == null) {
-            return encoding::fail(assembler, runtime::Error.invalid_argument);
+            return fail(assembler, runtime::Error.invalid_argument);
         }
         if (!binding->materialized) {
-            if (fixup.kind != encoding::FixupKind.call) {
-                return encoding::fail(assembler, runtime::Error.invalid_argument);
+            if (fixup.kind != FixupKind.call) {
+                return fail(assembler, runtime::Error.invalid_argument);
             }
             let materialized: object::IndexResult = assembler->symbol_table->materialize(&assembler->object, binding);
             if (materialized.error != runtime::Error.none) {
-                return encoding::fail(assembler, materialized.error);
+                return fail(assembler, materialized.error);
             }
         }
         let symbol: *object::Symbol = object::symbol_mut(&assembler->object, binding->index);
         if (symbol == null) {
-            return encoding::fail(assembler, runtime::Error.invalid_argument);
+            return fail(assembler, runtime::Error.invalid_argument);
         }
-        if (!symbol->defined && fixup.kind == encoding::FixupKind.call) {
+        if (!symbol->defined && fixup.kind == FixupKind.call) {
             symbol->global = true;
             symbol->external = true;
         }
         let unresolved_local: bool = !symbol->defined && !symbol->global;
         if (unresolved_local && !symbol->external) {
-            return encoding::fail(assembler, runtime::Error.invalid_argument);
+            return fail(assembler, runtime::Error.invalid_argument);
         }
         let same_section: bool = symbol->defined && symbol->section == fixup.section;
-        if (fixup.kind != encoding::FixupKind.absolute64 && same_section) {
+        if (fixup.kind != FixupKind.absolute64 && same_section) {
             if (!patch(
                     assembler, fixup, symbol->value)) {
                 return false;
             }
             continue;
         }
-        if (fixup.kind == encoding::FixupKind.branch) {
-            return encoding::fail(assembler, runtime::Error.invalid_argument);
+        if (fixup.kind == FixupKind.branch) {
+            return fail(assembler, runtime::Error.invalid_argument);
         }
         if (!symbol->defined) {
             symbol->global = true;
@@ -430,18 +420,18 @@ fn resolve_fixups(assembler: *encoding::State) -> bool {
         var relocation_kind: object::RelocationKind = object::RelocationKind.pc32;
         var addend: isize = -4;
         switch (fixup.kind) {
-        case encoding::FixupKind.call {
+        case FixupKind.call {
             relocation_kind = object::RelocationKind.plt32;
         }
-        case encoding::FixupKind.rip_relative {
+        case FixupKind.rip_relative {
             relocation_kind = object::RelocationKind.pc32;
         }
-        case encoding::FixupKind.absolute64 {
+        case FixupKind.absolute64 {
             relocation_kind = object::RelocationKind.absolute64;
             addend = 0;
         }
         default {
-            return encoding::fail(assembler, runtime::Error.invalid_argument);
+            return fail(assembler, runtime::Error.invalid_argument);
         }
         }
         let relocation: object::Relocation = {
@@ -449,24 +439,24 @@ fn resolve_fixups(assembler: *encoding::State) -> bool {
             kind = relocation_kind, addend = addend,
         };
         if (!object::add_relocation(&assembler->object, relocation)) {
-            return encoding::fail(assembler, assembler->object.error);
+            return fail(assembler, assembler->object.error);
         }
     }
     return true;
 }
 
-fn validate_symbols(assembler: *encoding::State) -> bool {
+fn validate_symbols(assembler: *State) -> bool {
     let count: usize = object::symbol_count(assembler->object);
     let symbol_table_is_valid: bool = assembler->symbol_table != null && assembler->symbol_table->is_valid();
     if (!symbol_table_is_valid || assembler->symbol_table->size() != count) {
-        return encoding::fail(assembler, runtime::Error.invalid_argument);
+        return fail(assembler, runtime::Error.invalid_argument);
     }
     for (var index: usize = 0; index < count; index += 1) {
         let result: object::SymbolResult = object::get_symbol(assembler->object, index);
         let symbol_is_known: bool = result.symbol.defined || result.symbol.global;
         let symbol_has_linkage: bool = symbol_is_known || result.symbol.external;
         if (result.error != runtime::Error.none || !symbol_has_linkage) {
-            return encoding::fail(assembler, runtime::Error.invalid_argument);
+            return fail(assembler, runtime::Error.invalid_argument);
         }
     }
     return true;

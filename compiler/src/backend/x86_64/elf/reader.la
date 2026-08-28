@@ -1,22 +1,12 @@
-module luna.bootstrap.backend.x86_64.elf.reader;
+module luna.compiler.x86.elf;
 
-import luna.bootstrap.backend.x86_64.elf.format as format;
-import luna.runtime as runtime;
-import luna.std.binary as binary;
-import luna.std.bytes as bytes;
-import luna.std.checked as checked;
-import luna.std.text as text;
 
-// Reads ELF64 relocatable objects (ET_REL, as produced by foreign compilers)
-// and converts them into the same in-memory object model the Luna assembler
-// emits, so the linker consumes both through one path. The accepted subset is
-// deliberate: little-endian x86-64 ET_REL with allocated PROGBITS/NOBITS
-// sections, one SHT_SYMTAB and explicit-addend SHT_RELA relocations. TLS,
-// COMDAT groups, writable-executable sections, implicit-addend REL entries
-// and unsupported relocation types are rejected; non-allocated metadata
-// (notes, comments, debug sections) is dropped. Every header field, range,
-// string, symbol reference and relocation reference is validated before its
-// data is used.
+// 读取外部编译器产生的 ELF64 ET_REL，并转换成 Luna assembler 使用的同一内存对象模型，
+// 让 linker 只消费一种表示。支持范围刻意限定为 little-endian x86-64 ET_REL、已分配的
+// PROGBITS/NOBITS section、一个 SHT_SYMTAB 和显式 addend 的 SHT_RELA relocation。
+// TLS、COMDAT、可写且可执行的 section、隐式 addend 的 REL 和未知 relocation 均被拒绝；
+// 未分配的 note/comment/debug metadata 会被丢弃。使用任何字段前都验证 header、范围、
+// 字符串、符号引用和 relocation 引用。
 
 struct Section {
     region: object::Section;
@@ -89,7 +79,7 @@ fn section_copy(reader: *Reader, index: usize) -> Section {
     let section: *Section = section_at(reader, index);
     if (section == null) {
         return {
-            region = object::Section.undefined, region_offset = 0, symbol = format::Limit.no_symbol as usize,
+            region = object::Section.undefined, region_offset = 0, symbol = Limit.no_symbol as usize,
             kind = 0, flags = 0, offset = 0, size = 0, link = 0, info = 0, alignment = 0, entry_size = 0,
         };
     }
@@ -143,30 +133,29 @@ fn parse_header(reader: *Reader) -> bool {
         return fail(reader, runtime::Error.invalid_argument);
     }
     if (elf_type != 1 || machine != 62 || version != 1 || program_count != 0 || header_size !=
-            (format::Limit.header_size as usize) as u16 || section_header_size !=
-            (format::Limit.section_size as usize) as u16 || section_offset == 0 || section_offset >
-            ((length as u64) - (format::Limit.section_size as usize) as u64)) {
+            (Limit.header_size as usize) as u16 || section_header_size !=
+            (Limit.section_size as usize) as u16 || section_offset == 0 || section_offset >
+            ((length as u64) - (Limit.section_size as usize) as u64)) {
         return fail(reader, runtime::Error.invalid_argument);
     }
     var section_count: usize = section_count_field as usize;
     if (section_count == 0) {
-        // Extended section numbering: the real count lives in section 0's
-        // sh_size when e_shnum is zero.
+        // e_shnum 为零时采用扩展 section 编号，真实数量保存在 section 0 的 sh_size。
         var extended: u64 = 0;
         if (!read_u64(bytes, length, (section_offset as usize) + 32, &extended) || extended == 0 ||
-            extended > (format::Limit.maximum_sections as usize) as u64) {
+            extended > (Limit.maximum_sections as usize) as u64) {
             return fail(reader, runtime::Error.invalid_argument);
         }
         section_count = extended as usize;
     }
     let table_offset: usize = section_offset as usize;
-    if (section_count > format::Limit.maximum_sections as usize || section_count >
-        (length - table_offset) / (format::Limit.section_size as usize)) {
+    if (section_count > Limit.maximum_sections as usize || section_count >
+        (length - table_offset) / (Limit.section_size as usize)) {
         return fail(reader, runtime::Error.invalid_argument);
     }
     var index: usize = 0;
     while (index < section_count) {
-        let base: usize = table_offset + index * (format::Limit.section_size as usize);
+        let base: usize = table_offset + index * (Limit.section_size as usize);
         var kind: u32 = 0;
         var flags: u64 = 0;
         var offset: u64 = 0;
@@ -183,7 +172,7 @@ fn parse_header(reader: *Reader) -> bool {
         }
         let section: Section = {
             region = object::Section.undefined, region_offset = 0,
-            symbol = format::Limit.no_symbol as usize, kind = kind as usize, flags = flags as usize,
+            symbol = Limit.no_symbol as usize, kind = kind as usize, flags = flags as usize,
             offset = offset as usize, size = size as usize, link = link as usize, info = info as usize,
             alignment = alignment as usize, entry_size = entry_size as usize,
         };
@@ -203,80 +192,79 @@ fn classify_sections(reader: *Reader) -> bool {
     var index: usize = 0;
     while (index < count) {
         let section: *Section = section_at(reader, index);
-        if (section == null || (index == 0 && section->kind != (format::SectionType.none as usize))) {
+        if (section == null || (index == 0 && section->kind != (SectionType.none as usize))) {
             return fail(reader, runtime::Error.invalid_argument);
         }
         if (section->alignment == 0) {
             section->alignment = 1;
         }
-        if (!power_of_two(section->alignment) || section->alignment > format::Limit.maximum_alignment as usize) {
+        if (!power_of_two(section->alignment) || section->alignment > Limit.maximum_alignment as usize) {
             return fail(reader, runtime::Error.invalid_argument);
         }
-        if ((section->flags & ((format::SectionFlag.group as usize) | (format::SectionFlag.tls as usize))) != 0) {
+        if ((section->flags & ((SectionFlag.group as usize) | (SectionFlag.tls as usize))) != 0) {
             return fail(reader, runtime::Error.not_supported);
         }
-        if ((section->flags & (format::SectionFlag.write as usize)) != 0 &&
-            (section->flags & (format::SectionFlag.execute as usize)) != 0) {
+        if ((section->flags & (SectionFlag.write as usize)) != 0 &&
+            (section->flags & (SectionFlag.execute as usize)) != 0) {
             return fail(reader, runtime::Error.invalid_argument);
         }
-        let alloc: bool = (section->flags & (format::SectionFlag.alloc as usize)) != 0;
-        if (section->kind == (format::SectionType.none as usize)) {
+        let alloc: bool = (section->flags & (SectionFlag.alloc as usize)) != 0;
+        if (section->kind == (SectionType.none as usize)) {
             index += 1;
             continue;
         }
-        if (section->kind == (format::SectionType.progbits as usize)) {
+        if (section->kind == (SectionType.progbits as usize)) {
             if (!alloc) {
                 index += 1;
                 continue;
             }
-            if (section->size > format::Limit.maximum_payload as usize ||
+            if (section->size > Limit.maximum_payload as usize ||
                 !range_valid(section->offset, section->size, reader->length)) {
                 return fail(reader, runtime::Error.invalid_argument);
             }
-            if ((section->flags & (format::SectionFlag.execute as usize)) != 0) {
+            if ((section->flags & (SectionFlag.execute as usize)) != 0) {
                 section->region = object::Section.text;
-            } else if ((section->flags & (format::SectionFlag.write as usize)) != 0) {
+            } else if ((section->flags & (SectionFlag.write as usize)) != 0) {
                 section->region = object::Section.data;
             } else {
                 section->region = object::Section.rodata;
             }
-        } else if (section->kind == (format::SectionType.nobits as usize)) {
+        } else if (section->kind == (SectionType.nobits as usize)) {
             if (!alloc) {
                 index += 1;
                 continue;
             }
-            if ((section->flags & (format::SectionFlag.write as usize)) == 0 || section->size >
-                    format::Limit.maximum_payload as usize) {
+            if ((section->flags & (SectionFlag.write as usize)) == 0 || section->size >
+                    Limit.maximum_payload as usize) {
                 return fail(reader, runtime::Error.invalid_argument);
             }
             section->region = object::Section.bss;
-        } else if (section->kind == (format::SectionType.symtab as usize)) {
-            if (alloc || reader->has_symtab || section->entry_size != format::Limit.symbol_size as usize ||
-                section->size % (format::Limit.symbol_size as usize) != 0 || section->size /
-                    (format::Limit.symbol_size as usize) > format::Limit.maximum_records as usize ||
+        } else if (section->kind == (SectionType.symtab as usize)) {
+            if (alloc || reader->has_symtab || section->entry_size != Limit.symbol_size as usize ||
+                section->size % (Limit.symbol_size as usize) != 0 || section->size /
+                    (Limit.symbol_size as usize) > Limit.maximum_records as usize ||
                 !range_valid(section->offset, section->size, reader->length) || section->link >= count) {
                 return fail(reader, runtime::Error.invalid_argument);
             }
             reader->symtab = index;
             reader->has_symtab = true;
-        } else if (section->kind == (format::SectionType.strtab as usize)) {
+        } else if (section->kind == (SectionType.strtab as usize)) {
             if (alloc || !range_valid(section->offset, section->size, reader->length)) {
                 return fail(reader, runtime::Error.invalid_argument);
             }
-        } else if (section->kind == (format::SectionType.rela as usize)) {
-            if (alloc || section->entry_size != format::Limit.relocation_size as usize || section->size %
-                    (format::Limit.relocation_size as usize) != 0 || section->size /
-                    (format::Limit.relocation_size as usize) > format::Limit.maximum_records as usize ||
+        } else if (section->kind == (SectionType.rela as usize)) {
+            if (alloc || section->entry_size != Limit.relocation_size as usize || section->size %
+                    (Limit.relocation_size as usize) != 0 || section->size /
+                    (Limit.relocation_size as usize) > Limit.maximum_records as usize ||
                 !range_valid(section->offset, section->size, reader->length) || section->link >= count ||
                 section->info >= count) {
                 return fail(reader, runtime::Error.invalid_argument);
             }
-        } else if (section->kind == (format::SectionType.note as usize)) {
-            // Loader metadata (including allocated .note.gnu.property); never
-            // consumed by a static link.
+        } else if (section->kind == (SectionType.note as usize)) {
+            // loader metadata（包括已分配的 .note.gnu.property）不会被静态链接消费。
             index += 1;
             continue;
-        } else if (section->kind == (format::SectionType.rel as usize)) {
+        } else if (section->kind == (SectionType.rel as usize)) {
             return fail(reader, runtime::Error.not_supported);
         } else if (alloc) {
             return fail(reader, runtime::Error.not_supported);
@@ -303,8 +291,8 @@ fn layout_sections(reader: *Reader) -> bool {
         }
         if (section->region == object::Section.bss) {
             var placed: usize = 0;
-            if (!format::align(reader->object.bss_size, section->alignment, &placed) || section->size >
-                    (format::Limit.maximum_payload as usize) - placed) {
+            if (!align(reader->object.bss_size, section->alignment, &placed) || section->size >
+                    (Limit.maximum_payload as usize) - placed) {
                 return fail(reader, runtime::Error.out_of_memory);
             }
             section->region_offset = placed;
@@ -314,8 +302,8 @@ fn layout_sections(reader: *Reader) -> bool {
         }
         let buffer: *bytes::Buffer = region_buffer(&reader->object, section->region);
         var placed: usize = 0;
-        if (buffer == null || !format::align(buffer->length, section->alignment, &placed) || section->size >
-                (format::Limit.maximum_payload as usize) - placed || !format::pad_to(buffer, placed) ||
+        if (buffer == null || !align(buffer->length, section->alignment, &placed) || section->size >
+                (Limit.maximum_payload as usize) - placed || !pad_to(buffer, placed) ||
             !append_bytes(buffer, reader->bytes, section->offset, section->size)) {
             return fail(reader, runtime::Error.out_of_memory);
         }
@@ -333,7 +321,7 @@ fn symbol_name(reader: *Reader, strtab: Section, name_offset: usize, name: *text
     while (name_offset + length < strtab.size && reader->bytes[strtab.offset + name_offset + length] != 0) {
         length += 1;
     }
-    if (name_offset + length >= strtab.size || length > format::Limit.maximum_name as usize) {
+    if (name_offset + length >= strtab.size || length > Limit.maximum_name as usize) {
         return false;
     }
     let view: text::ViewResult = text::view(&reader->bytes[strtab.offset + name_offset], length);
@@ -345,8 +333,7 @@ fn symbol_name(reader: *Reader, strtab: Section, name_offset: usize, name: *text
 }
 
 fn synthetic_name(tag: *const u8, tag_length: usize, index: usize, output: *u8) -> usize {
-    // Synthetic names embed zero bytes, which strtab names by construction
-    // never contain, so they cannot collide with any input symbol name.
+    // 合成名字嵌入零字节，而 strtab 名字按定义不含零字节，因此不会与输入符号重名。
     var length: usize = 0;
     output[length] = 0;
     length += 1;
@@ -403,7 +390,7 @@ fn load_section_symbol(reader: *Reader, st_shndx: usize, st_value: u64, st_size:
     if (target->region == object::Section.undefined) {
         return true;
     }
-    if (target->symbol == (format::Limit.no_symbol as usize)) {
+    if (target->symbol == (Limit.no_symbol as usize)) {
         var name: text::View = {
             data = null, length = 0,
         };
@@ -458,11 +445,10 @@ fn load_undefined_symbol(
 fn load_common_symbol(
     reader: *Reader, strtab: Section, st_name: usize, local: bool, st_value: u64,
     st_size: u64, mapped: *usize) -> bool {
-    // COMMON storage is allocated in bss: st_value carries the required
-    // alignment and st_size the byte count, so objects compiled without
-    // -fno-common stay linkable.
-    if (local || st_name == 0 || st_value > (format::Limit.maximum_alignment as usize) as u64 || st_size >
-            (format::Limit.maximum_payload as usize) as u64) {
+    // COMMON storage 在 bss 中分配：st_value 携带对齐，st_size 携带字节数，因此未使用
+    // -fno-common 编译的对象仍可链接。
+    if (local || st_name == 0 || st_value > (Limit.maximum_alignment as usize) as u64 || st_size >
+            (Limit.maximum_payload as usize) as u64) {
         return fail(reader, runtime::Error.invalid_argument);
     }
     var alignment: usize = st_value as usize;
@@ -473,8 +459,8 @@ fn load_common_symbol(
         return fail(reader, runtime::Error.invalid_argument);
     }
     var placed: usize = 0;
-    if (!format::align(reader->object.bss_size, alignment, &placed) || (st_size as usize) >
-            (format::Limit.maximum_payload as usize) - placed) {
+    if (!align(reader->object.bss_size, alignment, &placed) || (st_size as usize) >
+            (Limit.maximum_payload as usize) - placed) {
         return fail(reader, runtime::Error.out_of_memory);
     }
     var name: text::View = {
@@ -532,9 +518,8 @@ fn load_defined_symbol(
         return fail(reader, added.error);
     }
     if (local && added.found) {
-        // A local symbol sharing its name with another entry (for example an
-        // undefined global reference) is a distinct symbol; relabel it under
-        // a unique synthetic name.
+        // 与其他 entry 同名的 local symbol（例如与未定义 global reference 同名）仍是独立
+        // 符号，必须改用唯一合成名字。
         if (!synthetic_view("local", 5, index, &name)) {
             return fail(reader, runtime::Error.invalid_argument);
         }
@@ -555,9 +540,9 @@ fn load_defined_symbol(
     symbol->section = target.region;
     symbol->value = target.region_offset + (st_value as usize);
     symbol->size = st_size as usize;
-    symbol->kind = symbol_type == (format::SymbolType.function as usize) ? object::SymbolKind.function :
-        (symbol_type == (format::SymbolType.object as usize) || symbol_type ==
-            (format::SymbolType.common as usize)) ? object::SymbolKind.object : object::SymbolKind.none;
+    symbol->kind = symbol_type == (SymbolType.function as usize) ? object::SymbolKind.function :
+        (symbol_type == (SymbolType.object as usize) || symbol_type ==
+            (SymbolType.common as usize)) ? object::SymbolKind.object : object::SymbolKind.none;
     *mapped = added.index;
     return true;
 }
@@ -568,10 +553,10 @@ fn load_symbol(
     if (mapped == null) {
         return fail(reader, runtime::Error.invalid_argument);
     }
-    if (st_other != 0 || st_info >> 4 > (format::SymbolBind.weak as usize)) {
+    if (st_other != 0 || st_info >> 4 > (SymbolBind.weak as usize)) {
         return fail(reader, runtime::Error.not_supported);
     }
-    let local: bool = st_info >> 4 == (format::SymbolBind.local as usize);
+    let local: bool = st_info >> 4 == (SymbolBind.local as usize);
     let symbol_type: usize = st_info & 15;
     if (index == 0) {
         if (st_name != 0 || st_info != 0 || st_shndx != 0 || st_value != 0 || st_size != 0) {
@@ -579,22 +564,22 @@ fn load_symbol(
         }
         return true;
     }
-    if (symbol_type == (format::SymbolType.file as usize)) {
+    if (symbol_type == (SymbolType.file as usize)) {
         return true;
     }
-    if (symbol_type >= (format::SymbolType.tls as usize)) {
+    if (symbol_type >= (SymbolType.tls as usize)) {
         return fail(reader, runtime::Error.not_supported);
     }
-    if (symbol_type == (format::SymbolType.section as usize)) {
+    if (symbol_type == (SymbolType.section as usize)) {
         return load_section_symbol(reader, st_shndx, st_value, st_size, mapped);
     }
-    if (st_shndx == (format::SectionIndex.undefined as usize)) {
+    if (st_shndx == (SectionIndex.undefined as usize)) {
         return load_undefined_symbol(reader, strtab, st_name, local, st_value, st_size, mapped);
     }
-    if (st_shndx == (format::SectionIndex.common as usize)) {
+    if (st_shndx == (SectionIndex.common as usize)) {
         return load_common_symbol(reader, strtab, st_name, local, st_value, st_size, mapped);
     }
-    if (st_shndx >= (format::SectionIndex.reserve_low as usize)) {
+    if (st_shndx >= (SectionIndex.reserve_low as usize)) {
         return fail(reader, runtime::Error.not_supported);
     }
     return load_defined_symbol(reader, strtab, index, st_name, local, st_shndx, st_value, st_size, symbol_type, mapped);
@@ -617,13 +602,13 @@ fn load_symbols(reader: *Reader) -> bool {
     }
     let symtab: Section = section_copy(reader, reader->symtab);
     let strtab: Section = section_copy(reader, symtab.link);
-    if (strtab.kind != (format::SectionType.strtab as usize)) {
+    if (strtab.kind != (SectionType.strtab as usize)) {
         return fail(reader, runtime::Error.invalid_argument);
     }
-    let count: usize = symtab.size / (format::Limit.symbol_size as usize);
+    let count: usize = symtab.size / (Limit.symbol_size as usize);
     var index: usize = 0;
     while (index < count) {
-        let base: usize = symtab.offset + index * (format::Limit.symbol_size as usize);
+        let base: usize = symtab.offset + index * (Limit.symbol_size as usize);
         var st_name: u32 = 0;
         var st_shndx: u16 = 0;
         var st_value: u64 = 0;
@@ -634,7 +619,7 @@ fn load_symbols(reader: *Reader) -> bool {
             !read_u64(reader->bytes, reader->length, base + 16, &st_size)) {
             return fail(reader, runtime::Error.invalid_argument);
         }
-        var mapped: usize = format::Limit.no_symbol as usize;
+        var mapped: usize = Limit.no_symbol as usize;
         if (!load_symbol(
                 reader, strtab, index, st_name as usize, reader->bytes[base + 4] as usize,
                 reader->bytes[base + 5] as usize, st_shndx as usize, st_value, st_size, &mapped) ||
@@ -653,7 +638,7 @@ fn load_relocations(reader: *Reader) -> bool {
     var index: usize = 0;
     while (index < section_count) {
         let section: Section = section_copy(reader, index);
-        if (section.kind != (format::SectionType.rela as usize)) {
+        if (section.kind != (SectionType.rela as usize)) {
             index += 1;
             continue;
         }
@@ -668,10 +653,10 @@ fn load_relocations(reader: *Reader) -> bool {
         if (target.region == object::Section.bss) {
             return fail(reader, runtime::Error.invalid_argument);
         }
-        let count: usize = section.size / (format::Limit.relocation_size as usize);
+        let count: usize = section.size / (Limit.relocation_size as usize);
         var relocation_index: usize = 0;
         while (relocation_index < count) {
-            let base: usize = section.offset + relocation_index * (format::Limit.relocation_size as usize);
+            let base: usize = section.offset + relocation_index * (Limit.relocation_size as usize);
             var offset: u64 = 0;
             var info: u64 = 0;
             var addend: u64 = 0;
@@ -684,21 +669,21 @@ fn load_relocations(reader: *Reader) -> bool {
             let relocation_type: usize = (info & (4294967295 as u64)) as usize;
             var kind: object::RelocationKind = object::RelocationKind.pc32;
             var width: usize = 4;
-            if (relocation_type == (format::RelocationType.absolute64 as usize)) {
+            if (relocation_type == (RelocationType.absolute64 as usize)) {
                 kind = object::RelocationKind.absolute64;
                 width = 8;
-            } else if (relocation_type == (format::RelocationType.pc32 as usize)) {
+            } else if (relocation_type == (RelocationType.pc32 as usize)) {
                 kind = object::RelocationKind.pc32;
-            } else if (relocation_type == (format::RelocationType.plt32 as usize)) {
+            } else if (relocation_type == (RelocationType.plt32 as usize)) {
                 kind = object::RelocationKind.plt32;
-            } else if (relocation_type == (format::RelocationType.absolute32 as usize)) {
+            } else if (relocation_type == (RelocationType.absolute32 as usize)) {
                 kind = object::RelocationKind.absolute32;
-            } else if (relocation_type == (format::RelocationType.signed32 as usize)) {
+            } else if (relocation_type == (RelocationType.signed32 as usize)) {
                 kind = object::RelocationKind.signed32;
             } else {
                 return fail(reader, runtime::Error.not_supported);
             }
-            if (symbol_index >= symbol_count || symbol_map[symbol_index] == (format::Limit.no_symbol as usize) ||
+            if (symbol_index >= symbol_count || symbol_map[symbol_index] == (Limit.no_symbol as usize) ||
                 offset > (target.size as u64) || (width as u64) > (target.size as u64) - offset) {
                 return fail(reader, runtime::Error.invalid_argument);
             }
@@ -718,12 +703,12 @@ fn load_relocations(reader: *Reader) -> bool {
     return true;
 }
 
-fn load(bytes: *const u8, length: usize) -> object::Result {
+fn load_object(bytes: *const u8, length: usize) -> object::Result {
     var reader: Reader = {
         bytes = bytes, length = length, sections = bytes::empty(), symbol_map = bytes::empty(),
         symtab = 0, has_symtab = false, object = object::empty(), error = runtime::Error.none,
     };
-    if (bytes == null || length < format::Limit.header_size as usize) {
+    if (bytes == null || length < Limit.header_size as usize) {
         return {
             object = reader.object, error = runtime::Error.invalid_argument,
         };
@@ -752,4 +737,3 @@ fn load(bytes: *const u8, length: usize) -> object::Result {
         object = reader.object, error = runtime::Error.none,
     };
 }
-

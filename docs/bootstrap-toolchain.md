@@ -133,7 +133,7 @@ standard static ELF64 executable.
 
 ## Assembler contract
 
-`luna.bootstrap.backend.x86_64.assembler` accepts only the directives,
+`luna.compiler.x86.assembler` accepts only the directives,
 registers, operands and integer/SSE instruction forms emitted by the
 correctness-first Luna backend. It supports named and numeric labels,
 compiler-owned section directives, symbol declarations and explicit
@@ -157,7 +157,7 @@ release failures have distinct non-success statuses. Input is capped at
 
 ## Linker contract
 
-`luna.bootstrap.backend.x86_64.linker` accepts at most 64 `LUNAOBJ1` inputs.
+`luna.compiler.x86.linker` accepts at most 64 `LUNAOBJ1` inputs.
 It merges aligned text, read-only-data, writable-data and BSS regions,
 resolves input-local and global symbols, rejects duplicate strong definitions
 and unresolved references, applies all relocations with range checks and

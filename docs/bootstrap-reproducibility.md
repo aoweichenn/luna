@@ -83,8 +83,8 @@ stages compile a deterministic source graph directly.
 
 The Luna backend emits the closed assembly representation already owned by
 the project. Stage 1 and later use
-`luna.bootstrap.backend.x86_64.assembler` to produce validated `LUNAOBJ1`
-objects and `luna.bootstrap.backend.x86_64.linker` to produce the static ELF64
+`luna.compiler.x86.assembler` to produce validated `LUNAOBJ1` objects and
+`luna.compiler.x86.linker` to produce the static ELF64
 tools. The linker builds its direct-syscall wrapper object with that same Luna
 assembler.
 

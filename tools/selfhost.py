@@ -249,46 +249,34 @@ LIBRARIES = {
     ),
     "sem_stmt": compiler_module("luna.bootstrap.middleend.semantic.stmt", "middleend/semantic/stmt"),
     "sema": compiler_module("luna.bootstrap.middleend.sema", "middleend/sema"),
-    "x86_64_text": compiler_module("luna.bootstrap.backend.x86_64.text", "backend/x86_64/text"),
-    "x86_64_abi": compiler_module("luna.bootstrap.backend.x86_64.abi", "backend/x86_64/abi"),
-    "x86_64_frame": compiler_module("luna.bootstrap.backend.x86_64.frame", "backend/x86_64/frame"),
-    "x86_64_codegen_support": compiler_module(
-        "luna.bootstrap.backend.x86_64.codegen.support",
+    "x86_64_text": compiler_module("luna.compiler.x86.text", "backend/x86_64/text/text"),
+    "x86_64_codegen": compiler_module(
+        "luna.compiler.x86.codegen",
+        "backend/x86_64/codegen/abi",
+        "backend/x86_64/codegen/frame",
         "backend/x86_64/codegen/support",
-    ),
-    "x86_64_codegen_instruction_value": compiler_module(
-        "luna.bootstrap.backend.x86_64.codegen.instruction.value",
-        "backend/x86_64/codegen/instruction/value",
-    ),
-    "x86_64_codegen_instruction_call": compiler_module(
-        "luna.bootstrap.backend.x86_64.codegen.instruction.call",
-        "backend/x86_64/codegen/instruction/call",
-    ),
-    "x86_64_codegen_instruction": compiler_module(
-        "luna.bootstrap.backend.x86_64.codegen.instruction",
+        "backend/x86_64/codegen/value",
+        "backend/x86_64/codegen/call",
         "backend/x86_64/codegen/instruction",
+        "backend/x86_64/codegen/facade",
     ),
-    "x86_64_codegen": compiler_module("luna.bootstrap.backend.x86_64.codegen", "backend/x86_64/codegen"),
-    "x86_64_object": compiler_module("luna.bootstrap.backend.x86_64.object", "backend/x86_64/object"),
-    "x86_64_symbols": compiler_module("luna.compiler.x86.symbols", "backend/x86_64/symbols"),
-    "x86_64_elf_format": compiler_module("luna.bootstrap.backend.x86_64.elf.format", "backend/x86_64/elf/format"),
-    "x86_64_elf_reader": compiler_module("luna.bootstrap.backend.x86_64.elf.reader", "backend/x86_64/elf/reader"),
-    "x86_64_elf_writer": compiler_module("luna.bootstrap.backend.x86_64.elf.writer", "backend/x86_64/elf/writer"),
-    "x86_64_elf": compiler_module("luna.bootstrap.backend.x86_64.elf", "backend/x86_64/elf"),
-    "x86_64_assembler_operands": compiler_module(
-        "luna.bootstrap.backend.x86_64.assembler.operands",
+    "x86_64_object": compiler_module("luna.compiler.x86.object", "backend/x86_64/object/object"),
+    "x86_64_elf": compiler_module(
+        "luna.compiler.x86.elf",
+        "backend/x86_64/elf/format",
+        "backend/x86_64/elf/reader",
+        "backend/x86_64/elf/writer",
+        "backend/x86_64/elf/facade",
+    ),
+    "x86_64_assembler": compiler_module(
+        "luna.compiler.x86.assembler",
         "backend/x86_64/assembler/operands",
-    ),
-    "x86_64_assembler_encoding": compiler_module(
-        "luna.bootstrap.backend.x86_64.assembler.encoding",
+        "backend/x86_64/assembler/symbols",
         "backend/x86_64/assembler/encoding",
-    ),
-    "x86_64_assembler_source": compiler_module(
-        "luna.bootstrap.backend.x86_64.assembler.source",
         "backend/x86_64/assembler/source",
+        "backend/x86_64/assembler/facade",
     ),
-    "x86_64_assembler": compiler_module("luna.bootstrap.backend.x86_64.assembler", "backend/x86_64/assembler"),
-    "x86_64_linker": compiler_module("luna.bootstrap.backend.x86_64.linker", "backend/x86_64/linker"),
+    "x86_64_linker": compiler_module("luna.compiler.x86.linker", "backend/x86_64/linker/linker"),
     "tool_cli": driver_module("luna.tools.cli", "cli"),
     "tool_compile": driver_module("luna.tools.compile", "stage_compiler"),
     "tool_assemble": driver_module("luna.tools.assemble", "stage_assembler"),
@@ -464,6 +452,28 @@ def declared_module(path: pathlib.Path) -> tuple[bool, str] | None:
     return bool(exported), name
 
 
+def audit_migrated_layout(errors: list[str]) -> None:
+    backend_root = ROOT / "compiler" / "src" / "backend" / "x86_64"
+    directories = (backend_root, *sorted(path for path in backend_root.rglob("*") if path.is_dir()))
+    for directory in directories:
+        entries = tuple(directory.iterdir())
+        has_sources = any(entry.is_file() and entry.suffix in (".la", ".lh") for entry in entries)
+        has_directories = any(entry.is_dir() for entry in entries)
+        if has_sources and has_directories:
+            errors.append(
+                f"{directory.relative_to(ROOT)} mixes source files and directories"
+            )
+
+    interface_root = ROOT / "compiler" / "include" / "luna" / "compiler"
+    for interface in sorted(interface_root.rglob("*.lh")):
+        line_count = len(interface.read_text(encoding="utf-8").splitlines())
+        if line_count > 250:
+            errors.append(
+                f"{interface.relative_to(ROOT)} exceeds the 250-line interface ceiling "
+                f"({line_count} lines)"
+            )
+
+
 def audit_sources() -> None:
     """Validate the registered module graph and non-mutating source rules."""
     errors: list[str] = []
@@ -562,6 +572,8 @@ def audit_sources() -> None:
     }
     for path in sorted(discovered_paths - registered_paths):
         errors.append(f"unregistered source {path.relative_to(ROOT)}")
+
+    audit_migrated_layout(errors)
 
     for path in source_paths:
         if not path.is_file():

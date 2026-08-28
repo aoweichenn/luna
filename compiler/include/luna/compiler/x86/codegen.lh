@@ -1,0 +1,175 @@
+export module luna.compiler.x86.codegen;
+
+import luna.bootstrap.frontend.lexer as lexer;
+import luna.bootstrap.frontend.syntax as syntax;
+import luna.bootstrap.middleend.ir as ir;
+import luna.bootstrap.middleend.ir.verify as ir_check;
+import luna.bootstrap.middleend.semantic.context as context;
+import luna.bootstrap.middleend.type as type_info;
+import luna.compiler.x86.text as asm_text;
+import luna.runtime;
+import luna.std.ascii as ascii;
+import luna.std.bytes as bytes;
+import luna.std.checked as checked;
+
+enum Class: usize {
+    invalid, no_class, integer, sse, memory,
+}
+
+enum LocationKind: usize {
+    invalid, general_register, vector_register, stack,
+}
+
+struct Classification {
+    eightbyte_count: usize;
+    first: Class;
+    second: Class;
+}
+
+struct Piece {
+    abi_class: Class;
+    location: LocationKind;
+    register_index: usize;
+    value_offset_bytes: usize;
+    size_bytes: usize;
+}
+
+struct Parameter {
+    function_id: usize;
+    parameter_index: usize;
+    abi_class: Class;
+    location: LocationKind;
+    register_index: usize;
+    stack_offset_bytes: usize;
+    stack_size_bytes: usize;
+    type_id: usize;
+    size_bytes: usize;
+    alignment_bytes: usize;
+    first_piece: usize;
+    piece_count: usize;
+    aggregate: bool;
+}
+
+struct Function {
+    function_id: usize;
+    first_parameter: usize;
+    parameter_count: usize;
+    first_return_piece: usize;
+    return_piece_count: usize;
+    return_type: usize;
+    return_size_bytes: usize;
+    return_alignment_bytes: usize;
+    return_aggregate: bool;
+    hidden_return_pointer: bool;
+    general_register_count: usize;
+    vector_register_count: usize;
+    stack_argument_size_bytes: usize;
+    call_frame_size_bytes: usize;
+}
+
+export struct Abi {
+    functions: bytes::Buffer;
+    function_count: usize;
+    parameters: bytes::Buffer;
+    parameter_count: usize;
+    pieces: bytes::Buffer;
+    piece_count: usize;
+    error: runtime::Error;
+}
+
+struct AbiResult {
+    abi: Abi;
+    error: runtime::Error;
+}
+
+struct FunctionResult {
+    function: Function;
+    error: runtime::Error;
+}
+
+struct ParameterResult {
+    parameter: Parameter;
+    error: runtime::Error;
+}
+
+struct PieceResult {
+    piece: Piece;
+    error: runtime::Error;
+}
+
+enum StorageKind: usize {
+    invalid, slot, value, aggregate_call_result, hidden_return_pointer, register_save_area,
+}
+
+struct Storage {
+    function_id: usize;
+    kind: StorageKind;
+    source_id: usize;
+    type_id: usize;
+    offset_bytes: usize;
+    size_bytes: usize;
+    alignment_bytes: usize;
+}
+
+struct Frame {
+    function_id: usize;
+    first_storage: usize;
+    storage_count: usize;
+    frame_size_bytes: usize;
+    // 超过 16 字节的动态对齐会在序言中下调 rsp，所有 frame 引用因此改用 rsp 相对地址。
+    dynamic_alignment: usize;
+}
+
+export struct Plan {
+    frames: bytes::Buffer;
+    frame_count: usize;
+    storage: bytes::Buffer;
+    storage_count: usize;
+    error: runtime::Error;
+}
+
+struct PlanResult {
+    plan: Plan;
+    error: runtime::Error;
+}
+
+struct FrameResult {
+    frame: Frame;
+    error: runtime::Error;
+}
+
+struct StorageResult {
+    storage: Storage;
+    error: runtime::Error;
+}
+
+enum CodegenLimit: usize {
+    maximum_size = 18446744073709551615, text_limit = 4096, general_argument_registers = 6,
+    vector_argument_registers = 8, variadic_stack_slot = 8, call_stack_alignment = 16,
+}
+
+struct CodegenContext {
+    semantic_input: context::Input;
+    ir: ir::Store;
+    types: type_info::Table;
+    abi: Abi;
+    frames: Plan;
+    text: asm_text::Text;
+    current_function: usize;
+    // 该值只在 call 的 subq 与匹配 addq 之间非零，记录当前 outgoing 参数区字节数。
+    call_frame_depth: usize;
+    error: runtime::Error;
+}
+
+export struct BackendResult {
+    assembly: bytes::Buffer;
+    abi: Abi;
+    frames: Plan;
+    error: runtime::Error;
+}
+
+export fn backend_empty() -> BackendResult;
+export fn backend_is_success(
+    result: BackendResult, semantic_input: context::Input, ir: ir::Store, types: type_info::Table) -> bool;
+export fn emit_assembly(semantic_input: context::Input, ir: ir::Store, types: type_info::Table) -> BackendResult;
+export fn backend_release(result: BackendResult) -> runtime::Error;

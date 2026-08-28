@@ -1,0 +1,849 @@
+module luna.compiler.x86.codegen;
+
+
+fn general_register_64(index: usize) -> *const u8 {
+    if (index == 0) {
+        return "%rdi";
+    }
+    if (index == 1) {
+        return "%rsi";
+    }
+    if (index == 2) {
+        return "%rdx";
+    }
+    if (index == 3) {
+        return "%rcx";
+    }
+    if (index == 4) {
+        return "%r8";
+    }
+    return index == 5 ? "%r9" : null;
+}
+
+fn general_register_32(index: usize) -> *const u8 {
+    if (index == 0) {
+        return "%edi";
+    }
+    if (index == 1) {
+        return "%esi";
+    }
+    if (index == 2) {
+        return "%edx";
+    }
+    if (index == 3) {
+        return "%ecx";
+    }
+    if (index == 4) {
+        return "%r8d";
+    }
+    return index == 5 ? "%r9d" : null;
+}
+
+fn vector_register(index: usize) -> *const u8 {
+    if (index == 0) {
+        return "%xmm0";
+    }
+    if (index == 1) {
+        return "%xmm1";
+    }
+    if (index == 2) {
+        return "%xmm2";
+    }
+    if (index == 3) {
+        return "%xmm3";
+    }
+    if (index == 4) {
+        return "%xmm4";
+    }
+    if (index == 5) {
+        return "%xmm5";
+    }
+    if (index == 6) {
+        return "%xmm6";
+    }
+    return index == 7 ? "%xmm7" : null;
+}
+
+fn return_general_register(index: usize) -> *const u8 {
+    if (index == 0) {
+        return "%rax";
+    }
+    return index == 1 ? "%rdx" : null;
+}
+
+fn argument_at(context: *CodegenContext, instruction_id: usize, argument_index: usize) -> usize {
+    let arguments: *const ir::Argument = context->ir.arguments.data as
+            *const ir::Argument;
+    var found: usize = 0;
+    var index: usize = 0;
+    while (index < context->ir.argument_count) {
+        if (arguments[index].instruction_id == instruction_id) {
+            if (found == argument_index) {
+                return arguments[index].value_id;
+            }
+            found += 1;
+        }
+        index += 1;
+    }
+    fail(context, runtime::Error.invalid_argument);
+    return no_id();
+}
+
+fn call_argument_total(context: *CodegenContext, instruction_id: usize) -> usize {
+    let arguments: *const ir::Argument = context->ir.arguments.data as
+            *const ir::Argument;
+    var found: usize = 0;
+    var index: usize = 0;
+    while (index < context->ir.argument_count) {
+        if (arguments[index].instruction_id == instruction_id) {
+            found += 1;
+        }
+        index += 1;
+    }
+    return found;
+}
+
+// 从具名参数结束位置继续沿当前寄存器/栈游标分类一个标量可变参数，并生成现有 call
+// argument emitter 可直接消费的 ABI parameter 记录。
+fn variadic_extra_parameter(
+    context: *CodegenContext, argument: usize, general_used: *usize, vector_used: *usize,
+    stack_cursor: *usize) -> Parameter {
+    let none: usize = no_id();
+    var parameter: Parameter = {
+        function_id = none, parameter_index = none, abi_class = Class.invalid,
+        location = LocationKind.invalid, register_index = none, stack_offset_bytes = none,
+        stack_size_bytes = 0, type_id = none, size_bytes = 0, alignment_bytes = 0, first_piece = none, piece_count = 0,
+        aggregate = false,
+    };
+    if (general_used == null || vector_used == null || stack_cursor == null || context->error != runtime::Error.none) {
+        return parameter;
+    }
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let record: *const type_info::Record = type(context, values[argument].type_id);
+    if (record == null || type_info::is_memory(record->kind)) {
+        return parameter;
+    }
+    parameter.type_id = values[argument].type_id;
+    parameter.size_bytes = record->size_bytes;
+    parameter.alignment_bytes = record->alignment_bytes;
+    parameter.abi_class = type_info::is_float(record->kind) ? Class.sse : Class.integer;
+    if (parameter.abi_class == Class.integer && *general_used < (CodegenLimit.general_argument_registers as usize)) {
+        parameter.location = LocationKind.general_register;
+        parameter.register_index = *general_used;
+        *general_used += 1;
+        return parameter;
+    }
+    if (parameter.abi_class == Class.sse && *vector_used < (CodegenLimit.vector_argument_registers as usize)) {
+        parameter.location = LocationKind.vector_register;
+        parameter.register_index = *vector_used;
+        *vector_used += 1;
+        return parameter;
+    }
+    parameter.location = LocationKind.stack;
+    parameter.stack_offset_bytes = *stack_cursor;
+    parameter.stack_size_bytes = CodegenLimit.variadic_stack_slot as usize;
+    *stack_cursor += CodegenLimit.variadic_stack_slot as usize;
+    return parameter;
+}
+
+fn emit_load_piece(context: *CodegenContext, piece: Piece, destination: *const u8) -> bool {
+    if (piece.size_bytes == 8) {
+        return literal(context, "    movq ") && append_usize(context, piece.value_offset_bytes) &&
+            literal(context, "(%r11), ") && literal(context, destination) && literal(context, "\n");
+    }
+    if (piece.size_bytes == 4) {
+        return literal(context, "    movl ") && append_usize(context, piece.value_offset_bytes) &&
+            literal(context, "(%r11), %eax\n    movq %rax, ") &&
+            literal(context, destination) && literal(context, "\n");
+    }
+    if (piece.size_bytes == 2) {
+        return literal(context, "    movzwl ") && append_usize(context, piece.value_offset_bytes) &&
+            literal(context, "(%r11), %eax\n    movq %rax, ") &&
+            literal(context, destination) && literal(context, "\n");
+    }
+    if (piece.size_bytes == 1) {
+        return literal(context, "    movzbl ") && append_usize(context, piece.value_offset_bytes) &&
+            literal(context, "(%r11), %eax\n    movq %rax, ") &&
+            literal(context, destination) && literal(context, "\n");
+    }
+    if (piece.size_bytes == 0 || piece.size_bytes > 8 ||
+        !literal(
+            context, "    xorq %rax, %rax\n")) {
+        return fail(context, runtime::Error.invalid_argument);
+    }
+    var index: usize = 0;
+    while (index < piece.size_bytes) {
+        if (!literal(context, "    movzbl ") || !append_usize(context, piece.value_offset_bytes + index) ||
+            !literal(context, "(%r11), %r10d\n") || (index != 0 && (!literal(context, "    shlq $") ||
+                !append_usize(context, index * 8) ||
+                !literal(
+                    context, ", %r10\n"))) ||
+            !literal(
+                context, "    orq %r10, %rax\n")) {
+            return false;
+        }
+        index += 1;
+    }
+    return literal(context, "    movq %rax, ") && literal(context, destination) && literal(context, "\n");
+}
+
+fn emit_store_piece(context: *CodegenContext, piece: Piece, source: *const u8) -> bool {
+    if (piece.size_bytes == 0 || piece.size_bytes > 8 || !literal(context, "    movq ") || !literal(context, source) ||
+        !literal(
+            context, ", %r10\n")) {
+        return fail(context, runtime::Error.invalid_argument);
+    }
+    var index: usize = 0;
+    while (index < piece.size_bytes) {
+        if (!literal(context, "    movb %r10b, ") || !append_usize(context, piece.value_offset_bytes + index) ||
+            !literal(context, "(%r11)\n") || (index + 1 != piece.size_bytes &&
+                !literal(
+                    context, "    shrq $8, %r10\n"))) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn emit_call_stack_argument(context: *CodegenContext, parameter: Parameter, argument: usize, external_c: bool) -> bool {
+    let record: *const type_info::Record = type(context, parameter.type_id);
+    if (record == null) {
+        return false;
+    }
+    if (parameter.aggregate) {
+        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+        let pointer_record: *const type_info::Record = type(context, values[argument].type_id);
+        return pointer_record != null && load_integer(context, argument, pointer_record, "%esi", "%rsi", false) &&
+            literal(context, "    leaq ") && append_usize(context, parameter.stack_offset_bytes) &&
+            literal(context, "(%rsp), %rdi\n    movq $") && append_usize(context,
+                parameter.size_bytes) && literal(context, ", %rcx\n    cld\n    rep movsb\n");
+    }
+    if (type_info::is_float(record->kind)) {
+        return load_xmm(context, argument, record, "%xmm0") && literal(context, "    ") &&
+            literal(context, float_move(record)) && literal(context, " %xmm0, ") &&
+            append_usize(context, parameter.stack_offset_bytes) && literal(context, "(%rsp)\n");
+    }
+    let width: usize = bit_width(record);
+    let extend_signed: bool = external_c && is_signed(context, record) && width < 32;
+    return (extend_signed ? load_integer(context, argument, record, "%eax", "%rax", true) :
+            load_rax(context, argument, record)) && literal(context,
+                    width <= 32 ? "    movl %eax, " : "    movq %rax, ") &&
+        append_usize(context, parameter.stack_offset_bytes) && literal(context, "(%rsp)\n");
+}
+
+fn emit_call_register_argument(
+    context: *CodegenContext, parameter: Parameter, argument: usize, external_c: bool) -> bool {
+    let record: *const type_info::Record = type(context, parameter.type_id);
+    if (record == null) {
+        return false;
+    }
+    if (parameter.aggregate) {
+        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+        let pointer_record: *const type_info::Record = type(context, values[argument].type_id);
+        if (pointer_record == null ||
+            !load_integer(
+                context, argument, pointer_record, "%r11d", "%r11", false)) {
+            return false;
+        }
+        let pieces: *const Piece = context->abi.pieces.data as
+                *const Piece;
+        var index: usize = 0;
+        while (index < parameter.piece_count) {
+            let piece: Piece = pieces[parameter.first_piece + index];
+            if (piece.abi_class == Class.integer) {
+                let destination: *const u8 = general_register_64(piece.register_index);
+                if (destination == null ||
+                    !emit_load_piece(
+                        context, piece, destination)) {
+                    return false;
+                }
+            } else {
+                let destination: *const u8 = vector_register(piece.register_index);
+                if (destination == null || (piece.size_bytes != 4 && piece.size_bytes != 8) ||
+                    !literal(context, piece.size_bytes == 4 ? "    movss " : "    movq ") ||
+                    !append_usize(context, piece.value_offset_bytes) || !literal(context,
+                        "(%r11), ") || !literal(context, destination) ||
+                    !literal(
+                        context, "\n")) {
+                    return false;
+                }
+            }
+            index += 1;
+        }
+        return true;
+    }
+    if (parameter.location == LocationKind.vector_register) {
+        let destination: *const u8 = vector_register(parameter.register_index);
+        return destination != null && load_xmm(context, argument, record, destination);
+    }
+    let width: usize = bit_width(record);
+    let destination: *const u8 = width <= 32 ? general_register_32(parameter.register_index) :
+            general_register_64(parameter.register_index);
+    if (destination == null) {
+        return fail(context, runtime::Error.invalid_argument);
+    }
+    return load_integer(
+        context, argument, record, destination, destination, external_c && is_signed(context, record) && width < 32);
+}
+
+fn emit_stack_address(context: *CodegenContext, storage: Storage, suffix: *const u8) -> bool {
+    if (context->error != runtime::Error.none) {
+        return false;
+    }
+    return literal(context, "    leaq ") && append_stack(context, storage) && literal(context, suffix);
+}
+
+fn emit_call_result(context: *CodegenContext, instruction: ir::Instruction, function_abi: Function) -> bool {
+    let record: *const type_info::Record = type(context, instruction.type_id);
+    if (record == null || record->kind == type_info::Kind.type_void) {
+        return record != null;
+    }
+    if (!function_abi.return_aggregate) {
+        if (type_info::is_float(record->kind)) {
+            return store_xmm(context, instruction.result, record, "%xmm0");
+        }
+        if (record->kind == type_info::Kind.boolean &&
+            !literal(
+                context, "    testl %eax, %eax\n    setne %al\n    movzbl %al, %eax\n")) {
+            return false;
+        }
+        return store_rax(context, instruction.result, record);
+    }
+    let direct_destination: bool = instruction.right != no_id();
+    if (direct_destination) {
+        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+        let pointer: *const type_info::Record = type(context, values[instruction.right].type_id);
+        if (pointer == null || !load_integer(context, instruction.right, pointer, "%r11d", "%r11", false)) {
+            return false;
+        }
+    } else {
+        let destination: Storage = storage(context, StorageKind.aggregate_call_result, instruction.result);
+        if (!emit_stack_address(context, destination, ", %r11\n")) {
+            return false;
+        }
+    }
+    if (!function_abi.hidden_return_pointer) {
+        let pieces: *const Piece = context->abi.pieces.data as
+                *const Piece;
+        var index: usize = 0;
+        while (index < function_abi.return_piece_count) {
+            let piece: Piece = pieces[function_abi.first_return_piece + index];
+            if (piece.abi_class == Class.integer) {
+                let source: *const u8 = return_general_register(piece.register_index);
+                if (source == null ||
+                    !emit_store_piece(
+                        context, piece, source)) {
+                    return false;
+                }
+            } else {
+                let source: *const u8 = vector_register(piece.register_index);
+                if (source == null || (piece.size_bytes != 4 && piece.size_bytes != 8) ||
+                    !literal(context, piece.size_bytes == 4 ? "    movss " : "    movq ") ||
+                    !literal(context, source) || !literal(context, ", ") ||
+                    !append_usize(context, piece.value_offset_bytes) ||
+                    !literal(
+                        context, "(%r11)\n")) {
+                    return false;
+                }
+            }
+            index += 1;
+        }
+    }
+    if (direct_destination) {
+        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+        let pointer: *const type_info::Record = type(context, values[instruction.right].type_id);
+        return pointer != null && load_rax(context, instruction.right, pointer) &&
+            literal(context, "    movq %rax, ") && append_value(context, instruction.result) && literal(context, "\n");
+    }
+    let destination: Storage = storage(context, StorageKind.aggregate_call_result, instruction.result);
+    return emit_stack_address(context, destination, ", %rax\n    movq %rax, ") &&
+        append_value(context, instruction.result) && literal(context, "\n");
+}
+
+fn emit_hidden_return_argument(context: *CodegenContext, instruction: ir::Instruction) -> bool {
+    if (instruction.right != no_id()) {
+        let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+        let pointer: *const type_info::Record = type(context, values[instruction.right].type_id);
+        return pointer != null && load_rax(context, instruction.right, pointer) &&
+            literal(context, "    movq %rax, %rdi\n");
+    }
+    let destination: Storage = storage(context, StorageKind.aggregate_call_result, instruction.result);
+    return emit_stack_address(context, destination, ", %rdi\n");
+}
+
+fn function_pointer_abi_index(context: *CodegenContext, type_id: usize) -> usize {
+    let records: *const type_info::Record = context->types.types.data as
+            *const type_info::Record;
+    var ordinal: usize = 0;
+    var index: usize = 0;
+    while (index < type_id) {
+        if (records[index].kind == type_info::Kind.function_pointer) {
+            ordinal += 1;
+        }
+        index += 1;
+    }
+    return context->ir.function_count + ordinal;
+}
+
+fn emit_call_indirect(context: *CodegenContext, instruction: ir::Instruction, instruction_id: usize) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let callee_type: usize = values[instruction.left].type_id;
+    let abi_index: usize = function_pointer_abi_index(context, callee_type);
+    let abi_functions: *const Function = context->abi.functions.data as
+            *const Function;
+    let function_abi: Function = abi_functions[abi_index];
+    let parameters: *const Parameter = context->abi.parameters.data as
+            *const Parameter;
+    if (function_abi.call_frame_size_bytes != 0 && (!literal(context, "    subq $") ||
+        !append_usize(context, function_abi.call_frame_size_bytes) ||
+        !literal(
+            context, ", %rsp\n"))) {
+        return false;
+    }
+    context->call_frame_depth += function_abi.call_frame_size_bytes;
+    var index: usize = 0;
+    while (index < function_abi.parameter_count) {
+        let parameter: Parameter = parameters[function_abi.first_parameter + index];
+        if (parameter.location == LocationKind.stack) {
+            let argument: usize = argument_at(context, instruction_id, index);
+            if (argument == no_id() ||
+                !emit_call_stack_argument(
+                    context, parameter, argument, false)) {
+                return false;
+            }
+        }
+        index += 1;
+    }
+    if (function_abi.hidden_return_pointer) {
+        if (!emit_hidden_return_argument(context, instruction)) {
+            return false;
+        }
+    }
+    index = 0;
+    while (index < function_abi.parameter_count) {
+        let parameter: Parameter = parameters[function_abi.first_parameter + index];
+        if (parameter.location != LocationKind.stack) {
+            let argument: usize = argument_at(context, instruction_id, index);
+            if (argument == no_id() ||
+                !emit_call_register_argument(
+                    context, parameter, argument, false)) {
+                return false;
+            }
+        }
+        index += 1;
+    }
+    if (!load_rax(context, instruction.left, type(context, callee_type)) ||
+        !literal(
+            context, "    movq %rax, %r11\n    call *%r11\n")) {
+        return false;
+    }
+    context->call_frame_depth -= function_abi.call_frame_size_bytes;
+    if (function_abi.call_frame_size_bytes != 0 && (!literal(context, "    addq $") ||
+        !append_usize(context, function_abi.call_frame_size_bytes) ||
+        !literal(
+            context, ", %rsp\n"))) {
+        return false;
+    }
+    return emit_call_result(context, instruction, function_abi);
+}
+
+fn emit_call(context: *CodegenContext, instruction: ir::Instruction, instruction_id: usize) -> bool {
+    if (instruction.auxiliary >= context->ir.function_count) {
+        return fail(context, runtime::Error.invalid_argument);
+    }
+    let abi_functions: *const Function = context->abi.functions.data as
+            *const Function;
+    let function_abi: Function = abi_functions[instruction.auxiliary];
+    let functions: *const ir::Function = context->ir.functions.data as
+            *const ir::Function;
+    let external_c: bool = functions[instruction.auxiliary].linkage == ir::Linkage.external_c;
+    let parameters: *const Parameter = context->abi.parameters.data as
+            *const Parameter;
+    // 可变参数 callee 在具名参数之后接收额外参数；分类游标从具名列表的结束位置继续，
+    // call 必须把实际使用的 vector register 总数写入 %al。
+    let variadic: bool = functions[instruction.auxiliary].variadic;
+    var extra_count: usize = 0;
+    var vector_count: usize = function_abi.vector_register_count;
+    var frame_size: usize = function_abi.call_frame_size_bytes;
+    if (variadic) {
+        extra_count = call_argument_total(context, instruction_id) - function_abi.parameter_count;
+        var general_used: usize = function_abi.general_register_count;
+        var stack_cursor: usize = function_abi.stack_argument_size_bytes;
+        var extra: usize = 0;
+        while (extra < extra_count) {
+            let argument: usize = argument_at(context, instruction_id, function_abi.parameter_count + extra);
+            if (argument == no_id() ||
+                variadic_extra_parameter(context, argument, &general_used, &vector_count, &stack_cursor).location ==
+                    LocationKind.invalid) {
+                return fail(context, runtime::Error.invalid_argument);
+            }
+            extra += 1;
+        }
+        frame_size = (stack_cursor + (CodegenLimit.call_stack_alignment as usize) - 1) &
+            ~((CodegenLimit.call_stack_alignment as usize) - 1);
+    }
+    if (frame_size != 0 && (!literal(context, "    subq $") || !append_usize(context, frame_size) ||
+        !literal(
+            context, ", %rsp\n"))) {
+        return false;
+    }
+    context->call_frame_depth += frame_size;
+    var index: usize = 0;
+    while (index < function_abi.parameter_count) {
+        let parameter: Parameter = parameters[function_abi.first_parameter + index];
+        if (parameter.location == LocationKind.stack) {
+            let argument: usize = argument_at(context, instruction_id, index);
+            if (argument == no_id() ||
+                !emit_call_stack_argument(
+                    context, parameter, argument, external_c)) {
+                return false;
+            }
+        }
+        index += 1;
+    }
+    if (variadic) {
+        var general_used: usize = function_abi.general_register_count;
+        var vector_used: usize = function_abi.vector_register_count;
+        var stack_cursor: usize = function_abi.stack_argument_size_bytes;
+        var extra: usize = 0;
+        while (extra < extra_count) {
+            let argument: usize = argument_at(context, instruction_id, function_abi.parameter_count + extra);
+            let parameter: Parameter = variadic_extra_parameter(
+                context, argument, &general_used, &vector_used, &stack_cursor);
+            if (parameter.location == LocationKind.invalid) {
+                return fail(context, runtime::Error.invalid_argument);
+            }
+            if (parameter.location == LocationKind.stack &&
+                !emit_call_stack_argument(
+                    context, parameter, argument, external_c)) {
+                return false;
+            }
+            extra += 1;
+        }
+    }
+    if (function_abi.hidden_return_pointer) {
+        if (!emit_hidden_return_argument(context, instruction)) {
+            return false;
+        }
+    }
+    index = 0;
+    while (index < function_abi.parameter_count) {
+        let parameter: Parameter = parameters[function_abi.first_parameter + index];
+        if (parameter.location != LocationKind.stack) {
+            let argument: usize = argument_at(context, instruction_id, index);
+            if (argument == no_id() ||
+                !emit_call_register_argument(
+                    context, parameter, argument, external_c)) {
+                return false;
+            }
+        }
+        index += 1;
+    }
+    if (variadic) {
+        var general_used: usize = function_abi.general_register_count;
+        var vector_used: usize = function_abi.vector_register_count;
+        var stack_cursor: usize = function_abi.stack_argument_size_bytes;
+        var extra: usize = 0;
+        while (extra < extra_count) {
+            let argument: usize = argument_at(context, instruction_id, function_abi.parameter_count + extra);
+            let parameter: Parameter = variadic_extra_parameter(
+                context, argument, &general_used, &vector_used, &stack_cursor);
+            if (parameter.location == LocationKind.invalid) {
+                return fail(context, runtime::Error.invalid_argument);
+            }
+            if (parameter.location != LocationKind.stack &&
+                !emit_call_register_argument(
+                    context, parameter, argument, external_c)) {
+                return false;
+            }
+            extra += 1;
+        }
+        if (!literal(context, "    movb $") || !append_usize(context, vector_count) || !literal(context, ", %al\n")) {
+            return false;
+        }
+    }
+    if (!literal(context, "    call ") || !append_function_symbol(context, instruction.auxiliary) ||
+        !literal(context, "\n")) {
+        return false;
+    }
+    context->call_frame_depth -= frame_size;
+    if (frame_size != 0 && (!literal(context, "    addq $") || !append_usize(context, frame_size) ||
+        !literal(
+            context, ", %rsp\n"))) {
+        return false;
+    }
+    return emit_call_result(context, instruction, function_abi);
+}
+
+fn emit_parameter_register(context: *CodegenContext, parameter: Parameter, ir_parameter: ir::Parameter) -> bool {
+    let record: *const type_info::Record = type(context, parameter.type_id);
+    if (record == null) {
+        return false;
+    }
+    if (parameter.aggregate) {
+        if (!literal(context, "    leaq ") || !append_slot(context, ir_parameter.slot_id) ||
+            !literal(
+                context, ", %r11\n")) {
+            return false;
+        }
+        let pieces: *const Piece = context->abi.pieces.data as
+                *const Piece;
+        var index: usize = 0;
+        while (index < parameter.piece_count) {
+            let piece: Piece = pieces[parameter.first_piece + index];
+            if (piece.abi_class == Class.integer) {
+                let source: *const u8 = general_register_64(piece.register_index);
+                if (source == null ||
+                    !emit_store_piece(
+                        context, piece, source)) {
+                    return false;
+                }
+            } else {
+                let source: *const u8 = vector_register(piece.register_index);
+                if (source == null || (piece.size_bytes != 4 && piece.size_bytes != 8) ||
+                    !literal(context, piece.size_bytes == 4 ? "    movss " : "    movq ") ||
+                    !literal(context, source) || !literal(context, ", ") ||
+                    !append_usize(context, piece.value_offset_bytes) ||
+                    !literal(
+                        context, "(%r11)\n")) {
+                    return false;
+                }
+            }
+            index += 1;
+        }
+        return true;
+    }
+    if (parameter.location == LocationKind.vector_register) {
+        let source: *const u8 = vector_register(parameter.register_index);
+        return source != null && literal(context, "    ") && literal(context, float_move(record)) &&
+            literal(context, " ") && literal(context, source) && literal(context, ", ") &&
+            append_slot(context, ir_parameter.slot_id) && literal(context, "\n");
+    }
+    let width: usize = bit_width(record);
+    let source: *const u8 = width <= 32 ? general_register_32(parameter.register_index) :
+            general_register_64(parameter.register_index);
+    return source != null && literal(context, width <= 32 ? "    movl " : "    movq ") &&
+        literal(context, source) && literal(context, ", ") && append_slot(context,
+            ir_parameter.slot_id) && literal(context, "\n");
+}
+
+// 把入参寄存器保存到 frame 的 176 字节 System V register save area：通用寄存器固定放在
+// +0..+40；仅当 caller 设置 %al 时，xmm0-7 才写入 +48..+175 的 16 字节槽。每个 SSE 槽
+// 只会读取低 8 字节（f64/f32），因此 movq 已足够。
+fn emit_register_save(context: *CodegenContext, function_id: usize) -> bool {
+    let storage: Storage = storage(context, StorageKind.register_save_area, function_id);
+    if (context->error != runtime::Error.none || !literal(context, "    leaq ") ||
+        !append_stack(context, storage) || !literal(context, ", %r11\n")) {
+        return false;
+    }
+    var index: usize = 0;
+    while (index < (CodegenLimit.general_argument_registers as usize)) {
+        let source: *const u8 = general_register_64(index);
+        if (source == null || !literal(context, "    movq ") || !literal(context, source) || !literal(context, ", ") ||
+            !append_usize(context, index * 8) || !literal(context, "(%r11)\n")) {
+            return false;
+        }
+        index += 1;
+    }
+    if (!literal(context, "    testb %al, %al\n    je ") || !literal(context, ".Lbf") ||
+        !append_usize(context, function_id) || !literal(context, "_va_save\n")) {
+        return false;
+    }
+    index = 0;
+    while (index < (CodegenLimit.vector_argument_registers as usize)) {
+        let source: *const u8 = vector_register(index);
+        if (source == null || !literal(context, "    movq ") || !literal(context, source) || !literal(context, ", ") ||
+            !append_usize(context, 48 + index * 16) || !literal(context, "(%r11)\n")) {
+            return false;
+        }
+        index += 1;
+    }
+    return literal(context, ".Lbf") && append_usize(context, function_id) && literal(context, "_va_save:\n");
+}
+
+fn emit_va_start(context: *CodegenContext, instruction: ir::Instruction) -> bool {
+    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let abi_functions: *const Function = context->abi.functions.data as
+            *const Function;
+    let function_abi: Function = abi_functions[context->current_function];
+    let storage: Storage = storage(context, StorageKind.register_save_area, context->current_function);
+    if (context->error != runtime::Error.none ||
+        !load_rax(
+            context, instruction.left, type(context, values[instruction.left].type_id))) {
+        return false;
+    }
+    // %rax 保存 va_list 地址。gp_offset/fp_offset 精确跳过具名寄存器参数；
+    // general_register_count 已包含隐藏返回指针。overflow area 从具名栈参数之后开始，
+    // save area 指向当前 frame 的序言保存槽。
+    return literal(context, "    movl $") && append_usize(context,
+        function_abi.general_register_count * 8) && literal(context, ", 0(%rax)\n    movl $") &&
+        append_usize(context, 48 + function_abi.vector_register_count * 16) &&
+        literal(context, ", 4(%rax)\n    leaq ") &&
+        append_usize(context, 16 + function_abi.stack_argument_size_bytes) &&
+        literal(context, "(%rbp), %r10\n    movq %r10, 8(%rax)\n    leaq ") && append_stack(context,
+            storage) && literal(context, ", %r10\n    movq %r10, 16(%rax)\n");
+}
+
+fn emit_va_arg(context: *CodegenContext, instruction: ir::Instruction, instruction_id: usize) -> bool {
+    let record: *const type_info::Record = type(context, instruction.type_id);
+    if (record == null || !literal(context, "    movq ") || !append_value(context,
+        instruction.left) || !literal(context, ", %r11\n")) {
+        return false;
+    }
+    if (type_info::is_float(record->kind)) {
+        // SSE class 在 fp_offset 小于 176 时使用 16 字节 save slot；f32 读取低 4 字节，
+        // f64 读取低 8 字节。超过该范围后使用 8 字节 overflow slot。
+        if (!literal(context, "    movl 4(%r11), %eax\n    cmpl $176, %eax\n    jae ") ||
+            !instruction_label(context, instruction_id, "va_overflow") ||
+            !literal(context, "\n    movq 16(%r11), %r10\n    ") || !literal(context, float_move(record)) ||
+            !literal(context, " (%r10,%rax), %xmm0\n    addl $16, 4(%r11)\n    jmp ") ||
+            !instruction_label(context, instruction_id, "va_done") || !literal(context, "\n") ||
+            !instruction_label(context, instruction_id, "va_overflow") ||
+            !literal(context, ":\n    movq 8(%r11), %r10\n    ") || !literal(context, float_move(record)) ||
+            !literal(context, " (%r10), %xmm0\n    addq $8, %r10\n    movq %r10, 8(%r11)\n") ||
+            !instruction_label(context, instruction_id, "va_done") || !literal(context, ":\n")) {
+            return false;
+        }
+        return store_xmm(context, instruction.result, record, "%xmm0");
+    }
+    // INTEGER class 在 gp_offset 小于 48 时使用 8 字节通用寄存器 save slot，之后转到
+    // overflow area。Luna 按声明宽度传递可变参数，不执行 C 默认参数提升；va_arg 也按请求
+    // 宽度读取，这是有意保留的语言差异。
+    if (!literal(context, "    movl 0(%r11), %eax\n    cmpl $48, %eax\n    jae ") ||
+        !instruction_label(context, instruction_id, "va_overflow") || !literal(context,
+            "\n    movq 16(%r11), %r10\n    movq (%r10,%rax), %rax\n    addl $8, 0(%r11)\n    jmp ") ||
+        !instruction_label(context, instruction_id, "va_done") || !literal(context, "\n") ||
+        !instruction_label(context, instruction_id, "va_overflow") ||
+        !literal(
+            context, ":\n    movq 8(%r11), %r10\n    movq (%r10), %rax\n    addq $8, %r10\n    movq %r10, 8(%r11)\n") ||
+        !instruction_label(context, instruction_id, "va_done") || !literal(context, ":\n")) {
+        return false;
+    }
+    return store_rax(context, instruction.result, record);
+}
+
+fn emit_parameter_stack(context: *CodegenContext, parameter: Parameter, ir_parameter: ir::Parameter) -> bool {
+    let record: *const type_info::Record = type(context, parameter.type_id);
+    let source_offset: usize = parameter.stack_offset_bytes + 16;
+    if (record == null) {
+        return false;
+    }
+    if (parameter.aggregate) {
+        return literal(context, "    leaq ") && append_usize(context, source_offset) &&
+            literal(context, "(%rbp), %rsi\n    leaq ") && append_slot(context, ir_parameter.slot_id) &&
+            literal(context, ", %rdi\n    movq $") && append_usize(context, parameter.size_bytes) &&
+            literal(context, ", %rcx\n    cld\n    rep movsb\n");
+    }
+    if (type_info::is_float(record->kind)) {
+        return literal(context, "    ") && literal(context, float_move(record)) &&
+            literal(context, " ") && append_usize(context, source_offset) && literal(context, "(%rbp), %xmm15\n    ") &&
+            literal(context, float_move(record)) && literal(context, " %xmm15, ") &&
+            append_slot(context, ir_parameter.slot_id) && literal(context, "\n");
+    }
+    let width: usize = bit_width(record);
+    return literal(context, width <= 32 ? "    movl " : "    movq ") && append_usize(context, source_offset) &&
+        literal(context, width <= 32 ? "(%rbp), %eax\n    movl %eax, " : "(%rbp), %rax\n    movq %rax, ") &&
+        append_slot(context, ir_parameter.slot_id) && literal(context, "\n");
+}
+
+fn emit_parameters(context: *CodegenContext, function: ir::Function, function_abi: Function) -> bool {
+    let parameters: *const Parameter = context->abi.parameters.data as
+            *const Parameter;
+    let ir_parameters: *const ir::Parameter = context->ir.parameters.data as
+            *const ir::Parameter;
+    if (function_abi.hidden_return_pointer) {
+        let storage: Storage = storage(context, StorageKind.hidden_return_pointer, context->current_function);
+        if (context->error != runtime::Error.none || !literal(context, "    movq %rdi, ") ||
+            !append_stack(context, storage) || !literal(context, "\n")) {
+            return false;
+        }
+    }
+    var phase: usize = 0;
+    while (phase < 2) {
+        var index: usize = 0;
+        while (index < function.parameter_count) {
+            let parameter: Parameter = parameters[function_abi.first_parameter + index];
+            let is_stack: bool = parameter.location == LocationKind.stack;
+            if ((phase == 0 && !is_stack) || (phase == 1 && is_stack)) {
+                let ir_parameter: ir::Parameter = ir_parameters[ function.first_parameter + index];
+                let emitted: bool = is_stack ? emit_parameter_stack(context, parameter, ir_parameter) :
+                    emit_parameter_register(context, parameter, ir_parameter);
+                if (!emitted) {
+                    return false;
+                }
+            }
+            index += 1;
+        }
+        phase += 1;
+    }
+    return true;
+}
+
+fn emit_return(context: *CodegenContext, instruction: ir::Instruction) -> bool {
+    let functions: *const ir::Function = context->ir.functions.data as
+            *const ir::Function;
+    let abi_functions: *const Function = context->abi.functions.data as
+            *const Function;
+    let function: ir::Function = functions[context->current_function];
+    let function_abi: Function = abi_functions[context->current_function];
+    let record: *const type_info::Record = type(context, function.return_type);
+    if (record == null) {
+        return false;
+    }
+    if (instruction.opcode == ir::Opcode.return_value && function_abi.return_aggregate) {
+        if (!load_rax(context, instruction.left, record) ||
+            !literal(
+                context, "    movq %rax, %r11\n")) {
+            return false;
+        }
+        if (function_abi.hidden_return_pointer) {
+            let hidden: Storage = storage(context, StorageKind.hidden_return_pointer, context->current_function);
+            if (context->error != runtime::Error.none || !literal(context, "    movq ") ||
+                !append_stack(context, hidden) ||
+                !literal(context, ", %rdi\n    movq %rdi, %rax\n    movq %r11, %rsi\n    movq $") ||
+                !append_usize(context, function_abi.return_size_bytes) ||
+                !literal(
+                    context, ", %rcx\n    cld\n    rep movsb\n")) {
+                return false;
+            }
+        } else {
+            let pieces: *const Piece = context->abi.pieces.data as
+                    *const Piece;
+            var reverse: usize = function_abi.return_piece_count;
+            while (reverse != 0) {
+                reverse -= 1;
+                let piece: Piece = pieces[ function_abi.first_return_piece + reverse];
+                if (piece.abi_class == Class.integer) {
+                    let destination: *const u8 = return_general_register(piece.register_index);
+                    if (destination == null ||
+                        !emit_load_piece(
+                            context, piece, destination)) {
+                        return false;
+                    }
+                } else {
+                    let destination: *const u8 = vector_register(piece.register_index);
+                    if (destination == null || (piece.size_bytes != 4 && piece.size_bytes != 8) ||
+                        !literal(context, piece.size_bytes == 4 ? "    movss " : "    movq ") ||
+                        !append_usize(context, piece.value_offset_bytes) || !literal(context,
+                            "(%r11), ") || !literal(context, destination) ||
+                        !literal(
+                            context, "\n")) {
+                        return false;
+                    }
+                }
+            }
+        }
+    } else if (instruction.opcode == ir::Opcode.return_value) {
+        if (type_info::is_float(record->kind)) {
+            if (!load_xmm(
+                    context, instruction.left, record, "%xmm0")) {
+                return false;
+            }
+        } else if (!load_rax(
+                context, instruction.left, record)) {
+            return false;
+        }
+    }
+    return literal(context, "    jmp ") && return_label(context) && literal(context, "\n");
+}

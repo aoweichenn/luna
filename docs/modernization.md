@@ -130,6 +130,11 @@ modules. A new submodule is allowed only when all of the following hold:
 Parent facades never flow downward. Same-module method bodies and private
 declarations may be distributed across implementation units.
 
+A non-generic interface normally remains below 250 lines and contains no
+algorithm bodies. Exported generic bodies are the only current exception,
+because consumers must monomorphize them. New or rewritten source directories
+contain files or child module/family directories at one level, never both.
+
 ### Target compiler module contraction
 
 | Historical group | Target module | Same-module implementation units |
@@ -146,6 +151,7 @@ declarations may be distributed across implementation units.
 | semantic `functions.*` | `luna.compiler.sema.functions` | signatures, overloads, bindings, generics, methods, IR |
 | semantic `expr.*` | `luna.compiler.sema.expr` | base, numeric, strings, probe, initializer, access, operators |
 | semantic `stmt.*` | `luna.compiler.sema.stmt` | lowering, labels |
+| backend checked assembly text | `luna.compiler.x86.text` | owned text construction shared by codegen and drivers |
 | `backend.x86_64.codegen.*` | `luna.compiler.x86.codegen` | session, ABI, frame, values, calls, instructions |
 | `backend.x86_64.elf.*` | `luna.compiler.x86.elf` | format, reader, writer |
 | `backend.x86_64.assembler.*` | `luna.compiler.x86.assembler` | session, operands, encoding, source |
@@ -274,6 +280,7 @@ binaries and one-interface-per-command modules are forbidden.
    Name the file for its domain responsibility.
 5. A directory mirrors either a real module or a multi-file implementation of
    one substantial module. Repeated single-child directories are collapsed.
+   A rewritten directory level contains files or child directories, not both.
 6. Every implementation path is registered in `LIBRARIES`; build order remains
    derived from source imports.
 

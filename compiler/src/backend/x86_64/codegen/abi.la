@@ -1,16 +1,14 @@
-module luna.bootstrap.backend.x86_64.abi;
+module luna.compiler.x86.codegen;
 
-import luna.bootstrap.middleend.ir.verify as ir_check;
 
-import luna.std.checked as checked;
 
-enum Limit: usize {
+enum AbiLimit: usize {
     maximum_size = 18446744073709551615, general_register_count = 6, vector_register_count = 8, eightbyte_size = 8,
     stack_alignment = 16, maximum_register_eightbytes = 2, maximum_type_depth = 128, maximum_stack_size = 2147483647,
 }
 
-fn no_id() -> usize {
-    return Limit.maximum_size as usize;
+fn abi_no_id() -> usize {
+    return AbiLimit.maximum_size as usize;
 }
 
 fn empty() -> Abi {
@@ -31,9 +29,9 @@ fn storage_is_valid(abi: Abi) -> bool {
         buffer_matches(abi.pieces, abi.piece_count, sizeof(Piece));
 }
 
-fn align_up(value: usize, alignment: usize) -> usize {
+fn abi_align_up(value: usize, alignment: usize) -> usize {
     var result: usize = 0;
-    return checked::align_up(value, alignment, &result) ? result : no_id();
+    return checked::align_up(value, alignment, &result) ? result : abi_no_id();
 }
 
 fn class_merge(left: Class, right: Class) -> Class {
@@ -98,7 +96,7 @@ fn merge_leaf(
 fn merge_type(
     types: type_info::Table, type_id: usize, base_offset: usize, depth: usize,
     classification: *Classification) -> bool {
-    let input_is_valid: bool = type_id < types.type_count && depth <= Limit.maximum_type_depth as usize;
+    let input_is_valid: bool = type_id < types.type_count && depth <= AbiLimit.maximum_type_depth as usize;
     let output_is_valid: bool = classification != null && classification->first != Class.memory;
     if (!input_is_valid || !output_is_valid) {
         return set_memory(classification);
@@ -118,7 +116,7 @@ fn merge_type(
     if (record.kind == type_info::Kind.array) {
         let element: type_info::Record = records[record.element_type];
         for (var index: usize = 0; index < record.element_count; index += 1) {
-            if (index > (Limit.maximum_size as usize) / element.size_bytes ||
+            if (index > (AbiLimit.maximum_size as usize) / element.size_bytes ||
                 !merge_type(
                     types, record.element_type, base_offset + index * element.size_bytes, depth + 1, classification)) {
                 return false;
@@ -134,7 +132,7 @@ fn merge_type(
         }
         for (var index: usize = 0; index < record.field_count; index += 1) {
             let field: type_info::Field = fields[record.first_field + index];
-            if (field.offset_bytes > (Limit.maximum_size as usize) - base_offset ||
+            if (field.offset_bytes > (AbiLimit.maximum_size as usize) - base_offset ||
                 !merge_type(
                     types, field.type_id, base_offset + field.offset_bytes, depth + 1, classification)) {
                 return false;
@@ -187,7 +185,7 @@ fn append(buffer: bytes::Buffer, record: *const u8, record_size: usize) -> bytes
 }
 
 fn add_piece(abi: *Abi, piece: Piece) -> usize {
-    let none: usize = no_id();
+    let none: usize = abi_no_id();
     if (abi == null || abi->error != runtime::Error.none) {
         return none;
     }
@@ -203,7 +201,7 @@ fn add_piece(abi: *Abi, piece: Piece) -> usize {
 }
 
 fn add_parameter(abi: *Abi, parameter: Parameter) -> usize {
-    let none: usize = no_id();
+    let none: usize = abi_no_id();
     if (abi == null || abi->error != runtime::Error.none) {
         return none;
     }
@@ -220,7 +218,7 @@ fn add_parameter(abi: *Abi, parameter: Parameter) -> usize {
 }
 
 fn add_function(abi: *Abi, function: Function) -> usize {
-    let none: usize = no_id();
+    let none: usize = abi_no_id();
     if (abi == null || abi->error != runtime::Error.none) {
         return none;
     }
@@ -249,14 +247,14 @@ fn piece_size(size_bytes: usize, index: usize) -> usize {
 fn add_stack_area(
     current_size: usize, size_bytes: usize, alignment_bytes: usize, offset: *usize, area_size: *usize) -> usize {
     if (offset == null || area_size == null || size_bytes == 0 || alignment_bytes == 0) {
-        return no_id();
+        return abi_no_id();
     }
     let stack_alignment: usize = alignment_bytes > 8 ? alignment_bytes : 8;
-    let aligned_offset: usize = align_up(current_size, stack_alignment);
-    let aligned_size: usize = align_up(size_bytes, 8);
-    if (aligned_offset == no_id() || aligned_size == no_id() ||
-        aligned_offset > (Limit.maximum_size as usize) - aligned_size) {
-        return no_id();
+    let aligned_offset: usize = abi_align_up(current_size, stack_alignment);
+    let aligned_size: usize = abi_align_up(size_bytes, 8);
+    if (aligned_offset == abi_no_id() || aligned_size == abi_no_id() ||
+        aligned_offset > (AbiLimit.maximum_size as usize) - aligned_size) {
+        return abi_no_id();
     }
     *offset = aligned_offset;
     *area_size = aligned_size;
@@ -269,7 +267,7 @@ fn build_return(abi: *Abi, function: *Function, types: type_info::Table) -> bool
     function->return_size_bytes = record.size_bytes;
     function->return_alignment_bytes = record.alignment_bytes;
     function->return_aggregate = type_info::is_memory(record.kind);
-    function->first_return_piece = no_id();
+    function->first_return_piece = abi_no_id();
     if (!function->return_aggregate) {
         return true;
     }
@@ -296,7 +294,7 @@ fn build_return(abi: *Abi, function: *Function, types: type_info::Table) -> bool
                             LocationKind.general_register : LocationKind
                                 .vector_register, register_index = register_index, value_offset_bytes = index * 8,
                     size_bytes = piece_size(record.size_bytes, index),
-                }) == no_id()) {
+                }) == abi_no_id()) {
             return false;
         }
         function->return_piece_count += 1;
@@ -307,13 +305,13 @@ fn build_return(abi: *Abi, function: *Function, types: type_info::Table) -> bool
 fn build_scalar_parameter(function: *Function, parameter: *Parameter, record: type_info::Record) -> bool {
     let abi_class: Class = scalar_class(record.kind);
     parameter->abi_class = abi_class;
-    if (abi_class == Class.integer && function->general_register_count < Limit.general_register_count as usize) {
+    if (abi_class == Class.integer && function->general_register_count < AbiLimit.general_register_count as usize) {
         parameter->location = LocationKind.general_register;
         parameter->register_index = function->general_register_count;
         function->general_register_count += 1;
         return true;
     }
-    if (abi_class == Class.sse && function->vector_register_count < Limit.vector_register_count as usize) {
+    if (abi_class == Class.sse && function->vector_register_count < AbiLimit.vector_register_count as usize) {
         parameter->location = LocationKind.vector_register;
         parameter->register_index = function->vector_register_count;
         function->vector_register_count += 1;
@@ -322,7 +320,7 @@ fn build_scalar_parameter(function: *Function, parameter: *Parameter, record: ty
     var offset: usize = 0;
     var area_size: usize = 0;
     let total: usize = add_stack_area(function->stack_argument_size_bytes, 8, 8, &offset, &area_size);
-    if (total == no_id()) {
+    if (total == abi_no_id()) {
         return false;
     }
     function->stack_argument_size_bytes = total;
@@ -349,9 +347,9 @@ fn build_aggregate_parameter(
     }
     let register_classification: bool = classification.first != Class.memory;
     let general_registers_fit: bool = required_general <=
-        (Limit.general_register_count as usize) - function->general_register_count;
+        (AbiLimit.general_register_count as usize) - function->general_register_count;
     let vector_registers_fit: bool = required_vector <=
-        (Limit.vector_register_count as usize) - function->vector_register_count;
+        (AbiLimit.vector_register_count as usize) - function->vector_register_count;
     let register_counts_fit: bool = general_registers_fit && vector_registers_fit;
     let registers_fit: bool = register_classification && register_counts_fit;
     if (!registers_fit) {
@@ -360,7 +358,7 @@ fn build_aggregate_parameter(
         let total: usize =
             add_stack_area(
                 function->stack_argument_size_bytes, record.size_bytes, record.alignment_bytes, &offset, &area_size);
-        if (total == no_id()) {
+        if (total == abi_no_id()) {
             return false;
         }
         function->stack_argument_size_bytes = total;
@@ -389,7 +387,7 @@ fn build_aggregate_parameter(
                 abi, {
                     abi_class = abi_class, location = location, register_index = register_index,
                     value_offset_bytes = index * 8, size_bytes = piece_size(record.size_bytes, index),
-                }) == no_id()) {
+                }) == abi_no_id()) {
             return false;
         }
     }
@@ -401,7 +399,7 @@ fn build_parameter(
     parameter_index: usize, types: type_info::Table) -> bool {
     let records: *const type_info::Record = types.types.data as *const type_info::Record;
     let record: type_info::Record = records[ir_parameter.type_id];
-    let none: usize = no_id();
+    let none: usize = abi_no_id();
     var parameter: Parameter = {
         function_id = function->function_id, parameter_index = parameter_index,
         abi_class = Class.invalid, location = LocationKind.invalid,
@@ -415,14 +413,15 @@ fn build_parameter(
 }
 
 fn finish_function(abi: *Abi, function: *Function) -> bool {
-    function->call_frame_size_bytes = align_up(function->stack_argument_size_bytes, Limit.stack_alignment as usize);
-    let frame_exists: bool = function->call_frame_size_bytes != no_id();
-    let frame_is_bounded: bool = function->call_frame_size_bytes <= Limit.maximum_stack_size as usize;
+    function->call_frame_size_bytes = abi_align_up(function->stack_argument_size_bytes,
+        AbiLimit.stack_alignment as usize);
+    let frame_exists: bool = function->call_frame_size_bytes != abi_no_id();
+    let frame_is_bounded: bool = function->call_frame_size_bytes <= AbiLimit.maximum_stack_size as usize;
     let frame_is_valid: bool = frame_exists && frame_is_bounded;
-    return frame_is_valid && add_function(abi, *function) != no_id();
+    return frame_is_valid && add_function(abi, *function) != abi_no_id();
 }
 
-fn analyze(ir: ir::Store, types: type_info::Table) -> Result {
+fn analyze(ir: ir::Store, types: type_info::Table) -> AbiResult {
     var abi: Abi = empty();
     if (!ir_check::is_valid(ir, types)) {
         return {
@@ -431,7 +430,7 @@ fn analyze(ir: ir::Store, types: type_info::Table) -> Result {
     }
     let functions: *const ir::Function = ir.functions.data as *const ir::Function;
     let parameters: *const ir::Parameter = ir.parameters.data as *const ir::Parameter;
-    let none: usize = no_id();
+    let none: usize = abi_no_id();
     for (var function_id: usize = 0;
         function_id < ir.function_count && abi.error == runtime::Error.none;
         function_id += 1) {
@@ -536,7 +535,7 @@ fn is_valid(abi: Abi, ir: ir::Store, types: type_info::Table) -> bool {
     if (abi.error != runtime::Error.none || !storage_is_valid(abi)) {
         return false;
     }
-    let expected: Result = analyze(ir, types);
+    let expected: AbiResult = analyze(ir, types);
     let valid: bool = expected.error == runtime::Error.none && equal(abi, expected.abi);
     release(expected.abi);
     return valid;
@@ -544,7 +543,7 @@ fn is_valid(abi: Abi, ir: ir::Store, types: type_info::Table) -> bool {
 
 fn invalid_function()
     -> Function {
-    let none: usize = no_id();
+    let none: usize = abi_no_id();
     return {
         function_id = none, first_parameter = none, parameter_count = 0, first_return_piece = none,
         return_piece_count = 0, return_type = none, return_size_bytes = 0, return_alignment_bytes = 0,
@@ -555,7 +554,7 @@ fn invalid_function()
 
 fn invalid_parameter()
     -> Parameter {
-    let none: usize = no_id();
+    let none: usize = abi_no_id();
     return {
         function_id = none, parameter_index = none, abi_class = Class.invalid,
         location = LocationKind.invalid, register_index = none, stack_offset_bytes = none,
@@ -568,7 +567,7 @@ fn invalid_piece()
     -> Piece {
     return {
         abi_class = Class.invalid, location = LocationKind.invalid,
-        register_index = no_id(), value_offset_bytes = 0, size_bytes = 0,
+        register_index = abi_no_id(), value_offset_bytes = 0, size_bytes = 0,
     };
 }
 
