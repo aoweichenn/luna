@@ -1,0 +1,239 @@
+export module luna.std.deque;
+
+import luna.runtime;
+import luna.std.buffer as buffer;
+import luna.std.memory as memory;
+
+enum deque_limit: usize {
+    initial_capacity = 8,
+}
+
+export class deque<Value> {
+    priv storage: buffer::byte_buffer;
+    priv head: usize;
+    priv element_count: usize;
+
+    pub init();
+    pub init(other: deque<Value>&&);
+    pub operator =(other: deque<Value>&&);
+    pub fn is_valid() const -> bool;
+    pub fn empty() const -> bool;
+    pub fn size() const -> usize;
+    pub fn capacity() const -> usize;
+    pub fn front() -> Value&;
+    pub fn front() const -> Value const&;
+    pub fn back() -> Value&;
+    pub fn back() const -> Value const&;
+    pub fn get(index: usize) -> Value&;
+    pub fn get(index: usize) const -> Value const&;
+    pub fn push_front(value: Value) -> runtime::Error;
+    pub fn push_back(value: Value) -> runtime::Error;
+    pub fn pop_front() -> runtime::Error;
+    pub fn pop_back() -> runtime::Error;
+    pub fn clear();
+    pub deinit();
+}
+
+impl deque {
+    init(): storage = buffer::byte_buffer() {
+        assert(@is_trivially_relocatable(Value));
+        this->head = 0;
+        this->element_count = 0;
+    }
+
+    init(other: deque<Value>&&): storage = other.storage as buffer::byte_buffer&& {
+        assert(@is_trivially_relocatable(Value));
+        this->head = other.head;
+        this->element_count = other.element_count;
+        other.head = 0;
+        other.element_count = 0;
+    }
+
+    operator =(other: deque<Value>&&) {
+        if (this == &other) {
+            return;
+        }
+        this->storage = other.storage as buffer::byte_buffer&&;
+        this->head = other.head;
+        this->element_count = other.element_count;
+        other.head = 0;
+        other.element_count = 0;
+    }
+
+    fn is_valid() const -> bool {
+        if (!this->storage.is_valid()) {
+            return false;
+        }
+        let slot_capacity: usize = this->capacity();
+        if (slot_capacity == 0) {
+            return this->head == 0 && this->element_count == 0;
+        }
+        return this->head < slot_capacity && this->element_count <= slot_capacity;
+    }
+
+    fn empty() const -> bool {
+        return this->element_count == 0;
+    }
+
+    fn size() const -> usize {
+        return this->element_count;
+    }
+
+    fn capacity() const -> usize {
+        return this->storage.capacity() / sizeof(Value);
+    }
+
+    fn front() -> Value& {
+        return this->get(0);
+    }
+
+    fn front() const -> Value const& {
+        return this->get(0);
+    }
+
+    fn back() -> Value& {
+        return this->get(this->element_count - 1);
+    }
+
+    fn back() const -> Value const& {
+        return this->get(this->element_count - 1);
+    }
+
+    fn get(index: usize) -> Value& {
+        return *this->element_pointer(index);
+    }
+
+    fn get(index: usize) const -> Value const& {
+        return *this->element_pointer(index);
+    }
+
+    fn push_front(value: Value) -> runtime::Error {
+        var next_size: usize = 0;
+        if (@add_overflow(this->element_count, 1, &next_size)) {
+            return runtime::Error.out_of_memory;
+        }
+        let capacity_error: runtime::Error = this->ensure_capacity(next_size);
+        if (capacity_error != runtime::Error.none) {
+            return capacity_error;
+        }
+        let slot_capacity: usize = this->capacity();
+        this->head = this->head == 0 ? slot_capacity - 1 : this->head - 1;
+        let destination: *Value = (this->storage.data() as *Value) + this->head;
+        let move_error: runtime::Error = memory::move(
+            destination as *u8, (&value) as *const Value as *const u8, sizeof(Value));
+        if (move_error != runtime::Error.none) {
+            this->head = this->head + 1 == slot_capacity ? 0 : this->head + 1;
+            return move_error;
+        }
+        this->element_count = next_size;
+        return runtime::Error.none;
+    }
+
+    fn push_back(value: Value) -> runtime::Error {
+        var next_size: usize = 0;
+        if (@add_overflow(this->element_count, 1, &next_size)) {
+            return runtime::Error.out_of_memory;
+        }
+        let capacity_error: runtime::Error = this->ensure_capacity(next_size);
+        if (capacity_error != runtime::Error.none) {
+            return capacity_error;
+        }
+        let destination: *Value = this->element_pointer(this->element_count);
+        let move_error: runtime::Error = memory::move(
+            destination as *u8, (&value) as *const Value as *const u8, sizeof(Value));
+        if (move_error != runtime::Error.none) {
+            return move_error;
+        }
+        this->element_count = next_size;
+        return runtime::Error.none;
+    }
+
+    fn pop_front() -> runtime::Error {
+        if (this->empty()) {
+            return runtime::Error.invalid_argument;
+        }
+        this->element_count -= 1;
+        if (this->element_count == 0) {
+            this->head = 0;
+            return runtime::Error.none;
+        }
+        let slot_capacity: usize = this->capacity();
+        this->head = this->head + 1 == slot_capacity ? 0 : this->head + 1;
+        return runtime::Error.none;
+    }
+
+    fn pop_back() -> runtime::Error {
+        if (this->empty()) {
+            return runtime::Error.invalid_argument;
+        }
+        this->element_count -= 1;
+        if (this->element_count == 0) {
+            this->head = 0;
+        }
+        return runtime::Error.none;
+    }
+
+    fn clear() {
+        this->head = 0;
+        this->element_count = 0;
+    }
+
+    deinit() {
+    }
+
+    priv fn physical_index(index: usize) const -> usize {
+        let slot_capacity: usize = this->capacity();
+        let tail_slots: usize = slot_capacity - this->head;
+        return index < tail_slots ? this->head + index : index - tail_slots;
+    }
+
+    priv fn element_pointer(index: usize) -> *Value {
+        return (this->storage.data() as *Value) + this->physical_index(index);
+    }
+
+    priv fn element_pointer(index: usize) const -> *const Value {
+        return (this->storage.data() as *const Value) + this->physical_index(index);
+    }
+
+    priv fn ensure_capacity(minimum_capacity: usize) -> runtime::Error {
+        if (!this->is_valid()) {
+            return runtime::Error.invalid_argument;
+        }
+        if (minimum_capacity <= this->capacity()) {
+            return runtime::Error.none;
+        }
+        var next_capacity: usize = this->capacity();
+        if (next_capacity < deque_limit.initial_capacity as usize) {
+            next_capacity = deque_limit.initial_capacity as usize;
+        }
+        while (next_capacity < minimum_capacity) {
+            var doubled: usize = 0;
+            if (@mul_overflow(next_capacity, 2, &doubled)) {
+                next_capacity = minimum_capacity;
+            } else {
+                next_capacity = doubled;
+            }
+        }
+        var byte_capacity: usize = 0;
+        if (@mul_overflow(next_capacity, sizeof(Value), &byte_capacity)) {
+            return runtime::Error.out_of_memory;
+        }
+        var replacement: buffer::byte_buffer = buffer::byte_buffer();
+        let reserve_error: runtime::Error = replacement.reserve(byte_capacity);
+        if (reserve_error != runtime::Error.none) {
+            return reserve_error;
+        }
+        let destination: *Value = replacement.data() as *Value;
+        for (var index: usize = 0; index < this->element_count; index += 1) {
+            let source: *const Value = this->element_pointer(index) as *const Value;
+            let move_error: runtime::Error = memory::move(
+                (destination + index) as *u8, source as *const u8, sizeof(Value));
+            if (move_error != runtime::Error.none) {
+                return move_error;
+            }
+        }
+        this->storage = replacement as buffer::byte_buffer&&;
+        this->head = 0;
+        return runtime::Error.none;
+    }
+}

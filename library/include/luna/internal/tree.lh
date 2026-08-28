@@ -1,0 +1,518 @@
+export module luna.internal.tree;
+
+import luna.internal.pool as pool;
+import luna.runtime;
+
+enum tree_limit: usize {
+    maximum_depth = 256,
+}
+
+enum tree_color: u8 {
+    red, black,
+}
+
+struct tree_node<Key, Value> {
+    parent: *tree_node<Key, Value>;
+    left: *tree_node<Key, Value>;
+    right: *tree_node<Key, Value>;
+    key: Key;
+    value: Value;
+    color: tree_color;
+}
+
+struct tree_validation {
+    count: usize;
+    black_height: usize;
+    valid: bool;
+}
+
+export struct tree_insert_result<Value> {
+    value: *Value;
+    inserted: bool;
+    error: runtime::Error;
+}
+
+export struct tree_erase_result {
+    erased: bool;
+    error: runtime::Error;
+}
+
+export class ordered_tree<Key, Value> {
+    priv nodes: pool::slot_pool<tree_node<Key, Value>>;
+    priv root: *tree_node<Key, Value>;
+    priv element_count: usize;
+
+    pub init();
+    pub init(other: ordered_tree<Key, Value>&&);
+    pub operator =(other: ordered_tree<Key, Value>&&);
+    pub fn is_valid() const -> bool;
+    pub fn empty() const -> bool;
+    pub fn size() const -> usize;
+    pub fn find(key: Key const&) -> *Value;
+    pub fn find(key: Key const&) const -> *const Value;
+    pub fn contains(key: Key const&) const -> bool;
+    pub fn insert(key: Key, value: Value) -> tree_insert_result<Value>;
+    pub fn insert_or_assign(key: Key, value: Value) -> tree_insert_result<Value>;
+    pub fn erase(key: Key const&) -> tree_erase_result;
+    pub fn clear();
+    pub deinit();
+}
+
+impl ordered_tree {
+    init(): nodes = pool::slot_pool<tree_node<Key, Value>>() {
+        assert(@is_trivially_relocatable(Key));
+        assert(@is_trivially_relocatable(Value));
+        this->root = null;
+        this->element_count = 0;
+    }
+
+    init(other: ordered_tree<Key, Value>&&): nodes = other.nodes as pool::slot_pool<tree_node<Key, Value>>&& {
+        assert(@is_trivially_relocatable(Key));
+        assert(@is_trivially_relocatable(Value));
+        this->root = other.root;
+        this->element_count = other.element_count;
+        other.root = null;
+        other.element_count = 0;
+    }
+
+    operator =(other: ordered_tree<Key, Value>&&) {
+        if (this == &other) {
+            return;
+        }
+        this->clear();
+        this->nodes = other.nodes as pool::slot_pool<tree_node<Key, Value>>&&;
+        this->root = other.root;
+        this->element_count = other.element_count;
+        other.root = null;
+        other.element_count = 0;
+    }
+
+    fn is_valid() const -> bool {
+        if (!this->nodes.is_valid() || this->nodes.size() != this->element_count) {
+            return false;
+        }
+        if (this->element_count == 0) {
+            return this->root == null;
+        }
+        if (this->root == null || this->root->parent != null) {
+            return false;
+        }
+        if (this->root->color != tree_color.black) {
+            return false;
+        }
+        let result: tree_validation = this->validate_node(
+            this->root as *const tree_node<Key, Value>, null, null, null, 0);
+        return result.valid && result.count == this->element_count;
+    }
+
+    fn empty() const -> bool {
+        return this->element_count == 0;
+    }
+
+    fn size() const -> usize {
+        return this->element_count;
+    }
+
+    fn find(key: Key const&) -> *Value {
+        let node: *tree_node<Key, Value> = this->find_node(key);
+        return node == null ? null : &node->value;
+    }
+
+    fn find(key: Key const&) const -> *const Value {
+        let node: *const tree_node<Key, Value> = this->find_node(key);
+        return node == null ? null : &node->value as *const Value;
+    }
+
+    fn contains(key: Key const&) const -> bool {
+        return this->find_node(key) != null;
+    }
+
+    fn insert(key: Key, value: Value) -> tree_insert_result<Value> {
+        if (!this->storage_is_valid()) {
+            return { value = null, inserted = false, error = runtime::Error.invalid_argument };
+        }
+        var parent: *tree_node<Key, Value> = null;
+        var current: *tree_node<Key, Value> = this->root;
+        while (current != null) {
+            parent = current;
+            if (key < current->key) {
+                current = current->left;
+            } else if (current->key < key) {
+                current = current->right;
+            } else {
+                return { value = &current->value, inserted = false, error = runtime::Error.none };
+            }
+        }
+        let created: pool::pool_allocation<tree_node<Key, Value>> = this->nodes.allocate();
+        if (created.error != runtime::Error.none) {
+            return { value = null, inserted = false, error = created.error };
+        }
+        *created.address = {
+            parent = parent, left = null, right = null, key = key, value = value, color = tree_color.red,
+        };
+        if (parent == null) {
+            this->root = created.address;
+        } else if (key < parent->key) {
+            parent->left = created.address;
+        } else {
+            parent->right = created.address;
+        }
+        this->element_count += 1;
+        this->insert_fixup(created.address);
+        return { value = &created.address->value, inserted = true, error = runtime::Error.none };
+    }
+
+    fn insert_or_assign(key: Key, value: Value) -> tree_insert_result<Value> {
+        let existing: *Value = this->find(key);
+        if (existing != null) {
+            *existing = value;
+            return { value = existing, inserted = false, error = runtime::Error.none };
+        }
+        return this->insert(key, value);
+    }
+
+    fn erase(key: Key const&) -> tree_erase_result {
+        if (!this->storage_is_valid()) {
+            return { erased = false, error = runtime::Error.invalid_argument };
+        }
+        let target: *tree_node<Key, Value> = this->find_node(key);
+        if (target == null) {
+            return { erased = false, error = runtime::Error.none };
+        }
+        var removed: *tree_node<Key, Value> = target;
+        var removed_color: tree_color = removed->color;
+        var replacement: *tree_node<Key, Value> = null;
+        var replacement_parent: *tree_node<Key, Value> = null;
+        if (target->left == null) {
+            replacement = target->right;
+            replacement_parent = target->parent;
+            this->transplant(target, target->right);
+        } else if (target->right == null) {
+            replacement = target->left;
+            replacement_parent = target->parent;
+            this->transplant(target, target->left);
+        } else {
+            removed = this->minimum(target->right);
+            removed_color = removed->color;
+            replacement = removed->right;
+            if (removed->parent == target) {
+                replacement_parent = removed;
+                if (replacement != null) {
+                    replacement->parent = removed;
+                }
+            } else {
+                replacement_parent = removed->parent;
+                this->transplant(removed, removed->right);
+                removed->right = target->right;
+                removed->right->parent = removed;
+            }
+            this->transplant(target, removed);
+            removed->left = target->left;
+            removed->left->parent = removed;
+            removed->color = target->color;
+        }
+        if (removed_color == tree_color.black) {
+            this->erase_fixup(replacement, replacement_parent);
+        }
+        let release_error: runtime::Error = this->nodes.deallocate(target);
+        if (release_error != runtime::Error.none) {
+            return { erased = false, error = release_error };
+        }
+        this->element_count -= 1;
+        return { erased = true, error = runtime::Error.none };
+    }
+
+    fn clear() {
+        this->release_subtree(this->root);
+        this->root = null;
+        this->element_count = 0;
+    }
+
+    deinit() {
+        this->clear();
+    }
+
+    priv fn storage_is_valid() const -> bool {
+        if (this->nodes.size() != this->element_count) {
+            return false;
+        }
+        return this->element_count == 0 ? this->root == null : this->root != null;
+    }
+
+    priv fn find_node(key: Key const&) -> *tree_node<Key, Value> {
+        var current: *tree_node<Key, Value> = this->root;
+        while (current != null) {
+            if (key < current->key) {
+                current = current->left;
+            } else if (current->key < key) {
+                current = current->right;
+            } else {
+                return current;
+            }
+        }
+        return null;
+    }
+
+    priv fn find_node(key: Key const&) const -> *const tree_node<Key, Value> {
+        var current: *const tree_node<Key, Value> = this->root as *const tree_node<Key, Value>;
+        while (current != null) {
+            if (key < current->key) {
+                current = current->left as *const tree_node<Key, Value>;
+            } else if (current->key < key) {
+                current = current->right as *const tree_node<Key, Value>;
+            } else {
+                return current;
+            }
+        }
+        return null;
+    }
+
+    priv fn color_of(node: *const tree_node<Key, Value>) const -> tree_color {
+        return node == null ? tree_color.black : node->color;
+    }
+
+    priv fn color_of(node: *tree_node<Key, Value>) const -> tree_color {
+        return node == null ? tree_color.black : node->color;
+    }
+
+    priv fn left_of(node: *tree_node<Key, Value>) const -> *tree_node<Key, Value> {
+        return node == null ? null : node->left;
+    }
+
+    priv fn right_of(node: *tree_node<Key, Value>) const -> *tree_node<Key, Value> {
+        return node == null ? null : node->right;
+    }
+
+    priv fn set_color(node: *tree_node<Key, Value>, color: tree_color) {
+        if (node != null) {
+            node->color = color;
+        }
+    }
+
+    priv fn rotate_left(node: *tree_node<Key, Value>) {
+        let pivot: *tree_node<Key, Value> = node->right;
+        node->right = pivot->left;
+        if (pivot->left != null) {
+            pivot->left->parent = node;
+        }
+        pivot->parent = node->parent;
+        if (node->parent == null) {
+            this->root = pivot;
+        } else if (node == node->parent->left) {
+            node->parent->left = pivot;
+        } else {
+            node->parent->right = pivot;
+        }
+        pivot->left = node;
+        node->parent = pivot;
+    }
+
+    priv fn rotate_right(node: *tree_node<Key, Value>) {
+        let pivot: *tree_node<Key, Value> = node->left;
+        node->left = pivot->right;
+        if (pivot->right != null) {
+            pivot->right->parent = node;
+        }
+        pivot->parent = node->parent;
+        if (node->parent == null) {
+            this->root = pivot;
+        } else if (node == node->parent->right) {
+            node->parent->right = pivot;
+        } else {
+            node->parent->left = pivot;
+        }
+        pivot->right = node;
+        node->parent = pivot;
+    }
+
+    priv fn insert_fixup(inserted: *tree_node<Key, Value>) {
+        var node: *tree_node<Key, Value> = inserted;
+        while (node != this->root && this->color_of(node->parent) == tree_color.red) {
+            let parent: *tree_node<Key, Value> = node->parent;
+            let grandparent: *tree_node<Key, Value> = parent->parent;
+            if (parent == grandparent->left) {
+                let uncle: *tree_node<Key, Value> = grandparent->right;
+                if (this->color_of(uncle) == tree_color.red) {
+                    parent->color = tree_color.black;
+                    uncle->color = tree_color.black;
+                    grandparent->color = tree_color.red;
+                    node = grandparent;
+                } else {
+                    if (node == parent->right) {
+                        node = parent;
+                        this->rotate_left(node);
+                    }
+                    node->parent->color = tree_color.black;
+                    node->parent->parent->color = tree_color.red;
+                    this->rotate_right(node->parent->parent);
+                }
+            } else {
+                let uncle: *tree_node<Key, Value> = grandparent->left;
+                if (this->color_of(uncle) == tree_color.red) {
+                    parent->color = tree_color.black;
+                    uncle->color = tree_color.black;
+                    grandparent->color = tree_color.red;
+                    node = grandparent;
+                } else {
+                    if (node == parent->left) {
+                        node = parent;
+                        this->rotate_right(node);
+                    }
+                    node->parent->color = tree_color.black;
+                    node->parent->parent->color = tree_color.red;
+                    this->rotate_left(node->parent->parent);
+                }
+            }
+        }
+        this->root->color = tree_color.black;
+    }
+
+    priv fn transplant(target: *tree_node<Key, Value>, replacement: *tree_node<Key, Value>) {
+        if (target->parent == null) {
+            this->root = replacement;
+        } else if (target == target->parent->left) {
+            target->parent->left = replacement;
+        } else {
+            target->parent->right = replacement;
+        }
+        if (replacement != null) {
+            replacement->parent = target->parent;
+        }
+    }
+
+    priv fn minimum(node: *tree_node<Key, Value>) const -> *tree_node<Key, Value> {
+        var current: *tree_node<Key, Value> = node;
+        while (current->left != null) {
+            current = current->left;
+        }
+        return current;
+    }
+
+    priv fn erase_fixup(node_value: *tree_node<Key, Value>, parent_value: *tree_node<Key, Value>) {
+        var node: *tree_node<Key, Value> = node_value;
+        var parent: *tree_node<Key, Value> = parent_value;
+        while (node != this->root && this->color_of(node) == tree_color.black) {
+            if (parent == null) {
+                break;
+            }
+            if (node == parent->left) {
+                var sibling: *tree_node<Key, Value> = parent->right;
+                if (this->color_of(sibling) == tree_color.red) {
+                    this->set_color(sibling, tree_color.black);
+                    parent->color = tree_color.red;
+                    this->rotate_left(parent);
+                    sibling = parent->right;
+                }
+                let left_is_black: bool = this->color_of(this->left_of(sibling)) == tree_color.black;
+                let right_is_black: bool = this->color_of(this->right_of(sibling)) == tree_color.black;
+                if (left_is_black && right_is_black) {
+                    this->set_color(sibling, tree_color.red);
+                    node = parent;
+                    parent = node->parent;
+                } else {
+                    if (right_is_black) {
+                        this->set_color(this->left_of(sibling), tree_color.black);
+                        this->set_color(sibling, tree_color.red);
+                        this->rotate_right(sibling);
+                        sibling = parent->right;
+                    }
+                    this->set_color(sibling, parent->color);
+                    parent->color = tree_color.black;
+                    this->set_color(this->right_of(sibling), tree_color.black);
+                    this->rotate_left(parent);
+                    node = this->root;
+                    parent = null;
+                }
+            } else {
+                var sibling: *tree_node<Key, Value> = parent->left;
+                if (this->color_of(sibling) == tree_color.red) {
+                    this->set_color(sibling, tree_color.black);
+                    parent->color = tree_color.red;
+                    this->rotate_right(parent);
+                    sibling = parent->left;
+                }
+                let left_is_black: bool = this->color_of(this->left_of(sibling)) == tree_color.black;
+                let right_is_black: bool = this->color_of(this->right_of(sibling)) == tree_color.black;
+                if (left_is_black && right_is_black) {
+                    this->set_color(sibling, tree_color.red);
+                    node = parent;
+                    parent = node->parent;
+                } else {
+                    if (left_is_black) {
+                        this->set_color(this->right_of(sibling), tree_color.black);
+                        this->set_color(sibling, tree_color.red);
+                        this->rotate_left(sibling);
+                        sibling = parent->left;
+                    }
+                    this->set_color(sibling, parent->color);
+                    parent->color = tree_color.black;
+                    this->set_color(this->left_of(sibling), tree_color.black);
+                    this->rotate_right(parent);
+                    node = this->root;
+                    parent = null;
+                }
+            }
+        }
+        this->set_color(node, tree_color.black);
+    }
+
+    priv fn release_subtree(node: *tree_node<Key, Value>) {
+        if (node == null) {
+            return;
+        }
+        let left: *tree_node<Key, Value> = node->left;
+        let right: *tree_node<Key, Value> = node->right;
+        this->release_subtree(left);
+        this->release_subtree(right);
+        this->nodes.deallocate(node);
+    }
+
+    priv fn validate_node(
+        node: *const tree_node<Key, Value>, parent: *const tree_node<Key, Value>,
+        lower: *const Key, upper: *const Key, depth: usize) const -> tree_validation {
+        if (node == null) {
+            return { count = 0, black_height = 1, valid = true };
+        }
+        if (depth >= tree_limit.maximum_depth as usize || !this->nodes.owns(node)) {
+            return { count = 0, black_height = 0, valid = false };
+        }
+        if (node->parent as *const tree_node<Key, Value> != parent) {
+            return { count = 0, black_height = 0, valid = false };
+        }
+        if (lower != null && !(*lower < node->key)) {
+            return { count = 0, black_height = 0, valid = false };
+        }
+        if (upper != null && !(node->key < *upper)) {
+            return { count = 0, black_height = 0, valid = false };
+        }
+        let red_has_red_left: bool = node->color == tree_color.red &&
+            this->color_of(node->left as *const tree_node<Key, Value>) == tree_color.red;
+        let red_has_red_right: bool = node->color == tree_color.red &&
+            this->color_of(node->right as *const tree_node<Key, Value>) == tree_color.red;
+        if (red_has_red_left || red_has_red_right) {
+            return { count = 0, black_height = 0, valid = false };
+        }
+        let left: tree_validation = this->validate_node(
+            node->left as *const tree_node<Key, Value>, node, lower, &node->key as *const Key, depth + 1);
+        if (!left.valid) {
+            return left;
+        }
+        let right: tree_validation = this->validate_node(
+            node->right as *const tree_node<Key, Value>, node, &node->key as *const Key, upper, depth + 1);
+        if (!right.valid || left.black_height != right.black_height) {
+            return { count = 0, black_height = 0, valid = false };
+        }
+        var child_count: usize = 0;
+        if (@add_overflow(left.count, right.count, &child_count)) {
+            return { count = 0, black_height = 0, valid = false };
+        }
+        var subtree_count: usize = 0;
+        if (@add_overflow(child_count, 1, &subtree_count)) {
+            return { count = 0, black_height = 0, valid = false };
+        }
+        let own_black: usize = node->color == tree_color.black ? 1 : 0;
+        return {
+            count = subtree_count, black_height = left.black_height + own_black, valid = true,
+        };
+    }
+}

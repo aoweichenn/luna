@@ -42,6 +42,9 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
   leading `BootstrapSemanticDiagnosticKind`, compile-only, no linking. Either
   form may append `UNITS <ordered-source>...` to replace import-derived test
   discovery with an explicit source set for module-order and graph cases.
+- `test` runs independent expectation cases with four workers by default;
+  use `--jobs N` to tune concurrency. Shared CLI, relocation and FFI suites
+  remain serialized, and result reporting preserves expectation-file order.
 
 ## Iteration discipline
 
@@ -79,7 +82,8 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
   function design is not accepted.
 - Standard-library public APIs follow the C++ standard-library naming model:
   lowercase module/type/function names such as `luna.std.vector`,
-  `vector<Value>`, `span<Value>`, `expected<Value, Error>`, `move`,
+  `vector<Value>`, `span<Value>`, `list<Value>`, `deque<Value>`,
+  `map<Key, Value>`, `queue<Value>`, `expected<Value, Error>`, `move`,
   `push_back`, `size`, `capacity`, `data`, `reserve`, `clear`, `value` and
   `error`. Match C++ spelling and
   semantics whenever Luna supports them; document intentional differences.

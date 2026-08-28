@@ -8,7 +8,7 @@ modernization. It applies to every new or rewritten source under `library/`,
 subsystem must move toward this design rather than preserve its historical
 bootstrap shape.
 
-The current branch has established a green baseline with 439 tests and
+The current branch has established a green baseline with 443 tests and
 a byte-identical fixed point. Every migration batch must preserve those gates.
 
 ## Non-negotiable design rules
@@ -172,6 +172,12 @@ The detailed container contract is `docs/container-foundation.md`.
 | `luna.std.span` | non-owning typed contiguous range | `span<Value>` |
 | `luna.std.buffer` | owning byte storage | move-only `byte_buffer` |
 | `luna.std.vector` | typed trivially-relocatable storage | `vector<Value>` |
+| `luna.std.deque` | double-ended indexed sequence | `deque<Value>` |
+| `luna.std.list` | stable-address linked sequence | `list<Value>` |
+| `luna.std.map` | unique-key ordered association | `map<Key, Value>` |
+| `luna.std.queue` | FIFO container adaptor | `queue<Value>` |
+| `luna.internal.pool` | stable raw node slots | non-generic storage + typed wrapper |
+| `luna.internal.tree` | shared ordered index implementation | red-black `ordered_tree<Key, Value>` |
 | `luna.std.memory` | raw allocation and byte primitives | narrow platform-independent functions |
 | `luna.std.ascii` | ASCII classification and conversion | stateless functions/tables |
 | `luna.std.binary` | endian-aware binary reading/writing | reader/writer value classes |
@@ -204,11 +210,13 @@ module is deleted rather than retained as a forwarding facade.
 ```text
 library/
   include/luna/
-    std/{expected,span,buffer,vector}.lh
+    std/{expected,span,buffer,vector,deque,list,map,queue}.lh
+    internal/{pool,tree}.lh
     linux/{syscall,process,memory,file,path}.lh
     std/{utility,checked,memory,ascii,binary,text,path,io}.lh
   src/
     linux/{syscall,process,memory,file,path}.la
+    internal/pool.la
     std/{buffer,memory,ascii,binary,text,path,io}.la
     std/text/{utf8,owned}.la            # same module, justified method families
     std/io/{read,write}.la              # same module when the facade grows

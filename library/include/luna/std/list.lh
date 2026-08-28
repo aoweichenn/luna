@@ -1,0 +1,228 @@
+export module luna.std.list;
+
+import luna.internal.pool as pool;
+import luna.runtime;
+
+struct list_node<Value> {
+    previous: *list_node<Value>;
+    next: *list_node<Value>;
+    value: Value;
+}
+
+export class list<Value> {
+    priv nodes: pool::slot_pool<list_node<Value>>;
+    priv first: *list_node<Value>;
+    priv last: *list_node<Value>;
+    priv element_count: usize;
+
+    pub init();
+    pub init(other: list<Value>&&);
+    pub operator =(other: list<Value>&&);
+    pub fn is_valid() const -> bool;
+    pub fn empty() const -> bool;
+    pub fn size() const -> usize;
+    pub fn front() -> Value&;
+    pub fn front() const -> Value const&;
+    pub fn back() -> Value&;
+    pub fn back() const -> Value const&;
+    pub fn push_front(value: Value) -> runtime::Error;
+    pub fn push_back(value: Value) -> runtime::Error;
+    pub fn pop_front() -> runtime::Error;
+    pub fn pop_back() -> runtime::Error;
+    pub fn clear();
+    pub deinit();
+}
+
+impl list {
+    init(): nodes = pool::slot_pool<list_node<Value>>() {
+        assert(@is_trivially_relocatable(Value));
+        this->first = null;
+        this->last = null;
+        this->element_count = 0;
+    }
+
+    init(other: list<Value>&&): nodes = other.nodes as pool::slot_pool<list_node<Value>>&& {
+        assert(@is_trivially_relocatable(Value));
+        this->first = other.first;
+        this->last = other.last;
+        this->element_count = other.element_count;
+        other.first = null;
+        other.last = null;
+        other.element_count = 0;
+    }
+
+    operator =(other: list<Value>&&) {
+        if (this == &other) {
+            return;
+        }
+        this->clear();
+        this->nodes = other.nodes as pool::slot_pool<list_node<Value>>&&;
+        this->first = other.first;
+        this->last = other.last;
+        this->element_count = other.element_count;
+        other.first = null;
+        other.last = null;
+        other.element_count = 0;
+    }
+
+    fn is_valid() const -> bool {
+        if (!this->nodes.is_valid() || this->nodes.size() != this->element_count) {
+            return false;
+        }
+        if (this->element_count == 0) {
+            return this->first == null && this->last == null;
+        }
+        if (this->first == null || this->last == null) {
+            return false;
+        }
+        if (this->first->previous != null || this->last->next != null) {
+            return false;
+        }
+        var current: *const list_node<Value> = this->first as *const list_node<Value>;
+        var previous: *const list_node<Value> = null;
+        var observed: usize = 0;
+        while (current != null && observed < this->element_count) {
+            if (!this->nodes.owns(current) || current->previous as *const list_node<Value> != previous) {
+                return false;
+            }
+            previous = current;
+            current = current->next as *const list_node<Value>;
+            observed += 1;
+        }
+        let reached_end: bool = current == null && observed == this->element_count;
+        let last_matches: bool = previous == this->last as *const list_node<Value>;
+        return reached_end && last_matches;
+    }
+
+    fn empty() const -> bool {
+        return this->element_count == 0;
+    }
+
+    fn size() const -> usize {
+        return this->element_count;
+    }
+
+    fn front() -> Value& {
+        return this->first->value;
+    }
+
+    fn front() const -> Value const& {
+        return this->first->value;
+    }
+
+    fn back() -> Value& {
+        return this->last->value;
+    }
+
+    fn back() const -> Value const& {
+        return this->last->value;
+    }
+
+    fn push_front(value: Value) -> runtime::Error {
+        if (!this->storage_is_valid()) {
+            return runtime::Error.invalid_argument;
+        }
+        let created: pool::pool_allocation<list_node<Value>> = this->nodes.allocate();
+        if (created.error != runtime::Error.none) {
+            return created.error;
+        }
+        *created.address = {
+            previous = null, next = this->first, value = value,
+        };
+        if (this->first != null) {
+            this->first->previous = created.address;
+        } else {
+            this->last = created.address;
+        }
+        this->first = created.address;
+        this->element_count += 1;
+        return runtime::Error.none;
+    }
+
+    fn push_back(value: Value) -> runtime::Error {
+        if (!this->storage_is_valid()) {
+            return runtime::Error.invalid_argument;
+        }
+        let created: pool::pool_allocation<list_node<Value>> = this->nodes.allocate();
+        if (created.error != runtime::Error.none) {
+            return created.error;
+        }
+        *created.address = {
+            previous = this->last, next = null, value = value,
+        };
+        if (this->last != null) {
+            this->last->next = created.address;
+        } else {
+            this->first = created.address;
+        }
+        this->last = created.address;
+        this->element_count += 1;
+        return runtime::Error.none;
+    }
+
+    fn pop_front() -> runtime::Error {
+        if (!this->storage_is_valid() || this->empty()) {
+            return runtime::Error.invalid_argument;
+        }
+        let removed: *list_node<Value> = this->first;
+        let next: *list_node<Value> = removed->next;
+        let release_error: runtime::Error = this->nodes.deallocate(removed);
+        if (release_error != runtime::Error.none) {
+            return release_error;
+        }
+        this->first = next;
+        this->element_count -= 1;
+        if (next != null) {
+            next->previous = null;
+        } else {
+            this->last = null;
+        }
+        return runtime::Error.none;
+    }
+
+    fn pop_back() -> runtime::Error {
+        if (!this->storage_is_valid() || this->empty()) {
+            return runtime::Error.invalid_argument;
+        }
+        let removed: *list_node<Value> = this->last;
+        let previous: *list_node<Value> = removed->previous;
+        let release_error: runtime::Error = this->nodes.deallocate(removed);
+        if (release_error != runtime::Error.none) {
+            return release_error;
+        }
+        this->last = previous;
+        this->element_count -= 1;
+        if (previous != null) {
+            previous->next = null;
+        } else {
+            this->first = null;
+        }
+        return runtime::Error.none;
+    }
+
+    fn clear() {
+        var current: *list_node<Value> = this->first;
+        while (current != null) {
+            let next: *list_node<Value> = current->next;
+            this->nodes.deallocate(current);
+            current = next;
+        }
+        this->first = null;
+        this->last = null;
+        this->element_count = 0;
+    }
+
+    deinit() {
+        this->clear();
+    }
+
+    priv fn storage_is_valid() const -> bool {
+        if (this->nodes.size() != this->element_count) {
+            return false;
+        }
+        if (this->element_count == 0) {
+            return this->first == null && this->last == null;
+        }
+        return this->first != null && this->last != null;
+    }
+}

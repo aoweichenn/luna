@@ -1,0 +1,294 @@
+module luna.internal.pool;
+
+import luna.std.memory as memory;
+
+enum pool_limit: usize {
+    slots_per_block = 64, maximum_count = 18446744073709551615,
+}
+
+struct pool_block {
+    allocation: memory::Allocation;
+    live_mask: u64;
+}
+
+struct pool_slot {
+    block_index: usize;
+    bit: u64;
+    valid: bool;
+}
+
+struct free_slot {
+    address: *u8;
+    block_index: usize;
+    bit: u64;
+}
+
+impl slot_storage {
+    init(slot_size: usize): blocks = buffer::byte_buffer(), free_slots = buffer::byte_buffer() {
+        this->slot_size = slot_size;
+        this->live_slots = 0;
+    }
+
+    init(other: slot_storage&&): blocks = other.blocks as buffer::byte_buffer&&,
+          free_slots = other.free_slots as buffer::byte_buffer&& {
+        this->slot_size = other.slot_size;
+        this->live_slots = other.live_slots;
+        other.live_slots = 0;
+    }
+
+    operator =(other: slot_storage&&) {
+        if (this == &other) {
+            return;
+        }
+        this->release_blocks();
+        this->blocks = other.blocks as buffer::byte_buffer&&;
+        this->free_slots = other.free_slots as buffer::byte_buffer&&;
+        this->slot_size = other.slot_size;
+        this->live_slots = other.live_slots;
+        other.live_slots = 0;
+    }
+
+    fn is_valid() const -> bool {
+        if (!this->storage_is_valid()) {
+            return false;
+        }
+        let blocks: *const pool_block = this->blocks.data() as *const pool_block;
+        let block_count: usize = this->block_count();
+        var observed_live: usize = 0;
+        var block_bytes: usize = 0;
+        if (@mul_overflow(this->slot_size, pool_limit.slots_per_block as usize, &block_bytes)) {
+            return false;
+        }
+        for (var index: usize = 0; index < block_count; index += 1) {
+            let block: pool_block = blocks[index];
+            if (block.allocation.address == null || block.allocation.length != block_bytes) {
+                return false;
+            }
+            observed_live += @popcount(block.live_mask) as usize;
+        }
+        if (observed_live != this->live_slots) {
+            return false;
+        }
+        let free_slots: *const free_slot = this->free_slots.data() as *const free_slot;
+        let free_count: usize = this->free_count();
+        for (var index: usize = 0; index < free_count; index += 1) {
+            let slot: free_slot = free_slots[index];
+            if (slot.block_index >= block_count) {
+                return false;
+            }
+            let location: pool_slot = this->locate(slot.address as *const u8);
+            let identity_is_valid: bool = location.valid && location.block_index == slot.block_index;
+            if (!identity_is_valid || location.bit != slot.bit) {
+                return false;
+            }
+            if ((blocks[slot.block_index].live_mask & slot.bit) != 0) {
+                return false;
+            }
+            for (var other: usize = index + 1; other < free_count; other += 1) {
+                if (slot.address == free_slots[other].address) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    fn size() const -> usize {
+        return this->live_slots;
+    }
+
+    fn allocate() -> storage_allocation {
+        if (!this->storage_is_valid()) {
+            return { address = null, error = runtime::Error.invalid_argument };
+        }
+        if (this->free_count() == 0) {
+            let block_error: runtime::Error = this->add_block();
+            if (block_error != runtime::Error.none) {
+                return { address = null, error = block_error };
+            }
+        }
+        if (this->live_slots == pool_limit.maximum_count as usize) {
+            return { address = null, error = runtime::Error.out_of_memory };
+        }
+        let last: usize = this->free_count() - 1;
+        let free_slots: *const free_slot = this->free_slots.data() as *const free_slot;
+        let slot: free_slot = free_slots[last];
+        if (slot.block_index >= this->block_count()) {
+            return { address = null, error = runtime::Error.invalid_argument };
+        }
+        var blocks: *pool_block = this->blocks.data() as *pool_block;
+        if ((blocks[slot.block_index].live_mask & slot.bit) != 0) {
+            return { address = null, error = runtime::Error.invalid_argument };
+        }
+        let truncate_error: runtime::Error = this->free_slots.truncate(last * sizeof(free_slot));
+        if (truncate_error != runtime::Error.none) {
+            return { address = null, error = truncate_error };
+        }
+        blocks = this->blocks.data() as *pool_block;
+        blocks[slot.block_index].live_mask |= slot.bit;
+        this->live_slots += 1;
+        return { address = slot.address, error = runtime::Error.none };
+    }
+
+    fn owns(address: *const u8) const -> bool {
+        return this->locate(address).valid;
+    }
+
+    fn deallocate(address: *u8) -> runtime::Error {
+        if (!this->storage_is_valid() || this->live_slots == 0) {
+            return runtime::Error.invalid_argument;
+        }
+        let location: pool_slot = this->locate(address as *const u8);
+        if (!location.valid) {
+            return runtime::Error.invalid_argument;
+        }
+        var blocks: *pool_block = this->blocks.data() as *pool_block;
+        if ((blocks[location.block_index].live_mask & location.bit) == 0) {
+            return runtime::Error.invalid_argument;
+        }
+        let slot: free_slot = {
+            address = address, block_index = location.block_index, bit = location.bit,
+        };
+        let append_error: runtime::Error = this->free_slots.append(
+            (&slot) as *const free_slot as *const u8, sizeof(free_slot));
+        if (append_error != runtime::Error.none) {
+            return append_error;
+        }
+        blocks = this->blocks.data() as *pool_block;
+        blocks[location.block_index].live_mask &= ~location.bit;
+        this->live_slots -= 1;
+        return runtime::Error.none;
+    }
+
+    deinit() {
+        this->release_blocks();
+    }
+
+    priv fn block_count() const -> usize {
+        return this->blocks.size() / sizeof(pool_block);
+    }
+
+    priv fn free_count() const -> usize {
+        return this->free_slots.size() / sizeof(free_slot);
+    }
+
+    priv fn storage_is_valid() const -> bool {
+        if (this->slot_size == 0) {
+            return false;
+        }
+        if (!this->blocks.is_valid() || !this->free_slots.is_valid()) {
+            return false;
+        }
+        if (this->blocks.size() % sizeof(pool_block) != 0) {
+            return false;
+        }
+        if (this->free_slots.size() % sizeof(free_slot) != 0) {
+            return false;
+        }
+        var expected_slots: usize = 0;
+        if (@mul_overflow(this->block_count(), pool_limit.slots_per_block as usize, &expected_slots)) {
+            return false;
+        }
+        var observed_slots: usize = 0;
+        if (@add_overflow(this->live_slots, this->free_count(), &observed_slots)) {
+            return false;
+        }
+        return observed_slots == expected_slots;
+    }
+
+    priv fn locate(address: *const u8) const -> pool_slot {
+        if (address == null) {
+            return { block_index = 0, bit = 0, valid = false };
+        }
+        let address_value: usize = address as usize;
+        let blocks: *const pool_block = this->blocks.data() as *const pool_block;
+        for (var index: usize = 0; index < this->block_count(); index += 1) {
+            let block: pool_block = blocks[index];
+            let block_begin: usize = block.allocation.address as usize;
+            var block_end: usize = 0;
+            if (@add_overflow(block_begin, block.allocation.length, &block_end)) {
+                return { block_index = 0, bit = 0, valid = false };
+            }
+            let inside_block: bool = address_value >= block_begin && address_value < block_end;
+            if (!inside_block) {
+                continue;
+            }
+            let offset: usize = address_value - block_begin;
+            if (offset % this->slot_size != 0) {
+                return { block_index = 0, bit = 0, valid = false };
+            }
+            let slot_index: usize = offset / this->slot_size;
+            if (slot_index >= pool_limit.slots_per_block as usize) {
+                return { block_index = 0, bit = 0, valid = false };
+            }
+            return { block_index = index, bit = (1 as u64) << (slot_index as u64), valid = true };
+        }
+        return { block_index = 0, bit = 0, valid = false };
+    }
+
+    priv fn add_block() -> runtime::Error {
+        var block_bytes: usize = 0;
+        if (@mul_overflow(this->slot_size, pool_limit.slots_per_block as usize, &block_bytes)) {
+            return runtime::Error.out_of_memory;
+        }
+        var block_capacity: usize = 0;
+        if (@add_overflow(this->blocks.size(), sizeof(pool_block), &block_capacity)) {
+            return runtime::Error.out_of_memory;
+        }
+        var free_bytes: usize = 0;
+        if (@mul_overflow(pool_limit.slots_per_block as usize, sizeof(free_slot), &free_bytes)) {
+            return runtime::Error.out_of_memory;
+        }
+        var free_capacity: usize = 0;
+        if (@add_overflow(this->free_slots.size(), free_bytes, &free_capacity)) {
+            return runtime::Error.out_of_memory;
+        }
+        let block_reserve_error: runtime::Error = this->blocks.reserve(block_capacity);
+        if (block_reserve_error != runtime::Error.none) {
+            return block_reserve_error;
+        }
+        let free_reserve_error: runtime::Error = this->free_slots.reserve(free_capacity);
+        if (free_reserve_error != runtime::Error.none) {
+            return free_reserve_error;
+        }
+        let created: memory::AllocationResult = memory::allocate(block_bytes);
+        if (created.error != runtime::Error.none) {
+            return created.error;
+        }
+        let free_start: usize = this->free_slots.size();
+        let block_index: usize = this->block_count();
+        for (var index: usize = 0; index < pool_limit.slots_per_block as usize; index += 1) {
+            let slot: free_slot = {
+                address = &created.allocation.address[index * this->slot_size], block_index = block_index,
+                bit = (1 as u64) << (index as u64),
+            };
+            let append_error: runtime::Error = this->free_slots.append(
+                (&slot) as *const free_slot as *const u8, sizeof(free_slot));
+            if (append_error != runtime::Error.none) {
+                this->free_slots.truncate(free_start);
+                memory::release(created.allocation);
+                return append_error;
+            }
+        }
+        let block: pool_block = { allocation = created.allocation, live_mask = 0 };
+        let block_error: runtime::Error = this->blocks.append(
+            (&block) as *const pool_block as *const u8, sizeof(pool_block));
+        if (block_error != runtime::Error.none) {
+            this->free_slots.truncate(free_start);
+            memory::release(created.allocation);
+            return block_error;
+        }
+        return runtime::Error.none;
+    }
+
+    priv fn release_blocks() {
+        let blocks: *const pool_block = this->blocks.data() as *const pool_block;
+        for (var index: usize = 0; index < this->block_count(); index += 1) {
+            memory::release(blocks[index].allocation);
+        }
+        this->blocks.clear();
+        this->free_slots.clear();
+        this->slot_size = 0;
+        this->live_slots = 0;
+    }
+}

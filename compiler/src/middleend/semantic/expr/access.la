@@ -564,6 +564,9 @@ fn lower_member(
             context::empty_span(), base.type_id);
         return base::invalid_expression();
     }
+    if (!types::require_complete_type(context, owner_type)) {
+        return base::invalid_expression();
+    }
     let owner_record: type_info::Record = context::type_record(context, owner_type);
     if (!type_info::is_record(owner_record.kind)) {
         context::add_diagnostic(
@@ -1259,18 +1262,18 @@ fn lower_target_call_with_receiver(
     var parameters_from_fields: bool = false;
     var callee_no_return: bool = false;
     var bound_receiver: usize = none;
+    var selected_record: context::Function = {};
     let symbols: *const context::Symbol = context->symbols.data as
             *const context::Symbol;
-    let functions: *const context::Function = context->functions.data as
-            *const context::Function;
     if (selected_function != none) {
-        let function: context::Function = functions[selected_function];
-        return_type = function.return_type;
-        ir_callee = function.ir_function;
-        parameter_count = functions::function_argument_parameter_count(function);
-        required_parameter_count = functions::function_required_argument_count(function);
-        first_parameter = functions::function_first_argument_parameter(function);
-        callee_no_return = (function.flags & (context::SymbolFlag.no_return as usize)) != 0;
+        let function_data: *const context::Function = context->functions.data as *const context::Function;
+        selected_record = function_data[selected_function];
+        return_type = selected_record.return_type;
+        ir_callee = selected_record.ir_function;
+        parameter_count = functions::function_argument_parameter_count(selected_record);
+        required_parameter_count = functions::function_required_argument_count(selected_record);
+        first_parameter = functions::function_first_argument_parameter(selected_record);
+        callee_no_return = (selected_record.flags & (context::SymbolFlag.no_return as usize)) != 0;
     } else {
         let callee: context::Expression = api::invoke(lowerer, context, node.first_child, none);
         if (!callee.valid) {
@@ -1309,16 +1312,12 @@ fn lower_target_call_with_receiver(
         functions::function_accepts_arity(context, selected_function, argument_total);
     if (!arity_is_valid) {
         let related_unit: usize = selected_function == none ? none :
-            symbols[functions[selected_function].symbol_id].declaration_unit;
+            symbols[selected_record.symbol_id].declaration_unit;
         context::add_diagnostic(
             context, context::DiagnosticKind.argument_count, context->current_unit, node.span,
             related_unit, context::empty_span(), required_parameter_count);
         return base::invalid_expression();
     }
-    let parameters: *const context::Parameter = context->parameters.data as
-            *const context::Parameter;
-    let type_fields: *const type_info::Field = context->types.fields.data as
-            *const type_info::Field;
     var argument_values: bytes::Buffer = bytes::empty();
     if (bound_receiver != none) {
         append_call_argument(context, &argument_values, bound_receiver);
@@ -1326,7 +1325,7 @@ fn lower_target_call_with_receiver(
     var constructed_address: usize = none;
     let target_has_receiver: bool = target.receiver_source != probe::ReceiverSource.none;
     if (selected_function != none && target_has_receiver) {
-        let receiver_type: usize = functions::function_receiver_type(context, functions[selected_function]);
+        let receiver_type: usize = functions::function_receiver_type(context, selected_record);
         constructed_address = collect_direct_receiver(
             context, node, target, receiver_type, receiver_address, lowerer, &argument_values);
         if (constructed_address == none) {
@@ -1334,8 +1333,7 @@ fn lower_target_call_with_receiver(
             return base::invalid_expression();
         }
         if (call_dispatch.kind == class_model::CallDispatch.virtual_call) {
-            callee_value = load_virtual_callee(
-                context, node, call_dispatch, functions[selected_function], constructed_address);
+            callee_value = load_virtual_callee(context, node, call_dispatch, selected_record, constructed_address);
             if (callee_value == none) {
                 bytes::release(argument_values);
                 return base::invalid_expression();
@@ -1347,8 +1345,13 @@ fn lower_target_call_with_receiver(
         index < argument_total && context->error == runtime::Error.none;
         index += 1) {
         let variadic_extra: bool = index >= parameter_count;
-        let parameter_type: usize = variadic_extra ? none :
-            call_parameter_type(parameters, type_fields, first_parameter, index, parameters_from_fields);
+        var parameter_type: usize = none;
+        if (!variadic_extra) {
+            let parameters: *const context::Parameter = context->parameters.data as *const context::Parameter;
+            let type_fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+            parameter_type = call_parameter_type(
+                parameters, type_fields, first_parameter, index, parameters_from_fields);
+        }
         var expected_type: usize = parameter_type;
         if (!variadic_extra) {
             let parameter_record: type_info::Record = context::type_record(context, parameter_type);
@@ -1366,7 +1369,7 @@ fn lower_target_call_with_receiver(
         child = argument_node.next_sibling;
     }
     if (selected_function != none && argument_total < parameter_count) {
-        collect_default_call_arguments(context, functions[selected_function], argument_total, &argument_values);
+        collect_default_call_arguments(context, selected_record, argument_total, &argument_values);
     }
     let indirect_call: bool = callee_value != none;
     var instruction: ir::Instruction = builder::instruction(

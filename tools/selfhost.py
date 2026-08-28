@@ -14,6 +14,7 @@ rebuilding itself and comparing every artifact byte-for-byte.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 from dataclasses import dataclass
 import filecmp
 import os
@@ -95,6 +96,12 @@ LIBRARIES = {
     "memory": library_module("luna.std.memory", "std/memory"),
     "buffer": library_module("luna.std.buffer", "std/buffer"),
     "vector": interface_module("library", "luna.std.vector"),
+    "pool": library_module("luna.internal.pool", "internal/pool"),
+    "deque": interface_module("library", "luna.std.deque"),
+    "list": interface_module("library", "luna.std.list"),
+    "tree": interface_module("library", "luna.internal.tree"),
+    "map": interface_module("library", "luna.std.map"),
+    "queue": interface_module("library", "luna.std.queue"),
     "bytes": library_module("luna.std.bytes", "std/bytes"),
     "binary": library_module("luna.std.binary", "std/binary"),
     "text": library_module("luna.std.text", "std/text"),
@@ -1416,7 +1423,95 @@ def execute_ffi_tests(
     return passed, failed, skipped
 
 
-def execute_tests(stage_bin: pathlib.Path, runner: tuple[str, ...]) -> int:
+def execute_expectation_case(
+    stage_bin: pathlib.Path,
+    runner: tuple[str, ...],
+    cases: pathlib.Path,
+    kinds: dict[str, int],
+    timeout: int,
+    case_index: int,
+    line: str,
+) -> tuple[bool, str]:
+    parts = line.split()
+    name = parts[0]
+    work = ROOT / "out" / "tests" / f"{case_index:04d}-{name.removesuffix('.la')}"
+    reset(work)
+    assembly = work / f"{name}.s"
+
+    def execute(command: list[str | pathlib.Path]) -> subprocess.CompletedProcess[str]:
+        printable = " ".join(str(part) for part in command)
+        try:
+            completed = subprocess.run(
+                [str(part) for part in command],
+                timeout=timeout,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise AssertionError(f"command timed out after {timeout}s: {printable}") from error
+        return completed
+
+    try:
+        if len(parts) >= 3 and parts[1] == "FAIL":
+            kind = parts[2]
+            if kind not in kinds:
+                raise AssertionError(f"unknown diagnostic kind {kind}")
+            command = [
+                *tool(stage_bin, "compile", runner),
+                "--executable",
+                "-o",
+                assembly,
+                *expectation_units(cases, name, parts[3:]),
+            ]
+            completed = execute(command)
+            expected_status = SEMANTIC_DIAGNOSTIC_BASE + kinds[kind]
+            if completed.returncode != expected_status:
+                raise AssertionError(
+                    f"compile exit {completed.returncode}, expected {expected_status} ({kind}); "
+                    f"stderr={completed.stderr.strip()!r}"
+                )
+            if not completed.stderr.startswith(f"semantic:{kinds[kind]}:"):
+                raise AssertionError(
+                    f"stderr {completed.stderr.strip()!r}, expected leading semantic:{kinds[kind]}:"
+                )
+            return True, f"PASS {name} (FAIL {kind})"
+
+        expected = int(parts[1])
+        object_file = work / f"{name}.lo"
+        executable = work / name.removesuffix(".la")
+        commands = (
+            [
+                *tool(stage_bin, "compile", runner),
+                "--executable",
+                "-o",
+                assembly,
+                *expectation_units(cases, name, parts[2:]),
+            ],
+            [*tool(stage_bin, "assemble", runner), "-o", object_file, assembly],
+            [
+                *tool(stage_bin, "link", runner),
+                "-o",
+                executable,
+                object_file,
+                syscall_object(stage_bin),
+            ],
+        )
+        for command in commands:
+            completed = execute(command)
+            if completed.returncode != 0:
+                printable = " ".join(str(part) for part in command)
+                raise AssertionError(
+                    f"command returned {completed.returncode}: {printable}; stderr={completed.stderr.strip()!r}"
+                )
+        completed = execute([*runner, executable])
+        if completed.returncode != expected:
+            raise AssertionError(f"exit {completed.returncode}, expected {expected}")
+        return True, f"PASS {name} ({expected})"
+    except Exception as error:  # noqa: BLE001 - return one deterministic failure record
+        return False, f"FAIL {name}: {error}"
+
+
+def execute_tests(stage_bin: pathlib.Path, runner: tuple[str, ...], jobs: int) -> int:
     expectations = ROOT / "tests" / "expectations.txt"
     cases = ROOT / "tests" / "cases"
     kinds = semantic_diagnostic_kinds()
@@ -1426,83 +1521,34 @@ def execute_tests(stage_bin: pathlib.Path, runner: tuple[str, ...]) -> int:
     cli_passed, cli_failed = execute_tool_cli_tests(stage_bin, runner)
     passed += cli_passed
     failed.extend(cli_failed)
-    for line in expectations.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        parts = line.split()
-        name = parts[0]
-        work = ROOT / "out" / "tests" / name.removesuffix(".la")
-        reset(work)
-        assembly = work / f"{name}.s"
-        try:
-            if len(parts) >= 3 and parts[1] == "FAIL":
-                kind = parts[2]
-                if kind not in kinds:
-                    raise AssertionError(f"unknown diagnostic kind {kind}")
-                completed = subprocess.run(
-                    [
-                        *tool(stage_bin, "compile", runner),
-                        "--executable",
-                        "-o",
-                        assembly,
-                        *expectation_units(cases, name, parts[3:]),
-                    ],
-                    timeout=timeout,
-                    capture_output=True,
-                    text=True,
-                )
-                expected_status = SEMANTIC_DIAGNOSTIC_BASE + kinds[kind]
-                if completed.returncode != expected_status:
-                    raise AssertionError(
-                        f"exit {completed.returncode}, expected {expected_status} ({kind})"
-                    )
-                if not completed.stderr.startswith(f"semantic:{kinds[kind]}:"):
-                    raise AssertionError(
-                        f"stderr {completed.stderr.strip()!r}, expected leading semantic:{kinds[kind]}:"
-                    )
+    expectation_lines = [
+        line
+        for line in expectations.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    worker_count = min(jobs, len(expectation_lines))
+    print(f"running {len(expectation_lines)} expectations with {worker_count} jobs")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(
+                execute_expectation_case,
+                stage_bin,
+                runner,
+                cases,
+                kinds,
+                timeout,
+                case_index,
+                line,
+            )
+            for case_index, line in enumerate(expectation_lines)
+        ]
+        for future in futures:
+            succeeded, message = future.result()
+            print(message)
+            if succeeded:
                 passed += 1
-                print(f"PASS {name} (FAIL {kind})")
-                continue
-            expected = int(parts[1])
-            object_file = work / f"{name}.lo"
-            executable = work / name.removesuffix(".la")
-            run(
-                [
-                    *tool(stage_bin, "compile", runner),
-                    "--executable",
-                    "-o",
-                    assembly,
-                    *expectation_units(cases, name, parts[2:]),
-                ],
-                timeout=timeout,
-            )
-            run(
-                [*tool(stage_bin, "assemble", runner), "-o", object_file, assembly],
-                timeout=timeout,
-            )
-            run(
-                [
-                    *tool(stage_bin, "link", runner),
-                    "-o",
-                    executable,
-                    object_file,
-                    syscall_object(stage_bin),
-                ],
-                timeout=timeout,
-            )
-            completed = subprocess.run(
-                [*runner, str(executable)],
-                timeout=timeout,
-            )
-            if completed.returncode != expected:
-                raise AssertionError(
-                    f"exit {completed.returncode}, expected {expected}"
-                )
-            passed += 1
-            print(f"PASS {name} ({expected})")
-        except Exception as error:  # noqa: BLE001 - report and continue
-            failed.append(name)
-            print(f"FAIL {name}: {error}")
+            else:
+                failed.append(message.split(":", 1)[0].removeprefix("FAIL "))
     identity_passed, identity_failed = execute_callable_identity_tests(
         stage_bin,
         runner,
@@ -1550,6 +1596,12 @@ def main() -> None:
     test_parser = subparsers.add_parser("test", help="run behavior tests")
     add_common(test_parser)
     test_parser.add_argument("--stage", type=pathlib.Path)
+    test_parser.add_argument(
+        "--jobs",
+        type=int,
+        default=4,
+        help="parallel expectation workers (default: 4)",
+    )
 
     audit_parser = subparsers.add_parser(
         "audit",
@@ -1589,10 +1641,12 @@ def main() -> None:
         compare_stages(next_out, fixed_out)
         print("FIXED POINT: all artifacts byte-identical")
     else:
+        if arguments.jobs <= 0:
+            fail("--jobs must be positive")
         stage = arguments.stage or default_out / "stage-next" / "bin"
         if not toolchain_is_available(stage):
             fail(f"no built toolchain under {stage}; run 'build' first")
-        raise SystemExit(execute_tests(stage, runner))
+        raise SystemExit(execute_tests(stage, runner, arguments.jobs))
 
 
 if __name__ == "__main__":

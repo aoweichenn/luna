@@ -372,3 +372,32 @@ class-composed source through `stage-transition`, `stage-next` and
 was byte-identical. The final test run passed 439/439 with no skips. The
 promoted executable is 4,556,630 bytes with SHA-256
 `5e4530aa12706080fad52733656c6d310de6d426e92262eae32e703fdc59ec38`.
+
+## 2026-08-28: promotion to the standard-container toolchain
+
+The anchor now contains the stage-fixed compiler supporting the first
+C++-shaped `list<Value>`, `deque<Value>`, `map<Key, Value>` and `queue<Value>`
+library surfaces. Public names and operations follow the C++ standard-library
+spelling. The reusable red-black tree and stable slot pool remain implementation
+dependencies under `luna.internal`, because C++ exposes neither as a standard
+container.
+
+All owning containers currently require trivially relocatable elements. The
+node pool keeps stable addresses and moves its block/bitmap/free-list algorithm
+into one non-generic `slot_storage` implementation, while list and map retain
+typed generic wrappers. The tree validates ordering, parent links, red-parent
+rules, black height and reachable node count after insertion and deletion.
+
+The container work exposed two general semantic defects. Member access now
+completes an incomplete concrete generic record before field lookup. Call probe
+and emitting lowering refresh parameter and field views around argument
+expressions that can lazily instantiate generics, preventing stale pointers
+after store growth. Neither fix contains a container-specific exception.
+
+Remote x86-64 `caw` verification built the 86-module graph through
+`stage-transition`, `stage-next` and `stage-fixed`; every next/fixed assembly,
+object and executable artifact was byte-identical. The final suite passed
+443/443 with no skips. Its expectation phase produced identical results with
+one and four workers; wall time fell from 83.24 seconds to 49.44 seconds. The
+promoted executable remains 4,556,630 bytes with SHA-256
+`c2c36ff54455138416afdd2004ea2294c8cfbc68a6c375fc13e7a6987dabb500`.

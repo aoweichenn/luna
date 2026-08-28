@@ -6,7 +6,7 @@
 它解决当前 `bytes::Buffer` 同时承担字节流、类型数组和资源句柄三种职责的问题，并为
 后续 `Lexer`、`Parser`、`SemanticSession`、`Assembler` 和 `Linker` 类提供稳定底座。
 
-当前实现基线为 439 项测试全部通过，stage-next 与 stage-fixed 全部产物逐字节一致。
+当前实现基线为 443 项测试全部通过，stage-next 与 stage-fixed 全部产物逐字节一致。
 
 ## C++接口对齐
 
