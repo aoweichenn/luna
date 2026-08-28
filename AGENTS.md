@@ -42,9 +42,11 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
   leading `BootstrapSemanticDiagnosticKind`, compile-only, no linking. Either
   form may append `UNITS <ordered-source>...` to replace import-derived test
   discovery with an explicit source set for module-order and graph cases.
-- `test` runs independent expectation cases with four workers by default;
-  use `--jobs N` to tune concurrency. Shared CLI, relocation and FFI suites
-  remain serialized, and result reporting preserves expectation-file order.
+- `test` batches ordinary non-negative behavior cases into bounded module
+  suites and runs suite/isolated tasks with four workers by default; use
+  `--jobs N` to tune concurrency. Compile failures, signals and explicit
+  `UNITS` contracts remain isolated. Shared CLI, relocation and FFI suites
+  keep their dedicated protocols. See `docs/test-architecture.md`.
 
 ## Iteration discipline
 

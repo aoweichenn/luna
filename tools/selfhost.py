@@ -14,6 +14,7 @@ rebuilding itself and comparing every artifact byte-for-byte.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import concurrent.futures
 from dataclasses import dataclass
 import filecmp
@@ -38,6 +39,34 @@ MODULE_PATTERN = re.compile(
     r"^[ \t]*(export[ \t]+)?module[ \t]+([A-Za-z0-9_.]+)[ \t]*;[ \t]*$",
     re.MULTILINE,
 )
+MAIN_DECLARATION_PATTERN = re.compile(
+    r"^(?P<indent>[ \t]*)fn[ \t]+main\(\)[ \t]*->[ \t]*i32(?P<opening>[ \t]*\{[ \t]*)$",
+    re.MULTILINE,
+)
+MAIN_REFERENCE_PATTERN = re.compile(r"\bmain[ \t]*\(")
+TOP_LEVEL_DECLARATION_PATTERN = re.compile(
+    r"^(?:@[A-Za-z_][A-Za-z0-9_]*(?:\([^\n)]*\))?[ \t]+)*(?:const[ \t]+)?"
+    r"(?:fn|class|struct|union|enum|type)[ \t]+([A-Za-z_][A-Za-z0-9_]*)",
+    re.MULTILINE,
+)
+TOP_LEVEL_CONSTANT_PATTERN = re.compile(
+    r"^const[ \t]+(?!fn\b)([A-Za-z_][A-Za-z0-9_]*)",
+    re.MULTILINE,
+)
+LUNA_LEXEME_PATTERN = re.compile(
+    r"//[^\n]*|/\*.*?\*/|\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|"
+    r"(?P<identifier>[A-Za-z_][A-Za-z0-9_]*)",
+    re.DOTALL,
+)
+SUITE_UNSAFE_SOURCE_MARKERS = (
+    "@embed(",
+    "@export_name(",
+    "@file(",
+    "asm fn",
+    "extern fn",
+    "process_exit(",
+)
+TEST_SUITE_CASE_LIMIT = 6
 
 
 @dataclass(frozen=True)
@@ -241,6 +270,7 @@ LIBRARIES = {
     ),
     "x86_64_codegen": compiler_module("luna.bootstrap.backend.x86_64.codegen", "backend/x86_64/codegen"),
     "x86_64_object": compiler_module("luna.bootstrap.backend.x86_64.object", "backend/x86_64/object"),
+    "x86_64_symbols": compiler_module("luna.compiler.x86.symbols", "backend/x86_64/symbols"),
     "x86_64_elf_format": compiler_module("luna.bootstrap.backend.x86_64.elf.format", "backend/x86_64/elf/format"),
     "x86_64_elf_reader": compiler_module("luna.bootstrap.backend.x86_64.elf.reader", "backend/x86_64/elf/reader"),
     "x86_64_elf_writer": compiler_module("luna.bootstrap.backend.x86_64.elf.writer", "backend/x86_64/elf/writer"),
@@ -809,6 +839,152 @@ def expectation_units(
             raise AssertionError(f"invalid unit for {name}: {source_name}")
         units.append(source)
     return units
+
+
+@dataclass(frozen=True)
+class TestExpectation:
+    index: int
+    name: str
+    expected_exit: int | None
+    diagnostic_kind: str | None
+    unit_specification: tuple[str, ...]
+
+    @classmethod
+    def parse(cls, index: int, line: str) -> TestExpectation:
+        match tuple(line.split()):
+            case (name, "FAIL", diagnostic_kind, *unit_specification):
+                return cls(
+                    index=index,
+                    name=name,
+                    expected_exit=None,
+                    diagnostic_kind=diagnostic_kind,
+                    unit_specification=tuple(unit_specification),
+                )
+            case (name, expected_exit, *unit_specification):
+                return cls(
+                    index=index,
+                    name=name,
+                    expected_exit=int(expected_exit),
+                    diagnostic_kind=None,
+                    unit_specification=tuple(unit_specification),
+                )
+            case _:
+                raise AssertionError(f"invalid expectation: {line}")
+
+
+@dataclass(frozen=True)
+class TestSuiteCase:
+    expectation: TestExpectation
+    entry_name: str
+    body: str
+
+
+@dataclass(frozen=True)
+class TestSuitePlan:
+    identifier: int
+    cases: tuple[TestSuiteCase, ...]
+
+    @property
+    def first_expectation_index(self) -> int:
+        return self.cases[0].expectation.index
+
+
+@dataclass(frozen=True)
+class ExpectationTaskResult:
+    order: int
+    passed: int
+    failed: tuple[str, ...]
+    messages: tuple[str, ...]
+
+
+class TestSuitePlanner:
+    def __init__(self, cases: pathlib.Path) -> None:
+        self._cases = cases
+
+    def plan(
+        self,
+        expectations: tuple[TestExpectation, ...],
+    ) -> tuple[tuple[TestSuitePlan, ...], tuple[TestExpectation, ...]]:
+        name_counts = Counter(expectation.name for expectation in expectations)
+        candidates: list[TestSuiteCase] = []
+        isolated: list[TestExpectation] = []
+        for expectation in expectations:
+            candidate = self._make_case(expectation, name_counts[expectation.name])
+            if candidate is None:
+                isolated.append(expectation)
+            else:
+                candidates.append(candidate)
+
+        suites = tuple(
+            TestSuitePlan(identifier, tuple(candidates[offset : offset + TEST_SUITE_CASE_LIMIT]))
+            for identifier, offset in enumerate(range(0, len(candidates), TEST_SUITE_CASE_LIMIT))
+        )
+        isolated.sort(key=lambda expectation: expectation.index)
+        return suites, tuple(isolated)
+
+    def _make_case(self, expectation: TestExpectation, name_count: int) -> TestSuiteCase | None:
+        source_path = self._cases / expectation.name
+        source = source_path.read_text(encoding="utf-8")
+        module_matches = MODULE_PATTERN.findall(source)
+        declaration_matches = MAIN_DECLARATION_PATTERN.findall(source)
+        has_expected_exit = expectation.expected_exit is not None
+        expected_exit_is_safe = has_expected_exit and expectation.expected_exit >= 0
+        expectation_is_unique = name_count == 1
+        uses_default_units = not expectation.unit_specification
+        has_single_module = len(module_matches) == 1
+        has_single_entry = len(declaration_matches) == 1
+        entry_is_unreferenced = len(MAIN_REFERENCE_PATTERN.findall(source)) == 1
+        source_is_portable = not any(marker in source for marker in SUITE_UNSAFE_SOURCE_MARKERS)
+        has_no_case_interface = not source_path.with_suffix(".lh").exists()
+        has_no_imports = IMPORT_PATTERN.search(source) is None
+        is_eligible = all(
+            (
+                expected_exit_is_safe,
+                expectation_is_unique,
+                uses_default_units,
+                has_single_module,
+                has_single_entry,
+                entry_is_unreferenced,
+                source_is_portable,
+                has_no_case_interface,
+                has_no_imports,
+            )
+        )
+        if not is_eligible:
+            return None
+
+        entry_name = f"run_case_{expectation.index:04d}"
+        body, replacement_count = MAIN_DECLARATION_PATTERN.subn(
+            rf"\g<indent>fn {entry_name}() -> i32\g<opening>",
+            source,
+        )
+        if replacement_count != 1:
+            raise AssertionError(f"cannot rewrite entry for {expectation.name}")
+        body = MODULE_PATTERN.sub("", body, count=1).strip()
+        declarations = set(TOP_LEVEL_DECLARATION_PATTERN.findall(body))
+        declarations.update(TOP_LEVEL_CONSTANT_PATTERN.findall(body))
+        declarations.discard(entry_name)
+        replacements = {
+            declaration: f"case_{expectation.index:04d}_{declaration}"
+            for declaration in declarations
+        }
+        return TestSuiteCase(
+            expectation=expectation,
+            entry_name=entry_name,
+            body=self._replace_identifiers(body, replacements),
+        )
+
+    @staticmethod
+    def _replace_identifiers(source: str, replacements: dict[str, str]) -> str:
+        return LUNA_LEXEME_PATTERN.sub(
+            lambda match: replacements.get(
+                match.group("identifier"),
+                match.group(0),
+            )
+            if match.group("identifier") is not None
+            else match.group(0),
+            source,
+        )
 
 
 def test_command(
@@ -1423,92 +1599,221 @@ def execute_ffi_tests(
     return passed, failed, skipped
 
 
-def execute_expectation_case(
-    stage_bin: pathlib.Path,
-    runner: tuple[str, ...],
-    cases: pathlib.Path,
-    kinds: dict[str, int],
-    timeout: int,
-    case_index: int,
-    line: str,
-) -> tuple[bool, str]:
-    parts = line.split()
-    name = parts[0]
-    work = ROOT / "out" / "tests" / f"{case_index:04d}-{name.removesuffix('.la')}"
-    reset(work)
-    assembly = work / f"{name}.s"
+class ExpectationExecutor:
+    def __init__(
+        self,
+        stage_bin: pathlib.Path,
+        runner: tuple[str, ...],
+        cases: pathlib.Path,
+        kinds: dict[str, int],
+        timeout: int,
+    ) -> None:
+        self._stage_bin = stage_bin
+        self._runner = runner
+        self._cases = cases
+        self._kinds = kinds
+        self._timeout = timeout
 
-    def execute(command: list[str | pathlib.Path]) -> subprocess.CompletedProcess[str]:
+    def execute_case(self, expectation: TestExpectation) -> ExpectationTaskResult:
+        name = expectation.name
+        work = ROOT / "out" / "tests" / f"{expectation.index:04d}-{name.removesuffix('.la')}"
+        reset(work)
+        assembly = work / f"{name}.s"
+        try:
+            if expectation.diagnostic_kind is not None:
+                self._compile_failure(expectation, assembly)
+                message = f"PASS {name} (FAIL {expectation.diagnostic_kind})"
+            else:
+                self._compile_and_run_case(expectation, work, assembly)
+                message = f"PASS {name} ({expectation.expected_exit})"
+            return ExpectationTaskResult(expectation.index, 1, (), (message,))
+        except Exception as error:  # noqa: BLE001 - return one deterministic failure record
+            return ExpectationTaskResult(
+                expectation.index,
+                0,
+                (name,),
+                (f"FAIL {name}: {error}",),
+            )
+
+    def execute_suite(self, suite: TestSuitePlan) -> ExpectationTaskResult:
+        try:
+            self._compile_and_run_suite(suite)
+            message = f"PASS suite-{suite.identifier:02d} ({len(suite.cases)} expectations)"
+            return ExpectationTaskResult(
+                suite.first_expectation_index,
+                len(suite.cases),
+                (),
+                (message,),
+            )
+        except Exception as suite_error:  # noqa: BLE001 - isolate only the failed suite
+            messages = (f"FALLBACK suite-{suite.identifier:02d}: {suite_error}",)
+            results = tuple(self.execute_case(case.expectation) for case in suite.cases)
+            return ExpectationTaskResult(
+                suite.first_expectation_index,
+                sum(result.passed for result in results),
+                tuple(name for result in results for name in result.failed),
+                messages + tuple(message for result in results for message in result.messages),
+            )
+
+    def _compile_failure(self, expectation: TestExpectation, assembly: pathlib.Path) -> None:
+        kind = expectation.diagnostic_kind
+        if kind not in self._kinds:
+            raise AssertionError(f"unknown diagnostic kind {kind}")
+        command = [
+            *tool(self._stage_bin, "compile", self._runner),
+            "--executable",
+            "-o",
+            assembly,
+            *expectation_units(
+                self._cases,
+                expectation.name,
+                list(expectation.unit_specification),
+            ),
+        ]
+        completed = self._execute(command)
+        expected_kind = self._kinds[kind]
+        expected_status = SEMANTIC_DIAGNOSTIC_BASE + expected_kind
+        if completed.returncode != expected_status:
+            raise AssertionError(
+                f"compile exit {completed.returncode}, expected {expected_status} ({kind}); "
+                f"stderr={completed.stderr.strip()!r}"
+            )
+        if not completed.stderr.startswith(f"semantic:{expected_kind}:"):
+            raise AssertionError(
+                f"stderr {completed.stderr.strip()!r}, expected leading semantic:{expected_kind}:"
+            )
+
+    def _compile_and_run_case(
+        self,
+        expectation: TestExpectation,
+        work: pathlib.Path,
+        assembly: pathlib.Path,
+    ) -> None:
+        object_file = work / f"{expectation.name}.lo"
+        executable = work / expectation.name.removesuffix(".la")
+        units = expectation_units(
+            self._cases,
+            expectation.name,
+            list(expectation.unit_specification),
+        )
+        self._compile_assemble_link(assembly, object_file, executable, units)
+        completed = self._execute([*self._runner, executable])
+        if completed.returncode != expectation.expected_exit:
+            raise AssertionError(
+                f"exit {completed.returncode}, expected {expectation.expected_exit}"
+            )
+
+    def _compile_and_run_suite(self, suite: TestSuitePlan) -> None:
+        work = ROOT / "out" / "tests" / "suites" / f"suite-{suite.identifier:02d}"
+        reset(work)
+        units = self._materialize_suite(suite, work)
+        assembly = work / "suite.s"
+        object_file = work / "suite.lo"
+        executable = work / "suite"
+        self._compile_assemble_link(assembly, object_file, executable, units)
+        completed = self._execute([*self._runner, executable])
+        if completed.returncode == 0:
+            return
+        failed_case = self._suite_failure_name(suite, completed.returncode)
+        raise AssertionError(f"{failed_case} returned suite status {completed.returncode}")
+
+    def _compile_assemble_link(
+        self,
+        assembly: pathlib.Path,
+        object_file: pathlib.Path,
+        executable: pathlib.Path,
+        units: list[pathlib.Path],
+    ) -> None:
+        commands = (
+            [
+                *tool(self._stage_bin, "compile", self._runner),
+                "--executable",
+                "-o",
+                assembly,
+                *units,
+            ],
+            [*tool(self._stage_bin, "assemble", self._runner), "-o", object_file, assembly],
+            [
+                *tool(self._stage_bin, "link", self._runner),
+                "-o",
+                executable,
+                object_file,
+                syscall_object(self._stage_bin),
+            ],
+        )
+        for command in commands:
+            completed = self._execute(command)
+            if completed.returncode != 0:
+                printable = " ".join(str(part) for part in command)
+                raise AssertionError(
+                    f"command returned {completed.returncode}: {printable}; "
+                    f"stderr={completed.stderr.strip()!r}"
+                )
+
+    def _materialize_suite(
+        self,
+        suite: TestSuitePlan,
+        work: pathlib.Path,
+    ) -> list[pathlib.Path]:
+        sources = work / "sources"
+        sources.mkdir()
+        assertions: list[str] = []
+        for ordinal, case in enumerate(suite.cases, start=1):
+            assertions.append(
+                f"    suite.EXPECT_EXIT({case.entry_name}(), "
+                f"{case.expectation.expected_exit}, {ordinal});"
+            )
+
+        driver = sources / "suite.la"
+        bodies = tuple(case.body for case in suite.cases)
+        driver.write_text(
+            "\n".join(
+                (
+                    f"module tests.suites.suite_{suite.identifier:02d};",
+                    "",
+                    "import tests.modules.framework::{TestSuite};",
+                    "",
+                    *bodies,
+                    "",
+                    "fn main() -> i32 {",
+                    "    var suite: TestSuite = TestSuite();",
+                    *assertions,
+                    "    return suite.result();",
+                    "}",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        framework = ROOT / "tests" / "modules" / "framework"
+        return [
+            driver,
+            framework.with_suffix(".la"),
+            framework.with_suffix(".lh"),
+        ]
+
+    def _execute(
+        self,
+        command: list[str | pathlib.Path],
+    ) -> subprocess.CompletedProcess[str]:
         printable = " ".join(str(part) for part in command)
         try:
-            completed = subprocess.run(
+            return subprocess.run(
                 [str(part) for part in command],
-                timeout=timeout,
+                timeout=self._timeout,
                 capture_output=True,
                 text=True,
             )
         except subprocess.TimeoutExpired as error:
-            raise AssertionError(f"command timed out after {timeout}s: {printable}") from error
-        return completed
+            raise AssertionError(
+                f"command timed out after {self._timeout}s: {printable}"
+            ) from error
 
-    try:
-        if len(parts) >= 3 and parts[1] == "FAIL":
-            kind = parts[2]
-            if kind not in kinds:
-                raise AssertionError(f"unknown diagnostic kind {kind}")
-            command = [
-                *tool(stage_bin, "compile", runner),
-                "--executable",
-                "-o",
-                assembly,
-                *expectation_units(cases, name, parts[3:]),
-            ]
-            completed = execute(command)
-            expected_status = SEMANTIC_DIAGNOSTIC_BASE + kinds[kind]
-            if completed.returncode != expected_status:
-                raise AssertionError(
-                    f"compile exit {completed.returncode}, expected {expected_status} ({kind}); "
-                    f"stderr={completed.stderr.strip()!r}"
-                )
-            if not completed.stderr.startswith(f"semantic:{kinds[kind]}:"):
-                raise AssertionError(
-                    f"stderr {completed.stderr.strip()!r}, expected leading semantic:{kinds[kind]}:"
-                )
-            return True, f"PASS {name} (FAIL {kind})"
-
-        expected = int(parts[1])
-        object_file = work / f"{name}.lo"
-        executable = work / name.removesuffix(".la")
-        commands = (
-            [
-                *tool(stage_bin, "compile", runner),
-                "--executable",
-                "-o",
-                assembly,
-                *expectation_units(cases, name, parts[2:]),
-            ],
-            [*tool(stage_bin, "assemble", runner), "-o", object_file, assembly],
-            [
-                *tool(stage_bin, "link", runner),
-                "-o",
-                executable,
-                object_file,
-                syscall_object(stage_bin),
-            ],
-        )
-        for command in commands:
-            completed = execute(command)
-            if completed.returncode != 0:
-                printable = " ".join(str(part) for part in command)
-                raise AssertionError(
-                    f"command returned {completed.returncode}: {printable}; stderr={completed.stderr.strip()!r}"
-                )
-        completed = execute([*runner, executable])
-        if completed.returncode != expected:
-            raise AssertionError(f"exit {completed.returncode}, expected {expected}")
-        return True, f"PASS {name} ({expected})"
-    except Exception as error:  # noqa: BLE001 - return one deterministic failure record
-        return False, f"FAIL {name}: {error}"
+    @staticmethod
+    def _suite_failure_name(suite: TestSuitePlan, status: int) -> str:
+        if status < 1 or status > len(suite.cases):
+            return "suite executable"
+        return suite.cases[status - 1].expectation.name
 
 
 def execute_tests(stage_bin: pathlib.Path, runner: tuple[str, ...], jobs: int) -> int:
@@ -1521,34 +1826,39 @@ def execute_tests(stage_bin: pathlib.Path, runner: tuple[str, ...], jobs: int) -
     cli_passed, cli_failed = execute_tool_cli_tests(stage_bin, runner)
     passed += cli_passed
     failed.extend(cli_failed)
-    expectation_lines = [
+    expectation_lines = tuple(
         line
         for line in expectations.read_text(encoding="utf-8").splitlines()
         if line.strip()
-    ]
-    worker_count = min(jobs, len(expectation_lines))
-    print(f"running {len(expectation_lines)} expectations with {worker_count} jobs")
+    )
+    parsed_expectations = tuple(
+        TestExpectation.parse(index, line)
+        for index, line in enumerate(expectation_lines)
+    )
+    suites, isolated = TestSuitePlanner(cases).plan(parsed_expectations)
+    executor_service = ExpectationExecutor(stage_bin, runner, cases, kinds, timeout)
+    task_count = len(suites) + len(isolated)
+    worker_count = min(jobs, task_count)
+    suite_case_count = sum(len(suite.cases) for suite in suites)
+    print(
+        f"running {len(suites)} suites ({suite_case_count} expectations) and "
+        f"{len(isolated)} isolated expectations with {worker_count} jobs"
+    )
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = [
-            executor.submit(
-                execute_expectation_case,
-                stage_bin,
-                runner,
-                cases,
-                kinds,
-                timeout,
-                case_index,
-                line,
-            )
-            for case_index, line in enumerate(expectation_lines)
-        ]
-        for future in futures:
-            succeeded, message = future.result()
-            print(message)
-            if succeeded:
-                passed += 1
-            else:
-                failed.append(message.split(":", 1)[0].removeprefix("FAIL "))
+        futures = [executor.submit(executor_service.execute_suite, suite) for suite in suites]
+        futures.extend(
+            executor.submit(executor_service.execute_case, expectation)
+            for expectation in isolated
+        )
+        results = sorted(
+            (future.result() for future in futures),
+            key=lambda result: result.order,
+        )
+        for result in results:
+            for message in result.messages:
+                print(message)
+            passed += result.passed
+            failed.extend(result.failed)
     identity_passed, identity_failed = execute_callable_identity_tests(
         stage_bin,
         runner,

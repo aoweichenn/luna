@@ -59,6 +59,10 @@ slot pool 每次从`luna.std.memory`申请一块包含固定数量 slot 的映�
 `slot_pool<Value>`只负责`sizeof(Value)`、平凡性断言和 typed pointer 转换。它不构造或
 销毁 Value；上层容器负责写入和解除节点关系。
 
+`slot_storage`与`storage_allocation`从`luna.internal.pool`导出，但不是`luna.std`公开
+容器 API。独立编译的泛型消费者会从自己的 object 调用这组非泛型方法，因此它们必须是
+internal 模块的稳定链接 ABI，不能退化为仅在同次编译时偶然可见的私有符号。
+
 不变量：
 
 - 每块起点满足目标页对齐，`sizeof(Value)`保证块内所有 slot 保持 Value 对齐；

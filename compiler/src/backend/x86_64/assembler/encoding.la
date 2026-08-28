@@ -65,7 +65,8 @@ fn append_opcode(assembler: *State, first: u8, second: u8, count: usize) -> bool
 }
 
 fn numeric_reference(target: text::View, number: *usize, forward: *bool) -> bool {
-    if (target.length < 2 || number == null || forward == null) {
+    let output_is_valid: bool = number != null && forward != null;
+    if (target.length < 2 || !output_is_valid) {
         return false;
     }
     let suffix: u8 = target.data[target.length - 1];
@@ -73,18 +74,30 @@ fn numeric_reference(target: text::View, number: *usize, forward: *bool) -> bool
         return false;
     }
     var value: usize = 0;
-    var index: usize = 0;
-    while (index + 1 < target.length) {
+    for (var index: usize = 0; index + 1 < target.length; index += 1) {
         let digit: u8 = target.data[index];
         if (!operands::is_decimal_digit(digit) ||
             value > (18446744073709551615 as usize - (digit - '0') as usize) / 10) {
             return false;
         }
         value = value * 10 + (digit - '0') as usize;
-        index += 1;
     }
     *number = value;
     *forward = suffix == 'f';
+    return true;
+}
+
+fn bind_symbol_fixup(assembler: *State, fixup: *Fixup, target: text::View) -> bool {
+    if (assembler->symbol_table == null) {
+        return fail(assembler, runtime::Error.invalid_argument);
+    }
+    let symbol: symbols::SymbolBindingResult = assembler->symbol_table->reference(target);
+    if (symbol.error != runtime::Error.none || symbol.binding == null) {
+        let error: runtime::Error = symbol.error == runtime::Error.none ? runtime::Error.invalid_argument :
+            symbol.error;
+        return fail(assembler, error);
+    }
+    fixup->symbol = symbol.binding;
     return true;
 }
 
@@ -93,10 +106,13 @@ fn add_fixup(assembler: *State, target: text::View, offset: usize, kind: FixupKi
         return fail(assembler, runtime::Error.out_of_memory);
     }
     var fixup: Fixup = {
-        target = target, section = assembler->section, offset = offset, line = assembler->line, kind = kind,
+        section = assembler->section, offset = offset, line = assembler->line, kind = kind, symbol = null,
         numeric_label = 0, numeric_forward = false, is_numeric = false,
     };
     fixup.is_numeric = numeric_reference(target, &fixup.numeric_label, &fixup.numeric_forward);
+    if (!fixup.is_numeric && !bind_symbol_fixup(assembler, &fixup, target)) {
+        return false;
+    }
     let appended: bytes::BufferResult = bytes::append(
         assembler->fixups, (&fixup) as *const Fixup as *const u8, sizeof(Fixup));
     assembler->fixups = appended.buffer;

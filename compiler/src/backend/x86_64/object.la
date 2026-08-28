@@ -327,6 +327,47 @@ fn find_symbol(object: Object, name: text::View) -> IndexResult {
     };
 }
 
+// SymbolTable 已证明名字唯一；该入口避免重新扫描。add_symbol 保持完整的防御性
+// 查重路径供 ELF reader 使用，两种契约故意不通过一个带模式参数的弱接口合并。
+fn append_symbol(object: *Object, name: text::View) -> IndexResult {
+    let object_is_ready: bool = object != null && object->error == runtime::Error.none;
+    let name_is_valid: bool = text::is_valid_utf8(name) && name.length != 0;
+    if (!object_is_ready || !name_is_valid) {
+        fail(object, runtime::Error.invalid_argument);
+        return { index = 0, found = false, error = runtime::Error.invalid_argument };
+    }
+    if (name.length > Format.maximum_name as usize) {
+        fail(object, runtime::Error.invalid_argument);
+        return { index = 0, found = false, error = runtime::Error.invalid_argument };
+    }
+    let count: usize = symbol_count(*object);
+    if (count >= Format.maximum_records as usize || name.length >
+            (Format.maximum_payload as usize) - object->names.length) {
+        fail(object, runtime::Error.out_of_memory);
+        return { index = 0, found = false, error = runtime::Error.out_of_memory };
+    }
+    let name_offset: usize = object->names.length;
+    let appended_name: bytes::BufferResult = bytes::append(object->names, name.data, name.length);
+    object->names = appended_name.buffer;
+    if (appended_name.error != runtime::Error.none) {
+        fail(object, appended_name.error);
+        return { index = 0, found = false, error = appended_name.error };
+    }
+    var symbol: Symbol = invalid_symbol();
+    symbol.name_offset = name_offset;
+    symbol.name_length = name.length;
+    let appended_symbol: bytes::BufferResult =
+        bytes::append(object->symbols, (&symbol) as *const Symbol as *const u8, sizeof(Symbol));
+    object->symbols = appended_symbol.buffer;
+    if (appended_symbol.error != runtime::Error.none) {
+        let truncated: bytes::BufferResult = bytes::truncate(object->names, name_offset);
+        object->names = truncated.buffer;
+        fail(object, appended_symbol.error);
+        return { index = 0, found = false, error = appended_symbol.error };
+    }
+    return { index = count, found = false, error = runtime::Error.none };
+}
+
 fn add_symbol(object: *Object, name: text::View) -> IndexResult {
     if (object == null || object->error != runtime::Error.none || !text::is_valid_utf8(name) || name.length == 0 ||
         name.length > Format.maximum_name as usize) {
