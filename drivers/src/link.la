@@ -1,0 +1,273 @@
+module luna.tools;
+
+enum LinkLimit: usize {
+    maximum_inputs = 128, maximum_path_bytes = 4096, maximum_object = 268435456,
+}
+
+enum LinkStatus: i32 {
+    input_error = 1, object_error = 2, link_error = 3, output_error = 4, release_error = 5, success = 42,
+    cli_usage_error = 125,
+}
+
+class LinkCommand {
+    priv arguments: CommandLine;
+    priv inputs: [LinkLimit.maximum_inputs]path::Path;
+    priv input_count: usize;
+    priv output: path::Path;
+    priv has_output: bool;
+    priv fixed_protocol: bool;
+    priv valid: bool;
+
+    pub init(argc: usize, argv: **const u8);
+    pub fn execute() -> i32;
+    pub deinit();
+}
+
+fn link_fixed_input_path(index: usize) -> path::PathResult {
+    var path_string: strings::string = strings::string();
+    var error: runtime::Error = append_literal(&path_string, "bootstrap-link-input-", 32);
+    error = first_error(error, append_usize(&path_string, index));
+    error = first_error(error, append_literal(&path_string, ".lo", 8));
+    if (error != runtime::Error.none) {
+        return invalid_path_result(error);
+    }
+    let view: string_views::string_view_result = path_string.view();
+    return view.error == runtime::Error.none ? path::from_string_view(view.view) : invalid_path_result(view.error);
+}
+
+fn input_is_elf(data: *const u8, length: usize) -> bool {
+    if (data == null || length < 4) {
+        return false;
+    }
+    let prefix_matches: bool = data[0] == 127 && data[1] == 69;
+    let suffix_matches: bool = data[2] == 76 && data[3] == 70;
+    return prefix_matches && suffix_matches;
+}
+
+fn parse_object(data: *const u8, length: usize) -> object::Result {
+    if (input_is_elf(data, length)) {
+        return elf::load(data, length);
+    }
+    return object::deserialize(data, length);
+}
+
+fn link_inputs_are_valid(fixed_protocol: bool, input_paths: *const path::Path, input_count: usize) -> bool {
+    if (fixed_protocol) {
+        return true;
+    }
+    if (input_paths == null || input_count == 0) {
+        return false;
+    }
+    return input_count <= LinkLimit.maximum_inputs as usize;
+}
+
+impl LinkCommand {
+    init(argc: usize, argv: **const u8): arguments = CommandLine(argc, argv) {
+        this->input_count = 0;
+        this->has_output = false;
+        this->fixed_protocol = argc == 1;
+        this->valid = true;
+    }
+
+    priv fn link_objects() -> i32 {
+    let fixed_protocol: bool = this->fixed_protocol;
+    let input_paths: *const path::Path = &this->inputs[0] as *const path::Path;
+    let input_count: usize = this->input_count;
+    let output_path: path::Path = this->output;
+    let inputs_are_valid: bool = link_inputs_are_valid(fixed_protocol, input_paths, input_count);
+    if (!inputs_are_valid || !path::is_valid(output_path)) {
+        return LinkStatus.input_error as i32;
+    }
+    var objects: object::ObjectSet = object::ObjectSet();
+    var count: usize = 0;
+    let expected_count: usize = fixed_protocol ? LinkLimit.maximum_inputs as usize : input_count;
+    for (; count < expected_count;) {
+        var path: path::PathResult = invalid_path_result(runtime::Error.none);
+        if (fixed_protocol) {
+            path = link_fixed_input_path(count);
+            if (path.error != runtime::Error.none) {
+                return LinkStatus.input_error as i32;
+            }
+        }
+        let input_path: path::Path = fixed_protocol ? path.path : input_paths[count];
+        let bytes: bytes::BufferResult = io::read_file_limited(input_path, LinkLimit.maximum_object as usize);
+        var path_error: runtime::Error = runtime::Error.none;
+        if (fixed_protocol) {
+            path_error = path::release(path.path);
+        }
+        if (fixed_protocol && bytes.error == runtime::Error.not_found) {
+            if (path_error != runtime::Error.none) {
+                return LinkStatus.release_error as i32;
+            }
+            break;
+        }
+        if (bytes.error != runtime::Error.none || path_error != runtime::Error.none) {
+            if (bytes.error == runtime::Error.none) {
+                bytes::release(bytes.buffer);
+            }
+            return LinkStatus.input_error as i32;
+        }
+        var parsed: object::Result = parse_object(bytes.buffer.data as *const u8, bytes.buffer.length);
+        let bytes_error: runtime::Error = bytes::release(bytes.buffer);
+        if (parsed.error != runtime::Error.none || bytes_error != runtime::Error.none) {
+            return LinkStatus.object_error as i32;
+        }
+        if (!objects.add(parsed.object as object::Object&&)) {
+            return LinkStatus.object_error as i32;
+        }
+        count += 1;
+    }
+    if (fixed_protocol && count == LinkLimit.maximum_inputs as usize) {
+        let excess_path: path::PathResult = link_fixed_input_path(count);
+        if (excess_path.error != runtime::Error.none) {
+            return LinkStatus.input_error as i32;
+        }
+        let excess: bytes::BufferResult = io::read_file_limited(excess_path.path, 0);
+        let excess_path_error: runtime::Error = path::release(excess_path.path);
+        if (excess.error == runtime::Error.none) {
+            bytes::release(excess.buffer);
+        }
+        if (excess.error != runtime::Error.not_found || excess_path_error != runtime::Error.none) {
+            return LinkStatus.input_error as i32;
+        }
+    }
+    if (count == 0) {
+        return LinkStatus.input_error as i32;
+    }
+    let linked: linker::Result = linker::link(objects);
+    if (linked.error != runtime::Error.none) {
+        return LinkStatus.link_error as i32;
+    }
+    let write_error: runtime::Error =
+        io::write_executable_file_atomic(output_path, linked.executable.data as *const u8, linked.executable.length);
+    let executable_error: runtime::Error = bytes::release(linked.executable);
+    if (write_error != runtime::Error.none) {
+        return LinkStatus.output_error as i32;
+    }
+    if (executable_error != runtime::Error.none) {
+        return LinkStatus.release_error as i32;
+    }
+    return LinkStatus.success as i32;
+}
+
+    priv fn usage() -> i32 {
+    print(runtime::standard_error(), "usage: luna link -o <executable> <input.lo>...\n");
+    return LinkStatus.cli_usage_error as i32;
+}
+
+    priv fn release_paths() -> runtime::Error {
+    var error: runtime::Error = runtime::Error.none;
+    for (var remaining: usize = this->input_count; remaining != 0; remaining -= 1) {
+        let index: usize = remaining - 1;
+        let release_error: runtime::Error = path::release(this->inputs[index]);
+        error = first_error(error, release_error);
+    }
+    this->input_count = 0;
+    if (this->has_output) {
+        let output_error: runtime::Error = path::release(this->output);
+        error = first_error(error, output_error);
+        this->has_output = false;
+    }
+    return error;
+}
+
+    priv fn run_cli() -> i32 {
+    if (!this->arguments.is_valid() || this->arguments.count() < 2) {
+        return this->usage();
+    }
+    if (this->arguments.count() == 2 && this->arguments.matches("--help", 6)) {
+        print(runtime::standard_output(), "usage: luna link -o <executable> <input.lo>...\n");
+        return 0;
+    }
+    if (this->arguments.count() == 2 && this->arguments.matches("--version", 9)) {
+        print(runtime::standard_output(), "luna link (self-hosted Luna 1) 0.1.0\n");
+        return 0;
+    }
+
+    for (; !this->arguments.done() && this->valid; this->arguments.advance()) {
+        let argument: *const u8 = this->arguments.current();
+        if (this->arguments.consume_end_of_options()) {
+        } else if (this->arguments.options_are_active() && this->arguments.matches("-o", 2)) {
+            let value: *const u8 = this->arguments.take_next();
+            if (this->has_output || value == null) {
+                this->valid = false;
+            } else {
+                let path: path::PathResult = path::from_c_string(value, LinkLimit.maximum_path_bytes as usize);
+                if (path.error != runtime::Error.none) {
+                    this->valid = false;
+                } else {
+                    this->output = path.path;
+                    this->has_output = true;
+                }
+            }
+        } else if (this->arguments.options_are_active() && this->arguments.current_starts_with_dash()) {
+            this->valid = false;
+        } else if (this->input_count == LinkLimit.maximum_inputs as usize) {
+            this->valid = false;
+        } else {
+            let path: path::PathResult = path::from_c_string(argument, LinkLimit.maximum_path_bytes as usize);
+            if (path.error != runtime::Error.none) {
+                this->valid = false;
+            } else {
+                this->inputs[this->input_count] = path.path;
+                this->input_count += 1;
+            }
+        }
+    }
+    if (!this->has_output || this->input_count == 0) {
+        this->valid = false;
+    }
+    if (this->valid) {
+        let output_view: string_views::string_view_result = path::view(this->output);
+        for (var index: usize = 0; index < this->input_count && this->valid; index += 1) {
+            let input_view: string_views::string_view_result = path::view(this->inputs[index]);
+            let paths_are_readable: bool = output_view.error == runtime::Error.none &&
+                input_view.error == runtime::Error.none;
+            this->valid = paths_are_readable && !string_views::equal(output_view.view, input_view.view);
+        }
+    }
+
+    var status: i32 = LinkStatus.cli_usage_error as i32;
+    if (this->valid) {
+        status = this->link_objects();
+        if (status == LinkStatus.success as i32) {
+            status = 0;
+        }
+    } else {
+        this->usage();
+    }
+    let release_error: runtime::Error = this->release_paths();
+    if (status == 0 && release_error != runtime::Error.none) {
+        return LinkStatus.release_error as i32;
+    }
+    return status;
+}
+
+    priv fn run_fixed() -> i32 {
+    let output: path::PathResult = path::from_c_string("bootstrap-link-output", 22);
+    if (output.error != runtime::Error.none) {
+        return LinkStatus.output_error as i32;
+    }
+    this->output = output.path;
+    this->has_output = true;
+    let status: i32 = this->link_objects();
+    let release_error: runtime::Error = this->release_paths();
+    if (status == LinkStatus.success as i32 && release_error != runtime::Error.none) {
+        return LinkStatus.release_error as i32;
+    }
+    return status;
+}
+
+    fn execute() -> i32 {
+        return this->fixed_protocol ? this->run_fixed() : this->run_cli();
+    }
+
+    deinit() {
+        this->release_paths();
+    }
+}
+
+fn run_link(argc: usize, argv: **const u8) -> i32 {
+    var command: LinkCommand = LinkCommand(argc, argv);
+    return command.execute();
+}

@@ -18,6 +18,7 @@ from collections import Counter
 import concurrent.futures
 from dataclasses import dataclass
 import filecmp
+import hashlib
 import os
 import pathlib
 import re
@@ -302,15 +303,12 @@ LIBRARIES = {
         "backend/x86_64/linker/writer",
         "backend/x86_64/linker/facade",
     ),
-    "tool_cli": driver_module("luna.tools.cli", "cli"),
-    "tool_compile": driver_module("luna.tools.compile", "stage_compiler"),
-    "tool_assemble": driver_module("luna.tools.assemble", "stage_assembler"),
-    "tool_link": driver_module("luna.tools.link", "stage_linker"),
+    "tools": driver_module("luna.tools", "cli", "compile", "assemble", "link", "facade"),
 }
 
 # tool name -> driver source. Interface and object closures are derived.
 DRIVERS = {
-    "luna": "drivers/src/luna.la",
+    "luna": "drivers/src/entry.la",
 }
 
 NATIVE_TIMEOUT_SECONDS = 600
@@ -1108,6 +1106,27 @@ def execute_tool_cli_tests(
             "usage: luna link -o <executable> <input.lo>...\n",
             "",
         ),
+        (
+            "tool-compile-version",
+            ("compile", "--version"),
+            0,
+            "luna compile (self-hosted Luna 1) 0.1.0\n",
+            "",
+        ),
+        (
+            "tool-assemble-version",
+            ("assemble", "--version"),
+            0,
+            "luna assemble (self-hosted Luna 1) 0.1.0\n",
+            "",
+        ),
+        (
+            "tool-link-version",
+            ("link", "--version"),
+            0,
+            "luna link (self-hosted Luna 1) 0.1.0\n",
+            "",
+        ),
     )
     timeout = timeout_seconds(runner)
     passed = 0
@@ -1127,6 +1146,81 @@ def execute_tool_cli_tests(
         except Exception as error:  # noqa: BLE001 - report and continue
             failed.append(name)
             print(f"FAIL {name}: {error}")
+
+    name = "tool-fixed-protocol"
+    try:
+        work = ROOT / "out" / "tests" / "tool-fixed-protocol"
+        reset(work)
+        (work / "bootstrap-stage-version").write_text(
+            "LUNA-STAGE/1 LUNA/1\n",
+            encoding="utf-8",
+        )
+        (work / "bootstrap-stage-mode").write_text("E\n", encoding="utf-8")
+        (work / "bootstrap-stage-unit-0.luna").write_text(
+            "module tests.fixed_protocol;\n"
+            "fn main() -> i32 { return 42; }\n",
+            encoding="utf-8",
+        )
+
+        def run_fixed(command: str) -> None:
+            completed = subprocess.run(
+                [*runner, executable, command],
+                cwd=work,
+                timeout=timeout,
+                capture_output=True,
+                text=True,
+            )
+            if (completed.returncode, completed.stdout, completed.stderr) != (42, "", ""):
+                raise AssertionError(
+                    f"{command} fixed result "
+                    f"{(completed.returncode, completed.stdout, completed.stderr)!r}"
+                )
+
+        run_fixed("compile")
+        shutil.copyfile(
+            work / "bootstrap-stage-output.s",
+            work / "bootstrap-assembly-input.s",
+        )
+        run_fixed("assemble")
+        shutil.copyfile(
+            work / "bootstrap-object-output.lo",
+            work / "bootstrap-link-input-0.lo",
+        )
+        run_fixed("link")
+
+        expected_artifacts = {
+            "bootstrap-stage-output.s": (
+                951,
+                "aa5023c18d89eb0ea04a0764d4cc7602afbc784774d4845141fcd2c6f338d3a6",
+            ),
+            "bootstrap-object-output.lo": (
+                597,
+                "d7c2ff72e8065eecc7a9ae56c43404dd576841723b8c47cdd18d637bb5e79b55",
+            ),
+            "bootstrap-link-output": (
+                4190,
+                "09a52ee70e72522c7b8d2c39df588d8291683470c9befe9502abcede66260cae",
+            ),
+        }
+        for artifact, (expected_size, expected_hash) in expected_artifacts.items():
+            content = (work / artifact).read_bytes()
+            actual = (len(content), hashlib.sha256(content).hexdigest())
+            if actual != (expected_size, expected_hash):
+                raise AssertionError(f"{artifact} shape {actual!r}")
+
+        completed = subprocess.run(
+            [*runner, work / "bootstrap-link-output"],
+            timeout=timeout,
+        )
+        if completed.returncode != 42:
+            raise AssertionError(
+                f"fixed executable returned {completed.returncode}, expected 42"
+            )
+        passed += 1
+        print("PASS tool-fixed-protocol (compile/assemble/link byte contract, exit 42)")
+    except Exception as error:  # noqa: BLE001 - report and continue
+        failed.append(name)
+        print(f"FAIL {name}: {error}")
     return passed, failed
 
 

@@ -1,0 +1,233 @@
+module luna.tools;
+
+enum AssembleLimit: usize {
+    maximum_path_bytes = 4096, maximum_input = 67108864,
+}
+
+enum AssembleStatus: i32 {
+    input_error = 1, assembly_error = 2, serialization_error = 3, output_error = 4, release_error = 5, success = 42,
+    cli_usage_error = 125,
+}
+
+class AssembleCommand {
+    priv arguments: CommandLine;
+    priv input: path::Path;
+    priv output: path::Path;
+    priv has_input: bool;
+    priv has_output: bool;
+    priv has_emit: bool;
+    priv emit_elf: bool;
+    priv valid: bool;
+
+    pub init(argc: usize, argv: **const u8);
+    pub fn execute() -> i32;
+    pub deinit();
+}
+
+fn report_assembly_error(line: usize) -> runtime::Error {
+    var digits: [20]u8 = {};
+    var cursor: usize = 20;
+    var value: usize = line;
+    if (value == 0) {
+        cursor -= 1;
+        digits[cursor] = 48;
+    }
+    for (; value != 0;) {
+        cursor -= 1;
+        digits[cursor] = ((48 as usize) + value % 10) as u8;
+        value /= 10;
+    }
+    var error: runtime::Error = io::write_all(runtime::standard_error(), "assembler:", 10);
+    if (error == runtime::Error.none) {
+        error = io::write_all(runtime::standard_error(), &digits[cursor] as *const u8, 20 - cursor);
+    }
+    if (error == runtime::Error.none) {
+        error = io::write_all(runtime::standard_error(), "\n", 1);
+    }
+    return error;
+}
+
+impl AssembleCommand {
+    init(argc: usize, argv: **const u8): arguments = CommandLine(argc, argv) {
+        this->has_input = false;
+        this->has_output = false;
+        this->has_emit = false;
+        this->emit_elf = false;
+        this->valid = true;
+    }
+
+    priv fn assemble() -> i32 {
+    if (!path::is_valid(this->input) || !path::is_valid(this->output)) {
+        return AssembleStatus.input_error as i32;
+    }
+    let input: bytes::BufferResult = io::read_file_limited(this->input, AssembleLimit.maximum_input as usize);
+    if (input.error != runtime::Error.none) {
+        return AssembleStatus.input_error as i32;
+    }
+    let view: string_views::string_view_result = string_views::from_bytes(input.buffer.data as *const u8,
+        input.buffer.length);
+    if (view.error != runtime::Error.none) {
+        bytes::release(input.buffer);
+        return AssembleStatus.input_error as i32;
+    }
+    let assembled: assembler::Result = assembler::assemble(view.view);
+    if (assembled.error != runtime::Error.none) {
+        report_assembly_error(assembled.line);
+        bytes::release(input.buffer);
+        return AssembleStatus.assembly_error as i32;
+    }
+    let serialized: bytes::BufferResult = this->emit_elf ?
+        elf::save(assembled.object) : object::serialize(assembled.object);
+    if (serialized.error != runtime::Error.none) {
+        bytes::release(input.buffer);
+        return AssembleStatus.serialization_error as i32;
+    }
+    let write_error: runtime::Error = io::write_file_atomic(
+        this->output, serialized.buffer.data as *const u8, serialized.buffer.length);
+    let serialized_error: runtime::Error = bytes::release(serialized.buffer);
+    let input_error: runtime::Error = bytes::release(input.buffer);
+    if (write_error != runtime::Error.none) {
+        return AssembleStatus.output_error as i32;
+    }
+    let release_error: runtime::Error = first_error(serialized_error, input_error);
+    if (release_error != runtime::Error.none) {
+        return AssembleStatus.release_error as i32;
+    }
+    return AssembleStatus.success as i32;
+}
+
+    priv fn usage() -> i32 {
+    print(runtime::standard_error(), "usage: luna assemble [--emit elf|lunaobj] -o <output> <input.s>\n");
+    return AssembleStatus.cli_usage_error as i32;
+}
+
+    priv fn release_paths() -> runtime::Error {
+        var error: runtime::Error = runtime::Error.none;
+        if (this->has_input) {
+            error = path::release(this->input);
+            this->has_input = false;
+        }
+        if (this->has_output) {
+            let output_error: runtime::Error = path::release(this->output);
+            error = first_error(error, output_error);
+            this->has_output = false;
+        }
+        return error;
+    }
+
+    priv fn run_cli() -> i32 {
+    if (!this->arguments.is_valid() || this->arguments.count() < 2) {
+        return this->usage();
+    }
+    if (this->arguments.count() == 2 && this->arguments.matches("--help", 6)) {
+        print(runtime::standard_output(), "usage: luna assemble [--emit elf|lunaobj] -o <output> <input.s>\n");
+        return 0;
+    }
+    if (this->arguments.count() == 2 && this->arguments.matches("--version", 9)) {
+        print(runtime::standard_output(), "luna assemble (self-hosted Luna 1) 0.1.0\n");
+        return 0;
+    }
+
+    for (; !this->arguments.done() && this->valid; this->arguments.advance()) {
+        let argument: *const u8 = this->arguments.current();
+        if (this->arguments.consume_end_of_options()) {
+        } else if (this->arguments.options_are_active() && this->arguments.matches("--emit", 6)) {
+            let value: *const u8 = this->arguments.take_next();
+            if (this->has_emit || value == null) {
+                this->valid = false;
+            } else if (argument_equals(value, "elf", 3)) {
+                this->emit_elf = true;
+                this->has_emit = true;
+            } else if (argument_equals(value, "lunaobj", 7)) {
+                this->has_emit = true;
+            } else {
+                this->valid = false;
+            }
+        } else if (this->arguments.options_are_active() && this->arguments.matches("-o", 2)) {
+            let value: *const u8 = this->arguments.take_next();
+            if (this->has_output || value == null) {
+                this->valid = false;
+            } else {
+                let path: path::PathResult = path::from_c_string(value, AssembleLimit.maximum_path_bytes as usize);
+                if (path.error != runtime::Error.none) {
+                    this->valid = false;
+                } else {
+                    this->output = path.path;
+                    this->has_output = true;
+                }
+            }
+        } else if (this->arguments.options_are_active() && this->arguments.current_starts_with_dash()) {
+            this->valid = false;
+        } else if (this->has_input) {
+            this->valid = false;
+        } else {
+            let path: path::PathResult = path::from_c_string(argument, AssembleLimit.maximum_path_bytes as usize);
+            if (path.error != runtime::Error.none) {
+                this->valid = false;
+            } else {
+                this->input = path.path;
+                this->has_input = true;
+            }
+        }
+    }
+    if (!this->has_input || !this->has_output) {
+        this->valid = false;
+    }
+    if (this->valid) {
+        let input_view: string_views::string_view_result = path::view(this->input);
+        let output_view: string_views::string_view_result = path::view(this->output);
+        let paths_are_readable: bool = input_view.error == runtime::Error.none &&
+            output_view.error == runtime::Error.none;
+        this->valid = paths_are_readable && !string_views::equal(input_view.view, output_view.view);
+    }
+
+    var status: i32 = AssembleStatus.cli_usage_error as i32;
+    if (this->valid) {
+        status = this->assemble();
+        if (status == AssembleStatus.success as i32) {
+            status = 0;
+        }
+    } else {
+        this->usage();
+    }
+    let release_error: runtime::Error = this->release_paths();
+    if (status == 0 && release_error != runtime::Error.none) {
+        return AssembleStatus.release_error as i32;
+    }
+    return status;
+}
+
+    priv fn run_fixed() -> i32 {
+    let input: path::PathResult = path::from_c_string("bootstrap-assembly-input.s", 27);
+    if (input.error != runtime::Error.none) {
+        return AssembleStatus.input_error as i32;
+    }
+    this->input = input.path;
+    this->has_input = true;
+    let output: path::PathResult = path::from_c_string("bootstrap-object-output.lo", 27);
+    if (output.error != runtime::Error.none) {
+        return AssembleStatus.output_error as i32;
+    }
+    this->output = output.path;
+    this->has_output = true;
+    let status: i32 = this->assemble();
+    let release_error: runtime::Error = this->release_paths();
+    if (status == AssembleStatus.success as i32 && release_error != runtime::Error.none) {
+        return AssembleStatus.release_error as i32;
+    }
+    return status;
+}
+
+    fn execute() -> i32 {
+        return this->arguments.count() == 1 ? this->run_fixed() : this->run_cli();
+    }
+
+    deinit() {
+        this->release_paths();
+    }
+}
+
+fn run_assemble(argc: usize, argv: **const u8) -> i32 {
+    var command: AssembleCommand = AssembleCommand(argc, argv);
+    return command.execute();
+}

@@ -1,0 +1,613 @@
+module luna.tools;
+
+enum CompileLimit: usize {
+    maximum_units = 64, maximum_path_bytes = 4096, maximum_source_bytes = 8388608,
+    maximum_total_source_bytes = 33554432, maximum_frontend_diagnostics = 4096, maximum_semantic_diagnostics = 4096,
+}
+
+enum CompileStatus: i32 {
+    mode_error = 1, input_error = 2, unit_limit = 3, semantic_error = 4, backend_error = 5, output_error = 6,
+    release_error = 7, resource_limit = 8, version_error = 9, semantic_diagnostic_base = 64, success = 42,
+    cli_usage_error = 125,
+}
+
+class CompileCommand {
+    priv arguments: CommandLine;
+    priv inputs: [CompileLimit.maximum_units]path::Path;
+    priv input_count: usize;
+    priv output: path::Path;
+    priv has_output: bool;
+    priv executable: bool;
+    priv has_mode: bool;
+    priv fixed_protocol: bool;
+    priv valid: bool;
+
+    pub init(argc: usize, argv: **const u8);
+    pub fn execute() -> i32;
+    pub deinit();
+}
+
+fn compile_fixed_unit_path(index: usize) -> path::PathResult {
+    var path_string: strings::string = strings::string();
+    var error: runtime::Error = append_literal(&path_string, "bootstrap-stage-unit-", 32);
+    error = first_error(error, append_usize(&path_string, index));
+    error = first_error(error, append_literal(&path_string, ".luna", 8));
+    if (error != runtime::Error.none) {
+        return invalid_path_result(error);
+    }
+    let view: string_views::string_view_result = path_string.view();
+    return view.error == runtime::Error.none ? path::from_string_view(view.view) : invalid_path_result(view.error);
+}
+
+fn compile_fixed_mode(executable: *bool) -> runtime::Error {
+    if (executable == null) {
+        return runtime::Error.invalid_argument;
+    }
+    let path: path::PathResult = path::from_c_string("bootstrap-stage-mode", 32);
+    if (path.error != runtime::Error.none) {
+        return path.error;
+    }
+    let bytes: bytes::BufferResult = io::read_file_limited(path.path, 2);
+    let path_error: runtime::Error = path::release(path.path);
+    if (bytes.error != runtime::Error.none) {
+        return bytes.error;
+    }
+    var error: runtime::Error = path_error;
+    if (error == runtime::Error.none) {
+        if (bytes.buffer.length != 2 || bytes.buffer.data[1] != 10) {
+            error = runtime::Error.invalid_argument;
+        } else if (bytes.buffer.data[0] == 69) {
+            *executable = true;
+        } else if (bytes.buffer.data[0] == 76) {
+            *executable = false;
+        } else {
+            error = runtime::Error.invalid_argument;
+        }
+    }
+    let release_error: runtime::Error = bytes::release(bytes.buffer);
+    return error == runtime::Error.none ? release_error : error;
+}
+
+fn compile_fixed_version() -> runtime::Error {
+    let path: path::PathResult = path::from_c_string("bootstrap-stage-version", 32);
+    if (path.error != runtime::Error.none) {
+        return path.error;
+    }
+    let bytes: bytes::BufferResult = io::read_file_limited(path.path, 20);
+    let path_error: runtime::Error = path::release(path.path);
+    if (bytes.error != runtime::Error.none) {
+        return bytes.error;
+    }
+    var error: runtime::Error = path_error;
+    if (error == runtime::Error.none &&
+        !bytes::equal(
+            bytes.buffer, "LUNA-STAGE/1 LUNA/1\n", 20)) {
+        error = runtime::Error.invalid_argument;
+    }
+    let release_error: runtime::Error = bytes::release(bytes.buffer);
+    return error == runtime::Error.none ? release_error : error;
+}
+
+fn release_source(source: bytes::Buffer, frontend: parser::FrontendResult) -> runtime::Error {
+    let frontend_error: runtime::Error = parser::frontend_result_release(frontend);
+    let source_error: runtime::Error = bytes::release(source);
+    return first_error(frontend_error, source_error);
+}
+
+fn release_sources(sources: *bytes::Buffer, frontends: *parser::FrontendResult, count: usize) -> runtime::Error {
+    if (sources == null || frontends == null) {
+        return runtime::Error.invalid_argument;
+    }
+    if (count > CompileLimit.maximum_units as usize) {
+        return runtime::Error.invalid_argument;
+    }
+    var error: runtime::Error = runtime::Error.none;
+    for (var remaining: usize = count; remaining != 0; remaining -= 1) {
+        let index: usize = remaining - 1;
+        let release_error: runtime::Error = release_source(sources[index], frontends[index]);
+        error = first_error(error, release_error);
+    }
+    return error;
+}
+
+fn load_source(
+    path: path::Path, result_source: *bytes::Buffer, result_frontend: *parser::FrontendResult) -> runtime::Error {
+    if (!path::is_valid(path) || result_source == null) {
+        return runtime::Error.invalid_argument;
+    }
+    if (result_frontend == null) {
+        return runtime::Error.invalid_argument;
+    }
+    let source: bytes::BufferResult = io::read_file_limited(path, CompileLimit.maximum_source_bytes as usize);
+    if (source.error != runtime::Error.none) {
+        return source.error;
+    }
+    let view: string_views::string_view_result = string_views::from_bytes(source.buffer.data as *const u8,
+        source.buffer.length);
+    if (view.error != runtime::Error.none) {
+        bytes::release(source.buffer);
+        return view.error;
+    }
+    let frontend: parser::FrontendResult = parser::frontend_parse(view.view);
+    *result_source = source.buffer;
+    *result_frontend = frontend;
+    return runtime::Error.none;
+}
+
+fn diagnostic_is_resource(diagnostic: lexer::Diagnostic) -> bool {
+    return diagnostic.kind == lexer::DiagnosticKind.nesting_limit ||
+        diagnostic.kind == lexer::DiagnosticKind.resource_limit;
+}
+
+fn select_frontend_diagnostic(frontend: parser::FrontendResult, lexical: *bool) -> lexer::DiagnosticResult {
+    if (lexical == null) {
+        return {
+            diagnostic = {}, error = runtime::Error.invalid_argument,
+        };
+    }
+    for (var index: usize = 0; index < frontend.lex.diagnostics.count; index += 1) {
+        let diagnostic: lexer::DiagnosticResult = lexer::diagnostic_buffer_get(frontend.lex.diagnostics, index);
+        if (diagnostic.error != runtime::Error.none || diagnostic_is_resource(diagnostic.diagnostic)) {
+            *lexical = true;
+            return diagnostic;
+        }
+    }
+    for (var index: usize = 0; index < frontend.parse.diagnostics.count; index += 1) {
+        let diagnostic: lexer::DiagnosticResult = lexer::diagnostic_buffer_get(frontend.parse.diagnostics, index);
+        if (diagnostic.error != runtime::Error.none || diagnostic_is_resource(diagnostic.diagnostic)) {
+            *lexical = false;
+            return diagnostic;
+        }
+    }
+    if (frontend.lex.diagnostics.count != 0) {
+        *lexical = true;
+        return lexer::diagnostic_buffer_get(frontend.lex.diagnostics, 0);
+    }
+    if (frontend.parse.diagnostics.count != 0) {
+        *lexical = false;
+        return lexer::diagnostic_buffer_get(frontend.parse.diagnostics, 0);
+    }
+    return {
+        diagnostic = {}, error = runtime::Error.not_found,
+    };
+}
+
+fn frontend_status(frontend: parser::FrontendResult) -> i32 {
+    if (frontend.error == runtime::Error.out_of_memory) {
+        return CompileStatus.resource_limit as i32;
+    }
+    var lexical: bool = false;
+    let result: lexer::DiagnosticResult = select_frontend_diagnostic(frontend, &lexical);
+    if (result.error != runtime::Error.none) {
+        return CompileStatus.input_error as i32;
+    }
+    if (diagnostic_is_resource(result.diagnostic)) {
+        return CompileStatus.resource_limit as i32;
+    }
+    return CompileStatus.input_error as i32;
+}
+
+fn print_message(message: strings::string const&) -> runtime::Error {
+    let view: string_views::string_view_result = message.view();
+    return view.error == runtime::Error.none ? io::print_error(view.view) : view.error;
+}
+
+fn report_frontend(frontend: parser::FrontendResult) -> runtime::Error {
+    var lexical: bool = false;
+    let result: lexer::DiagnosticResult = select_frontend_diagnostic(frontend, &lexical);
+    if (result.error == runtime::Error.not_found) {
+        return runtime::Error.none;
+    }
+    if (result.error != runtime::Error.none) {
+        return result.error;
+    }
+    var message: strings::string = strings::string();
+    var error: runtime::Error = append_literal(&message, lexical ? "frontend:lex:" : "frontend:parse:", 32);
+    error = first_error(error, append_usize(&message, result.diagnostic.kind as usize));
+    error = first_error(error, append_literal(&message, ":", 2));
+    error = first_error(error, append_usize(&message, result.diagnostic.span.offset));
+    error = first_error(error, append_literal(&message, ":", 2));
+    error = first_error(error, append_usize(&message, result.diagnostic.detail));
+    error = first_error(error, append_literal(&message, "\n", 2));
+    if (error != runtime::Error.none) {
+        return error;
+    }
+    return print_message(message);
+}
+
+fn report_resource(label: *const u8, label_maximum_length: usize, unit_index: usize, limit: usize) -> runtime::Error {
+    var message: strings::string = strings::string();
+    var error: runtime::Error = append_literal(&message, "resource:", 16);
+    error = first_error(error, append_literal(&message, label, label_maximum_length));
+    error = first_error(error, append_literal(&message, ":", 2));
+    error = first_error(error, append_usize(&message, unit_index));
+    error = first_error(error, append_literal(&message, ":", 2));
+    error = first_error(error, append_usize(&message, limit));
+    error = first_error(error, append_literal(&message, "\n", 2));
+    if (error != runtime::Error.none) {
+        return error;
+    }
+    return print_message(message);
+}
+
+fn add_semantic_input(
+    input: *context::Input, source: bytes::Buffer, frontend: parser::FrontendResult,
+        path: string_views::string_view) -> bool {
+    if (input == null) {
+        return false;
+    }
+    let view: string_views::string_view_result = string_views::from_bytes(source.data as *const u8, source.length);
+    return view.error == runtime::Error.none &&
+        context::input_add(
+            input, {
+                source = view.view, tokens = frontend.lex.tokens, tree = frontend.parse.tree,
+                path_offset = 0, path_length = 0,
+            }, path);
+}
+
+fn semantic_status(semantic: context::Result) -> i32 {
+    if (semantic.error == runtime::Error.out_of_memory) {
+        return CompileStatus.resource_limit as i32;
+    }
+    if (semantic.diagnostics.count == 0) {
+        return CompileStatus.semantic_error as i32;
+    }
+    let diagnostic: context::DiagnosticResult = context::diagnostic_get(semantic.diagnostics, 0);
+    if (diagnostic.error != runtime::Error.none) {
+        return CompileStatus.semantic_error as i32;
+    }
+    return CompileStatus.semantic_diagnostic_base as i32 + diagnostic.diagnostic.kind as usize as i32;
+}
+
+fn report_semantic(semantic: context::Result) -> runtime::Error {
+    if (semantic.diagnostics.count == 0) {
+        return runtime::Error.none;
+    }
+    let diagnostic: context::DiagnosticResult = context::diagnostic_get(semantic.diagnostics, 0);
+    if (diagnostic.error != runtime::Error.none) {
+        return diagnostic.error;
+    }
+    var message: strings::string = strings::string();
+    var error: runtime::Error = append_literal(&message, "semantic:", 16);
+    error = first_error(error, append_usize(&message, diagnostic.diagnostic.kind as usize));
+    error = first_error(error, append_literal(&message, ":", 2));
+    error = first_error(error, append_usize(&message, diagnostic.diagnostic.unit_index));
+    error = first_error(error, append_literal(&message, ":", 2));
+    error = first_error(error, append_usize(&message, diagnostic.diagnostic.span.offset));
+    error = first_error(error, append_literal(&message, ":", 2));
+    error = first_error(error, append_usize(&message, diagnostic.diagnostic.detail));
+    error = first_error(error, append_literal(&message, "\n", 2));
+    if (error != runtime::Error.none) {
+        return error;
+    }
+    return print_message(message);
+}
+
+fn compile_inputs_are_valid(fixed_protocol: bool, input_paths: *const path::Path, input_count: usize) -> bool {
+    if (fixed_protocol) {
+        return true;
+    }
+    if (input_paths == null || input_count == 0) {
+        return false;
+    }
+    return input_count <= CompileLimit.maximum_units as usize;
+}
+
+impl CompileCommand {
+    init(argc: usize, argv: **const u8): arguments = CommandLine(argc, argv) {
+        this->input_count = 0;
+        this->has_output = false;
+        this->executable = true;
+        this->has_mode = false;
+        this->fixed_protocol = argc == 1;
+        this->valid = true;
+    }
+
+    priv fn compile_sources() -> i32 {
+    let fixed_protocol: bool = this->fixed_protocol;
+    let input_paths: *const path::Path = &this->inputs[0] as *const path::Path;
+    let input_count: usize = this->input_count;
+    let executable: bool = this->executable;
+    let output_path: path::Path = this->output;
+    let inputs_are_valid: bool = compile_inputs_are_valid(fixed_protocol, input_paths, input_count);
+    if (!inputs_are_valid || !path::is_valid(output_path)) {
+        return CompileStatus.input_error as i32;
+    }
+    var sources: [64]bytes::Buffer = {};
+    var frontends: [64]parser::FrontendResult = {};
+    var source_count: usize = 0;
+    var total_source_bytes: usize = 0;
+    let expected_count: usize = fixed_protocol ? CompileLimit.maximum_units as usize : input_count;
+    for (; source_count < expected_count;) {
+        var path: path::PathResult = invalid_path_result(runtime::Error.none);
+        if (fixed_protocol) {
+            path = compile_fixed_unit_path(source_count);
+            if (path.error != runtime::Error.none) {
+                release_sources(&sources[0], &frontends[0], source_count);
+                return CompileStatus.input_error as i32;
+            }
+        }
+        let source_path: path::Path = fixed_protocol ? path.path : input_paths[source_count];
+        var error: runtime::Error = load_source(source_path, &sources[source_count], &frontends[source_count]);
+        let source_loaded: bool = error == runtime::Error.none;
+        if (fixed_protocol) {
+            let path_error: runtime::Error = path::release(path.path);
+            if (source_loaded && path_error != runtime::Error.none) {
+                release_source(sources[source_count], frontends[source_count]);
+                error = path_error;
+            }
+        }
+        if (fixed_protocol && error == runtime::Error.not_found) {
+            break;
+        }
+        if (error != runtime::Error.none) {
+            release_sources(&sources[0], &frontends[0], source_count);
+            if (error == runtime::Error.out_of_memory) {
+                report_resource("source", 8, source_count, CompileLimit.maximum_source_bytes as usize);
+                return CompileStatus.resource_limit as i32;
+            }
+            return CompileStatus.input_error as i32;
+        }
+        source_count += 1;
+        let source_length: usize = sources[source_count - 1].length;
+        if (source_length > (CompileLimit.maximum_total_source_bytes as usize) - total_source_bytes) {
+            report_resource("total", 8, source_count - 1, CompileLimit.maximum_total_source_bytes as usize);
+            release_sources(&sources[0], &frontends[0], source_count);
+            return CompileStatus.resource_limit as i32;
+        }
+        total_source_bytes += source_length;
+        let frontend: parser::FrontendResult = frontends[source_count - 1];
+        let diagnostics_exist: bool = frontend.lex.diagnostics.count != 0 || frontend.parse.diagnostics.count != 0;
+        if (frontend.error != runtime::Error.none || diagnostics_exist) {
+            let status: i32 = frontend_status(frontend);
+            var lexical: bool = false;
+            let diagnostic: lexer::DiagnosticResult = select_frontend_diagnostic(frontend, &lexical);
+            let has_resource_diagnostic: bool = diagnostic.error == runtime::Error.none && diagnostic.diagnostic.kind ==
+                    lexer::DiagnosticKind.resource_limit;
+            if (frontend.error == runtime::Error.out_of_memory && !has_resource_diagnostic) {
+                report_resource("frontend", 16, source_count - 1, CompileLimit.maximum_frontend_diagnostics as usize);
+            } else {
+                report_frontend(frontend);
+            }
+            release_sources(&sources[0], &frontends[0], source_count);
+            return status;
+        }
+    }
+    if (source_count == 0) {
+        return CompileStatus.input_error as i32;
+    }
+    if (fixed_protocol && source_count == CompileLimit.maximum_units as usize) {
+        var excess_source: bytes::Buffer = bytes::empty();
+        var excess_frontend: parser::FrontendResult = {};
+        let excess_path: path::PathResult = compile_fixed_unit_path(source_count);
+        var excess_error: runtime::Error = excess_path.error;
+        var excess_present: bool = false;
+        if (excess_path.error == runtime::Error.none) {
+            excess_error = load_source(excess_path.path, &excess_source, &excess_frontend);
+            excess_present = excess_error == runtime::Error.none;
+            let path_error: runtime::Error = path::release(excess_path.path);
+            if (excess_error == runtime::Error.none) {
+                excess_error = path_error;
+            }
+        }
+        if (excess_present) {
+            let release_error: runtime::Error = release_source(excess_source, excess_frontend);
+            if (excess_error == runtime::Error.none) {
+                excess_error = release_error;
+            }
+        }
+        if (excess_present || excess_error != runtime::Error.not_found) {
+            release_sources(&sources[0], &frontends[0], source_count);
+            return CompileStatus.unit_limit as i32;
+        }
+    }
+
+    var input: context::Input = context::input_empty(executable);
+    var added: bool = true;
+    for (var index: usize = 0; index < source_count && added; index += 1) {
+        if (fixed_protocol) {
+            let path: path::PathResult = compile_fixed_unit_path(index);
+            if (path.error != runtime::Error.none) {
+                added = false;
+            } else {
+                let path_view: string_views::string_view_result = path::view(path.path);
+                added = path_view.error == runtime::Error.none &&
+                    add_semantic_input(&input, sources[index], frontends[index], path_view.view);
+                added = path::release(path.path) == runtime::Error.none && added;
+            }
+        } else {
+            let path_view: string_views::string_view_result = path::view(input_paths[index]);
+            added = path_view.error == runtime::Error.none &&
+                add_semantic_input(&input, sources[index], frontends[index], path_view.view);
+        }
+    }
+    if (!added) {
+        context::input_release(input);
+        release_sources(&sources[0], &frontends[0], source_count);
+        return CompileStatus.semantic_error as i32;
+    }
+
+    let semantic: context::Result = sema::check(input);
+    if (!context::result_is_success(semantic)) {
+        let status: i32 = semantic_status(semantic);
+        if (semantic.error == runtime::Error.out_of_memory) {
+            report_resource("semantic", 16, 0, CompileLimit.maximum_semantic_diagnostics as usize);
+        } else {
+            report_semantic(semantic);
+        }
+        context::result_release(semantic);
+        context::input_release(input);
+        release_sources(&sources[0], &frontends[0], source_count);
+        return status;
+    }
+    let backend: codegen::BackendResult = codegen::emit_assembly(input, semantic.ir, semantic.types);
+    if (!codegen::backend_is_success(
+            backend, input, semantic.ir, semantic.types)) {
+        let backend_status: i32 = backend.error == runtime::Error.out_of_memory ?
+                CompileStatus.resource_limit as i32 : CompileStatus.backend_error as i32;
+        codegen::backend_release(backend);
+        context::result_release(semantic);
+        context::input_release(input);
+        release_sources(&sources[0], &frontends[0], source_count);
+        return backend_status;
+    }
+
+    let write_error: runtime::Error = io::write_file_atomic(
+        output_path, backend.assembly.data as *const u8, backend.assembly.length);
+
+    let backend_error: runtime::Error = codegen::backend_release(backend);
+    let semantic_error: runtime::Error = context::result_release(semantic);
+    let input_error: runtime::Error = context::input_release(input);
+    let sources_error: runtime::Error = release_sources(&sources[0], &frontends[0], source_count);
+    if (write_error != runtime::Error.none) {
+        return CompileStatus.output_error as i32;
+    }
+    var release_error: runtime::Error = first_error(backend_error, semantic_error);
+    release_error = first_error(release_error, input_error);
+    release_error = first_error(release_error, sources_error);
+    if (release_error != runtime::Error.none) {
+        return CompileStatus.release_error as i32;
+    }
+    return CompileStatus.success as i32;
+}
+
+    priv fn usage() -> i32 {
+    print(runtime::standard_error(), "usage: luna compile [--executable|--library] -o <output.s> <source-unit>...\n");
+    return CompileStatus.cli_usage_error as i32;
+}
+
+    priv fn release_paths() -> runtime::Error {
+    var error: runtime::Error = runtime::Error.none;
+    for (var remaining: usize = this->input_count; remaining != 0; remaining -= 1) {
+        let index: usize = remaining - 1;
+        let release_error: runtime::Error = path::release(this->inputs[index]);
+        error = first_error(error, release_error);
+    }
+    this->input_count = 0;
+    if (this->has_output) {
+        let output_error: runtime::Error = path::release(this->output);
+        error = first_error(error, output_error);
+        this->has_output = false;
+    }
+    return error;
+}
+
+    priv fn argument_is_mode(argument: *const u8) -> bool {
+    return argument_equals(argument, "--library", 9) || argument_equals(argument, "--executable", 12);
+}
+
+    priv fn run_cli() -> i32 {
+    if (!this->arguments.is_valid() || this->arguments.count() < 2) {
+        return this->usage();
+    }
+    if (this->arguments.count() == 2 && this->arguments.matches("--help", 6)) {
+        print(
+            runtime::standard_output(),
+            "usage: luna compile [--executable|--library] -o <output.s> <source-unit>...\n");
+        return 0;
+    }
+    if (this->arguments.count() == 2 && this->arguments.matches("--version", 9)) {
+        print(runtime::standard_output(), "luna compile (self-hosted Luna 1) 0.1.0\n");
+        return 0;
+    }
+
+    for (; !this->arguments.done() && this->valid; this->arguments.advance()) {
+        let argument: *const u8 = this->arguments.current();
+        if (this->arguments.consume_end_of_options()) {
+        } else if (this->arguments.options_are_active() && this->arguments.matches("-o", 2)) {
+            let value: *const u8 = this->arguments.take_next();
+            if (this->has_output || value == null) {
+                this->valid = false;
+            } else {
+                let path: path::PathResult = path::from_c_string(value, CompileLimit.maximum_path_bytes as usize);
+                if (path.error != runtime::Error.none) {
+                    this->valid = false;
+                } else {
+                    this->output = path.path;
+                    this->has_output = true;
+                }
+            }
+        } else if (this->arguments.options_are_active() && this->argument_is_mode(argument)) {
+            if (this->has_mode) {
+                this->valid = false;
+            } else {
+                this->executable = argument_equals(argument, "--executable", 12);
+                this->has_mode = true;
+            }
+        } else if (this->arguments.options_are_active() && this->arguments.current_starts_with_dash()) {
+            this->valid = false;
+        } else if (this->input_count == CompileLimit.maximum_units as usize) {
+            this->valid = false;
+        } else {
+            let path: path::PathResult = path::from_c_string(argument, CompileLimit.maximum_path_bytes as usize);
+            if (path.error != runtime::Error.none) {
+                this->valid = false;
+            } else {
+                this->inputs[this->input_count] = path.path;
+                this->input_count += 1;
+            }
+        }
+    }
+    if (!this->has_output || this->input_count == 0) {
+        this->valid = false;
+    }
+    if (this->valid) {
+        let output_view: string_views::string_view_result = path::view(this->output);
+        for (var index: usize = 0; index < this->input_count && this->valid; index += 1) {
+            let input_view: string_views::string_view_result = path::view(this->inputs[index]);
+            let paths_are_readable: bool = output_view.error == runtime::Error.none &&
+                input_view.error == runtime::Error.none;
+            this->valid = paths_are_readable && !string_views::equal(output_view.view, input_view.view);
+        }
+    }
+
+    var status: i32 = CompileStatus.cli_usage_error as i32;
+    if (this->valid) {
+        status = this->compile_sources();
+        if (status == CompileStatus.success as i32) {
+            status = 0;
+        }
+    } else {
+        this->usage();
+    }
+    let release_error: runtime::Error = this->release_paths();
+    if (status == 0 && release_error != runtime::Error.none) {
+        return CompileStatus.release_error as i32;
+    }
+    return status;
+}
+
+    priv fn run_fixed() -> i32 {
+    if (compile_fixed_version() != runtime::Error.none) {
+        return CompileStatus.version_error as i32;
+    }
+    if (compile_fixed_mode(&this->executable) != runtime::Error.none) {
+        return CompileStatus.mode_error as i32;
+    }
+    let output: path::PathResult = path::from_c_string("bootstrap-stage-output.s", 32);
+    if (output.error != runtime::Error.none) {
+        return CompileStatus.output_error as i32;
+    }
+    this->output = output.path;
+    this->has_output = true;
+    let status: i32 = this->compile_sources();
+    let release_error: runtime::Error = this->release_paths();
+    if (status == CompileStatus.success as i32 && release_error != runtime::Error.none) {
+        return CompileStatus.release_error as i32;
+    }
+    return status;
+}
+
+    fn execute() -> i32 {
+        return this->fixed_protocol ? this->run_fixed() : this->run_cli();
+    }
+
+    deinit() {
+        this->release_paths();
+    }
+}
+
+fn run_compile(argc: usize, argv: **const u8) -> i32 {
+    var command: CompileCommand = CompileCommand(argc, argv);
+    return command.execute();
+}

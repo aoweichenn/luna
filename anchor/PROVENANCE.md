@@ -619,3 +619,37 @@ For the complete toolchain input set, recorded old/new link samples were
 was added in this batch. The promoted executable is 4,876,112 bytes with
 SHA-256
 `a264d40411ce8c88086f0477497c25cbd5d59be7356025dd16cba60838337870`.
+
+## 2026-08-28: promotion to the unified Tools module
+
+The anchor now contains the stage-fixed `luna` executable from the unified
+command-tools snapshot accompanying this provenance note. Four shallow
+`luna.tools.cli`, `luna.tools.compile`, `luna.tools.assemble` and
+`luna.tools.link` modules are replaced by one cohesive `luna.tools` module and
+one narrow public interface. The freestanding entry point remains an
+independent driver module and delegates only to the tools facade.
+
+`CommandLine`, `ToolDriver`, `CompileCommand`, `AssembleCommand` and
+`LinkCommand` now own argument traversal, command dispatch, paths and stage
+cleanup. Closed root dispatch uses an enum and `switch`; bounded input
+traversal uses `for`; command resources are released by their destructors.
+The three observable compile, assemble and link stages, their files, exit
+codes, diagnostics and fixed protocol remain unchanged. No artificial command
+inheritance hierarchy or hidden in-process build pipeline was introduced.
+
+Remote x86-64 verification on isolated `caw` built the complete graph through
+`stage-transition`, `stage-next` and `stage-fixed` with `verify --fresh` in
+53.03 seconds. The graph contracted from 75 to 72 modules and from 65 to 62
+library objects; every next/fixed artifact was byte-identical. Audit and
+formatting gates were green. The expanded final suite passed 447/447 with no
+skips in 4.39 seconds, including 11 exact CLI and fixed-protocol checks.
+
+The fixed compile/assemble/link protocol returned 42 at every stage and
+produced a 951-byte assembly, 597-byte object and 4,190-byte executable with
+SHA-256 values
+`aa5023c18d89eb0ea04a0764d4cc7602afbc784774d4845141fcd2c6f338d3a6`,
+`d7c2ff72e8065eecc7a9ae56c43404dd576841723b8c47cdd18d637bb5e79b55`
+and
+`09a52ee70e72522c7b8d2c39df588d8291683470c9befe9502abcede66260cae`.
+The promoted executable is 4,884,298 bytes with SHA-256
+`ca1b1c80e8c03b7d0a56b880ce5ef18f69a3fb35fa41e18b3445b28cb1c9d786`.

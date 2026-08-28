@@ -1,7 +1,8 @@
-module luna.tools.cli;
+module luna.tools;
 
-import luna.std.io;
-import luna.std.string_view as string_views;
+enum Command: usize {
+    invalid, help, version, compile, assemble, link,
+}
 
 enum Limit: usize {
     command_count = 5, maximum_text_bytes = 1024,
@@ -11,6 +12,26 @@ struct CommandEntry {
     name: *const u8;
     length: usize;
     command: Command;
+}
+
+class CommandLine {
+    priv argc: usize;
+    priv argv: **const u8;
+    priv index: usize;
+    priv options_finished: bool;
+
+    pub init(argc: usize, argv: **const u8);
+    pub fn is_valid() const -> bool;
+    pub fn count() const -> usize;
+    pub fn data() const -> **const u8;
+    pub fn done() const -> bool;
+    pub fn current() const -> *const u8;
+    pub fn advance();
+    pub fn take_next() -> *const u8;
+    pub fn matches(expected: *const u8, length: usize) const -> bool;
+    pub fn consume_end_of_options() -> bool;
+    pub fn options_are_active() const -> bool;
+    pub fn current_starts_with_dash() const -> bool;
 }
 
 fn argument_equals(argument: *const u8, expected: *const u8, length: usize) -> bool {
@@ -45,6 +66,30 @@ fn first_error(current: runtime::Error, next: runtime::Error) -> runtime::Error 
     return current != runtime::Error.none ? current : next;
 }
 
+fn invalid_path_result(error: runtime::Error) -> path::PathResult {
+    return {path = {storage = bytes::empty(), length = 0}, error = error};
+}
+
+fn append_literal(destination: *strings::string, literal: *const u8, maximum_length: usize) -> runtime::Error {
+    if (destination == null) {
+        return runtime::Error.invalid_argument;
+    }
+    let view: string_views::string_view_result = string_views::from_c_string(literal, maximum_length);
+    return view.error == runtime::Error.none ? destination->append(view.view) : view.error;
+}
+
+fn append_usize(destination: *strings::string, value: usize) -> runtime::Error {
+    if (destination == null) {
+        return runtime::Error.invalid_argument;
+    }
+    var digits: [20]u8 = {};
+    let converted: charconv::to_chars_result = charconv::to_chars(&digits[0], &digits[0] + 20 as usize, value);
+    if (converted.error != runtime::Error.none) {
+        return converted.error;
+    }
+    return destination->append(&digits[0] as *const u8, converted.ptr - &digits[0]);
+}
+
 fn starts_with_dash(argument: *const u8) -> bool {
     return argument != null && argument[0] == '-';
 }
@@ -55,4 +100,67 @@ fn print(file: runtime::File, data: *const u8) -> runtime::Error {
         return value.error;
     }
     return io::write_all(file, value.view.data, value.view.length);
+}
+
+impl CommandLine {
+    init(argc: usize, argv: **const u8) {
+        this->argc = argc;
+        this->argv = argv;
+        this->index = 1;
+        this->options_finished = false;
+    }
+
+    fn is_valid() const -> bool {
+        return this->argv != null && this->argc != 0;
+    }
+
+    fn count() const -> usize {
+        return this->argc;
+    }
+
+    fn data() const -> **const u8 {
+        return this->argv;
+    }
+
+    fn done() const -> bool {
+        return this->index >= this->argc;
+    }
+
+    fn current() const -> *const u8 {
+        return this->done() || this->argv == null ? null : this->argv[this->index];
+    }
+
+    fn advance() {
+        if (!this->done()) {
+            this->index += 1;
+        }
+    }
+
+    fn take_next() -> *const u8 {
+        if (this->argv == null || this->index + 1 >= this->argc) {
+            return null;
+        }
+        this->index += 1;
+        return this->argv[this->index];
+    }
+
+    fn matches(expected: *const u8, length: usize) const -> bool {
+        return argument_equals(this->current(), expected, length);
+    }
+
+    fn consume_end_of_options() -> bool {
+        if (this->options_finished || !this->matches("--", 2)) {
+            return false;
+        }
+        this->options_finished = true;
+        return true;
+    }
+
+    fn options_are_active() const -> bool {
+        return !this->options_finished;
+    }
+
+    fn current_starts_with_dash() const -> bool {
+        return starts_with_dash(this->current());
+    }
 }
