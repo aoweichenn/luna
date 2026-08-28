@@ -1,0 +1,146 @@
+module luna.compiler.x86.linker;
+
+
+impl StaticLinker {
+    priv fn append_padding(storage: *buffer::byte_buffer, count: usize, fill: u8) -> bool {
+        if (storage == null) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        for (var index: usize = 0; index < count; index += 1) {
+            let error: runtime::Error = storage->push_back(fill);
+            if (error != runtime::Error.none) {
+                return this->fail(error);
+            }
+        }
+        return true;
+    }
+
+    priv fn pad_to(storage: *buffer::byte_buffer, offset: usize, fill: u8) -> bool {
+        if (storage == null || storage->size() > offset) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        return this->append_padding(storage, offset - storage->size(), fill);
+    }
+
+    priv fn append_region(
+        destination: *buffer::byte_buffer, source: bytes::Buffer,
+        alignment: usize, fill: u8, placement: *usize) -> bool {
+        if (destination == null || placement == null) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        var aligned: usize = 0;
+        if (!checked::align_up(destination->size(), alignment, &aligned)) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        if (aligned > Limit.maximum_output as usize) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        if (source.length > (Limit.maximum_output as usize) - aligned) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        if (!this->pad_to(destination, aligned, fill)) {
+            return false;
+        }
+        let append_error: runtime::Error = destination->append(source.data as *const u8, source.length);
+        if (append_error != runtime::Error.none) {
+            return this->fail(append_error);
+        }
+        *placement = aligned;
+        return true;
+    }
+
+    priv fn layout_regions() -> bool {
+        for (var object_index: usize = 0; object_index < this->object_count; object_index += 1) {
+            this->input_index = object_index;
+            let input: object::Object = this->objects[object_index];
+            let placement: *Placement = &this->placements.get(object_index);
+            if (!this->append_region(
+                    &this->text, input.text, input.text_alignment, Fill.nop as u8, &placement->text)) {
+                return false;
+            }
+            if (!this->append_region(
+                    &this->rodata, input.rodata, input.rodata_alignment, Fill.zero as u8, &placement->rodata)) {
+                return false;
+            }
+            if (!this->append_region(
+                    &this->data, input.data, input.data_alignment, Fill.zero as u8, &placement->data)) {
+                return false;
+            }
+            var bss_offset: usize = 0;
+            if (!checked::align_up(this->bss_size, input.bss_alignment, &bss_offset)) {
+                return this->fail(runtime::Error.out_of_memory);
+            }
+            if (bss_offset > Limit.maximum_output as usize) {
+                return this->fail(runtime::Error.out_of_memory);
+            }
+            if (input.bss_size > (Limit.maximum_output as usize) - bss_offset) {
+                return this->fail(runtime::Error.out_of_memory);
+            }
+            placement->bss = bss_offset;
+            this->bss_size = bss_offset + input.bss_size;
+            this->bss_alignment = this->bss_alignment < input.bss_alignment ? input.bss_alignment : this->bss_alignment;
+        }
+        if (this->text.empty()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        return true;
+    }
+
+    priv fn layout_image() -> bool {
+        let page: usize = Limit.page_size as usize;
+        let base: usize = Limit.image_base as usize;
+        let text_offset: usize = Limit.text_offset as usize;
+        var text_end: usize = 0;
+        if (!checked::add(text_offset, this->text.size(), &text_end)) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        var rodata_offset: usize = 0;
+        if (!checked::align_up(text_end, page, &rodata_offset)) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        var rodata_end: usize = 0;
+        if (!checked::add(rodata_offset, this->rodata.size(), &rodata_end)) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        var data_offset: usize = 0;
+        if (!checked::align_up(rodata_end, page, &data_offset)) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        if (!checked::add(base, text_offset, &this->text_address)) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        if (!checked::add(base, rodata_offset, &this->rodata_address)) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        if (!checked::add(base, data_offset, &this->data_address)) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        var data_end: usize = 0;
+        if (!checked::add(this->data_address, this->data.size(), &data_end)) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        if (!checked::align_up(data_end, this->bss_alignment, &this->bss_address)) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        return true;
+    }
+
+    priv fn relocation_region(placement: Placement, section: object::Section) -> RelocationRegion {
+        switch (section) {
+        case object::Section.text {
+            return {storage = &this->text, placement_offset = placement.text, virtual_address = this->text_address};
+        }
+        case object::Section.rodata {
+            return {
+                storage = &this->rodata, placement_offset = placement.rodata, virtual_address = this->rodata_address,
+            };
+        }
+        case object::Section.data {
+            return {storage = &this->data, placement_offset = placement.data, virtual_address = this->data_address};
+        }
+        default {
+            return {storage = null, placement_offset = 0, virtual_address = 0};
+        }
+        }
+    }
+}

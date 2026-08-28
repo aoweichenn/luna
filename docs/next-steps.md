@@ -15,12 +15,12 @@ implementation status is tracked in `roadmap.md`.
 | m1.3 kernel UAPI layout package | landed; 122/122 cases; verify fixed point |
 | Refactor R0-R4 (formatting, module graph, service/pass decoupling) | landed; every `.la` below 1,000 lines |
 | C23 disposition review | landed in `syntax-plan.md`; m1.2-m1.10 sequenced |
-| `anchor/` | promoted to the contracted-backend stage-fixed `luna` toolchain |
+| `anchor/` | promoted through the object-oriented ELF stage-fixed `luna` toolchain |
 | Negative tests | `FAIL <diagnostic-kind>` harness landed (0.3 done) |
 | M3.0-M3.6 object model and class-value composition | implemented and promoted; 383/383 cases |
 | M4 native generics | implemented and promoted; 409/409 cases; verify fixed point |
 | Unified `luna` tool driver | implemented and promoted; 416/416 cases; verify fixed point |
-| x86-64 backend module contraction | 20 modules reduced to six; 443/443 cases; verify fixed point |
+| x86-64 backend modernization | contracted modules plus RAII Assembler, ELF I/O and StaticLinker landed; 443/443 and fixed point |
 
 ## Step 0 — close m1.1 completely
 

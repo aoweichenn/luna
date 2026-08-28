@@ -1,0 +1,153 @@
+module luna.compiler.x86.linker;
+
+
+impl GlobalName {
+    init(name: string_views::string_view) {
+        this->name = name;
+    }
+
+    operator <(right: GlobalName) const -> bool {
+        let shared_length: usize = this->name.length < right.name.length ? this->name.length : right.name.length;
+        for (var index: usize = 0; index < shared_length; index += 1) {
+            if (this->name.data[index] != right.name.data[index]) {
+                return this->name.data[index] < right.name.data[index];
+            }
+        }
+        return this->name.length < right.name.length;
+    }
+}
+
+impl StaticLinker {
+    priv fn collect_globals() -> bool {
+        for (var object_index: usize = 0; object_index < this->object_count; object_index += 1) {
+            this->input_index = object_index;
+            let input: object::Object = this->objects[object_index];
+            if (!object::is_valid(input)) {
+                return this->fail(runtime::Error.invalid_argument);
+            }
+            let symbol_count: usize = object::symbol_count(input);
+            for (var symbol_index: usize = 0; symbol_index < symbol_count; symbol_index += 1) {
+                let result: object::SymbolResult = object::get_symbol(input, symbol_index);
+                if (result.error != runtime::Error.none) {
+                    return this->fail(result.error);
+                }
+                let symbol: object::Symbol = result.symbol;
+                if (!symbol.defined || !symbol.global) {
+                    continue;
+                }
+                let name: string_views::string_view_result = object::symbol_name(input, symbol);
+                if (name.error != runtime::Error.none) {
+                    return this->fail(name.error);
+                }
+                let global: Global = {object_index = object_index, symbol_index = symbol_index};
+                let inserted: map::map_insert_result<Global> = this->globals.insert(GlobalName(name.view), global);
+                if (inserted.error != runtime::Error.none) {
+                    return this->fail(inserted.error);
+                }
+                if (!inserted.inserted) {
+                    return this->fail(runtime::Error.exists);
+                }
+            }
+        }
+        return true;
+    }
+
+    priv fn global(name: string_views::string_view) const -> *const Global {
+        return this->globals.find(GlobalName(name));
+    }
+
+    priv fn section_address(placement: Placement, section: object::Section, result: *usize) const -> bool {
+        if (result == null) {
+            return false;
+        }
+        var base: usize = 0;
+        var offset: usize = 0;
+        switch (section) {
+        case object::Section.text {
+            base = this->text_address;
+            offset = placement.text;
+        }
+        case object::Section.rodata {
+            base = this->rodata_address;
+            offset = placement.rodata;
+        }
+        case object::Section.data {
+            base = this->data_address;
+            offset = placement.data;
+        }
+        case object::Section.bss {
+            base = this->bss_address;
+            offset = placement.bss;
+        }
+        default {
+            return false;
+        }
+        }
+        return checked::add(base, offset, result);
+    }
+
+    priv fn symbol_address(object_index: usize, symbol_index: usize, result: *usize) const -> bool {
+        if (result == null) {
+            return false;
+        }
+        let symbol_result: object::SymbolResult = object::get_symbol(this->objects[object_index], symbol_index);
+        if (symbol_result.error != runtime::Error.none || !symbol_result.symbol.defined) {
+            return false;
+        }
+        var section_base: usize = 0;
+        if (!this->section_address(
+                this->placements.get(object_index), symbol_result.symbol.section, &section_base)) {
+            return false;
+        }
+        return checked::add(section_base, symbol_result.symbol.value, result);
+    }
+
+    priv fn resolve_symbol(object_index: usize, symbol_index: usize, result: *usize) const -> bool {
+        if (result == null) {
+            return false;
+        }
+        let input: object::Object = this->objects[object_index];
+        let symbol_result: object::SymbolResult = object::get_symbol(input, symbol_index);
+        if (symbol_result.error != runtime::Error.none) {
+            return false;
+        }
+        if (symbol_result.symbol.defined) {
+            return this->symbol_address(object_index, symbol_index, result);
+        }
+        let name: string_views::string_view_result = object::symbol_name(input, symbol_result.symbol);
+        if (name.error != runtime::Error.none) {
+            return false;
+        }
+        let global: *const Global = this->global(name.view);
+        if (global == null) {
+            return false;
+        }
+        return this->symbol_address(global->object_index, global->symbol_index, result);
+    }
+
+    priv fn resolve_entry() -> bool {
+        let name: string_views::string_view_result = string_views::from_bytes("_start", 6);
+        if (name.error != runtime::Error.none) {
+            return this->fail(runtime::Error.not_found);
+        }
+        let global: *const Global = this->global(name.view);
+        if (global == null) {
+            return this->fail(runtime::Error.not_found);
+        }
+        this->input_index = global->object_index;
+        if (!this->symbol_address(global->object_index, global->symbol_index, &this->entry_address)) {
+            return this->fail(runtime::Error.not_found);
+        }
+        let symbol: object::SymbolResult = object::get_symbol(
+            this->objects[global->object_index], global->symbol_index);
+        if (symbol.error != runtime::Error.none) {
+            return this->fail(symbol.error);
+        }
+        let is_entry: bool = symbol.symbol.section == object::Section.text &&
+            symbol.symbol.kind == object::SymbolKind.function;
+        if (!is_entry) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        return true;
+    }
+}

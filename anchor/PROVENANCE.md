@@ -504,3 +504,38 @@ ELF/relocation integration probes and malformed-header, section-table,
 symbol-table and relocation-symbol boundaries. Audit and formatting gates
 were green. The promoted executable is 4,728,657 bytes with SHA-256
 `248fa7666daea68c5e23b0c783ec4c566582327ff2855e4d5897ce6810ab963d`.
+
+## 2026-08-28: promotion to the object-oriented static-linker toolchain
+
+The anchor now contains the stage-fixed `luna` executable from the static
+Linker RAII snapshot accompanying this provenance note. The former monolithic
+`Image`/`BinaryWriter` records and free-procedure pipeline are replaced by one
+private `StaticLinker` operation class. It composes typed placements, an
+ordered global-symbol table, RAII region buffers, deterministic ELF emission
+and sticky first-error/input-index state.
+
+The implementation is divided into symbols, layout, relocation, writer and
+facade method families behind one `luna.compiler.x86.linker` interface.
+`vector<Placement>` replaces the fixed stack array, while
+`map<GlobalName, Global>` replaces raw-byte global records and repeated linear
+lookup. Section and relocation alternatives use closed `switch` dispatch;
+layout arithmetic uses checked addition/alignment, and output fields share the
+Linker error state rather than a second weak writer protocol. Static ET_EXEC
+semantics remain the only mode; no placeholder dynamic-link strategy was
+introduced.
+
+Remote x86-64 verification on isolated `caw` built the complete 75-module
+graph through `stage-transition`, `stage-next` and `stage-fixed` with
+`verify --fresh` in 94.40 seconds. Every next/fixed assembly, object and
+executable artifact was byte-identical. The final suite passed 443/443 with no
+skips in 5.16 seconds, including direct deterministic links, static program
+headers, duplicate globals, missing and invalid entry points and unresolved
+symbols. Audit and formatting gates were green.
+
+For the saved dispatch probe, the old and new 429-byte objects and 8,200-byte
+executables were byte-identical. Relinking the complete toolchain input set
+three times produced the same 4,794,193-byte SHA-256 output with both linkers;
+median wall time fell from 21.754 seconds with the preceding anchor to 0.488
+seconds with `StaticLinker`. The promoted executable is 4,794,193 bytes with
+SHA-256
+`f11c8b0325edd80374531f85a9ed65d31df437bb604958eea192236438a9ad14`.

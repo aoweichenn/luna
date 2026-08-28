@@ -15,7 +15,7 @@ frame、instruction、reader、writer、operand 和 encoding 都没有父 facade
 | `luna.compiler.x86.object` | LUNAOBJ1 被动对象模型与序列化 |
 | `luna.compiler.x86.elf` | facade、format、reader、writer |
 | `luna.compiler.x86.assembler` | facade、operands、symbols、encoding、source |
-| `luna.compiler.x86.linker` | static ELF64 link |
+| `luna.compiler.x86.linker` | facade、symbols、layout、relocation、writer |
 
 模块数从 20 降为 5；`LIBRARIES`仍列出每个 implementation path，但只为五个接口生成五个
 library object。
@@ -34,7 +34,7 @@ compiler/src/backend/x86_64/
   assembler/{facade,operands,symbols,encoding,source}.la
   elf/{facade,format,reader,writer}.la
   object/object.la
-  linker/linker.la
+  linker/{facade,symbols,layout,relocation,writer}.la
 ```
 
 `x86_64/`只包含模块目录；每个模块目录只包含实现文件，不混合下一层目录。接口行数为：
@@ -42,8 +42,8 @@ compiler/src/backend/x86_64/
 - codegen 175；
 - assembler 119；
 - object 95；
-- ELF 41；
-- linker 13。
+- ELF 140；
+- linker 97。
 
 接口只保存导出契约和跨 implementation unit 共享的记录。算法、解析、编码和 writer body
 继续留在原职责文件中。`SymbolName`、`SymbolBinding`和`SymbolTable`因当前跨模块泛型
@@ -76,14 +76,17 @@ implementation-file 名称进入 module namespace。
 - `string`采用私有`byte_buffer`组合、move construction、move assignment 与 RAII；
 - `charconv`是无状态、无分配算法，保留 free function 比装饰性 class 更准确；
 - Assembler 已按`docs/assembler-design.md`成为组合 SymbolTable、typed vectors 和规则表的 RAII class；
-- ABI、frame、operand、ELF record、Object 和 Fixup 继续是透明 struct；
+- ABI、frame、operand、ELF record、Object、Placement、Global 和 Fixup 继续是透明 struct；
+- ElfReader/ElfWriter 以 RAII class 拥有 typed vectors、scratch buffers 和部分结果；
+- StaticLinker 以 RAII class 组合`vector<Placement>`、`map<GlobalName, Global>`、合并 region 与输出；
 - 本批次没有资源转移边界，因此不新增 move surface；
 - 没有运行期替换层次，因此 inheritance、virtual dispatch 和 RTTI 不适用；
 - 没有需要捕获对象的策略回调，因此 bound method 不适用；
 - 不使用 friend 扩大访问面；同模块 implementation unit 已提供所需私有共享边界。
 
-后续 OOP backend 批次会继续把 CodeGenerator、ElfReader、ElfWriter 和 Linker
-升级为状态类。本批次刻意不把 namespace 迁移与行为重写混在同一个正确性变化中。
+后续 OOP backend 批次只剩 CodeGenerator 主会话及其 ABI/Frame 阶段需要收敛；Object 作为
+被动交换记录保持 struct。动态链接不以空 LinkMode 预埋，待 PIC/PIE、ET_DYN 和装载器成为
+独立里程碑时再抽取真实共享边界。
 
 ## 验证
 
@@ -107,3 +110,8 @@ stage-next/stage-fixed 的全部产物继续逐字节一致。
 Assembler OOP 批次随后把`State + *State`收敛为组合 SymbolTable、typed vectors 和规则表的
 私有 RAII class。`caw`完整测试 443/443、verify 全产物一致；`sem_funcs.s`三次汇编为
 0.767/0.774/0.762 秒，并与旧 assembler 对同一输入生成的 object 逐字节相同。
+
+ELF OOP 批次将 Reader/Writer 收敛为 typed-vector RAII classes。Linker OOP 批次进一步以私有
+`StaticLinker` 组合 typed placements、有序全局符号表和 RAII regions，并按 symbols/layout/
+relocation/writer/facade 拆分同模块实现。`caw` 完整测试 443/443，`verify --fresh`
+全产物一致；完整工具链重链中位数从 21.754 秒降为 0.488 秒，输出哈希不变。

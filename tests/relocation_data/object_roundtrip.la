@@ -2,6 +2,7 @@ module tests.relocation_data.object_roundtrip;
 
 import luna.compiler.x86.assembler as assembler;
 import luna.compiler.x86.elf as elf;
+import luna.compiler.x86.linker as linker;
 import luna.compiler.x86.object as object;
 import luna.runtime;
 import luna.std.binary as binary;
@@ -10,6 +11,16 @@ import luna.std.string_view as string_views;
 
 enum ProbeLayout: usize {
     relocation_count = 2, second_address_offset = 16, byte_count = 24,
+}
+
+enum ExecutableLayout: usize {
+    elf_type = 2, machine = 62, header_size = 64, program_header_size = 56,
+    program_count = 3, load_segment = 1, page_size = 4096,
+    text_flags = 5, rodata_flags = 4, data_flags = 6,
+    type_offset = 16, machine_offset = 18, program_table_offset = 32, section_table_offset = 40,
+    header_size_offset = 52, program_size_offset = 54, program_count_offset = 56,
+    program_flags_offset = 4, program_alignment_offset = 48,
+    magic_zero = 127, magic_one = 69, magic_two = 76, magic_three = 70,
 }
 
 fn relocation_table_is_valid(value: object::Object) -> bool {
@@ -124,6 +135,178 @@ fn malformed_elf_is_rejected(source: bytes::Buffer) -> bool {
     return mutation_is_rejected(source, relocation_offset as usize + 15, 255);
 }
 
+fn executable_layout_is_valid(executable: bytes::Buffer) -> bool {
+    if (executable.length < 4 || executable.data == null) {
+        return false;
+    }
+    var elf_type: u16 = 0;
+    var machine: u16 = 0;
+    var program_offset: u64 = 0;
+    var section_offset: u64 = 0;
+    var header_size: u16 = 0;
+    var program_size: u16 = 0;
+    var program_count: u16 = 0;
+    let content: *const u8 = executable.data as *const u8;
+    if (!binary::read_u16(content, executable.length, ExecutableLayout.type_offset as usize, &elf_type) ||
+        !binary::read_u16(content, executable.length, ExecutableLayout.machine_offset as usize, &machine)) {
+        return false;
+    }
+    if (!binary::read_u64(content, executable.length, ExecutableLayout.program_table_offset as usize,
+            &program_offset) || !binary::read_u64(content, executable.length,
+            ExecutableLayout.section_table_offset as usize, &section_offset)) {
+        return false;
+    }
+    if (!binary::read_u16(content, executable.length, ExecutableLayout.header_size_offset as usize, &header_size) ||
+        !binary::read_u16(content, executable.length, ExecutableLayout.program_size_offset as usize, &program_size)) {
+        return false;
+    }
+    if (!binary::read_u16(
+            content, executable.length, ExecutableLayout.program_count_offset as usize, &program_count)) {
+        return false;
+    }
+    let identity_is_valid: bool = content[0] == (ExecutableLayout.magic_zero as usize) as u8;
+    let suffix_is_valid: bool = content[1] == (ExecutableLayout.magic_one as usize) as u8 &&
+        content[2] == (ExecutableLayout.magic_two as usize) as u8;
+    if (!identity_is_valid || !suffix_is_valid) {
+        return false;
+    }
+    if (content[3] != (ExecutableLayout.magic_three as usize) as u8 ||
+        elf_type != (ExecutableLayout.elf_type as usize) as u16) {
+        return false;
+    }
+    if (machine != (ExecutableLayout.machine as usize) as u16 || section_offset != 0) {
+        return false;
+    }
+    let sizes_are_valid: bool = header_size == (ExecutableLayout.header_size as usize) as u16 &&
+        program_size == (ExecutableLayout.program_header_size as usize) as u16;
+    if (!sizes_are_valid || program_count != (ExecutableLayout.program_count as usize) as u16) {
+        return false;
+    }
+    let expected_flags: [3]u32 = {
+        ExecutableLayout.text_flags as usize as u32,
+        ExecutableLayout.rodata_flags as usize as u32,
+        ExecutableLayout.data_flags as usize as u32,
+    };
+    for (var index: usize = 0; index < ExecutableLayout.program_count as usize; index += 1) {
+        let record: usize = program_offset as usize + index * (ExecutableLayout.program_header_size as usize);
+        var kind: u32 = 0;
+        var flags: u32 = 0;
+        var alignment: u64 = 0;
+        if (!binary::read_u32(content, executable.length, record, &kind) ||
+            !binary::read_u32(
+                content, executable.length, record + (ExecutableLayout.program_flags_offset as usize), &flags)) {
+            return false;
+        }
+        if (!binary::read_u64(content, executable.length,
+                record + (ExecutableLayout.program_alignment_offset as usize), &alignment)) {
+            return false;
+        }
+        if (kind != (ExecutableLayout.load_segment as usize) as u32 || flags != expected_flags[index]) {
+            return false;
+        }
+        if (alignment != (ExecutableLayout.page_size as usize) as u64) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn link_failure_is(
+    assembly: *const u8, maximum_length: usize,
+    expected_error: runtime::Error, expected_input: usize) -> bool {
+    let source: string_views::string_view_result = string_views::from_c_string(assembly, maximum_length);
+    if (source.error != runtime::Error.none) {
+        return false;
+    }
+    let assembled: assembler::Result = assembler::assemble(source.view);
+    if (assembled.error != runtime::Error.none) {
+        object::release(assembled.object);
+        return false;
+    }
+    let linked: linker::Result = linker::link(&assembled.object as *const object::Object, 1);
+    let error_is_valid: bool = linked.error == expected_error && linked.input_index == expected_input;
+    let output_is_empty: bool = linked.executable.length == 0 && linked.executable.data == null;
+    var release_error: runtime::Error = bytes::release(linked.executable);
+    release_error = first_error(release_error, object::release(assembled.object));
+    if (!error_is_valid || !output_is_empty) {
+        return false;
+    }
+    return release_error == runtime::Error.none;
+}
+
+fn linker_boundary_status() -> i32 {
+    let source: string_views::string_view_result = string_views::from_c_string(
+        ".section .rodata,\"a\",@progbits\n"
+        ".byte 7\n"
+        ".data\n"
+        ".byte 9\n"
+        ".text\n"
+        ".globl _start\n"
+        ".type _start, @function\n"
+        "_start:\n"
+        "movl $42, %edi\n"
+        "movl $60, %eax\n"
+        "syscall\n"
+        ".size _start, .-_start\n", 512);
+    if (source.error != runtime::Error.none) {
+        return 20;
+    }
+    let assembled: assembler::Result = assembler::assemble(source.view);
+    if (assembled.error != runtime::Error.none) {
+        object::release(assembled.object);
+        return 21;
+    }
+    let first: linker::Result = linker::link(&assembled.object as *const object::Object, 1);
+    let second: linker::Result = linker::link(&assembled.object as *const object::Object, 1);
+    let output_is_valid: bool = first.error == runtime::Error.none && second.error == runtime::Error.none;
+    let layout_is_valid: bool = output_is_valid && executable_layout_is_valid(first.executable);
+    let output_is_stable: bool = layout_is_valid &&
+        bytes::equal(first.executable, second.executable.data as *const u8, second.executable.length);
+
+    var duplicate_inputs: [2]object::Object = { assembled.object, assembled.object };
+    let duplicate: linker::Result = linker::link(&duplicate_inputs[0] as *const object::Object, 2);
+    let duplicate_is_valid: bool = duplicate.error == runtime::Error.exists && duplicate.input_index == 1;
+    let empty: linker::Result = linker::link(null, 0);
+    let empty_is_valid: bool = empty.error == runtime::Error.invalid_argument && empty.input_index == 0;
+
+    var release_error: runtime::Error = bytes::release(empty.executable);
+    release_error = first_error(release_error, bytes::release(duplicate.executable));
+    release_error = first_error(release_error, bytes::release(second.executable));
+    release_error = first_error(release_error, bytes::release(first.executable));
+    release_error = first_error(release_error, object::release(assembled.object));
+    if (!output_is_stable) {
+        return 22;
+    }
+    if (!duplicate_is_valid) {
+        return 23;
+    }
+    if (!empty_is_valid) {
+        return 24;
+    }
+    if (release_error != runtime::Error.none) {
+        return 25;
+    }
+
+    let missing_entry: bool = link_failure_is(
+        ".text\n.type helper, @function\nhelper:\nret\n.size helper, .-helper\n",
+        128, runtime::Error.not_found, 0);
+    let invalid_entry: bool = link_failure_is(
+        ".text\nret\n.data\n.globl _start\n.type _start, @object\n"
+        "_start:\n.byte 0\n.size _start, .-_start\n",
+        192, runtime::Error.invalid_argument, 0);
+    let unresolved: bool = link_failure_is(
+        ".extern missing\n.text\n.globl _start\n.type _start, @function\n"
+        "_start:\ncall missing\nret\n.size _start, .-_start\n",
+        192, runtime::Error.not_found, 0);
+    if (!missing_entry) {
+        return 26;
+    }
+    if (!invalid_entry) {
+        return 27;
+    }
+    return unresolved ? 0 : 28;
+}
+
 fn numeric_labels_are_valid() -> bool {
     let source: string_views::string_view_result = string_views::from_c_string(
         ".text\n"
@@ -172,6 +355,10 @@ fn numeric_labels_are_valid() -> bool {
 fn main() -> i32 {
     if (!numeric_labels_are_valid()) {
         return 10;
+    }
+    let linker_status: i32 = linker_boundary_status();
+    if (linker_status != 0) {
+        return linker_status;
     }
     let source: string_views::string_view_result = string_views::from_c_string(
         ".section .rodata,\"a\",@progbits\n"

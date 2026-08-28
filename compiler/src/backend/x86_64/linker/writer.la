@@ -1,0 +1,158 @@
+module luna.compiler.x86.linker;
+
+
+impl StaticLinker {
+    priv fn emit_bytes(data: *const u8, length: usize) {
+        if (!this->ready()) {
+            return;
+        }
+        let error: runtime::Error = this->executable.append(data, length);
+        if (error != runtime::Error.none) {
+            this->fail(error);
+        }
+    }
+
+    priv fn emit_integer(value: u64, width: usize) {
+        for (var index: usize = 0; index < width && this->ready(); index += 1) {
+            let byte: u8 = ((value >> ((index * 8) as u64)) & 255) as u8;
+            let error: runtime::Error = this->executable.push_back(byte);
+            if (error != runtime::Error.none) {
+                this->fail(error);
+            }
+        }
+    }
+
+    priv fn emit_u16(value: u16) {
+        this->emit_integer(value as u64, 2);
+    }
+
+    priv fn emit_u32(value: u32) {
+        this->emit_integer(value as u64, 4);
+    }
+
+    priv fn emit_u64(value: u64) {
+        this->emit_integer(value, 8);
+    }
+
+    priv fn emit_header(program_count: usize) {
+        this->emit_bytes("\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00", 16);
+        this->emit_u16((Elf.executable_type as usize) as u16);
+        this->emit_u16((Elf.machine_x86_64 as usize) as u16);
+        this->emit_u32(1);
+        this->emit_u64(this->entry_address as u64);
+        this->emit_u64((Elf.header_size as usize) as u64);
+        this->emit_u64(0);
+        this->emit_u32(0);
+        this->emit_u16((Elf.header_size as usize) as u16);
+        this->emit_u16((Elf.program_header_size as usize) as u16);
+        this->emit_u16(program_count as u16);
+        this->emit_u16(0);
+        this->emit_u16(0);
+        this->emit_u16(0);
+    }
+
+    priv fn emit_program(segment: LoadSegment) {
+        this->emit_u32((Elf.load_segment as usize) as u32);
+        this->emit_u32(segment.flags);
+        this->emit_u64(segment.offset as u64);
+        this->emit_u64(segment.virtual_address as u64);
+        this->emit_u64(segment.virtual_address as u64);
+        this->emit_u64(segment.file_size as u64);
+        this->emit_u64(segment.memory_size as u64);
+        this->emit_u64((Limit.page_size as usize) as u64);
+    }
+
+    priv fn data_memory_size(result: *usize) -> bool {
+        if (result == null) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (this->bss_size == 0) {
+            *result = this->data.size();
+            return true;
+        }
+        var bss_end: usize = 0;
+        if (!checked::add(this->bss_address, this->bss_size, &bss_end)) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        if (bss_end < this->data_address) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        *result = bss_end - this->data_address;
+        return true;
+    }
+
+    priv fn build_segments(segments: *LoadSegment) -> bool {
+        if (segments == null) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let base: usize = Limit.image_base as usize;
+        let has_rodata: bool = !this->rodata.empty();
+        let has_data: bool = !this->data.empty() || this->bss_size != 0;
+        var data_memory_size: usize = 0;
+        if (!this->data_memory_size(&data_memory_size)) {
+            return false;
+        }
+        segments[0] = {
+            content = &this->text as *const buffer::byte_buffer,
+            flags = ((Elf.flag_read as usize) | (Elf.flag_execute as usize)) as u32,
+            offset = Limit.text_offset as usize, virtual_address = this->text_address,
+            file_size = this->text.size(), memory_size = this->text.size(), enabled = true,
+        };
+        segments[1] = {
+            content = &this->rodata as *const buffer::byte_buffer,
+            flags = (Elf.flag_read as usize) as u32, offset = this->rodata_address - base,
+            virtual_address = this->rodata_address, file_size = this->rodata.size(),
+            memory_size = this->rodata.size(), enabled = has_rodata,
+        };
+        segments[2] = {
+            content = &this->data as *const buffer::byte_buffer,
+            flags = ((Elf.flag_read as usize) | (Elf.flag_write as usize)) as u32,
+            offset = this->data_address - base, virtual_address = this->data_address,
+            file_size = this->data.size(), memory_size = data_memory_size, enabled = has_data,
+        };
+        return true;
+    }
+
+    priv fn segment_count(segments: *const LoadSegment) const -> usize {
+        var count: usize = 0;
+        for (var index: usize = 0; index < Elf.maximum_load_segments as usize; index += 1) {
+            if (segments[index].enabled) {
+                count += 1;
+            }
+        }
+        return count;
+    }
+
+    priv fn emit_segment_content(segment: LoadSegment) -> bool {
+        if (!segment.enabled) {
+            return true;
+        }
+        if (segment.content == null || segment.content->size() != segment.file_size) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!this->pad_to(&this->executable, segment.offset, Fill.zero as u8)) {
+            return false;
+        }
+        this->emit_bytes(segment.content->data(), segment.content->size());
+        return this->ready();
+    }
+
+    priv fn emit_executable() -> bool {
+        var segments: [Elf.maximum_load_segments]LoadSegment = {};
+        if (!this->build_segments(&segments[0])) {
+            return false;
+        }
+        this->emit_header(this->segment_count(&segments[0] as *const LoadSegment));
+        for (var index: usize = 0; index < Elf.maximum_load_segments as usize; index += 1) {
+            if (segments[index].enabled) {
+                this->emit_program(segments[index]);
+            }
+        }
+        for (var index: usize = 0; index < Elf.maximum_load_segments as usize; index += 1) {
+            if (!this->emit_segment_content(segments[index])) {
+                return false;
+            }
+        }
+        return this->ready();
+    }
+}

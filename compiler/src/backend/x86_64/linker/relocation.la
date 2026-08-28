@@ -1,0 +1,167 @@
+module luna.compiler.x86.linker;
+
+
+impl StaticLinker {
+    priv fn relocation_width(kind: object::RelocationKind) const -> usize {
+        switch (kind) {
+        case object::RelocationKind.absolute64 {
+            return RelocationLimit.address_width as usize;
+        }
+        case object::RelocationKind.pc32, object::RelocationKind.plt32,
+            object::RelocationKind.absolute32, object::RelocationKind.signed32 {
+            return RelocationLimit.word_width as usize;
+        }
+        default {
+            return 0;
+        }
+        }
+    }
+
+    priv fn relocation_range_is_valid(region: RelocationRegion, relocation_offset: usize, width: usize) const -> bool {
+        if (region.storage == null || region.placement_offset > region.storage->size()) {
+            return false;
+        }
+        let remaining: usize = region.storage->size() - region.placement_offset;
+        if (relocation_offset > remaining) {
+            return false;
+        }
+        return width <= remaining - relocation_offset;
+    }
+
+    priv fn signed_addition_is_valid(value: isize, addend: isize) const -> bool {
+        if (addend > 0) {
+            return value <= (Limit.maximum_signed_address as usize) as isize - addend;
+        }
+        if (addend < 0) {
+            return value >= -(Limit.maximum_signed_address as usize) as isize - 1 - addend;
+        }
+        return true;
+    }
+
+    priv fn relocation_value_fits(kind: object::RelocationKind, value: isize) const -> bool {
+        switch (kind) {
+        case object::RelocationKind.absolute32 {
+            return value >= 0 && value <= (RelocationLimit.maximum_unsigned_32 as usize) as isize;
+        }
+        case object::RelocationKind.signed32 {
+            return value >= -(RelocationLimit.maximum_signed_32 as usize) as isize - 1 &&
+                value <= (RelocationLimit.maximum_signed_32 as usize) as isize;
+        }
+        default {
+            return false;
+        }
+        }
+    }
+
+    priv fn apply_pc_relative(
+        region: RelocationRegion, output_offset: usize, symbol_address: usize, addend: isize) -> bool {
+        var place_address: usize = 0;
+        if (!checked::add(region.virtual_address, output_offset, &place_address)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (symbol_address > Limit.maximum_signed_address as usize ||
+            place_address > Limit.maximum_signed_address as usize) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let difference: isize = symbol_address as isize - place_address as isize;
+        if (!this->signed_addition_is_valid(difference, addend)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let value: isize = difference + addend;
+        let value_fits: bool = value >= -(RelocationLimit.maximum_signed_32 as usize) as isize - 1 &&
+            value <= (RelocationLimit.maximum_signed_32 as usize) as isize;
+        if (!value_fits) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!binary::store_u32(&region.storage->data()[output_offset], value as u32)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        return true;
+    }
+
+    priv fn apply_absolute64(
+        region: RelocationRegion, output_offset: usize, symbol_address: usize, addend: isize) -> bool {
+        if (symbol_address > Limit.maximum_signed_address as usize) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let signed_symbol: isize = symbol_address as isize;
+        if (!this->signed_addition_is_valid(signed_symbol, addend)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!binary::store_u64(&region.storage->data()[output_offset], (signed_symbol + addend) as u64)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        return true;
+    }
+
+    priv fn apply_absolute32(
+        region: RelocationRegion, output_offset: usize, symbol_address: usize,
+        kind: object::RelocationKind, addend: isize) -> bool {
+        if (symbol_address > Limit.maximum_signed_address as usize) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let signed_symbol: isize = symbol_address as isize;
+        if (!this->signed_addition_is_valid(signed_symbol, addend)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let value: isize = signed_symbol + addend;
+        if (!this->relocation_value_fits(kind, value)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!binary::store_u32(&region.storage->data()[output_offset], value as u32)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        return true;
+    }
+
+    priv fn apply_relocation(object_index: usize, relocation: object::Relocation) -> bool {
+        var symbol_address: usize = 0;
+        if (!this->resolve_symbol(object_index, relocation.symbol_index, &symbol_address)) {
+            return this->fail(runtime::Error.not_found);
+        }
+        let width: usize = this->relocation_width(relocation.kind);
+        if (width == 0) {
+            return this->fail(runtime::Error.not_supported);
+        }
+        let region: RelocationRegion = this->relocation_region(this->placements.get(object_index), relocation.section);
+        if (!this->relocation_range_is_valid(region, relocation.offset, width)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        var output_offset: usize = 0;
+        if (!checked::add(region.placement_offset, relocation.offset, &output_offset)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        switch (relocation.kind) {
+        case object::RelocationKind.pc32, object::RelocationKind.plt32 {
+            return this->apply_pc_relative(region, output_offset, symbol_address, relocation.addend);
+        }
+        case object::RelocationKind.absolute64 {
+            return this->apply_absolute64(region, output_offset, symbol_address, relocation.addend);
+        }
+        case object::RelocationKind.absolute32, object::RelocationKind.signed32 {
+            return this->apply_absolute32(region, output_offset, symbol_address, relocation.kind, relocation.addend);
+        }
+        default {
+            return this->fail(runtime::Error.not_supported);
+        }
+        }
+    }
+
+    priv fn apply_relocations() -> bool {
+        for (var object_index: usize = 0; object_index < this->object_count; object_index += 1) {
+            this->input_index = object_index;
+            let input: object::Object = this->objects[object_index];
+            let relocation_count: usize = object::relocation_count(input);
+            for (var relocation_index: usize = 0; relocation_index < relocation_count; relocation_index += 1) {
+                let result: object::RelocationResult = object::get_relocation(input, relocation_index);
+                if (result.error != runtime::Error.none) {
+                    return this->fail(result.error);
+                }
+                if (!this->apply_relocation(object_index, result.relocation)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+}

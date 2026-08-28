@@ -1,0 +1,98 @@
+module luna.compiler.x86.linker;
+
+
+impl StaticLinker {
+    init(objects: *const object::Object, object_count: usize):
+            placements = vector::vector<Placement>(), globals = map::map<GlobalName, Global>(),
+            text = buffer::byte_buffer(), rodata = buffer::byte_buffer(), data = buffer::byte_buffer(),
+            executable = buffer::byte_buffer() {
+        this->objects = objects;
+        this->object_count = object_count;
+        this->bss_size = 0;
+        this->bss_alignment = 1;
+        this->text_address = 0;
+        this->rodata_address = 0;
+        this->data_address = 0;
+        this->bss_address = 0;
+        this->entry_address = 0;
+        this->error_code = runtime::Error.none;
+        this->input_index = 0;
+    }
+
+    priv fn ready() const -> bool {
+        return this->error_code == runtime::Error.none;
+    }
+
+    priv fn fail(error: runtime::Error) -> bool {
+        if (this->ready()) {
+            this->error_code = error;
+        }
+        return false;
+    }
+
+    priv fn initialize_placements() -> bool {
+        let reserve_error: runtime::Error = this->placements.reserve(this->object_count);
+        if (reserve_error != runtime::Error.none) {
+            return this->fail(reserve_error);
+        }
+        for (var index: usize = 0; index < this->object_count; index += 1) {
+            let append_error: runtime::Error = this->placements.push_back({text = 0, rodata = 0, data = 0, bss = 0});
+            if (append_error != runtime::Error.none) {
+                return this->fail(append_error);
+            }
+        }
+        return true;
+    }
+
+    fn run() {
+        if (this->objects == null || this->object_count == 0) {
+            this->fail(runtime::Error.invalid_argument);
+            return;
+        }
+        if (this->object_count > Limit.maximum_inputs as usize) {
+            this->fail(runtime::Error.invalid_argument);
+            return;
+        }
+        if (!this->initialize_placements()) {
+            return;
+        }
+        if (!this->collect_globals()) {
+            return;
+        }
+        if (!this->layout_regions()) {
+            return;
+        }
+        if (!this->layout_image()) {
+            return;
+        }
+        if (!this->apply_relocations()) {
+            return;
+        }
+        if (!this->resolve_entry()) {
+            return;
+        }
+        this->emit_executable();
+    }
+
+    fn take_result() -> Result {
+        if (!this->ready()) {
+            return {executable = bytes::empty(), error = this->error_code, input_index = this->input_index};
+        }
+        let size: usize = this->executable.size();
+        let capacity: usize = this->executable.capacity();
+        let data: *u8 = this->executable.detach();
+        return {
+            executable = {data = data, length = size, capacity = capacity},
+            error = runtime::Error.none, input_index = this->input_index,
+        };
+    }
+
+    deinit() {
+    }
+}
+
+fn link(objects: *const object::Object, object_count: usize) -> Result {
+    var linker: StaticLinker = StaticLinker(objects, object_count);
+    linker.run();
+    return linker.take_result();
+}
