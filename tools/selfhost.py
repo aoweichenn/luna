@@ -152,7 +152,12 @@ LIBRARIES = {
         "frontend/lexer/literals",
         "frontend/lexer/token",
     ),
-    "syntax": compiler_module("luna.bootstrap.frontend.syntax", "frontend/syntax/facade"),
+    "syntax": compiler_module(
+        "luna.compiler.syntax",
+        "frontend/syntax/tree",
+        "frontend/syntax/builder",
+        "frontend/syntax/verify",
+    ),
     "parser_state": compiler_module("luna.bootstrap.frontend.parser.state", "frontend/parser/state"),
     "parser_expression": compiler_module("luna.bootstrap.frontend.parser.expression", "frontend/parser/expression"),
     "parser_statements": compiler_module("luna.bootstrap.frontend.parser.statements", "frontend/parser/statements"),
@@ -1444,56 +1449,61 @@ def execute_frontend_tests(
     stage_bin: pathlib.Path,
     runner: tuple[str, ...],
 ) -> tuple[int, list[str]]:
-    """单独编译 Lexer 消费端，再链接真实的模块对象。"""
-    source = ROOT / "tests" / "frontend" / "lexer.la"
-    work = ROOT / "out" / "tests" / "frontend-lexer"
-    reset(work)
+    """单独编译前端消费端，再链接真实的模块对象。"""
     timeout = timeout_seconds(runner)
-    name = "frontend-lexer-contract"
+    cases = (
+        ("frontend-lexer-contract", "lexer.la", "keywords/tokens/spans/diagnostics/RAII"),
+        ("frontend-syntax-contract", "syntax.la", "builder/tree/view/move/restore"),
+    )
+    passed = 0
     failed: list[str] = []
-    try:
-        assembly = work / "lexer.s"
-        object_file = work / "lexer.lo"
-        executable = work / "lexer"
-        require_test_success(
-            [
-                *tool(stage_bin, "compile", runner),
-                "--executable",
-                "-o",
-                assembly,
-                *driver_units(source),
-            ],
-            timeout=timeout,
-        )
-        require_test_success(
-            [*tool(stage_bin, "assemble", runner), "-o", object_file, assembly],
-            timeout=timeout,
-        )
-        link_keys = implementation_closure(driver_dependencies(source))
-        library_objects = [
-            stage_bin.parent / "objects" / f"{key}.lo" for key in link_keys
-        ]
-        require_test_success(
-            [
-                *tool(stage_bin, "link", runner),
-                "-o",
-                executable,
-                object_file,
-                *library_objects,
-            ],
-            timeout=timeout,
-        )
-        completed = test_command([*runner, executable], timeout=timeout)
-        if completed.returncode != 0:
-            raise AssertionError(
-                f"Lexer contract returned {completed.returncode}, expected 0"
+    for name, source_name, contract in cases:
+        try:
+            source = ROOT / "tests" / "frontend" / source_name
+            work = ROOT / "out" / "tests" / name
+            reset(work)
+            assembly = work / "test.s"
+            object_file = work / "test.lo"
+            executable = work / "test"
+            require_test_success(
+                [
+                    *tool(stage_bin, "compile", runner),
+                    "--executable",
+                    "-o",
+                    assembly,
+                    *driver_units(source),
+                ],
+                timeout=timeout,
             )
-        print("PASS frontend-lexer-contract (keywords/tokens/spans/diagnostics/RAII)")
-        return 1, failed
-    except Exception as error:  # noqa: BLE001 - 汇总失败后继续执行
-        failed.append(name)
-        print(f"FAIL {name}: {error}")
-        return 0, failed
+            require_test_success(
+                [*tool(stage_bin, "assemble", runner), "-o", object_file, assembly],
+                timeout=timeout,
+            )
+            link_keys = implementation_closure(driver_dependencies(source))
+            library_objects = [
+                stage_bin.parent / "objects" / f"{key}.lo" for key in link_keys
+            ]
+            require_test_success(
+                [
+                    *tool(stage_bin, "link", runner),
+                    "-o",
+                    executable,
+                    object_file,
+                    *library_objects,
+                ],
+                timeout=timeout,
+            )
+            completed = test_command([*runner, executable], timeout=timeout)
+            if completed.returncode != 0:
+                raise AssertionError(
+                    f"frontend contract returned {completed.returncode}, expected 0"
+                )
+            passed += 1
+            print(f"PASS {name} ({contract})")
+        except Exception as error:  # noqa: BLE001 - 汇总失败后继续执行
+            failed.append(name)
+            print(f"FAIL {name}: {error}")
+    return passed, failed
 
 
 def execute_relocation_data_tests(

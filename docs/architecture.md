@@ -123,6 +123,11 @@ Source locations are byte spans into immutable source files. Tokens and syntax
 nodes retain spans so every parser, type and IR error can point to the original
 text. The parser uses an arena and never owns isolated syntax nodes.
 
+`luna.compiler.syntax` owns that arena as a move-only typed `SyntaxTree`.
+Parser state mutates it only through `SyntaxBuilder`; semantic analysis and
+Codegen receive a non-owning `SyntaxView`, so no consumer can release or resize
+the completed tree.
+
 The separately compiled Luna lexer, parser, type, IR, semantic and x86-64
 backend modules use owned typed byte buffers and stable indices, avoiding
 pointers into growable storage. Their structured diagnostics and verification

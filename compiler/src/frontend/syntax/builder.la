@@ -1,0 +1,186 @@
+module luna.compiler.syntax;
+
+impl SyntaxBuilder {
+    init(token_count: usize): storage = SyntaxTree() {
+        this->storage.source_token_count = token_count;
+        this->error_code = token_count == 0 ? runtime::Error.invalid_argument : runtime::Error.none;
+    }
+
+    priv fn fail(error: runtime::Error) -> bool {
+        if (this->error_code == runtime::Error.none) {
+            this->error_code = error;
+        }
+        return false;
+    }
+
+    priv fn node_pointer(index: usize) -> *SyntaxNode {
+        if (this->error_code != runtime::Error.none) {
+            return null;
+        }
+        if (index >= this->storage.nodes.size()) {
+            this->fail(runtime::Error.invalid_argument);
+            return null;
+        }
+        return &this->storage.nodes.get(index);
+    }
+
+    fn is_valid() const -> bool {
+        let state_is_ready: bool = this->error_code == runtime::Error.none && this->storage.source_token_count != 0;
+        return state_is_ready && this->storage.storage_is_valid();
+    }
+
+    fn error() const -> runtime::Error {
+        return this->error_code;
+    }
+
+    fn size() const -> usize {
+        return this->storage.nodes.size();
+    }
+
+    fn root() const -> usize {
+        return this->storage.root_index;
+    }
+
+    fn view() const -> SyntaxView {
+        return this->storage.view();
+    }
+
+    fn get(index: usize) const -> SyntaxNodeResult {
+        return this->storage.get(index);
+    }
+
+    fn add(kind: SyntaxKind, span: lexer::SourceSpan, token_index: usize) -> SyntaxIndexResult {
+        if (this->error_code != runtime::Error.none) {
+            return {index = no_index(), error = this->error_code};
+        }
+        let storage_is_ready: bool = this->storage.source_token_count != 0 && this->storage.storage_is_valid();
+        if (!storage_is_ready) {
+            this->fail(runtime::Error.invalid_argument);
+            return {index = no_index(), error = this->error_code};
+        }
+        if (this->storage.nodes.size() >= SyntaxLimit.maximum_nodes as usize) {
+            this->fail(runtime::Error.out_of_memory);
+            return {index = no_index(), error = this->error_code};
+        }
+        let none: usize = no_index();
+        let node: SyntaxNode = {
+            kind = kind, span = span, token_index = token_index, parent = none,
+            first_child = none, last_child = none, next_sibling = none,
+            child_count = 0, flags = SyntaxFlag.none as usize,
+        };
+        let index: usize = this->storage.nodes.size();
+        let error: runtime::Error = this->storage.nodes.push_back(node);
+        if (error != runtime::Error.none) {
+            this->fail(error);
+            return {index = none, error = error};
+        }
+        return {index = index, error = runtime::Error.none};
+    }
+
+    fn set_span(index: usize, span: lexer::SourceSpan) -> bool {
+        let node: *SyntaxNode = this->node_pointer(index);
+        if (node == null) {
+            return false;
+        }
+        node->span = span;
+        return true;
+    }
+
+    fn set_token(index: usize, token_index: usize) -> bool {
+        let node: *SyntaxNode = this->node_pointer(index);
+        if (node == null) {
+            return false;
+        }
+        let token_is_valid: bool = token_index == no_index() || token_index < this->storage.source_token_count;
+        if (!token_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        node->token_index = token_index;
+        return true;
+    }
+
+    fn add_flags(index: usize, flags: usize) -> bool {
+        let node: *SyntaxNode = this->node_pointer(index);
+        if (node == null) {
+            return false;
+        }
+        let maximum_flags: usize = (SyntaxFlag.destructor as usize) * 2 - 1;
+        let combined: usize = node->flags | flags;
+        if (combined > maximum_flags) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        node->flags = combined;
+        return true;
+    }
+
+    fn add_child(parent: usize, child: usize) -> bool {
+        let indices_are_valid: bool = parent < this->storage.nodes.size() && child < this->storage.nodes.size();
+        if (!indices_are_valid || parent == child) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let none: usize = no_index();
+        let child_node: *SyntaxNode = this->node_pointer(child);
+        let parent_node: *SyntaxNode = this->node_pointer(parent);
+        if (child_node == null || parent_node == null) {
+            return false;
+        }
+        let child_is_detached: bool = child_node->parent == none && child_node->next_sibling == none;
+        let parent_has_capacity: bool = parent_node->child_count != SyntaxLimit.maximum_size as usize;
+        if (!child_is_detached || !parent_has_capacity) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (parent_node->child_count == 0) {
+            parent_node->first_child = child;
+        } else {
+            let previous: *SyntaxNode = this->node_pointer(parent_node->last_child);
+            if (previous == null) {
+                return false;
+            }
+            previous->next_sibling = child;
+        }
+        child_node->parent = parent;
+        parent_node->last_child = child;
+        parent_node->child_count += 1;
+        return true;
+    }
+
+    fn set_root(index: usize) -> bool {
+        let node: *SyntaxNode = this->node_pointer(index);
+        if (node == null) {
+            return false;
+        }
+        if (this->storage.root_index != no_index() || node->kind != SyntaxKind.program) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (node->parent != no_index()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->storage.root_index = index;
+        return true;
+    }
+
+    fn mark() const -> usize {
+        return this->storage.nodes.size();
+    }
+
+    fn restore(mark: usize) -> bool {
+        if (!this->is_valid() || mark > this->storage.nodes.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let error: runtime::Error = this->storage.nodes.truncate(mark);
+        if (error != runtime::Error.none) {
+            return this->fail(error);
+        }
+        if (this->storage.root_index >= mark) {
+            this->storage.root_index = no_index();
+        }
+        return true;
+    }
+
+    fn take_tree() -> SyntaxTree {
+        return this->storage as SyntaxTree&&;
+    }
+
+    deinit() {
+    }
+}

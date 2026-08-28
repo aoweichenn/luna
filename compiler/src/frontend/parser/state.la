@@ -1,9 +1,7 @@
 module luna.bootstrap.frontend.parser.state;
 
-import luna.std.bytes as bytes;
-
 enum ParserLimit: usize {
-    maximum_size = 18446744073709551615, maximum_nesting = 256, maximum_nodes = 262144,
+    maximum_size = 18446744073709551615, maximum_nesting = 256,
 }
 
 fn parser_empty_span() -> lexer::SourceSpan {
@@ -15,6 +13,15 @@ fn parser_empty_span() -> lexer::SourceSpan {
 fn parser_invalid_token() -> lexer::Token {
     return {
         kind = lexer::TokenKind.invalid, span = parser_empty_span(),
+    };
+}
+
+fn parser_invalid_node() -> syntax::SyntaxNode {
+    let none: usize = syntax::no_index();
+    return {
+        kind = syntax::SyntaxKind.invalid, span = parser_empty_span(), token_index = none,
+        parent = none, first_child = none, last_child = none,
+        next_sibling = none, child_count = 0, flags = syntax::SyntaxFlag.none as usize,
     };
 }
 
@@ -137,98 +144,64 @@ fn parser_add_diagnostic(
 }
 
 fn parser_new_node(state: *State, kind: syntax::SyntaxKind, span: lexer::SourceSpan, token_index: usize) -> usize {
-    let none: usize = syntax::syntax_no_index();
+    let none: usize = syntax::no_index();
     if (state->error != runtime::Error.none) {
         return none;
     }
-    if (!syntax::syntax_tree_storage_is_valid(state->tree)) {
-        state->error = runtime::Error.invalid_argument;
-        return none;
+    let added: syntax::SyntaxIndexResult = state->builder.add(kind, span, token_index);
+    if (added.error == runtime::Error.none) {
+        return added.index;
     }
-    if (state->tree.count >= ParserLimit.maximum_nodes as usize) {
+    if (added.error == runtime::Error.out_of_memory) {
         parser_add_diagnostic(
             state, lexer::DiagnosticKind.resource_limit, span, lexer::TokenKind.invalid, state->current.kind,
-            ParserLimit.maximum_nodes as usize);
-        state->error = runtime::Error.out_of_memory;
-        return none;
+            syntax::maximum_nodes());
     }
-    let node: syntax::SyntaxNode = {
-        kind = kind, span = span, token_index = token_index, parent = none, first_child = none, last_child = none,
-        next_sibling = none, child_count = 0, flags = syntax::SyntaxFlag.none as usize,
-    };
-    let appended: bytes::BufferResult = bytes::append(
-        state->tree.storage, (&node) as *const syntax::SyntaxNode as *const u8, sizeof(syntax::SyntaxNode));
-    state->tree.storage = appended.buffer;
-    state->error = appended.error;
-    if (appended.error != runtime::Error.none) {
-        return none;
-    }
-    let index: usize = state->tree.count;
-    state->tree.count += 1;
-    return index;
+    state->error = added.error;
+    return none;
 }
 
-fn parser_node_pointer(state: *State, index: usize) -> *syntax::SyntaxNode {
+fn parser_node(state: *State, index: usize) -> syntax::SyntaxNode {
     if (state->error != runtime::Error.none) {
-        return null;
+        return parser_invalid_node();
     }
-    if (index >= state->tree.count) {
-        if (state->error == runtime::Error.none) {
-            state->error = runtime::Error.invalid_argument;
-        }
-        return null;
+    let result: syntax::SyntaxNodeResult = state->builder.get(index);
+    if (result.error != runtime::Error.none) {
+        state->error = result.error;
+        return parser_invalid_node();
     }
-    let nodes: *syntax::SyntaxNode = state->tree.storage.data as *syntax::SyntaxNode;
-    return &nodes[index];
+    return result.node;
 }
 
 fn parser_set_node_span(state: *State, index: usize, span: lexer::SourceSpan) -> bool {
-    let node: *syntax::SyntaxNode = parser_node_pointer(state, index);
-    if (node == null) {
+    if (!state->builder.set_span(index, span)) {
+        state->error = state->builder.error();
         return false;
     }
-    node->span = span;
+    return true;
+}
+
+fn parser_set_node_token(state: *State, index: usize, token_index: usize) -> bool {
+    if (!state->builder.set_token(index, token_index)) {
+        state->error = state->builder.error();
+        return false;
+    }
     return true;
 }
 
 fn parser_add_node_flags(state: *State, index: usize, flags: usize) -> bool {
-    let node: *syntax::SyntaxNode = parser_node_pointer(state, index);
-    if (node == null) {
+    if (!state->builder.add_flags(index, flags)) {
+        state->error = state->builder.error();
         return false;
     }
-    node->flags |= flags;
     return true;
 }
 
 fn parser_add_child(state: *State, parent_index: usize, child_index: usize) -> bool {
-    let none: usize = syntax::syntax_no_index();
-    if (state->error != runtime::Error.none) {
+    if (!state->builder.add_child(parent_index, child_index)) {
+        state->error = state->builder.error();
         return false;
     }
-    let indices_are_valid: bool = parent_index < state->tree.count && child_index < state->tree.count;
-    if (!indices_are_valid || parent_index == child_index) {
-        if (state->error == runtime::Error.none) {
-            state->error = runtime::Error.invalid_argument;
-        }
-        return false;
-    }
-    let nodes: *syntax::SyntaxNode = state->tree.storage.data as *syntax::SyntaxNode;
-    let child_is_detached: bool = nodes[child_index].parent == none && nodes[child_index].next_sibling == none;
-    let parent_has_capacity: bool = nodes[parent_index].child_count != ParserLimit.maximum_size as usize;
-    if (!child_is_detached || !parent_has_capacity) {
-        if (state->error == runtime::Error.none) {
-            state->error = runtime::Error.invalid_argument;
-        }
-        return false;
-    }
-    if (nodes[parent_index].child_count == 0) {
-        nodes[parent_index].first_child = child_index;
-    } else {
-        nodes[nodes[parent_index].last_child].next_sibling = child_index;
-    }
-    nodes[child_index].parent = parent_index;
-    nodes[parent_index].last_child = child_index;
-    nodes[parent_index].child_count += 1;
     return true;
 }
 
@@ -255,6 +228,10 @@ fn parser_advance(state: *State) -> void {
 
 fn parser_check(state: *State, kind: lexer::TokenKind) -> bool {
     return state->current.kind == kind;
+}
+
+fn parser_at_right_brace_or_end(state: *State) -> bool {
+    return state->current.kind == lexer::TokenKind.right_brace || state->current.kind == lexer::TokenKind.end;
 }
 
 fn parser_peek_kind(state: *State) -> lexer::TokenKind {
@@ -314,7 +291,7 @@ fn parser_leave_nesting(state: *State) -> void {
 fn parser_mark(state: *State) -> Mark {
     return {
         cursor = state->cursor, current = state->current, current_index = state->current_index,
-        previous = state->previous, tree_length = state->tree.storage.length, tree_count = state->tree.count,
+        previous = state->previous, tree_count = state->builder.mark(),
         diagnostic_count = state->diagnostics.size(), nesting_depth = state->nesting_depth,
     };
 }
@@ -323,7 +300,7 @@ fn parser_restore(state: *State, mark: Mark) -> bool {
     if (state == null || state->error != runtime::Error.none) {
         return false;
     }
-    let tree_can_restore: bool = mark.tree_length <= state->tree.storage.length && mark.tree_count <= state->tree.count;
+    let tree_can_restore: bool = mark.tree_count <= state->builder.size();
     let diagnostics_can_restore: bool = mark.diagnostic_count <= state->diagnostics.size();
     if (!tree_can_restore || !diagnostics_can_restore) {
         state->error = runtime::Error.invalid_argument;
@@ -333,8 +310,10 @@ fn parser_restore(state: *State, mark: Mark) -> bool {
     state->current = mark.current;
     state->current_index = mark.current_index;
     state->previous = mark.previous;
-    state->tree.storage.length = mark.tree_length;
-    state->tree.count = mark.tree_count;
+    if (!state->builder.restore(mark.tree_count)) {
+        state->error = state->builder.error();
+        return false;
+    }
     let diagnostic_error: runtime::Error = state->diagnostics.truncate(mark.diagnostic_count);
     if (diagnostic_error != runtime::Error.none) {
         state->error = diagnostic_error;

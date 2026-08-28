@@ -703,3 +703,48 @@ its 280,701-byte object has SHA-256
 `6d0b203f92b94d605681c77233264022142d2154e9035a4820cd95df71b84f38`.
 The promoted executable is 4,962,131 bytes with SHA-256
 `ed19edea6b21ffd169850d079b674e866a61088249bb227ff5fbd0061fbc0f37`.
+
+## 2026-08-28: promotion to the RAII Syntax toolchain
+
+The anchor now contains the stage-fixed `luna` executable from the Syntax
+modernization snapshot accompanying this provenance note. The historical
+`luna.bootstrap.frontend.syntax` module is replaced atomically by the short
+`luna.compiler.syntax` dependency and its same-module tree, builder and
+verification implementation units. No forwarding module remains.
+
+`SyntaxNode`, `SyntaxKind` and `SyntaxFlag` remain passive syntax records.
+`SyntaxTree` is a move-only RAII owner over `vector<SyntaxNode>`, `SyntaxView`
+is its read-only borrowing boundary and `SyntaxBuilder` is the only mutation
+boundary. Builder marks support parser rollback, and moving a builder leaves
+the source destructible but observably invalid. Parser state no longer exposes
+a mutable syntax-node pointer or owns the tree as raw bytes; `ParseResult`
+transfers the completed tree. Semantic analysis, code generation and Tools
+consume views, while Tools owns frontend storage explicitly.
+
+All 32 former direct consumers migrated in the same change. The dedicated
+Syntax contract covers tree construction, child/sibling topology, spans,
+tokens, flags, rollback, verification, ownership transfer and moved-from
+behavior. A focused scan of 18 relevant files confirmed that no changed
+condition exceeds two logical clauses.
+
+Remote x86-64 verification on isolated `caw` built the complete 72-module,
+62-library-object graph through `stage-transition`, `stage-next` and
+`stage-fixed` with `verify --fresh` in 57.42 seconds at 34,200 KiB maximum
+RSS. Every next/fixed assembly, object and executable artifact was
+byte-identical. Audit and formatting gates were green. The expanded final
+suite passed 449/449 with no failures or skips in 4.81 seconds at 27,040 KiB
+maximum RSS.
+
+With the preceding anchor compiling both source shapes, the historical Syntax
+module had a median compile time of 0.063769 seconds and produced 93,435
+assembly bytes. The final RAII module had a median compile time of 0.191968
+seconds and produced 400,578 assembly bytes. The correctness-first structural
+cost is recorded explicitly; no premature optimization is part of this
+promotion.
+
+The final Syntax assembly has SHA-256
+`d17042b2daf0618ee37cbf6a32ed2d7e8f723f4bb8ce7ca1b784a336ca5f794d`;
+its 146,877-byte object has SHA-256
+`7e84c13e9b503aa0db4e5a9edbae175754e0a23c9a99d17fa0b4d26306ec0fc7`.
+The promoted executable is 4,986,707 bytes with SHA-256
+`77f0e575626bad58f91caa59fc2f6261d7b68cffcca6192ed9bcd11124a3d979`.

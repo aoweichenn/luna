@@ -1,6 +1,6 @@
 module luna.tools;
 
-import luna.bootstrap.frontend.syntax as syntax;
+import luna.compiler.syntax as syntax;
 import luna.std.vector as vector;
 
 struct FrontendRecord {
@@ -76,7 +76,8 @@ fn invalid_frontend_view() -> parser::FrontendView {
         lex = {
             tokens = lexer::TokenView(null, 0), diagnostics = diagnostics, error = runtime::Error.invalid_argument,
         }, parse = {
-            tree = syntax::syntax_tree_empty(), diagnostics = diagnostics, error = runtime::Error.invalid_argument,
+            tree = syntax::SyntaxView(null, 0, 0, syntax::no_index()),
+            diagnostics = diagnostics, error = runtime::Error.invalid_argument,
         }, error = runtime::Error.invalid_argument,
     };
 }
@@ -126,7 +127,7 @@ impl FrontendStorage {
             error = this->reserve(this->lexical_diagnostics.size(), frontend.lex.diagnostics.size(), &lexical_capacity);
         }
         if (error == runtime::Error.none) {
-            error = this->reserve(this->nodes.size(), frontend.parse.tree.count, &node_capacity);
+            error = this->reserve(this->nodes.size(), frontend.parse.tree.size(), &node_capacity);
         }
         if (error == runtime::Error.none) {
             error = this->reserve(this->parse_diagnostics.size(), frontend.parse.diagnostics.size(), &parse_capacity);
@@ -161,9 +162,9 @@ impl FrontendStorage {
         return runtime::Error.none;
     }
 
-    priv fn append_nodes(tree: syntax::SyntaxTree) -> runtime::Error {
-        for (var index: usize = 0; index < tree.count; index += 1) {
-            let node: syntax::SyntaxNodeResult = syntax::syntax_tree_get(tree, index);
+    priv fn append_nodes(tree: syntax::SyntaxView) -> runtime::Error {
+        for (var index: usize = 0; index < tree.size(); index += 1) {
+            let node: syntax::SyntaxNodeResult = tree.get(index);
             if (node.error != runtime::Error.none) {
                 return node.error;
             }
@@ -188,8 +189,7 @@ impl FrontendStorage {
         }
         let view: parser::FrontendView = frontend.view();
         let lexical_views_are_valid: bool = view.lex.tokens.is_valid() && view.lex.diagnostics.is_valid();
-        let parse_view_is_valid: bool = view.parse.diagnostics.is_valid() &&
-            syntax::syntax_tree_is_valid(view.parse.tree);
+        let parse_view_is_valid: bool = view.parse.diagnostics.is_valid() && view.parse.tree.is_valid();
         if (!lexical_views_are_valid || !parse_view_is_valid) {
             return this->fail(runtime::Error.invalid_argument);
         }
@@ -204,8 +204,8 @@ impl FrontendStorage {
             token_offset = this->tokens.size(), token_count = view.lex.tokens.size(),
             lexical_diagnostic_offset = this->lexical_diagnostics.size(),
             lexical_diagnostic_count = view.lex.diagnostics.size(),
-            node_offset = this->nodes.size(), node_count = view.parse.tree.count,
-            tree_token_count = view.parse.tree.token_count, tree_root = view.parse.tree.root,
+            node_offset = this->nodes.size(), node_count = view.parse.tree.size(),
+            tree_token_count = view.parse.tree.token_count(), tree_root = view.parse.tree.root(),
             parse_diagnostic_offset = this->parse_diagnostics.size(),
             parse_diagnostic_count = view.parse.diagnostics.size(),
             lexical_error = view.lex.error, parse_error = view.parse.error, frontend_error = view.error,
@@ -251,17 +251,10 @@ impl FrontendStorage {
         return lexer::DiagnosticView(data, record.parse_diagnostic_count);
     }
 
-    priv fn syntax_tree(record: FrontendRecord) -> syntax::SyntaxTree {
-        var byte_length: usize = 0;
-        if (@mul_overflow(record.node_count, sizeof(syntax::SyntaxNode), &byte_length)) {
-            return syntax::syntax_tree_empty();
-        }
-        let data: *u8 = record.node_count == 0 ? null :
-            &this->nodes.get(record.node_offset).value as *syntax::SyntaxNode as *u8;
-        return {
-            storage = {data = data, length = byte_length, capacity = byte_length},
-            count = record.node_count, token_count = record.tree_token_count, root = record.tree_root,
-        };
+    priv fn syntax_view(record: FrontendRecord) -> syntax::SyntaxView {
+        let data: *const syntax::SyntaxNode = record.node_count == 0 ? null :
+            &this->nodes.get(record.node_offset).value as *const syntax::SyntaxNode;
+        return syntax::SyntaxView(data, record.node_count, record.tree_token_count, record.tree_root);
     }
 
     fn get(index: usize) -> FrontendViewResult {
@@ -276,7 +269,7 @@ impl FrontendStorage {
                 lex = {
                     tokens = this->token_view(record), diagnostics = lexical_diagnostics, error = record.lexical_error,
                 }, parse = {
-                    tree = this->syntax_tree(record), diagnostics = parse_diagnostics, error = record.parse_error,
+                    tree = this->syntax_view(record), diagnostics = parse_diagnostics, error = record.parse_error,
                 }, error = record.frontend_error,
             }, error = runtime::Error.none,
         };

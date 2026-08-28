@@ -1,0 +1,104 @@
+module luna.compiler.syntax;
+
+impl SyntaxView {
+    priv fn node_tag_is_valid(node: SyntaxNode) const -> bool {
+        let kind_is_valid: bool = (node.kind as usize) <= (SyntaxKind.type_reference as usize);
+        let maximum_flags: usize = (SyntaxFlag.destructor as usize) * 2 - 1;
+        return kind_is_valid && node.flags <= maximum_flags;
+    }
+
+    priv fn node_reference_is_valid(node: SyntaxNode) const -> bool {
+        let position_is_valid: bool = node.span.line != 0 && node.span.column != 0;
+        let span_is_valid: bool = node.span.length <= (SyntaxLimit.maximum_size as usize) - node.span.offset;
+        let token_is_valid: bool = node.token_index == no_index() || node.token_index < this->source_token_count;
+        let source_is_valid: bool = position_is_valid && span_is_valid;
+        return source_is_valid && token_is_valid;
+    }
+
+    priv fn child_range_is_valid(node: SyntaxNode) const -> bool {
+        if (node.child_count == 0) {
+            return node.first_child == no_index() && node.last_child == no_index();
+        }
+        let count_is_valid: bool = node.child_count <= this->node_count;
+        let range_is_valid: bool = node.first_child < this->node_count && node.last_child < this->node_count;
+        return count_is_valid && range_is_valid;
+    }
+
+    priv fn children_are_valid(node_index: usize, node: SyntaxNode) const -> bool {
+        if (node.child_count == 0) {
+            return true;
+        }
+        var child_index: usize = node.first_child;
+        var previous_child: usize = no_index();
+        for (var visited: usize = 0; visited < node.child_count; visited += 1) {
+            if (child_index >= this->node_count) {
+                return false;
+            }
+            if (this->data_pointer[child_index].parent != node_index) {
+                return false;
+            }
+            previous_child = child_index;
+            child_index = this->data_pointer[child_index].next_sibling;
+        }
+        return previous_child == node.last_child && child_index == no_index();
+    }
+
+    priv fn node_is_valid(node_index: usize) const -> bool {
+        let node: SyntaxNode = this->data_pointer[node_index];
+        if (!this->node_tag_is_valid(node) || !this->node_reference_is_valid(node)) {
+            return false;
+        }
+        if (node_index == this->root_index) {
+            if (node.parent != no_index()) {
+                return false;
+            }
+        } else if (node.parent >= this->node_count) {
+            return false;
+        }
+        if (node.next_sibling != no_index() && node.next_sibling >= this->node_count) {
+            return false;
+        }
+        if (!this->child_range_is_valid(node)) {
+            return false;
+        }
+        return this->children_are_valid(node_index, node);
+    }
+
+    priv fn reaches_root(node_index: usize) const -> bool {
+        var ancestor: usize = node_index;
+        for (var depth: usize = 0; ancestor != this->root_index && depth < this->node_count; depth += 1) {
+            ancestor = this->data_pointer[ancestor].parent;
+            if (ancestor >= this->node_count) {
+                return false;
+            }
+        }
+        return ancestor == this->root_index;
+    }
+
+    fn is_valid() const -> bool {
+        if (!this->storage_is_valid()) {
+            return false;
+        }
+        if (this->node_count == 0) {
+            return this->source_token_count == 0 && this->root_index == no_index();
+        }
+        if (this->source_token_count == 0 || this->root_index >= this->node_count) {
+            return false;
+        }
+        for (var node_index: usize = 0; node_index < this->node_count; node_index += 1) {
+            if (!this->node_is_valid(node_index)) {
+                return false;
+            }
+        }
+        let root: SyntaxNode = this->data_pointer[this->root_index];
+        if (root.kind != SyntaxKind.program || root.next_sibling != no_index()) {
+            return false;
+        }
+        for (var node_index: usize = 0; node_index < this->node_count; node_index += 1) {
+            if (!this->reaches_root(node_index)) {
+                return false;
+            }
+        }
+        return true;
+    }
+}

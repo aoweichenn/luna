@@ -4,21 +4,18 @@ import luna.bootstrap.frontend.parser.declarations as declarations;
 import luna.bootstrap.frontend.parser.state as state;
 
 impl ParseResult {
-    init(): diagnostic_storage = lexer::DiagnosticBuffer() {
-        this->tree_storage = syntax::syntax_tree_empty();
+    init(): tree_storage = syntax::SyntaxTree(), diagnostic_storage = lexer::DiagnosticBuffer() {
         this->error_code = runtime::Error.invalid_argument;
     }
 
-    init(tree: syntax::SyntaxTree, diagnostics: lexer::DiagnosticBuffer&&, error: runtime::Error):
-            diagnostic_storage = diagnostics as lexer::DiagnosticBuffer&& {
-        this->tree_storage = tree;
+    init(tree: syntax::SyntaxTree&&, diagnostics: lexer::DiagnosticBuffer&&, error: runtime::Error):
+            tree_storage = tree as syntax::SyntaxTree&&, diagnostic_storage = diagnostics as lexer::DiagnosticBuffer&& {
         this->error_code = error;
     }
 
-    init(other: ParseResult&&): diagnostic_storage = other.diagnostic_storage as lexer::DiagnosticBuffer&& {
-        this->tree_storage = other.tree_storage;
+    init(other: ParseResult&&): tree_storage = other.tree_storage as syntax::SyntaxTree&&,
+            diagnostic_storage = other.diagnostic_storage as lexer::DiagnosticBuffer&& {
         this->error_code = other.error_code;
-        other.tree_storage = syntax::syntax_tree_empty();
     }
 
     fn is_valid() const -> bool {
@@ -26,13 +23,13 @@ impl ParseResult {
             return false;
         }
         if (this->error_code != runtime::Error.none) {
-            return syntax::syntax_tree_storage_is_valid(this->tree_storage);
+            return this->tree_storage.storage_is_valid();
         }
-        return syntax::syntax_tree_is_valid(this->tree_storage);
+        return this->tree_storage.is_valid();
     }
 
-    fn tree() const -> syntax::SyntaxTree {
-        return this->tree_storage;
+    fn tree() const -> syntax::SyntaxView {
+        return this->tree_storage.view();
     }
 
     fn diagnostics() const -> lexer::DiagnosticView {
@@ -40,7 +37,7 @@ impl ParseResult {
     }
 
     fn view() const -> ParseView {
-        return {tree = this->tree_storage, diagnostics = this->diagnostics(), error = this->error_code};
+        return {tree = this->tree(), diagnostics = this->diagnostics(), error = this->error_code};
     }
 
     fn error() const -> runtime::Error {
@@ -48,8 +45,6 @@ impl ParseResult {
     }
 
     deinit() {
-        syntax::syntax_tree_release(this->tree_storage);
-        this->tree_storage = syntax::syntax_tree_empty();
     }
 }
 
@@ -96,19 +91,20 @@ fn parse(source: string_views::string_view, tokens: lexer::TokenView) -> ParseRe
     }
     var parser_state: state::State = {
         source = source, tokens = tokens, cursor = 0, current = state::parser_invalid_token(),
-        current_index = syntax::syntax_no_index(), previous = state::parser_invalid_token(),
-        tree = syntax::syntax_tree_empty(), diagnostics = lexer::DiagnosticBuffer(),
+        current_index = syntax::no_index(), previous = state::parser_invalid_token(),
+        builder = syntax::SyntaxBuilder(tokens.size()), diagnostics = lexer::DiagnosticBuffer(),
         error = runtime::Error.none, nesting_depth = 0,
     };
-    parser_state.tree.token_count = tokens.size();
     state::parser_advance(&parser_state);
     if (parser_state.error == runtime::Error.none) {
         declarations::parse_program(&parser_state);
     }
-    if (parser_state.error == runtime::Error.none && !syntax::syntax_tree_is_valid(parser_state.tree)) {
+    if (parser_state.error == runtime::Error.none && !parser_state.builder.view().is_valid()) {
         parser_state.error = runtime::Error.io;
     }
-    return ParseResult(parser_state.tree, parser_state.diagnostics as lexer::DiagnosticBuffer&&, parser_state.error);
+    var tree: syntax::SyntaxTree = parser_state.builder.take_tree();
+    return ParseResult(
+        tree as syntax::SyntaxTree&&, parser_state.diagnostics as lexer::DiagnosticBuffer&&, parser_state.error);
 }
 
 fn frontend_parse(source: string_views::string_view) -> FrontendResult {

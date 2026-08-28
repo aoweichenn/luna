@@ -58,10 +58,10 @@ harness 对满足以下条件的 expectation 自动生成少量大 suite 文件�
 
 这些任务仍使用独立工作目录，并与 suite 一起进入有界并行 worker pool。
 
-Lexer 契约属于 frontend 专用协议：消费端只携带 `luna.compiler.lexer` 接口独立编译，再链接 stage 中
-单独生成的 `lexer.lo` 与真实依赖对象。这样同时验证公开 ABI、RAII 析构和模块链接，避免把 Lexer
-实现与消费端错误地揉进一个源模块编译。一个大用例内部覆盖全部关键字、标点、字面量、trivia、span 和
-诊断，不为每个 Token 启动一次工具链。
+Lexer 与 Syntax 契约属于 frontend 专用协议：消费端只携带相应接口独立编译，再链接 stage 中单独生成的
+`lexer.lo`/`syntax.lo` 与真实依赖对象。这样同时验证公开 ABI、RAII 析构和模块链接，避免把实现与消费端
+错误地揉进一个源模块编译。Lexer 大用例覆盖全部关键字、标点、字面量、trivia、span 和诊断；Syntax
+大用例覆盖 Builder、Tree、View、move、mark/restore 与失败状态，不为每条细规则启动一次工具链。
 
 ## 失败与确定性
 

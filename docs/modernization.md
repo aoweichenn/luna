@@ -140,7 +140,7 @@ contain files or child module/family directories at one level, never both.
 | Historical group | Target module | Same-module implementation units |
 | --- | --- | --- |
 | `bootstrap.frontend.lexer` | `luna.compiler.lexer` | facade, session, keywords, literals, token |
-| `bootstrap.frontend.syntax` | `luna.compiler.syntax` | storage, builder when needed |
+| `bootstrap.frontend.syntax` | `luna.compiler.syntax` | tree, builder, verify |
 | `bootstrap.frontend.parser.*` | `luna.compiler.parser` | facade, session, expression, statements, declarations |
 | `bootstrap.middleend.type` | `luna.compiler.types` | storage, construction, validation, layout |
 | `bootstrap.middleend.ir` + `ir.verify` | `luna.compiler.ir` | model, builder, validation |

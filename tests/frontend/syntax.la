@@ -1,0 +1,95 @@
+module tests.frontend_syntax;
+
+import luna.compiler.lexer as lexer;
+import luna.compiler.syntax as syntax;
+import luna.runtime;
+import luna.std.utility as utility;
+
+fn span(offset: usize, length: usize, line: usize, column: usize) -> lexer::SourceSpan {
+    return {offset = offset, length = length, line = line, column = column};
+}
+
+fn main() -> i32 {
+    var builder: syntax::SyntaxBuilder = syntax::SyntaxBuilder(8);
+    if (!builder.is_valid() || builder.size() != 0) {
+        return 1;
+    }
+
+    let program: syntax::SyntaxIndexResult = builder.add(syntax::SyntaxKind.program, span(0, 20, 1, 1), 0);
+    let module_index: syntax::SyntaxIndexResult = builder.add(
+        syntax::SyntaxKind.module_declaration, span(0, 10, 1, 1), 0);
+    if (program.error != runtime::Error.none || module_index.error != runtime::Error.none) {
+        return 2;
+    }
+
+    let mark: usize = builder.mark();
+    let scratch: syntax::SyntaxIndexResult = builder.add(syntax::SyntaxKind.attribute, span(10, 2, 1, 11), 3);
+    if (scratch.error != runtime::Error.none || !builder.restore(mark)) {
+        return 3;
+    }
+    if (builder.size() != mark || builder.get(scratch.index).error != runtime::Error.invalid_argument) {
+        return 4;
+    }
+
+    let name: syntax::SyntaxIndexResult = builder.add(syntax::SyntaxKind.name_expression, span(7, 3, 1, 8), 1);
+    if (name.error != runtime::Error.none) {
+        return 5;
+    }
+    if (!builder.set_token(name.index, 2) || !builder.set_span(name.index, span(7, 4, 1, 8))) {
+        return 6;
+    }
+    if (!builder.add_flags(program.index, syntax::SyntaxFlag.interface_unit as usize)) {
+        return 7;
+    }
+    if (!builder.add_child(module_index.index, name.index) ||
+        !builder.add_child(program.index, module_index.index)) {
+        return 8;
+    }
+    if (!builder.set_root(program.index) || !builder.view().is_valid()) {
+        return 9;
+    }
+
+    var tree: syntax::SyntaxTree = builder.take_tree();
+    if (builder.is_valid() || !tree.is_valid()) {
+        return 10;
+    }
+    if (tree.size() != 3) {
+        return 10;
+    }
+    let view: syntax::SyntaxView = tree.view();
+    if (view.token_count() != 8 || view.root() != program.index) {
+        return 11;
+    }
+    let program_node: syntax::SyntaxNodeResult = view.get(program.index);
+    let module_node: syntax::SyntaxNodeResult = view.get(module_index.index);
+    let name_node: syntax::SyntaxNodeResult = view.get(name.index);
+    if (program_node.error != runtime::Error.none || module_node.error != runtime::Error.none) {
+        return 12;
+    }
+    if (name_node.error != runtime::Error.none || name_node.node.token_index != 2) {
+        return 13;
+    }
+    let program_children_are_valid: bool = program_node.node.child_count == 1 &&
+        program_node.node.first_child == module_index.index;
+    let module_children_are_valid: bool = module_node.node.parent == program.index &&
+        module_node.node.first_child == name.index;
+    if (!program_children_are_valid || !module_children_are_valid) {
+        return 14;
+    }
+    if (view.get(view.size()).error != runtime::Error.invalid_argument) {
+        return 15;
+    }
+
+    let moved: syntax::SyntaxTree = utility::move(tree);
+    let move_state_is_valid: bool = moved.is_valid() && tree.is_valid();
+    if (!move_state_is_valid || !tree.empty()) {
+        return 16;
+    }
+
+    var invalid: syntax::SyntaxBuilder = syntax::SyntaxBuilder(2);
+    let invalid_root: syntax::SyntaxIndexResult = invalid.add(syntax::SyntaxKind.program, span(0, 1, 1, 1), 0);
+    if (invalid.add_child(invalid_root.index, invalid_root.index)) {
+        return 17;
+    }
+    return invalid.error() == runtime::Error.invalid_argument ? 0 : 18;
+}
