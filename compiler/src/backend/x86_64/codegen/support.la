@@ -19,44 +19,68 @@ fn fail(context: *CodegenContext, error: runtime::Error) -> bool {
     return false;
 }
 
-fn literal(context: *CodegenContext, literal: *const u8) -> bool {
-    if (context == null || context->error != runtime::Error.none ||
-        !asm_text::append_c_string(
-            &context->text, literal, CodegenLimit.text_limit as usize)) {
-        if (context != null && context->error == runtime::Error.none) {
-            context->error = context->text.error;
-        }
+fn append_assembly(context: *CodegenContext, data: *const u8, length: usize) -> bool {
+    if (context == null || context->error != runtime::Error.none) {
         return false;
     }
-    return true;
+    let maximum_size: usize = CodegenLimit.maximum_assembly_size as usize;
+    if (context->assembly.size() > maximum_size || length > maximum_size - context->assembly.size()) {
+        return fail(context, runtime::Error.out_of_memory);
+    }
+    let error: runtime::Error = context->assembly.append(data, length);
+    return error == runtime::Error.none ? true : fail(context, error);
+}
+
+fn literal(context: *CodegenContext, literal: *const u8) -> bool {
+    if (context == null || context->error != runtime::Error.none) {
+        return false;
+    }
+    let view: string_views::string_view_result =
+        string_views::from_c_string(literal, CodegenLimit.maximum_literal_size as usize);
+    if (view.error != runtime::Error.none) {
+        return fail(context, view.error);
+    }
+    return append_assembly(context, view.view.data, view.view.length);
 }
 
 fn append_usize(context: *CodegenContext, value: usize) -> bool {
-    if (context == null || context->error != runtime::Error.none ||
-        !asm_text::append_usize(
-            &context->text, value)) {
-        if (context != null && context->error == runtime::Error.none) {
-            context->error = context->text.error;
-        }
+    if (context == null || context->error != runtime::Error.none) {
         return false;
     }
-    return true;
+    var digits: [20]u8 = {};
+    let converted: charconv::to_chars_result = charconv::to_chars(&digits[0], &digits[0] + 20 as usize, value);
+    if (converted.error != runtime::Error.none) {
+        return fail(context, converted.error);
+    }
+    return append_assembly(context, &digits[0] as *const u8, converted.ptr - &digits[0]);
 }
 
 fn hex(context: *CodegenContext, value: u64, digits: usize) -> bool {
-    if (context == null || context->error != runtime::Error.none ||
-        !asm_text::append_hex(
-            &context->text, value, digits)) {
-        if (context != null && context->error == runtime::Error.none) {
-            context->error = context->text.error;
-        }
+    if (context == null || context->error != runtime::Error.none) {
         return false;
     }
-    return true;
-}
-
-fn text_error(context: *CodegenContext) -> runtime::Error {
-    return context->text.error == runtime::Error.none ? runtime::Error.invalid_argument : context->text.error;
+    if (digits == 0 || digits > 16) {
+        return fail(context, runtime::Error.invalid_argument);
+    }
+    var converted_digits: [16]u8 = {};
+    let converted: charconv::to_chars_result =
+        charconv::to_chars(&converted_digits[0], &converted_digits[0] + 16 as usize, value, 16);
+    if (converted.error != runtime::Error.none) {
+        return fail(context, converted.error);
+    }
+    let converted_size: usize = converted.ptr - &converted_digits[0];
+    if (converted_size > digits) {
+        return fail(context, runtime::Error.invalid_argument);
+    }
+    var output: [16]u8 = {};
+    let padding_size: usize = digits - converted_size;
+    for (var index: usize = 0; index < padding_size; index += 1) {
+        output[index] = '0';
+    }
+    for (var index: usize = 0; index < converted_size; index += 1) {
+        output[padding_size + index] = converted_digits[index];
+    }
+    return append_assembly(context, &output[0] as *const u8, digits);
 }
 
 fn source_range_is_valid(unit: *const context::Unit, span: lexer::SourceSpan) -> bool {
@@ -76,14 +100,17 @@ fn append_source(context: *CodegenContext, data: *const u8, length: usize, encod
     var appended: bool = false;
     switch (encoding) {
     case SourceEncoding.raw {
-        appended = asm_text::append(&context->text, data, length);
+        appended = append_assembly(context, data, length);
     }
     case SourceEncoding.hexadecimal {
-        appended = asm_text::append_hex_bytes(&context->text, data, length);
+        appended = true;
+        for (var index: usize = 0; index < length && appended; index += 1) {
+            appended = hex(context, data[index] as u64, SymbolFormat.hex_byte_digits as usize);
+        }
     }
     }
     if (!appended) {
-        return fail(context, text_error(context));
+        return false;
     }
     return true;
 }

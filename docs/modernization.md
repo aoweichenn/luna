@@ -88,7 +88,7 @@ The standard library follows the C++ standard-library surface as far as Luna's
 current semantics permit:
 
 - modules mirror focused C++ headers/concepts: `vector`, `span`, `expected`,
-  `utility`, `memory`, `text`, `filesystem`/`path` and `io`;
+  `utility`, `memory`, `string`, `charconv`, `filesystem`/`path` and `io`;
 - public standard-library types and methods use lowercase names;
 - established operations keep C++ spellings such as `push_back`, `size`,
   `capacity`, `data`, `reserve`, `clear`, `empty`, `value` and `error`;
@@ -151,7 +151,7 @@ contain files or child module/family directories at one level, never both.
 | semantic `functions.*` | `luna.compiler.sema.functions` | signatures, overloads, bindings, generics, methods, IR |
 | semantic `expr.*` | `luna.compiler.sema.expr` | base, numeric, strings, probe, initializer, access, operators |
 | semantic `stmt.*` | `luna.compiler.sema.stmt` | lowering, labels |
-| backend checked assembly text | `luna.compiler.x86.text` | owned text construction shared by codegen and drivers |
+| backend checked assembly text | `luna.std.string` + `luna.std.charconv` | generic owned characters and allocation-free conversion; no backend wrapper |
 | `backend.x86_64.codegen.*` | `luna.compiler.x86.codegen` | session, ABI, frame, values, calls, instructions |
 | `backend.x86_64.elf.*` | `luna.compiler.x86.elf` | format, reader, writer |
 | `backend.x86_64.assembler.*` | `luna.compiler.x86.assembler` | session, operands, encoding, source |
@@ -187,7 +187,9 @@ The detailed container contract is `docs/container-foundation.md`.
 | `luna.std.memory` | raw allocation and byte primitives | narrow platform-independent functions |
 | `luna.std.ascii` | ASCII classification and conversion | stateless functions/tables |
 | `luna.std.binary` | endian-aware binary reading/writing | reader/writer value classes |
-| `luna.std.text` | UTF-8 view and owned text | `text_view`, `text` |
+| `luna.std.charconv` | allocation-free numeric/text conversion | `to_chars` and `to_chars_result` |
+| `luna.std.string` | owned mutable character sequence | move-only `string` over `byte_buffer` |
+| `luna.std.string_view` | non-owning UTF-8 validated character view | `string_view` |
 | `luna.std.path` | validated NUL-terminated path | move-aware `path` |
 | `luna.std.io` | high-level whole-file and stream operations | algorithms over file, span and vector |
 
@@ -219,12 +221,11 @@ library/
     std/{expected,span,buffer,vector,deque,list,map,queue}.lh
     internal/{pool,tree}.lh
     linux/{syscall,process,memory,file,path}.lh
-    std/{utility,checked,memory,ascii,binary,text,path,io}.lh
+    std/{utility,checked,memory,ascii,binary,charconv,string,string_view,path,io}.lh
   src/
     linux/{syscall,process,memory,file,path}.la
     internal/pool.la
-    std/{buffer,memory,ascii,binary,text,path,io}.la
-    std/text/{utf8,owned}.la            # same module, justified method families
+    std/{buffer,memory,ascii,binary,charconv,string,string_view,path,io}.la
     std/io/{read,write}.la              # same module when the facade grows
 ```
 

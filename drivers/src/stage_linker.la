@@ -3,12 +3,13 @@ module luna.tools.link;
 import luna.compiler.x86.elf as elf;
 import luna.compiler.x86.linker as linker;
 import luna.compiler.x86.object as object;
-import luna.compiler.x86.text as asm_text;
 import luna.runtime;
 import luna.std.bytes;
+import luna.std.charconv as charconv;
 import luna.std.io;
 import luna.std.path as path;
-import luna.std.text as text;
+import luna.std.string as strings;
+import luna.std.string_view as string_views;
 import luna.tools.cli as cli;
 
 enum BootstrapStageLimit: usize {
@@ -28,32 +29,38 @@ fn bootstrap_stage_driver_invalid_path(error: runtime::Error) -> path::PathResul
     };
 }
 
+fn bootstrap_stage_driver_append_literal(
+    destination: *strings::string, literal: *const u8, maximum_length: usize) -> runtime::Error {
+    if (destination == null) {
+        return runtime::Error.invalid_argument;
+    }
+    let view: string_views::string_view_result = string_views::from_c_string(literal, maximum_length);
+    return view.error == runtime::Error.none ? destination->append(view.view) : view.error;
+}
+
+fn bootstrap_stage_driver_append_usize(destination: *strings::string, value: usize) -> runtime::Error {
+    if (destination == null) {
+        return runtime::Error.invalid_argument;
+    }
+    var digits: [20]u8 = {};
+    let converted: charconv::to_chars_result = charconv::to_chars(&digits[0], &digits[0] + 20 as usize, value);
+    if (converted.error != runtime::Error.none) {
+        return converted.error;
+    }
+    return destination->append(&digits[0] as *const u8, converted.ptr - &digits[0]);
+}
+
 fn bootstrap_stage_driver_input_path(index: usize) -> path::PathResult {
-    var text: asm_text::Text = asm_text::empty();
-    asm_text::append_c_string(&text, "bootstrap-link-input-", 32);
-    asm_text::append_usize(&text, index);
-    asm_text::append_c_string(&text, ".lo", 8);
-    if (text.error != runtime::Error.none) {
-        let error: runtime::Error = text.error;
-        asm_text::release(text);
+    var path_string: strings::string = strings::string();
+    var error: runtime::Error = bootstrap_stage_driver_append_literal(&path_string, "bootstrap-link-input-", 32);
+    error = cli::first_error(error, bootstrap_stage_driver_append_usize(&path_string, index));
+    error = cli::first_error(error, bootstrap_stage_driver_append_literal(&path_string, ".lo", 8));
+    if (error != runtime::Error.none) {
         return bootstrap_stage_driver_invalid_path(error);
     }
-    let bytes: bytes::BufferResult = asm_text::take(&text);
-    if (bytes.error != runtime::Error.none) {
-        asm_text::release(text);
-        return bootstrap_stage_driver_invalid_path(bytes.error);
-    }
-    let view: text::ViewResult = text::view(bytes.buffer.data as *const u8, bytes.buffer.length);
-    var result: path::PathResult = bootstrap_stage_driver_invalid_path(view.error);
-    if (view.error == runtime::Error.none) {
-        result = path::from_text(view.view);
-    }
-    let release_error: runtime::Error = bytes::release(bytes.buffer);
-    if (result.error == runtime::Error.none && release_error != runtime::Error.none) {
-        path::release(result.path);
-        return bootstrap_stage_driver_invalid_path(release_error);
-    }
-    return result;
+    let view: string_views::string_view_result = path_string.view();
+    return view.error == runtime::Error.none ?
+        path::from_string_view(view.view) : bootstrap_stage_driver_invalid_path(view.error);
 }
 
 fn bootstrap_stage_driver_is_elf(data: *const u8, length: usize) -> bool {
@@ -262,13 +269,13 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
         valid = false;
     }
     if (valid) {
-        let output_text: text::ViewResult = path::text(output);
+        let output_view: string_views::string_view_result = path::view(output);
         index = 0;
         for (; index < input_count && valid; index += 1) {
-            let input_text: text::ViewResult = path::text(inputs[index]);
-            let paths_are_readable: bool = output_text.error == runtime::Error.none &&
-                input_text.error == runtime::Error.none;
-            valid = paths_are_readable && !text::equal(output_text.view, input_text.view);
+            let input_view: string_views::string_view_result = path::view(inputs[index]);
+            let paths_are_readable: bool = output_view.error == runtime::Error.none &&
+                input_view.error == runtime::Error.none;
+            valid = paths_are_readable && !string_views::equal(output_view.view, input_view.view);
         }
     }
 

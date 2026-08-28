@@ -18,13 +18,15 @@ the project-owned assembler.
 | Module | Responsibility |
 | --- | --- |
 | `luna.compiler.x86.codegen` | System V ABI, frame planning, Typed IR instruction selection, calls, symbols, globals and entry-point emission |
-| `luna.compiler.x86.text` | checked, owned assembly-byte construction shared by codegen and command drivers |
 | `luna.compiler.x86.object` | versioned, validated sections, symbols, relocations and deterministic serialization |
 | `luna.compiler.x86.elf` | ELF64 reader, writer and format validation |
 | `luna.compiler.x86.assembler` | operand parsing, symbol indexing and strict encoding of the compiler-owned x86-64 dialect |
 | `luna.compiler.x86.linker` | symbol resolution, relocation, W^X layout and direct static ELF64 serialization |
 
-`luna_sysroot` builds deterministic `.lmi` and `.o` files for all six modules
+Assembly and diagnostic text use the generic `luna.std.string` owner and
+`luna.std.charconv::to_chars`; there is no processor-specific text wrapper.
+
+`luna_sysroot` builds deterministic `.lmi` and `.o` files for all five backend modules
 under:
 
 ```text

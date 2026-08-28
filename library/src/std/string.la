@@ -1,0 +1,119 @@
+module luna.std.string;
+
+impl string {
+    init(): storage = buffer::byte_buffer() {
+        this->empty_sentinel = 0;
+    }
+
+    init(other: string&&): storage = other.storage as buffer::byte_buffer&& {
+        this->empty_sentinel = 0;
+    }
+
+    operator =(other: string&&) {
+        this->storage = other.storage as buffer::byte_buffer&&;
+    }
+
+    fn is_valid() const -> bool {
+        if (!this->storage.is_valid()) {
+            return false;
+        }
+        let storage_size: usize = this->storage.size();
+        return storage_size == 0 || this->storage.data()[storage_size - 1] == 0;
+    }
+
+    fn empty() const -> bool {
+        return this->size() == 0;
+    }
+
+    fn size() const -> usize {
+        let storage_size: usize = this->storage.size();
+        return storage_size == 0 ? 0 : storage_size - 1;
+    }
+
+    fn capacity() const -> usize {
+        let storage_capacity: usize = this->storage.capacity();
+        return storage_capacity == 0 ? 0 : storage_capacity - 1;
+    }
+
+    fn data() -> *u8 {
+        return this->storage.empty() ? &this->empty_sentinel : this->storage.data();
+    }
+
+    fn data() const -> *const u8 {
+        return this->storage.empty() ? &this->empty_sentinel as *const u8 : this->storage.data();
+    }
+
+    fn reserve(minimum_capacity: usize) -> runtime::Error {
+        if (!this->is_valid()) {
+            return runtime::Error.invalid_argument;
+        }
+        if (minimum_capacity == 0) {
+            return runtime::Error.none;
+        }
+        var storage_capacity: usize = 0;
+        if (@add_overflow(minimum_capacity, 1, &storage_capacity)) {
+            return runtime::Error.out_of_memory;
+        }
+        return this->storage.reserve(storage_capacity);
+    }
+
+    fn append(data: *const u8, length: usize) -> runtime::Error {
+        let source_is_invalid: bool = data == null && length != 0;
+        if (!this->is_valid() || source_is_invalid) {
+            return runtime::Error.invalid_argument;
+        }
+        if (length == 0) {
+            return runtime::Error.none;
+        }
+
+        let original_size: usize = this->size();
+        let truncate_error: runtime::Error = this->storage.truncate(original_size);
+        if (truncate_error != runtime::Error.none) {
+            return truncate_error;
+        }
+        let append_error: runtime::Error = this->storage.append(data, length);
+        if (append_error != runtime::Error.none) {
+            this->restore_terminator(original_size);
+            return append_error;
+        }
+        let terminate_error: runtime::Error = this->storage.push_back(0);
+        if (terminate_error != runtime::Error.none) {
+            this->storage.truncate(original_size);
+            this->restore_terminator(original_size);
+            return terminate_error;
+        }
+        return runtime::Error.none;
+    }
+
+    fn append(view: string_views::string_view) -> runtime::Error {
+        if (!string_views::is_valid_utf8(view)) {
+            return runtime::Error.invalid_argument;
+        }
+        return this->append(view.data, view.length);
+    }
+
+    fn push_back(value: u8) -> runtime::Error {
+        return this->append(&value as *const u8, 1);
+    }
+
+    fn clear() {
+        this->storage.clear();
+    }
+
+    fn view() const -> string_views::string_view_result {
+        return string_views::from_bytes(this->data(), this->size());
+    }
+
+    fn detach() -> *u8 {
+        return this->storage.detach();
+    }
+
+    deinit() {
+    }
+
+    priv fn restore_terminator(content_size: usize) {
+        if (content_size != 0) {
+            this->storage.push_back(0);
+        }
+    }
+}

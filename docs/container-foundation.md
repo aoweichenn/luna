@@ -12,7 +12,8 @@
 
 标准库公开接口以 C++标准库为命名和行为基准：
 
-- 模块使用 `luna.std.vector`、`luna.std.span`、`luna.std.utility`和`luna.std.memory`；
+- 模块使用 `luna.std.vector`、`luna.std.span`、`luna.std.string`、
+  `luna.std.charconv`、`luna.std.utility`和`luna.std.memory`；
 - 类型和方法使用 lowercase：`vector<Value>`、`span<Value>`、
   `byte_buffer`、`push_back`、`size`、`capacity`、`data`、`reserve`和`clear`；
 - 真正的值/错误和类型保留给未来的 `luna.std.expected`，本阶段不发明 `result`替代品；
@@ -116,6 +117,7 @@ interface-only。
 - `size`、`capacity`、`empty`；
 - 可写与只读数据指针；首轮 anchor 提升后再增加 span 适配；
 - 显式 `release()`返回错误，析构只负责兜底释放。
+- `detach()`只作为旧资源句柄迁移期的零拷贝所有权出口；它立即清空源对象。
 
 扩容保留现有能力：
 

@@ -425,3 +425,23 @@ was byte-identical. The final test run passed 443/443 with no skips. Reassemblin
 the 3,070,612-byte `sem_funcs.s` took 0.75 seconds and reproduced the transition
 object byte-for-byte. The promoted executable is 4,654,934 bytes with SHA-256
 `86a6c5e2102d036e417171102cd6e58e43be79cbccfabc80ae9b11daba1ecf0f`.
+
+## 2026-08-28: promotion to the standard-string toolchain
+
+The anchor now contains the stage-fixed `luna` executable from the standard
+character-foundation snapshot accompanying this provenance note. The former
+backend-specific byte builder and the transitional `luna.std.text` module are
+removed. Their responsibilities are separated into the C++-shaped
+`luna.std.string_view`, `luna.std.string` and `luna.std.charconv` modules.
+The owning string is a move-only RAII class with contiguous NUL-terminated
+storage; integer conversion is allocation-free, and code generation transfers
+its final assembly buffer without copying.
+
+Remote x86-64 verification on `caw` built the complete 75-module graph through
+`stage-transition`, `stage-next` and `stage-fixed`; every next/fixed assembly,
+object and executable artifact was byte-identical. The final test run passed
+443/443 with no skips. A single stage build took 86.73 seconds and the complete
+fixed-point verification took 251.72 seconds. Compiling the 3,069,988-byte
+`sem_funcs.s` took 10.00 seconds and assembling it took 0.75 seconds. The
+promoted executable remains 4,654,934 bytes with SHA-256
+`b05126bfd8d3cee85431df92cd828d65a3b794122bf6af8820f11b288da89c07`.

@@ -166,17 +166,17 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
 - `anchor/` — the single fixed-point multi-command `luna` executable with
   `SHA256SUMS` + `PROVENANCE.md`. Sole binary trust root.
 - `library/include/luna/` — library interface units, mirroring module
-  names (`luna.std.text` is `luna/std/text.lh`).
+  names (`luna.std.string_view` is `luna/std/string_view.lh`).
 - `library/src/` — runtime, Linux syscall and standard-library
   implementations: allocation, byte buffers, checked arithmetic, ASCII
-  classification, binary encoding, UTF-8 text, paths and file I/O.
+  classification, binary encoding, strings/views, paths and file I/O.
 - `compiler/include/luna/{bootstrap,compiler}/` — transitional historical
   interfaces and contracted `luna.compiler.*` interfaces respectively.
 - `compiler/src/` — `frontend/` (lexer, syntax, parser over
   `parser/{state,expression,statements,declarations}`), `middleend/`
   (type, ir + `ir/verify`, sema, `semantic/*` — see Style for the
-  lowering order), and `backend/x86_64/{text,codegen,object,elf,assembler,
-  linker}/`. Each backend directory is one module and contains only its
+  lowering order), and `backend/x86_64/{codegen,object,elf,assembler,linker}/`.
+  Each backend directory is one module and contains only its
   facade/pass implementation files. Correctness-first, no optimization.
 - `drivers/include/luna/tools/` and `drivers/src/` — the shared CLI service,
   independent compile/assemble/link command services and single freestanding

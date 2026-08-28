@@ -491,7 +491,7 @@ point) and rebuild-trigger rules are specified with the milestone.
 ## Milestones m1.11/m1.12 — module qualification and selective imports
 
 ```luna
-import luna.std.text;               // flat names + text:: qualifier
+import luna.std.string_view;        // flat names + string_view:: qualifier
 import luna.std.path as fs;         // fs:: qualifier only, nothing flat
 import luna.std.io::{read_all};     // read_all flat + io:: qualifier
 

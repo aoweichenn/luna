@@ -1,0 +1,135 @@
+module luna.std.string_view;
+
+fn empty_view() -> string_view {
+    return { data = null, length = 0 };
+}
+
+fn result(view: string_view, error: runtime::Error) -> string_view_result {
+    return { view = view, error = error };
+}
+
+fn is_continuation(byte: u8) -> bool {
+    return byte >= 128 && byte <= 191;
+}
+
+fn utf8_sequence_length(first: u8) -> usize {
+    if (first <= 127) {
+        return 1;
+    }
+    if (first >= 194 && first <= 223) {
+        return 2;
+    }
+    if (first >= 224 && first <= 239) {
+        return 3;
+    }
+    if (first >= 240 && first <= 244) {
+        return 4;
+    }
+    return 0;
+}
+
+fn second_byte_is_valid(first: u8, second: u8) -> bool {
+    switch (first) {
+    case 224 {
+        return second >= 160 && second <= 191;
+    }
+    case 237 {
+        return second >= 128 && second <= 159;
+    }
+    case 240 {
+        return second >= 144 && second <= 191;
+    }
+    case 244 {
+        return second >= 128 && second <= 143;
+    }
+    default {
+        return is_continuation(second);
+    }
+    }
+}
+
+fn sequence_is_valid(view: string_view, offset: usize, length: usize) -> bool {
+    if (view.length - offset < length) {
+        return false;
+    }
+    if (length == 1) {
+        return true;
+    }
+    if (!second_byte_is_valid(view.data[offset], view.data[offset + 1])) {
+        return false;
+    }
+    for (var index: usize = 2; index < length; index += 1) {
+        if (!is_continuation(view.data[offset + index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn is_valid_utf8(view: string_view) -> bool {
+    if (view.length == 0) {
+        return true;
+    }
+    if (view.data == null) {
+        return false;
+    }
+    for (var index: usize = 0; index < view.length;) {
+        let sequence_length: usize = utf8_sequence_length(view.data[index]);
+        if (sequence_length == 0 || !sequence_is_valid(view, index, sequence_length)) {
+            return false;
+        }
+        index += sequence_length;
+    }
+    return true;
+}
+
+fn from_bytes(data: *const u8, length: usize) -> string_view_result {
+    let candidate: string_view = { data = data, length = length };
+    if (length != 0 && data == null) {
+        return result(empty_view(), runtime::Error.bad_address);
+    }
+    if (!is_valid_utf8(candidate)) {
+        return result(empty_view(), runtime::Error.invalid_argument);
+    }
+    return result(candidate, runtime::Error.none);
+}
+
+fn from_c_string(data: *const u8, maximum_length: usize) -> string_view_result {
+    if (data == null) {
+        return result(empty_view(), runtime::Error.bad_address);
+    }
+    var length: usize = 0;
+    for (; length < maximum_length && data[length] != 0; length += 1) {}
+    if (length == maximum_length) {
+        return result(empty_view(), runtime::Error.name_too_long);
+    }
+    return from_bytes(data, length);
+}
+
+fn substr(source: string_view, offset: usize, length: usize) -> string_view_result {
+    if (!is_valid_utf8(source) || offset > source.length) {
+        return result(empty_view(), runtime::Error.invalid_argument);
+    }
+    if (length > source.length - offset) {
+        return result(empty_view(), runtime::Error.invalid_argument);
+    }
+    if (length == 0) {
+        return result(empty_view(), runtime::Error.none);
+    }
+    return from_bytes(&source.data[offset], length);
+}
+
+fn equal(left: string_view, right: string_view) -> bool {
+    if (!is_valid_utf8(left) || !is_valid_utf8(right)) {
+        return false;
+    }
+    if (left.length != right.length) {
+        return false;
+    }
+    for (var index: usize = 0; index < left.length; index += 1) {
+        if (left.data[index] != right.data[index]) {
+            return false;
+        }
+    }
+    return true;
+}

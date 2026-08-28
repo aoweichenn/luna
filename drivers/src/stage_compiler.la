@@ -5,12 +5,13 @@ import luna.bootstrap.frontend.parser as parser;
 import luna.bootstrap.middleend.sema as sema;
 import luna.bootstrap.middleend.semantic.context as context;
 import luna.compiler.x86.codegen as codegen;
-import luna.compiler.x86.text as asm_text;
 import luna.runtime;
 import luna.std.bytes;
+import luna.std.charconv as charconv;
 import luna.std.io;
 import luna.std.path as path;
-import luna.std.text as text;
+import luna.std.string as strings;
+import luna.std.string_view as string_views;
 import luna.tools.cli as cli;
 
 enum BootstrapStageLimit: usize {
@@ -32,32 +33,38 @@ fn bootstrap_stage_invalid_path_result(error: runtime::Error) -> path::PathResul
     };
 }
 
+fn bootstrap_stage_append_literal(
+    destination: *strings::string, literal: *const u8, maximum_length: usize) -> runtime::Error {
+    if (destination == null) {
+        return runtime::Error.invalid_argument;
+    }
+    let view: string_views::string_view_result = string_views::from_c_string(literal, maximum_length);
+    return view.error == runtime::Error.none ? destination->append(view.view) : view.error;
+}
+
+fn bootstrap_stage_append_usize(destination: *strings::string, value: usize) -> runtime::Error {
+    if (destination == null) {
+        return runtime::Error.invalid_argument;
+    }
+    var digits: [20]u8 = {};
+    let converted: charconv::to_chars_result = charconv::to_chars(&digits[0], &digits[0] + 20 as usize, value);
+    if (converted.error != runtime::Error.none) {
+        return converted.error;
+    }
+    return destination->append(&digits[0] as *const u8, converted.ptr - &digits[0]);
+}
+
 fn bootstrap_stage_unit_path(index: usize) -> path::PathResult {
-    var text: asm_text::Text = asm_text::empty();
-    asm_text::append_c_string(&text, "bootstrap-stage-unit-", 32);
-    asm_text::append_usize(&text, index);
-    asm_text::append_c_string(&text, ".luna", 8);
-    if (text.error != runtime::Error.none) {
-        let error: runtime::Error = text.error;
-        asm_text::release(text);
+    var path_string: strings::string = strings::string();
+    var error: runtime::Error = bootstrap_stage_append_literal(&path_string, "bootstrap-stage-unit-", 32);
+    error = cli::first_error(error, bootstrap_stage_append_usize(&path_string, index));
+    error = cli::first_error(error, bootstrap_stage_append_literal(&path_string, ".luna", 8));
+    if (error != runtime::Error.none) {
         return bootstrap_stage_invalid_path_result(error);
     }
-    let bytes: bytes::BufferResult = asm_text::take(&text);
-    if (bytes.error != runtime::Error.none) {
-        asm_text::release(text);
-        return bootstrap_stage_invalid_path_result(bytes.error);
-    }
-    let view: text::ViewResult = text::view(bytes.buffer.data as *const u8, bytes.buffer.length);
-    var result: path::PathResult = bootstrap_stage_invalid_path_result(view.error);
-    if (view.error == runtime::Error.none) {
-        result = path::from_text(view.view);
-    }
-    let release_error: runtime::Error = bytes::release(bytes.buffer);
-    if (result.error == runtime::Error.none && release_error != runtime::Error.none) {
-        path::release(result.path);
-        return bootstrap_stage_invalid_path_result(release_error);
-    }
-    return result;
+    let view: string_views::string_view_result = path_string.view();
+    return view.error == runtime::Error.none ?
+        path::from_string_view(view.view) : bootstrap_stage_invalid_path_result(view.error);
 }
 
 fn bootstrap_stage_read_mode(executable: *bool) -> runtime::Error {
@@ -144,7 +151,8 @@ fn bootstrap_stage_source_load(
     if (source.error != runtime::Error.none) {
         return source.error;
     }
-    let view: text::ViewResult = text::view(source.buffer.data as *const u8, source.buffer.length);
+    let view: string_views::string_view_result = string_views::from_bytes(source.buffer.data as *const u8,
+        source.buffer.length);
     if (view.error != runtime::Error.none) {
         bytes::release(source.buffer);
         return view.error;
@@ -208,22 +216,9 @@ fn bootstrap_stage_frontend_status(frontend: parser::FrontendResult) -> i32 {
     return BootstrapStageStatus.input_error as i32;
 }
 
-fn bootstrap_stage_print_text(text: *asm_text::Text) -> runtime::Error {
-    if (text == null) {
-        return runtime::Error.invalid_argument;
-    }
-    let bytes: bytes::BufferResult = asm_text::take(text);
-    if (bytes.error != runtime::Error.none) {
-        asm_text::release(*text);
-        return bytes.error;
-    }
-    let view: text::ViewResult = text::view(bytes.buffer.data as *const u8, bytes.buffer.length);
-    var error: runtime::Error = view.error;
-    if (error == runtime::Error.none) {
-        error = io::print_error(view.view);
-    }
-    let release_error: runtime::Error = bytes::release(bytes.buffer);
-    return error == runtime::Error.none ? release_error : error;
+fn bootstrap_stage_print_text(message: strings::string const&) -> runtime::Error {
+    let view: string_views::string_view_result = message.view();
+    return view.error == runtime::Error.none ? io::print_error(view.view) : view.error;
 }
 
 fn bootstrap_stage_report_frontend(frontend: parser::FrontendResult) -> runtime::Error {
@@ -235,46 +230,44 @@ fn bootstrap_stage_report_frontend(frontend: parser::FrontendResult) -> runtime:
     if (result.error != runtime::Error.none) {
         return result.error;
     }
-    var text: asm_text::Text = asm_text::empty();
-    asm_text::append_c_string(&text, lexical ? "frontend:lex:" : "frontend:parse:", 32);
-    asm_text::append_usize(&text, result.diagnostic.kind as usize);
-    asm_text::append_c_string(&text, ":", 2);
-    asm_text::append_usize(&text, result.diagnostic.span.offset);
-    asm_text::append_c_string(&text, ":", 2);
-    asm_text::append_usize(&text, result.diagnostic.detail);
-    asm_text::append_c_string(&text, "\n", 2);
-    if (text.error != runtime::Error.none) {
-        let error: runtime::Error = text.error;
-        asm_text::release(text);
+    var message: strings::string = strings::string();
+    var error: runtime::Error = bootstrap_stage_append_literal(
+        &message, lexical ? "frontend:lex:" : "frontend:parse:", 32);
+    error = cli::first_error(error, bootstrap_stage_append_usize(&message, result.diagnostic.kind as usize));
+    error = cli::first_error(error, bootstrap_stage_append_literal(&message, ":", 2));
+    error = cli::first_error(error, bootstrap_stage_append_usize(&message, result.diagnostic.span.offset));
+    error = cli::first_error(error, bootstrap_stage_append_literal(&message, ":", 2));
+    error = cli::first_error(error, bootstrap_stage_append_usize(&message, result.diagnostic.detail));
+    error = cli::first_error(error, bootstrap_stage_append_literal(&message, "\n", 2));
+    if (error != runtime::Error.none) {
         return error;
     }
-    return bootstrap_stage_print_text(&text);
+    return bootstrap_stage_print_text(message);
 }
 
 fn bootstrap_stage_report_resource(
     label: *const u8, label_maximum_length: usize, unit_index: usize, limit: usize) -> runtime::Error {
-    var text: asm_text::Text = asm_text::empty();
-    asm_text::append_c_string(&text, "resource:", 16);
-    asm_text::append_c_string(&text, label, label_maximum_length);
-    asm_text::append_c_string(&text, ":", 2);
-    asm_text::append_usize(&text, unit_index);
-    asm_text::append_c_string(&text, ":", 2);
-    asm_text::append_usize(&text, limit);
-    asm_text::append_c_string(&text, "\n", 2);
-    if (text.error != runtime::Error.none) {
-        let error: runtime::Error = text.error;
-        asm_text::release(text);
+    var message: strings::string = strings::string();
+    var error: runtime::Error = bootstrap_stage_append_literal(&message, "resource:", 16);
+    error = cli::first_error(error, bootstrap_stage_append_literal(&message, label, label_maximum_length));
+    error = cli::first_error(error, bootstrap_stage_append_literal(&message, ":", 2));
+    error = cli::first_error(error, bootstrap_stage_append_usize(&message, unit_index));
+    error = cli::first_error(error, bootstrap_stage_append_literal(&message, ":", 2));
+    error = cli::first_error(error, bootstrap_stage_append_usize(&message, limit));
+    error = cli::first_error(error, bootstrap_stage_append_literal(&message, "\n", 2));
+    if (error != runtime::Error.none) {
         return error;
     }
-    return bootstrap_stage_print_text(&text);
+    return bootstrap_stage_print_text(message);
 }
 
 fn bootstrap_stage_input_add(
-    input: *context::Input, source: bytes::Buffer, frontend: parser::FrontendResult, path: text::View) -> bool {
+    input: *context::Input, source: bytes::Buffer, frontend: parser::FrontendResult,
+        path: string_views::string_view) -> bool {
     if (input == null) {
         return false;
     }
-    let view: text::ViewResult = text::view(source.data as *const u8, source.length);
+    let view: string_views::string_view_result = string_views::from_bytes(source.data as *const u8, source.length);
     return view.error == runtime::Error.none &&
         context::input_add(
             input, {
@@ -305,33 +298,20 @@ fn bootstrap_stage_report_semantic(semantic: context::Result) -> runtime::Error 
     if (diagnostic.error != runtime::Error.none) {
         return diagnostic.error;
     }
-    var text: asm_text::Text = asm_text::empty();
-    asm_text::append_c_string(&text, "semantic:", 16);
-    asm_text::append_usize(&text, diagnostic.diagnostic.kind as usize);
-    asm_text::append_c_string(&text, ":", 2);
-    asm_text::append_usize(&text, diagnostic.diagnostic.unit_index);
-    asm_text::append_c_string(&text, ":", 2);
-    asm_text::append_usize(&text, diagnostic.diagnostic.span.offset);
-    asm_text::append_c_string(&text, ":", 2);
-    asm_text::append_usize(&text, diagnostic.diagnostic.detail);
-    asm_text::append_c_string(&text, "\n", 2);
-    if (text.error != runtime::Error.none) {
-        let error: runtime::Error = text.error;
-        asm_text::release(text);
+    var message: strings::string = strings::string();
+    var error: runtime::Error = bootstrap_stage_append_literal(&message, "semantic:", 16);
+    error = cli::first_error(error, bootstrap_stage_append_usize(&message, diagnostic.diagnostic.kind as usize));
+    error = cli::first_error(error, bootstrap_stage_append_literal(&message, ":", 2));
+    error = cli::first_error(error, bootstrap_stage_append_usize(&message, diagnostic.diagnostic.unit_index));
+    error = cli::first_error(error, bootstrap_stage_append_literal(&message, ":", 2));
+    error = cli::first_error(error, bootstrap_stage_append_usize(&message, diagnostic.diagnostic.span.offset));
+    error = cli::first_error(error, bootstrap_stage_append_literal(&message, ":", 2));
+    error = cli::first_error(error, bootstrap_stage_append_usize(&message, diagnostic.diagnostic.detail));
+    error = cli::first_error(error, bootstrap_stage_append_literal(&message, "\n", 2));
+    if (error != runtime::Error.none) {
         return error;
     }
-    let bytes: bytes::BufferResult = asm_text::take(&text);
-    if (bytes.error != runtime::Error.none) {
-        asm_text::release(text);
-        return bytes.error;
-    }
-    let view: text::ViewResult = text::view(bytes.buffer.data as *const u8, bytes.buffer.length);
-    var error: runtime::Error = view.error;
-    if (error == runtime::Error.none) {
-        error = io::print_error(view.view);
-    }
-    let release_error: runtime::Error = bytes::release(bytes.buffer);
-    return error == runtime::Error.none ? release_error : error;
+    return bootstrap_stage_print_text(message);
 }
 
 fn bootstrap_stage_inputs_are_valid(fixed_protocol: bool, input_paths: *const path::Path, input_count: usize) -> bool {
@@ -452,15 +432,15 @@ fn bootstrap_stage_run(
             if (path.error != runtime::Error.none) {
                 added = false;
             } else {
-                let text: text::ViewResult = path::text(path.path);
-                added = text.error == runtime::Error.none &&
-                    bootstrap_stage_input_add(&input, sources[index], frontends[index], text.view);
+                let path_view: string_views::string_view_result = path::view(path.path);
+                added = path_view.error == runtime::Error.none &&
+                    bootstrap_stage_input_add(&input, sources[index], frontends[index], path_view.view);
                 added = path::release(path.path) == runtime::Error.none && added;
             }
         } else {
-            let text: text::ViewResult = path::text(input_paths[index]);
-            added = text.error == runtime::Error.none &&
-                bootstrap_stage_input_add(&input, sources[index], frontends[index], text.view);
+            let path_view: string_views::string_view_result = path::view(input_paths[index]);
+            added = path_view.error == runtime::Error.none &&
+                bootstrap_stage_input_add(&input, sources[index], frontends[index], path_view.view);
         }
     }
     if (!added) {
@@ -612,13 +592,13 @@ fn bootstrap_stage_cli_main(argc: usize, argv: **const u8) -> i32 {
         valid = false;
     }
     if (valid) {
-        let output_text: text::ViewResult = path::text(output);
+        let output_view: string_views::string_view_result = path::view(output);
         index = 0;
         for (; index < input_count && valid; index += 1) {
-            let input_text: text::ViewResult = path::text(inputs[index]);
-            let paths_are_readable: bool = output_text.error == runtime::Error.none &&
-                input_text.error == runtime::Error.none;
-            valid = paths_are_readable && !text::equal(output_text.view, input_text.view);
+            let input_view: string_views::string_view_result = path::view(inputs[index]);
+            let paths_are_readable: bool = output_view.error == runtime::Error.none &&
+                input_view.error == runtime::Error.none;
+            valid = paths_are_readable && !string_views::equal(output_view.view, input_view.view);
         }
     }
 

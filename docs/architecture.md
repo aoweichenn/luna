@@ -57,8 +57,8 @@ library modules. Interfaces and implementations are physically separated:
 
 An interface path mirrors its complete module name, while implementation paths
 mirror the subsystem hierarchy. A small module may use one implementation,
-such as `luna.std.text` with `library/include/luna/std/text.lh` and
-`library/src/std/text.la`; a larger module may register additional `.la` units
+such as `luna.std.string_view` with `library/include/luna/std/string_view.lh` and
+`library/src/std/string_view.la`; a larger module may register additional `.la` units
 under an implementation subdirectory.
 
 Physical adjacency is not module identity. The `LIBRARIES` registry in

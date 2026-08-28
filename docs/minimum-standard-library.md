@@ -22,9 +22,11 @@ The source modules and their direct dependencies are:
 | `luna.std.memory` | owned byte allocations and byte operations | `luna.runtime` |
 | `luna.std.bytes` | growable owned byte buffers | `luna.runtime`, private `luna.std.memory` |
 | `luna.std.binary` | explicit little-endian integer reads, appends and stores | `luna.runtime`, `luna.std.bytes`, `luna.std.checked` |
-| `luna.std.text` | validated UTF-8 views and owned text | `luna.runtime`, `luna.std.bytes` |
-| `luna.std.path` | owned NUL-terminated filesystem paths | `luna.runtime`, `luna.std.bytes`, `luna.std.text` |
-| `luna.std.io` | complete writes, reads to EOF and file helpers | `luna.runtime`, `luna.std.ascii`, `luna.std.bytes`, `luna.std.text`, `luna.std.path` |
+| `luna.std.string_view` | validated non-owning UTF-8 views | `luna.runtime` |
+| `luna.std.string` | owned contiguous NUL-terminated characters | `luna.runtime`, `luna.std.buffer`, `luna.std.string_view` |
+| `luna.std.charconv` | allocation-free integer conversion | `luna.runtime` |
+| `luna.std.path` | owned NUL-terminated filesystem paths | `luna.runtime`, `luna.std.bytes`, `luna.std.string_view` |
+| `luna.std.io` | complete writes, reads to EOF and file helpers | `luna.runtime`, `luna.std.ascii`, `luna.std.bytes`, `luna.std.string_view`, `luna.std.path` |
 
 Build the complete target sysroot explicitly:
 
@@ -41,7 +43,7 @@ metadata graph:
 build/debug/lunac --emit obj -o app.o app.la \
   build/debug/sysroot/luna/runtime.lmi \
   build/debug/sysroot/luna/std/bytes.lmi \
-  build/debug/sysroot/luna/std/text.lmi \
+  build/debug/sysroot/luna/std/string_view.lmi \
   build/debug/sysroot/luna/std/path.lmi \
   build/debug/sysroot/luna/std/io.lmi
 ```
@@ -54,7 +56,7 @@ build/debug/lunalink -o app app.o \
   build/debug/sysroot/luna/runtime.o \
   build/debug/sysroot/luna/std/memory.o \
   build/debug/sysroot/luna/std/bytes.o \
-  build/debug/sysroot/luna/std/text.o \
+  build/debug/sysroot/luna/std/string_view.o \
   build/debug/sysroot/luna/std/path.o \
   build/debug/sysroot/luna/std/io.o
 ```

@@ -17,7 +17,7 @@ compiler will use:
 
 | Module | Responsibility | Direct dependencies |
 | --- | --- | --- |
-| `luna.bootstrap.frontend.lexer` | source validation, tokenization and lexical diagnostics | `luna.runtime`, `luna.std.bytes`, `luna.std.text` |
+| `luna.bootstrap.frontend.lexer` | source validation, tokenization and lexical diagnostics | `luna.runtime`, `luna.std.bytes`, `luna.std.string_view` |
 | `luna.bootstrap.frontend.parser` | literal validation, recursive-descent parsing, recovery and indexed syntax trees | lexer plus its direct runtime/standard-library dependencies |
 
 `luna_sysroot` emits deterministic metadata and separately linked objects at:

@@ -2,7 +2,9 @@ module tests.container_foundation;
 
 import luna.runtime as runtime;
 import luna.std.buffer::{byte_buffer};
+import luna.std.charconv as charconv;
 import luna.std.span::{const_span, span};
+import luna.std.string::{string};
 import luna.std.utility as utility;
 import luna.std.vector::{vector};
 
@@ -97,6 +99,54 @@ fn test_vector() -> bool {
     return address_is_aligned && aligned.get(0).value == 99;
 }
 
+fn test_string_and_charconv() -> bool {
+    var value: string = string();
+    if (value.append("luna-", 5) != runtime::Error.none) {
+        return false;
+    }
+
+    var decimal: [20]u8 = {};
+    let decimal_result: charconv::to_chars_result =
+        charconv::to_chars(&decimal[0], &decimal[0] + 20 as usize, 42 as usize);
+    if (decimal_result.error != runtime::Error.none) {
+        return false;
+    }
+    if (value.append(&decimal[0] as *const u8, decimal_result.ptr - &decimal[0]) != runtime::Error.none) {
+        return false;
+    }
+
+    var hexadecimal: [16]u8 = {};
+    let hexadecimal_result: charconv::to_chars_result =
+        charconv::to_chars(&hexadecimal[0], &hexadecimal[0] + 16 as usize, 255 as u64, 16);
+    let hexadecimal_size: usize = hexadecimal_result.ptr - &hexadecimal[0];
+    if (hexadecimal_result.error != runtime::Error.none || hexadecimal_size != 2) {
+        return false;
+    }
+    if (hexadecimal[0] != 'f' || hexadecimal[1] != 'f') {
+        return false;
+    }
+
+    let original_size: usize = value.size();
+    if (value.append(value.data() as *const u8, original_size) != runtime::Error.none) {
+        return false;
+    }
+    var moved: string = utility::move(value);
+    let shape_is_valid: bool = value.empty() && moved.size() == original_size * 2;
+    let content_is_valid: bool = moved.data()[0] == 'l' && moved.data()[original_size] == 'l';
+    let termination_is_valid: bool = value.data()[0] == 0 && moved.data()[moved.size()] == 0;
+    if (!shape_is_valid || !content_is_valid) {
+        return false;
+    }
+    if (!termination_is_valid) {
+        return false;
+    }
+
+    var too_small: [1]u8 = {};
+    let rejected: charconv::to_chars_result =
+        charconv::to_chars(&too_small[0], &too_small[0] + 1 as usize, 42 as usize);
+    return rejected.error == runtime::Error.no_space && rejected.ptr == &too_small[0] + 1 as usize;
+}
+
 fn main() -> i32 {
     if (!test_span()) {
         return 1;
@@ -104,5 +154,8 @@ fn main() -> i32 {
     if (!test_buffer()) {
         return 2;
     }
-    return test_vector() ? 0 : 3;
+    if (!test_vector()) {
+        return 3;
+    }
+    return test_string_and_charconv() ? 0 : 4;
 }
