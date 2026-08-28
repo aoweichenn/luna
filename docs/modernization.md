@@ -307,7 +307,7 @@ binaries and one-interface-per-command modules are forbidden.
 
 Each numbered phase is split into independently green batches. A batch runs
 `audit` and formatting first, then the smallest targeted behavior tests, then
-the full `verify` and `test` gates before the next layer adopts it.
+the full `verify --fresh` and `test` gates before the next layer adopts it.
 
 ## Review checklist
 

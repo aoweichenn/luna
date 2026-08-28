@@ -15,9 +15,9 @@ Requires Python 3 and an x86-64 Linux host (or `qemu-x86_64-static` via
 host is ever invoked.
 
 ```sh
-python3 tools/selfhost.py build    # anchor -> out/stage-next toolchain
-python3 tools/selfhost.py verify   # anchor -> transition -> stage-next ->
-                                   # stage-fixed; next/fixed must be identical
+python3 tools/selfhost.py build           # cached 4-worker stage-next build
+python3 tools/selfhost.py verify --fresh  # trusted cold transition -> next ->
+                                          # fixed; next/fixed identical
 python3 tools/selfhost.py test     # compile+run tests/cases against
                                    # out/stage-next/bin, exact exit codes
 python3 tools/selfhost.py audit    # read-only static gate: anchor hashes,
@@ -26,15 +26,18 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
                                    # reflow, zero token drift
 ```
 
-- `verify` is the core correctness gate for any change under `library/`,
-  `compiler/` or `drivers/`. It takes a few minutes.
+- `verify --fresh` is the core correctness gate for any change under
+  `library/`, `compiler/` or `drivers/`; it executes every tool command.
+  Plain `build`/`verify` use the bounded SHA-256 artifact cache and four
+  library workers by default; use `--jobs N`, `--fresh` and `--cache PATH`
+  to control the executor. See `docs/build-system.md`.
 - The build graph is derived, not hand-maintained: `LIBRARIES` in
   `tools/selfhost.py` is the single module registry, and dependencies,
   link order and driver closures are read out of the `import` lines in
   the sources themselves. `audit` fails whenever the registry, the
   sources and the anchor disagree.
 - `audit` and `refmt.py --check` are the fast static gates; run them
-  before the slow `verify` + `test` pair.
+  before the cold `verify --fresh` + `test` pair.
 - Test expectations live in `tests/expectations.txt`
   (`<case>.la <exit-code>`); negative codes are fatal signals, e.g. `-8`
   for a division trap. Expected-failure cases use
@@ -52,8 +55,8 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
 
 1. A new feature's first implementation may use only syntax the current
    toolchain accepts (the anchor builds stage-next).
-2. Land the feature behind the green `verify` + `test` gate first.
-3. Only then may compiler sources adopt the feature; re-run `verify`.
+2. Land the feature behind the green `verify --fresh` + `test` gate first.
+3. Only then may compiler sources adopt the feature; re-run `verify --fresh`.
 4. Promote a verified toolchain into `anchor/` with refreshed
    `SHA256SUMS` and a provenance note. Whenever the user asks to commit and
    push a completed change under `library/`, `compiler/` or `drivers/`, this

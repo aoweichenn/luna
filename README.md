@@ -41,8 +41,8 @@ via `--runner`):
 
 ```sh
 python3 tools/selfhost.py audit    # read-only anchor, module-graph and style checks
-python3 tools/selfhost.py verify   # anchor -> transition -> stage-next ->
-                                   # stage-fixed; next/fixed are identical
+python3 tools/selfhost.py verify --fresh  # trusted cold transition -> next ->
+                                          # stage-fixed; next/fixed identical
 ```
 
 On a non-x86-64 development host, `--runner qemu-x86_64-static` prefixes both
@@ -51,7 +51,10 @@ same default. The optional C FFI cases require an x86-64-targeting C compiler
 (`LUNA_FFI_CC` may name a cross compiler) and are reported as skipped when one
 is unavailable. Release validation runs all FFI cases on an x86-64 host.
 
-`build` stops after producing `out/stage-next/bin/luna`.
+`build` stops after producing `out/stage-next/bin/luna`. Build and verify use
+four library workers plus a bounded SHA-256 artifact cache by default;
+`--fresh` bypasses cache reads, `--jobs N` controls parallelism and
+`--cache PATH` selects storage. See [`docs/build-system.md`](docs/build-system.md).
 `test` compiles, links and executes every case in `tests/cases/` through the
 freshly built tools, checks exact callable-identity/linking invariants, and
 runs the ELF/host FFI matrix. Behavior cases use `tests/expectations.txt`;
@@ -78,7 +81,7 @@ Development follows one rule: **the previous compiler builds the next one**.
 1. edit Luna sources under `library/`, `compiler/` or `drivers/`;
 2. a feature's first implementation may use only syntax the current
    toolchain already accepts;
-3. `python3 tools/selfhost.py verify` must reach a byte-identical fixed
+3. `python3 tools/selfhost.py verify --fresh` must reach a byte-identical fixed
    point;
 4. once the new tools are proven, their own sources may adopt the feature;
 5. promote a verified toolchain into `anchor/` with refreshed checksums.

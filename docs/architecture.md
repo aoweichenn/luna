@@ -617,7 +617,7 @@ The current pure-Luna quality gate contains:
   rules without changing build outputs;
 - `tools/refmt.py --check`, which requires formatting stability and an
   unchanged whitespace-insensitive token stream;
-- `tools/selfhost.py verify`, which rebuilds the complete toolchain with the
+- `tools/selfhost.py verify --fresh`, which rebuilds the complete toolchain with the
   newly built tools and requires every assembly, object and executable to be
   byte-identical;
 - `tools/selfhost.py test`, which compiles and runs the behavior corpus with

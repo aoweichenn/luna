@@ -34,7 +34,7 @@ there is no preprocessor.
    and definitions with register save areas. Variadic arguments retain
    Luna's declared widths instead of receiving C's default promotions.
 4. **Milestone order** below is fixed by the self-hosting discipline: each
-   group lands green (`tools/selfhost.py verify` + `test`) before compiler
+   group lands green (`tools/selfhost.py verify --fresh` + `test`) before compiler
    sources adopt any of it, one group at a time.
 5. **The `@` namespace absorbs C's double-underscore surface.** C spells
    declaration modifiers as `__attribute__((...))` and compile-time hooks as

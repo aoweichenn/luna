@@ -5,8 +5,8 @@ Builds the complete Luna toolchain from pure Luna sources using a previously
 built toolchain (the committed `anchor/`), then verifies the result by
 rebuilding itself and comparing every artifact byte-for-byte.
 
-    python3 tools/selfhost.py build    # anchor -> out/stage-next
-    python3 tools/selfhost.py verify   # anchor -> transition -> next -> fixed
+    python3 tools/selfhost.py build              # cached parallel stage-next
+    python3 tools/selfhost.py verify --fresh     # trusted cold fixed point
     python3 tools/selfhost.py test     # run tests/cases through stage-next
     python3 tools/selfhost.py audit    # read-only anchor/module/source checks
 """
@@ -25,6 +25,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+
+try:
+    from tools import build as build_engine
+except ModuleNotFoundError:
+    import build as build_engine
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 # Optional emulator prefix (e.g. "qemu-x86_64-static") applied to every
@@ -633,58 +638,52 @@ def build_stage(
     tools: pathlib.Path,
     out: pathlib.Path,
     runner: tuple[str, ...],
-) -> dict[str, pathlib.Path]:
+    *,
+    jobs: int,
+    cache_root: pathlib.Path,
+    cache_scope: str,
+    fresh: bool,
+) -> build_engine.StageResult:
     """Compile, assemble and link one complete toolchain into `out`."""
     if not toolchain_is_available(tools):
         fail(f"missing toolchain under {tools}")
-    compiler = tool(tools, "compile", runner)
-    assembler = tool(tools, "assemble", runner)
-    linker = tool(tools, "link", runner)
-    timeout = timeout_seconds(runner)
-
-    assembly_root = out / "assembly"
-    object_root = out / "objects"
-    binary_root = out / "bin"
-    reset(assembly_root)
-    reset(object_root)
-    reset(binary_root)
-
     order = library_order()
-    objects: dict[str, pathlib.Path] = {}
-    for key in order:
-        if registered_module(key).interface_only:
-            print(f"  registered interface-only module {key}")
-            continue
-        assembly = assembly_root / f"{key}.s"
-        object_file = object_root / f"{key}.lo"
-        run(
-            [*compiler, "--library", "-o", assembly, *library_units(key)],
-            timeout=timeout,
+    libraries = tuple(
+        build_engine.LibraryTarget(key, tuple(library_units(key)))
+        for key in order
+        if not registered_module(key).interface_only
+    )
+    interface_only = tuple(
+        key for key in order if registered_module(key).interface_only
+    )
+    drivers = tuple(
+        build_engine.DriverTarget(
+            name,
+            tuple(driver_units(ROOT / source_name)),
+            tuple(
+                implementation_closure(
+                    driver_dependencies(ROOT / source_name)
+                )
+            ),
         )
-        run([*assembler, "-o", object_file, assembly], timeout=timeout)
-        objects[key] = object_file
-        print(f"  built library {key}")
-
-    executables: dict[str, pathlib.Path] = {}
-    for name, source_name in DRIVERS.items():
-        source = ROOT / source_name
-        driver_object = object_root / f"{name}.lo"
-        assembly = assembly_root / f"{name}.s"
-        run(
-            [*compiler, "--executable", "-o", assembly, *driver_units(source)],
-            timeout=timeout,
-        )
-        run([*assembler, "-o", driver_object, assembly], timeout=timeout)
-        executable = binary_root / name
-        link_keys = implementation_closure(driver_dependencies(source))
-        run(
-            [*linker, "-o", executable, driver_object, *(objects[key] for key in link_keys)],
-            timeout=timeout,
-        )
-        executables[name] = executable
-        print(f"  linked {name} ({len(link_keys)} library objects)")
-
-    return {"assemblies": assembly_root, "objects": object_root, "binaries": binary_root}
+        for name, source_name in DRIVERS.items()
+    )
+    plan = build_engine.StagePlan(libraries, interface_only, drivers)
+    builder = build_engine.StageBuilder(
+        ROOT,
+        tools,
+        out,
+        runner,
+        jobs,
+        build_engine.ArtifactCache(cache_root),
+        cache_scope,
+        fresh,
+        timeout_seconds(runner),
+    )
+    try:
+        return builder.build(plan)
+    except build_engine.BuildFailure as error:
+        fail(str(error))
 
 
 ARTIFACT_DIRS = ("assembly", "objects", "bin")
@@ -1907,10 +1906,12 @@ def main() -> None:
 
     build_parser = subparsers.add_parser("build", help="anchor -> out/stage-next")
     add_common(build_parser)
+    build_engine.add_arguments(build_parser)
     build_parser.add_argument("--out", type=pathlib.Path)
 
     verify_parser = subparsers.add_parser("verify", help="fixed-point gate")
     add_common(verify_parser)
+    build_engine.add_arguments(verify_parser)
     verify_parser.add_argument(
         "--out",
         type=pathlib.Path,
@@ -1947,21 +1948,43 @@ def main() -> None:
 
     runner = tuple(arguments.runner)
     audit_sources()
+    def build_one(
+        tools: pathlib.Path,
+        out: pathlib.Path,
+        cache_root: pathlib.Path,
+        cache_scope: str,
+    ) -> None:
+        build_stage(
+            tools,
+            out,
+            runner,
+            jobs=arguments.jobs,
+            cache_root=cache_root,
+            cache_scope=cache_scope,
+            fresh=arguments.fresh,
+        )
+
     if arguments.command == "build":
+        if arguments.jobs <= 0:
+            fail("--jobs must be positive")
         out = arguments.out or default_out / "stage-next"
+        cache_root = arguments.cache or out.parent / "cache"
         verify_anchor(arguments.anchor)
-        build_stage(arguments.anchor, out, runner)
+        build_one(arguments.anchor, out, cache_root, "build")
     elif arguments.command == "verify":
+        if arguments.jobs <= 0:
+            fail("--jobs must be positive")
         verify_root = arguments.out or default_out
+        cache_root = arguments.cache or verify_root / "cache"
         transition_out = verify_root / "stage-transition"
         next_out = verify_root / "stage-next"
         fixed_out = verify_root / "stage-fixed"
         verify_anchor(arguments.anchor)
-        build_stage(arguments.anchor, transition_out, runner)
+        build_one(arguments.anchor, transition_out, cache_root, "transition")
         print("building stage-next with the transition tools")
-        build_stage(transition_out / "bin", next_out, runner)
+        build_one(transition_out / "bin", next_out, cache_root, "next")
         print("confirming the fixed point with stage-next")
-        build_stage(next_out / "bin", fixed_out, runner)
+        build_one(next_out / "bin", fixed_out, cache_root, "fixed")
         compare_stages(next_out, fixed_out)
         print("FIXED POINT: all artifacts byte-identical")
     else:
