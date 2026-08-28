@@ -44,42 +44,42 @@ class RegisteredModule:
     name: str
     interface: str
     implementations: tuple[str, ...]
+    interface_only: bool = False
+
+
+def source_module(
+    source_tree: str,
+    name: str,
+    implementation_stems: tuple[str, ...],
+    *,
+    interface_only: bool = False,
+) -> RegisteredModule:
+    module_path = name.replace(".", "/")
+    return RegisteredModule(
+        name=name,
+        interface=f"{source_tree}/include/{module_path}.lh",
+        implementations=tuple(
+            f"{source_tree}/src/{implementation_stem}.la"
+            for implementation_stem in implementation_stems
+        ),
+        interface_only=interface_only,
+    )
 
 
 def library_module(name: str, *implementation_stems: str) -> RegisteredModule:
-    module_path = name.replace(".", "/")
-    return RegisteredModule(
-        name=name,
-        interface=f"library/include/{module_path}.lh",
-        implementations=tuple(
-            f"library/src/{implementation_stem}.la"
-            for implementation_stem in implementation_stems
-        ),
-    )
+    return source_module("library", name, implementation_stems)
 
 
 def compiler_module(name: str, *implementation_stems: str) -> RegisteredModule:
-    module_path = name.replace(".", "/")
-    return RegisteredModule(
-        name=name,
-        interface=f"compiler/include/{module_path}.lh",
-        implementations=tuple(
-            f"compiler/src/{implementation_stem}.la"
-            for implementation_stem in implementation_stems
-        ),
-    )
+    return source_module("compiler", name, implementation_stems)
+
+
+def interface_module(source_tree: str, name: str) -> RegisteredModule:
+    return source_module(source_tree, name, (), interface_only=True)
 
 
 def driver_module(name: str, *implementation_stems: str) -> RegisteredModule:
-    module_path = name.replace(".", "/")
-    return RegisteredModule(
-        name=name,
-        interface=f"drivers/include/{module_path}.lh",
-        implementations=tuple(
-            f"drivers/src/{implementation_stem}.la"
-            for implementation_stem in implementation_stems
-        ),
-    )
+    return source_module("drivers", name, implementation_stems)
 
 
 # key -> explicit interface and implementation source records. Dependencies
@@ -88,10 +88,13 @@ def driver_module(name: str, *implementation_stems: str) -> RegisteredModule:
 LIBRARIES = {
     "ascii": library_module("luna.std.ascii", "std/ascii"),
     "checked": library_module("luna.std.checked", "std/checked"),
-    "utility": library_module("luna.std.utility", "std/utility"),
+    "utility": interface_module("library", "luna.std.utility"),
     "syscall": library_module("luna.linux.syscall", "linux/syscall"),
     "runtime": library_module("luna.runtime", "runtime"),
+    "span": interface_module("library", "luna.std.span"),
     "memory": library_module("luna.std.memory", "std/memory"),
+    "buffer": library_module("luna.std.buffer", "std/buffer"),
+    "vector": interface_module("library", "luna.std.vector"),
     "bytes": library_module("luna.std.bytes", "std/bytes"),
     "binary": library_module("luna.std.binary", "std/binary"),
     "text": library_module("luna.std.text", "std/text"),
@@ -146,10 +149,7 @@ LIBRARIES = {
         "middleend/semantic/types/visibility",
     ),
     "sem_classes": compiler_module("luna.bootstrap.middleend.semantic.classes", "middleend/semantic/classes"),
-    "sem_consteval_model": compiler_module(
-        "luna.bootstrap.middleend.semantic.consteval.model",
-        "middleend/semantic/consteval/model",
-    ),
+    "sem_consteval_model": interface_module("compiler", "luna.bootstrap.middleend.semantic.consteval.model"),
     "sem_consteval_engine": compiler_module(
         "luna.bootstrap.middleend.semantic.consteval.engine",
         "middleend/semantic/consteval/engine",
@@ -206,7 +206,7 @@ LIBRARIES = {
         "middleend/semantic/expr/operators",
     ),
     "sem_expr": compiler_module("luna.bootstrap.middleend.semantic.expr", "middleend/semantic/expr"),
-    "sem_stmt_api": compiler_module("luna.bootstrap.middleend.semantic.stmt.api", "middleend/semantic/stmt/api"),
+    "sem_stmt_api": interface_module("compiler", "luna.bootstrap.middleend.semantic.stmt.api"),
     "sem_stmt_labels": compiler_module(
         "luna.bootstrap.middleend.semantic.stmt.labels",
         "middleend/semantic/stmt/labels",
@@ -389,7 +389,11 @@ def interface_closure(direct_dependencies: tuple[str, ...]) -> list[str]:
 
 
 def implementation_closure(direct_dependencies: tuple[str, ...]) -> list[str]:
-    return dependency_closure(direct_dependencies, implementation=True)
+    return [
+        key
+        for key in dependency_closure(direct_dependencies, implementation=True)
+        if not registered_module(key).interface_only
+    ]
 
 
 def library_units(key: str) -> list[pathlib.Path]:
@@ -442,7 +446,9 @@ def audit_sources() -> None:
         name = module.name
         interface = ROOT / module.interface
         implementations = tuple(ROOT / path for path in module.implementations)
-        if not implementations:
+        if module.interface_only and implementations:
+            errors.append(f"interface-only module {name} registers an implementation")
+        if not module.interface_only and not implementations:
             errors.append(f"module {name} has no registered implementation")
         source_paths.extend((interface, *implementations))
         units = [(interface, True)]
@@ -595,6 +601,9 @@ def build_stage(
     order = library_order()
     objects: dict[str, pathlib.Path] = {}
     for key in order:
+        if registered_module(key).interface_only:
+            print(f"  registered interface-only module {key}")
+            continue
         assembly = assembly_root / f"{key}.s"
         object_file = object_root / f"{key}.lo"
         run(

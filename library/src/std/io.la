@@ -125,14 +125,16 @@ fn read_file_limited(path: path::Path, maximum_length: usize) -> bytes::BufferRe
     return read;
 }
 
-fn write_file(path: path::Path, data: *const u8, length: usize) -> runtime::Error {
+fn write_file_implementation(path: path::Path, data: *const u8, length: usize, executable: bool) -> runtime::Error {
     if (!path::is_valid(path)) {
         return runtime::Error.invalid_argument;
     }
     if (length != 0 && data == null) {
         return runtime::Error.bad_address;
     }
-    let opened: runtime::FileResult = runtime::file_create(path::as_c_string(path));
+    let path_data: *const u8 = path::as_c_string(path);
+    let opened: runtime::FileResult = executable ?
+        runtime::file_create_executable(path_data) : runtime::file_create(path_data);
     if (opened.error != runtime::Error.none) {
         return opened.error;
     }
@@ -145,23 +147,12 @@ fn write_file(path: path::Path, data: *const u8, length: usize) -> runtime::Erro
     return close_error;
 }
 
+fn write_file(path: path::Path, data: *const u8, length: usize) -> runtime::Error {
+    return write_file_implementation(path, data, length, false);
+}
+
 fn write_executable_file(path: path::Path, data: *const u8, length: usize) -> runtime::Error {
-    if (!path::is_valid(path)) {
-        return runtime::Error.invalid_argument;
-    }
-    if (length != 0 && data == null) {
-        return runtime::Error.bad_address;
-    }
-    let opened: runtime::FileResult = runtime::file_create_executable(path::as_c_string(path));
-    if (opened.error != runtime::Error.none) {
-        return opened.error;
-    }
-    let write_error: runtime::Error = write_all(opened.file, data, length);
-    let close_error: runtime::Error = runtime::file_close(opened.file);
-    if (write_error != runtime::Error.none) {
-        return write_error;
-    }
-    return close_error;
+    return write_file_implementation(path, data, length, true);
 }
 
 fn invalid_path_result(error: runtime::Error) -> path::PathResult {
@@ -191,12 +182,10 @@ fn atomic_temporary_path(path: path::Path) -> path::PathResult {
         return invalid_path_result(bytes.error);
     }
     var digits: [16]u8 = {};
-    var index: usize = 16;
     var value: usize = process.process_id;
-    while (index != 0) {
-        index -= 1;
+    for (var remaining: usize = 16; remaining != 0; remaining -= 1) {
         let digit: usize = value & 15;
-        digits[index] = ascii::lower_hex_digit(digit as u8);
+        digits[remaining - 1] = ascii::lower_hex_digit(digit as u8);
         value >>= 4;
     }
     bytes = bytes::append(bytes.buffer, &digits[0] as *const u8, 16);

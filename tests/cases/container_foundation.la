@@ -1,0 +1,108 @@
+module tests.container_foundation;
+
+import luna.runtime as runtime;
+import luna.std.buffer::{byte_buffer};
+import luna.std.span::{const_span, span};
+import luna.std.utility as utility;
+import luna.std.vector::{vector};
+
+@align(4096) struct AlignedRecord {
+    value: u64;
+}
+
+fn test_span() -> bool {
+    var values: [5]i32 = { 2, 4, 6, 8, 10 };
+    var writable: span<i32> = span<i32>(&values[0], 5);
+    writable.get(2) = 42;
+    let middle: span<i32> = writable.subspan(1, 3);
+    if (middle.size() != 3) {
+        return false;
+    }
+    if (middle.get(1) != 42) {
+        return false;
+    }
+    var empty_tail: span<i32> = writable.subspan(writable.size(), 0);
+    let finish: *i32 = writable.data() + writable.size();
+    if (empty_tail.data() != finish) {
+        return false;
+    }
+    let read_only: const_span<i32> = writable.as_const();
+    return read_only.subspan(1, 3).get(1) == 42;
+}
+
+fn test_buffer() -> bool {
+    var bytes: byte_buffer = byte_buffer();
+    for (var value: usize = 0; value < 96; value += 1) {
+        if (bytes.push_back(value as u8) != runtime::Error.none) {
+            return false;
+        }
+    }
+    let original_size: usize = bytes.size();
+    let original_data: *const u8 = bytes.data() as *const u8;
+    if (bytes.append(original_data, original_size) != runtime::Error.none) {
+        return false;
+    }
+    let shape_is_valid: bool = bytes.size() == original_size * 2 && bytes.capacity() >= bytes.size();
+    let content_is_valid: bool = bytes.data()[0] == 0 && bytes.data()[original_size + 95] == 95;
+    if (!shape_is_valid || !content_is_valid) {
+        return false;
+    }
+    let invalid_source: *const u8 = &bytes.data()[bytes.size() - 1] as *const u8;
+    if (bytes.append(invalid_source, 2) != runtime::Error.invalid_argument) {
+        return false;
+    }
+    if (bytes.truncate(original_size) != runtime::Error.none) {
+        return false;
+    }
+    var moved: byte_buffer = utility::move(bytes);
+    if (!bytes.empty() || moved.size() != original_size) {
+        return false;
+    }
+    moved = utility::move(moved);
+    if (moved.size() != original_size) {
+        return false;
+    }
+    return moved.release() == runtime::Error.none && moved.empty();
+}
+
+fn test_vector() -> bool {
+    var values: vector<i32> = vector<i32>();
+    for (var value: i32 = 1; value <= 12; value += 1) {
+        if (values.push_back(value * value) != runtime::Error.none) {
+            return false;
+        }
+    }
+    let shape_is_valid: bool = values.size() == 12 && values.capacity() >= values.size();
+    let content_is_valid: bool = values.get(0) == 1 && values.get(11) == 144;
+    if (!shape_is_valid || !content_is_valid) {
+        return false;
+    }
+    values.get(5) = 42;
+    let view: const_span<i32> = values.as_span().as_const();
+    if (view.get(5) != 42) {
+        return false;
+    }
+    var moved: vector<i32> = utility::move(values);
+    moved = utility::move(moved);
+    if (!values.empty() || moved.size() != 12) {
+        return false;
+    }
+
+    var aligned: vector<AlignedRecord> = vector<AlignedRecord>();
+    let record: AlignedRecord = { value = 99 };
+    if (aligned.push_back(record) != runtime::Error.none) {
+        return false;
+    }
+    let address_is_aligned: bool = (aligned.as_span().data() as usize) % alignof(AlignedRecord) == 0;
+    return address_is_aligned && aligned.get(0).value == 99;
+}
+
+fn main() -> i32 {
+    if (!test_span()) {
+        return 1;
+    }
+    if (!test_buffer()) {
+        return 2;
+    }
+    return test_vector() ? 0 : 3;
+}

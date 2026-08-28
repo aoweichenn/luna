@@ -1,0 +1,81 @@
+module tests.type_table_validation;
+
+import luna.bootstrap.middleend.type as type_info;
+import luna.runtime as runtime;
+
+fn main() -> i32 {
+    let created: type_info::TableResult = type_info::table_create();
+    if (created.error != runtime::Error.none) {
+        return 1;
+    }
+    var table: type_info::Table = created.table;
+    if (!type_info::table_is_valid(table, true)) {
+        return 2;
+    }
+
+    let pointer: type_info::IdResult = type_info::table_pointer(
+        &table, type_info::BuiltinType.unsigned_8 as usize, true, false);
+    let duplicate_pointer: type_info::IdResult = type_info::table_pointer(
+        &table, type_info::BuiltinType.unsigned_8 as usize, true, false);
+    let pointer_was_reused: bool = pointer.type_id == duplicate_pointer.type_id;
+    if (pointer.error != runtime::Error.none || !pointer_was_reused) {
+        return 3;
+    }
+
+    let reference: type_info::IdResult = type_info::table_reference(
+        &table, type_info::BuiltinType.signed_32 as usize, false, true);
+    if (reference.error != runtime::Error.none) {
+        return 4;
+    }
+    let array: type_info::IdResult =
+        type_info::table_array(&table, type_info::BuiltinType.unsigned_16 as usize, 4);
+    if (array.error != runtime::Error.none) {
+        return 5;
+    }
+
+    let callable_id: usize = table.type_count;
+    let callable: type_info::TableResult =
+        type_info::table_add_function_pointer(table, type_info::BuiltinType.signed_32 as usize);
+    table = callable.table;
+    if (callable.error != runtime::Error.none) {
+        return 6;
+    }
+    let with_parameter: type_info::TableResult =
+        type_info::table_add_parameter(table, callable_id, type_info::BuiltinType.unsigned_64 as usize);
+    table = with_parameter.table;
+    if (with_parameter.error != runtime::Error.none) {
+        return 7;
+    }
+    if (type_info::table_set_layout(table, callable_id, 8, 8) != runtime::Error.none) {
+        return 8;
+    }
+    if (!type_info::table_is_valid(table, true)) {
+        return 9;
+    }
+
+    let records: *type_info::Record = table.types.data as *type_info::Record;
+    let pointer_size: usize = records[pointer.type_id].size_bytes;
+    records[pointer.type_id].size_bytes = pointer_size - 1;
+    if (type_info::table_is_valid(table, true)) {
+        return 10;
+    }
+    records[pointer.type_id].size_bytes = pointer_size;
+
+    let array_count: usize = records[array.type_id].element_count;
+    records[array.type_id].element_count = array_count + 1;
+    if (type_info::table_is_valid(table, true)) {
+        return 11;
+    }
+    records[array.type_id].element_count = array_count;
+
+    records[reference.type_id].flags |= 2048;
+    if (type_info::table_is_valid(table, true)) {
+        return 12;
+    }
+    records[reference.type_id].flags &= ~2048;
+
+    if (!type_info::table_is_valid(table, true)) {
+        return 13;
+    }
+    return type_info::table_release(table) == runtime::Error.none ? 0 : 14;
+}

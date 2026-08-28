@@ -22,6 +22,60 @@ fn is_continuation(byte: u8) -> bool {
     return byte >= 128 && byte <= 191;
 }
 
+fn utf8_sequence_length(first: u8) -> usize {
+    if (first <= 127) {
+        return 1;
+    }
+    if (first >= 194 && first <= 223) {
+        return 2;
+    }
+    if (first >= 224 && first <= 239) {
+        return 3;
+    }
+    if (first >= 240 && first <= 244) {
+        return 4;
+    }
+    return 0;
+}
+
+fn second_byte_is_valid(first: u8, second: u8) -> bool {
+    switch (first) {
+    case 224 {
+        return second >= 160 && second <= 191;
+    }
+    case 237 {
+        return second >= 128 && second <= 159;
+    }
+    case 240 {
+        return second >= 144 && second <= 191;
+    }
+    case 244 {
+        return second >= 128 && second <= 143;
+    }
+    default {
+        return is_continuation(second);
+    }
+    }
+}
+
+fn sequence_is_valid(view: View, offset: usize, length: usize) -> bool {
+    if (view.length - offset < length) {
+        return false;
+    }
+    if (length == 1) {
+        return true;
+    }
+    if (!second_byte_is_valid(view.data[offset], view.data[offset + 1])) {
+        return false;
+    }
+    for (var index: usize = 2; index < length; index += 1) {
+        if (!is_continuation(view.data[offset + index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 fn is_valid_utf8(view: View) -> bool {
     if (view.length == 0) {
         return true;
@@ -30,65 +84,13 @@ fn is_valid_utf8(view: View) -> bool {
         return false;
     }
 
-    var index: usize = 0;
-    while (index < view.length) {
+    for (var index: usize = 0; index < view.length;) {
         let first: u8 = view.data[index];
-        if (first <= 127) {
-            index += 1;
-            continue;
+        let sequence_length: usize = utf8_sequence_length(first);
+        if (sequence_length == 0 || !sequence_is_valid(view, index, sequence_length)) {
+            return false;
         }
-
-        if (first >= 194 && first <= 223) {
-            if (view.length - index < 2 || !is_continuation(view.data[index + 1])) {
-                return false;
-            }
-            index += 2;
-            continue;
-        }
-
-        if (first >= 224 && first <= 239) {
-            if (view.length - index < 3) {
-                return false;
-            }
-            let second: u8 = view.data[index + 1];
-            let third: u8 = view.data[index + 2];
-            if (!is_continuation(third)) {
-                return false;
-            }
-            if (first == 224 && (second < 160 || second > 191)) {
-                return false;
-            }
-            if (first == 237 && (second < 128 || second > 159)) {
-                return false;
-            }
-            if (first != 224 && first != 237 && !is_continuation(second)) {
-                return false;
-            }
-            index += 3;
-            continue;
-        }
-
-        if (first >= 240 && first <= 244) {
-            if (view.length - index < 4) {
-                return false;
-            }
-            let second: u8 = view.data[index + 1];
-            if (first == 240 && (second < 144 || second > 191)) {
-                return false;
-            }
-            if (first == 244 && (second < 128 || second > 143)) {
-                return false;
-            }
-            if (first != 240 && first != 244 && !is_continuation(second)) {
-                return false;
-            }
-            if (!is_continuation(view.data[index + 2]) || !is_continuation(view.data[index + 3])) {
-                return false;
-            }
-            index += 4;
-            continue;
-        }
-        return false;
+        index += sequence_length;
     }
     return true;
 }
@@ -112,9 +114,7 @@ fn from_c_string(data: *const u8, maximum_length: usize) -> ViewResult {
     }
 
     var length: usize = 0;
-    while (length < maximum_length && data[length] != 0) {
-        length += 1;
-    }
+    for (; length < maximum_length && data[length] != 0; length += 1) {}
     if (length == maximum_length) {
         return view_result(empty_view(), runtime::Error.name_too_long);
     }
@@ -122,7 +122,10 @@ fn from_c_string(data: *const u8, maximum_length: usize) -> ViewResult {
 }
 
 fn slice(source: View, offset: usize, length: usize) -> ViewResult {
-    if (!is_valid_utf8(source) || offset > source.length || length > source.length - offset) {
+    if (!is_valid_utf8(source) || offset > source.length) {
+        return view_result(empty_view(), runtime::Error.invalid_argument);
+    }
+    if (length > source.length - offset) {
         return view_result(empty_view(), runtime::Error.invalid_argument);
     }
     if (length == 0) {
@@ -132,19 +135,20 @@ fn slice(source: View, offset: usize, length: usize) -> ViewResult {
 }
 
 fn equal(left: View, right: View) -> bool {
-    if (!is_valid_utf8(left) || !is_valid_utf8(right) || left.length != right.length) {
+    if (!is_valid_utf8(left) || !is_valid_utf8(right)) {
+        return false;
+    }
+    if (left.length != right.length) {
         return false;
     }
     if (left.length == 0) {
         return true;
     }
 
-    var index: usize = 0;
-    while (index < left.length) {
+    for (var index: usize = 0; index < left.length; index += 1) {
         if (left.data[index] != right.data[index]) {
             return false;
         }
-        index += 1;
     }
     return true;
 }
@@ -177,4 +181,3 @@ fn owned_append(text: Owned, suffix: View) -> OwnedResult {
 fn owned_release(text: Owned) -> runtime::Error {
     return bytes::release(text.buffer);
 }
-

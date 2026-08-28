@@ -319,3 +319,56 @@ The recovered compiler built the complete 77-module graph through
 `stage-transition`, `stage-next` and `stage-fixed`; every next/fixed assembly,
 object and executable artifact was byte-identical before the final stage-fixed
 executable was copied here and `SHA256SUMS` refreshed.
+
+## 2026-08-27: promotion to the container-foundation toolchain
+
+The anchor now contains the stage-fixed `luna` executable built from the
+container-foundation and modernization source snapshot accompanying this
+provenance note. The compiler adds the compile-time
+`@is_trivially_relocatable(Type)` property, type-expression resolution for
+generic type parameters, receiver-qualification overload ranking and correct
+special-member accessibility for imported generic wrappers around private
+move-only types. The module registry now represents interface-only generic
+modules directly instead of requiring empty implementation units.
+
+The standard-library foundation adds C++-shaped lowercase `span<Value>`,
+`const_span<Value>`, move-only `byte_buffer` and trivially-relocatable
+`vector<Value>` abstractions. Stateful ownership is isolated in the RAII byte
+buffer; typed views and the vector wrapper remain zero-overhead generic
+interfaces. The same snapshot also applies the bounded-loop, named-predicate
+and table-driven validation rules to the touched runtime, standard-library and
+semantic sources.
+
+Remote x86-64 verification on `caw` built the complete 80-module graph through
+`stage-transition`, `stage-next` and `stage-fixed`; every next/fixed assembly,
+object and executable artifact was byte-identical. The promoted executable is
+4,536,150 bytes with SHA-256
+`86c69dabc50fb57b05fe7e082d6dec3d7822d185b2f92552ea1eba94f528821f`.
+The final test run passed 438/438, including mutable/const receiver selection,
+trivial-relocation classification, rejected nontrivial vectors, cross-module
+private move construction and the complete ELF/host FFI matrix.
+
+## 2026-08-28: promotion to the first compiler-vector toolchain
+
+The anchor now contains the final stage-fixed `luna` executable from the first
+compiler adoption of `luna.std.vector`. The initializer lowering unit owns a
+private `InitializerIndexSet` class composed from `vector<usize>`; it replaces
+three raw byte buffers, pointer casts, byte-count conversions and manual
+release paths with one typed uniqueness and RAII boundary.
+
+The adoption exposed and fixed a pre-existing generic-class ordering defect.
+A concrete imported generic class can be instantiated during type layout when
+it is a field of an ordinary class. Ordinary class-method collection now skips
+such concrete generic instances; their methods remain lazily materialized by
+`instantiate_generic_class` only while the instance's type-parameter bindings
+are active. The regression suite includes a non-generic class containing an
+imported `Box<i32>` field.
+
+The change followed a two-step bootstrap on remote x86-64 `caw`: the previous
+anchor first built a byte-identical fixed point containing the method-ordering
+fix and local vector adoption, and that verified toolchain then built the final
+class-composed source through `stage-transition`, `stage-next` and
+`stage-fixed`. Every final next/fixed assembly, object and executable artifact
+was byte-identical. The final test run passed 439/439 with no skips. The
+promoted executable is 4,556,630 bytes with SHA-256
+`5e4530aa12706080fad52733656c6d310de6d426e92262eae32e703fdc59ec38`.

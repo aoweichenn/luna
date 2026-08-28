@@ -1,0 +1,180 @@
+module luna.std.buffer;
+
+import luna.std.memory as memory;
+
+enum buffer_limit: usize {
+    initial_capacity = 64,
+}
+
+struct append_source {
+    offset: usize;
+    aliases_buffer: bool;
+    valid: bool;
+}
+
+impl byte_buffer {
+    init() {
+        this->reset();
+    }
+
+    init(other: byte_buffer&&) {
+        this->take_from(other);
+    }
+
+    operator =(other: byte_buffer&&) {
+        if (this == &other) {
+            return;
+        }
+        this->release();
+        this->take_from(other);
+    }
+
+    fn is_valid() const -> bool {
+        if (this->capacity_bytes == 0) {
+            return this->data_pointer == null && this->size_bytes == 0;
+        }
+        return this->data_pointer != null && this->size_bytes <= this->capacity_bytes;
+    }
+
+    fn empty() const -> bool {
+        return this->size_bytes == 0;
+    }
+
+    fn size() const -> usize {
+        return this->size_bytes;
+    }
+
+    fn capacity() const -> usize {
+        return this->capacity_bytes;
+    }
+
+    fn data() -> *u8 {
+        return this->data_pointer;
+    }
+
+    fn data() const -> *const u8 {
+        return this->data_pointer as *const u8;
+    }
+
+    fn reserve(minimum_capacity: usize) -> runtime::Error {
+        if (!this->is_valid()) {
+            return runtime::Error.invalid_argument;
+        }
+        if (minimum_capacity <= this->capacity_bytes) {
+            return runtime::Error.none;
+        }
+        var next_capacity: usize = this->capacity_bytes;
+        if (next_capacity < buffer_limit.initial_capacity as usize) {
+            next_capacity = buffer_limit.initial_capacity as usize;
+        }
+        while (next_capacity < minimum_capacity) {
+            var doubled: usize = 0;
+            if (@mul_overflow(next_capacity, 2, &doubled)) {
+                next_capacity = minimum_capacity;
+            } else {
+                next_capacity = doubled;
+            }
+        }
+        let resized: memory::AllocationResult = memory::resize(
+            { address = this->data_pointer, length = this->capacity_bytes }, next_capacity);
+        if (resized.error != runtime::Error.none) {
+            return resized.error;
+        }
+        this->data_pointer = resized.allocation.address;
+        this->capacity_bytes = resized.allocation.length;
+        return runtime::Error.none;
+    }
+
+    fn append(data: *const u8, length: usize) -> runtime::Error {
+        let source_is_invalid: bool = data == null && length != 0;
+        if (!this->is_valid() || source_is_invalid) {
+            return runtime::Error.invalid_argument;
+        }
+        if (length == 0) {
+            return runtime::Error.none;
+        }
+        var next_size: usize = 0;
+        if (@add_overflow(this->size_bytes, length, &next_size)) {
+            return runtime::Error.out_of_memory;
+        }
+        let resolved: append_source = this->resolve_source(data, length);
+        if (!resolved.valid) {
+            return runtime::Error.invalid_argument;
+        }
+        let reserve_error: runtime::Error = this->reserve(next_size);
+        if (reserve_error != runtime::Error.none) {
+            return reserve_error;
+        }
+        let actual_source: *const u8 = resolved.aliases_buffer ?
+            &this->data_pointer[resolved.offset] as *const u8 : data;
+        let move_error: runtime::Error = memory::move(&this->data_pointer[this->size_bytes], actual_source, length);
+        if (move_error != runtime::Error.none) {
+            return move_error;
+        }
+        this->size_bytes = next_size;
+        return runtime::Error.none;
+    }
+
+    fn push_back(value: u8) -> runtime::Error {
+        return this->append(&value as *const u8, 1);
+    }
+
+    fn truncate(length: usize) -> runtime::Error {
+        if (!this->is_valid() || length > this->size_bytes) {
+            return runtime::Error.invalid_argument;
+        }
+        this->size_bytes = length;
+        return runtime::Error.none;
+    }
+
+    fn clear() {
+        this->size_bytes = 0;
+    }
+
+    fn release() -> runtime::Error {
+        if (!this->is_valid()) {
+            return runtime::Error.invalid_argument;
+        }
+        let allocation: memory::Allocation = {
+            address = this->data_pointer, length = this->capacity_bytes,
+        };
+        let error: runtime::Error = memory::release(allocation);
+        if (error == runtime::Error.none) {
+            this->reset();
+        }
+        return error;
+    }
+
+    deinit() {
+        this->release();
+    }
+
+    priv fn reset() {
+        this->data_pointer = null;
+        this->size_bytes = 0;
+        this->capacity_bytes = 0;
+    }
+
+    priv fn take_from(other: byte_buffer&&) {
+        this->data_pointer = other.data_pointer;
+        this->size_bytes = other.size_bytes;
+        this->capacity_bytes = other.capacity_bytes;
+        other.data_pointer = null;
+        other.size_bytes = 0;
+        other.capacity_bytes = 0;
+    }
+
+    priv fn resolve_source(data: *const u8, length: usize) const -> append_source {
+        if (this->capacity_bytes == 0 || data < this->data_pointer as *const u8) {
+            return { offset = 0, aliases_buffer = false, valid = true };
+        }
+        let offset: usize = data - (this->data_pointer as *const u8);
+        if (offset >= this->capacity_bytes) {
+            return { offset = 0, aliases_buffer = false, valid = true };
+        }
+        if (offset > this->size_bytes || length > this->size_bytes - offset) {
+            return { offset = 0, aliases_buffer = false, valid = false };
+        }
+        return { offset = offset, aliases_buffer = true, valid = true };
+    }
+}

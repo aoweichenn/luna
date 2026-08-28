@@ -8,8 +8,9 @@ import luna.runtime as runtime;
 
 
 fn collect_modules(context: *context::Context) -> bool {
-    var unit_index: usize = 0;
-    while (unit_index < context->input.unit_count && context->error == runtime::Error.none) {
+    for (var unit_index: usize = 0;
+        unit_index < context->input.unit_count && context->error == runtime::Error.none;
+        unit_index += 1) {
         let unit: *const context::Unit = context::input_unit(context, unit_index);
         let root: syntax::SyntaxNode = context::node(context, unit_index, unit->tree.root);
         let interface_unit: bool = (root.flags & (syntax::SyntaxFlag.interface_unit as usize)) != 0;
@@ -45,9 +46,65 @@ fn collect_modules(context: *context::Context) -> bool {
                 })) {
             return false;
         }
-        unit_index += 1;
     }
     return context->error == runtime::Error.none;
+}
+
+struct ImportBinding {
+    alias_token: usize;
+    selective_node: usize;
+    valid: bool;
+}
+
+fn find_import_to(context: *context::Context, module_id: usize, target_module: usize) -> usize {
+    let modules: *const context::Module = context->modules.data as *const context::Module;
+    let imports: *const context::Import = context->imports.data as *const context::Import;
+    for (var index: usize = 0; index < modules[module_id].import_count; index += 1) {
+        let import_id: usize = modules[module_id].first_import + index;
+        if (imports[import_id].target_module == target_module) {
+            return import_id;
+        }
+    }
+    return context::no_id();
+}
+
+fn resolve_import_binding(
+    context: *context::Context, unit_index: usize,
+    declaration: syntax::SyntaxNode, target_module: usize) -> ImportBinding {
+    let none: usize = context::no_id();
+    let aliased: bool = (declaration.flags & (syntax::SyntaxFlag.aliased_import as usize)) != 0;
+    let selective: bool = (declaration.flags & (syntax::SyntaxFlag.selective_import as usize)) != 0;
+    if (aliased && selective) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.invalid_selective_import, unit_index, declaration.span,
+            none, context::empty_span(), target_module);
+        return {alias_token = none, selective_node = none, valid = false};
+    }
+    let has_binding_child: bool = declaration.last_child != none;
+    let alias_token: usize = aliased && has_binding_child ?
+        context::node(context, unit_index, declaration.last_child).token_index : none;
+    let selective_node: usize = selective && has_binding_child ? declaration.last_child : none;
+    return {alias_token = alias_token, selective_node = selective_node, valid = true};
+}
+
+fn append_module_import(
+    context: *context::Context, module_id: usize, unit_index: usize, declaration_node: usize,
+    target_module: usize, interface_import: bool, binding: ImportBinding) -> bool {
+    let import_id: usize = names::append_import(
+        context, {
+            owner_module = module_id, source_unit = unit_index, declaration_node = declaration_node,
+            target_module = target_module, interface_import = interface_import, alias_token = binding.alias_token,
+            selective_node = binding.selective_node,
+        });
+    if (import_id == context::no_id()) {
+        return false;
+    }
+    let modules: *context::Module = context->modules.data as *context::Module;
+    if (modules[module_id].import_count == 0) {
+        modules[module_id].first_import = import_id;
+    }
+    modules[module_id].import_count += 1;
+    return true;
 }
 
 fn collect_unit_imports(
@@ -58,8 +115,9 @@ fn collect_unit_imports(
     }
     let unit: *const context::Unit = context::input_unit(context, unit_index);
     let root: syntax::SyntaxNode = context::node(context, unit_index, unit->tree.root);
-    var child: usize = context::node(context, unit_index, root.first_child).next_sibling;
-    while (child != none) {
+    for (var child: usize = context::node(context, unit_index, root.first_child).next_sibling;
+        child != none;
+        child = context::node(context, unit_index, child).next_sibling) {
         let declaration: syntax::SyntaxNode = context::node(context, unit_index, child);
         if (declaration.kind != syntax::SyntaxKind.import_declaration) {
             break;
@@ -74,20 +132,9 @@ fn collect_unit_imports(
                 context, context::DiagnosticKind.self_import, unit_index, declaration.span, none, context::empty_span(),
                 module_id);
         } else {
-            let modules: *context::Module = context->modules.data as
-                    *context::Module;
             let imports: *const context::Import = context->imports.data as
                     *const context::Import;
-            var duplicate: usize = none;
-            var index: usize = 0;
-            while (index < modules[module_id].import_count) {
-                let import_id: usize = modules[module_id].first_import + index;
-                if (imports[import_id].target_module == target) {
-                    duplicate = import_id;
-                    break;
-                }
-                index += 1;
-            }
+            let duplicate: usize = find_import_to(context, module_id, target);
             if (duplicate != none) {
                 context::add_diagnostic(
                     context, context::DiagnosticKind.duplicate_import, unit_index, declaration.span,
@@ -95,62 +142,30 @@ fn collect_unit_imports(
                     context::node(context, imports[duplicate].source_unit, imports[duplicate].declaration_node).span,
                     target);
             } else {
-                let aliased: bool = (declaration.flags & (syntax::SyntaxFlag.aliased_import as usize)) != 0;
-                let selective: bool = (declaration.flags & (syntax::SyntaxFlag.selective_import as usize)) != 0;
-                if (aliased && selective) {
-                    // `import a.b.c as t::{x}` combines two binding modes;
-                    // out of scope, rejected outright.
-                    context::add_diagnostic(
-                        context, context::DiagnosticKind.invalid_selective_import, unit_index, declaration.span, none,
-                        context::empty_span(), target);
-                } else {
-                var alias_token: usize = none;
-                var selective_node: usize = none;
-                if (aliased && declaration.last_child != none) {
-                    // The parser carries the `as` alias as a trailing
-                    // name_expression child after the module-name segments.
-                    alias_token = context::node(context, unit_index, declaration.last_child).token_index;
-                }
-                if (selective && declaration.last_child != none) {
-                    // The parser carries the listed names in a trailing
-                    // selective_import_names container child.
-                    selective_node = declaration.last_child;
-                }
-                let import_id: usize =
-                    names::append_import(
-                        context, {
-                            owner_module = module_id, source_unit = unit_index, declaration_node = child,
-                            target_module = target, interface_import = interface_import, alias_token = alias_token,
-                            selective_node = selective_node,
-                        });
-                if (import_id == none) {
+                let binding: ImportBinding = resolve_import_binding(context, unit_index, declaration, target);
+                if (binding.valid && !append_module_import(
+                        context, module_id, unit_index, child, target, interface_import, binding)) {
                     return false;
-                }
-                let result_modules: *context::Module = context->modules.data as
-                        *context::Module;
-                if (result_modules[module_id].import_count == 0) {
-                    result_modules[module_id].first_import = import_id;
-                }
-                result_modules[module_id].import_count += 1;
                 }
             }
         }
-        child = declaration.next_sibling;
     }
     return context->error == runtime::Error.none;
 }
 
 fn collect_imports(context: *context::Context) -> bool {
-    var module_id: usize = 0;
-    while (module_id < context->module_count && context->error == runtime::Error.none) {
+    for (var module_id: usize = 0;
+        module_id < context->module_count && context->error == runtime::Error.none;
+        module_id += 1) {
         let modules: *const context::Module = context->modules.data as
                 *const context::Module;
         let interface_unit: usize = modules[module_id].interface_unit;
         if (!collect_unit_imports(context, module_id, interface_unit, true)) {
             return false;
         }
-        var implementation_index: usize = 0;
-        while (implementation_index < modules[module_id].implementation_count) {
+        for (var implementation_index: usize = 0;
+            implementation_index < modules[module_id].implementation_count;
+            implementation_index += 1) {
             let implementation_unit: usize =
                 names::module_implementation_unit(context, module_id, implementation_index);
             if (implementation_unit == context::no_id() ||
@@ -158,9 +173,7 @@ fn collect_imports(context: *context::Context) -> bool {
                     context, module_id, implementation_unit, false)) {
                 return false;
             }
-            implementation_index += 1;
         }
-        module_id += 1;
     }
     return validate_import_qualifiers(context);
 }
@@ -204,15 +217,14 @@ fn validate_import_qualifiers(context: *context::Context) -> bool {
             *const context::Module;
     let imports: *const context::Import = context->imports.data as
             *const context::Import;
-    var module_id: usize = 0;
-    while (module_id < context->module_count && context->error == runtime::Error.none) {
+    for (var module_id: usize = 0;
+        module_id < context->module_count && context->error == runtime::Error.none;
+        module_id += 1) {
         let module_record: context::Module = modules[module_id];
-        var right_index: usize = 1;
-        while (right_index < module_record.import_count) {
+        for (var right_index: usize = 1; right_index < module_record.import_count; right_index += 1) {
             let right: context::Import = imports[module_record.first_import + right_index];
-            var left_index: usize = 0;
             var conflict: bool = false;
-            while (left_index < right_index && !conflict) {
+            for (var left_index: usize = 0; left_index < right_index && !conflict; left_index += 1) {
                 let left: context::Import = imports[module_record.first_import + left_index];
                 if (import_qualifiers_equal(context, left, right)) {
                     context::add_diagnostic(
@@ -221,11 +233,8 @@ fn validate_import_qualifiers(context: *context::Context) -> bool {
                         context::node(context, left.source_unit, left.declaration_node).span, right.target_module);
                     conflict = true;
                 }
-                left_index += 1;
             }
-            right_index += 1;
         }
-        module_id += 1;
     }
     return context->error == runtime::Error.none;
 }
@@ -248,8 +257,7 @@ fn visit_imports(context: *context::Context, module_id: usize, depth: usize) -> 
     modules[module_id].visit_state = 1;
     let first_import: usize = modules[module_id].first_import;
     let import_count: usize = modules[module_id].import_count;
-    var index: usize = 0;
-    while (index < import_count) {
+    for (var index: usize = 0; index < import_count; index += 1) {
         let imports: *const context::Import = context->imports.data as
                 *const context::Import;
         let record: context::Import = imports[first_import + index];
@@ -268,7 +276,6 @@ fn visit_imports(context: *context::Context, module_id: usize, depth: usize) -> 
                 record.target_module);
             return false;
         }
-        index += 1;
     }
     modules = context->modules.data as
         *context::Module;
@@ -277,14 +284,12 @@ fn visit_imports(context: *context::Context, module_id: usize, depth: usize) -> 
 }
 
 fn validate_import_graph(context: *context::Context) -> bool {
-    var module_id: usize = 0;
-    while (module_id < context->module_count) {
+    for (var module_id: usize = 0; module_id < context->module_count; module_id += 1) {
         let modules: *const context::Module = context->modules.data as
                 *const context::Module;
         if (modules[module_id].visit_state == 0) {
             visit_imports(context, module_id, 0);
         }
-        module_id += 1;
     }
     return context->error == runtime::Error.none;
 }
@@ -298,157 +303,173 @@ fn symbols_have_same_name(context: *context::Context, left: context::Symbol, rig
 fn previous_selective_name(
     context: *context::Context, import_record: context::Import, container: syntax::SyntaxNode,
     current_child: usize) -> usize {
-    var child: usize = container.first_child;
     let current: syntax::SyntaxNode = context::node(context, import_record.source_unit, current_child);
-    while (child != context::no_id() && child != current_child) {
+    for (var child: usize = container.first_child;
+        child != context::no_id() && child != current_child;
+        child = context::node(context, import_record.source_unit, child).next_sibling) {
         let candidate: syntax::SyntaxNode = context::node(context, import_record.source_unit, child);
         if (context::tokens_equal(
                 context, import_record.source_unit, candidate.token_index, import_record.source_unit,
                 current.token_index)) {
             return child;
         }
-        child = candidate.next_sibling;
     }
     return context::no_id();
 }
 
+fn symbol_is_exported_from(symbol: context::Symbol, module_id: usize) -> bool {
+    let exported: bool = (symbol.flags & (context::SymbolFlag.exported as usize)) != 0;
+    return symbol.module_id == module_id && exported;
+}
+
+fn import_exposes_symbol(context: *context::Context, import_record: context::Import, symbol: context::Symbol) -> bool {
+    return symbol_is_exported_from(symbol, import_record.target_module) &&
+        names::import_binds_symbol(context, import_record, symbol);
+}
+
+fn diagnose_import_collision(
+    context: *context::Context, left: context::Import, right: context::Import, symbol_id: usize) {
+    context::add_diagnostic(
+        context, context::DiagnosticKind.ambiguous_import, right.source_unit,
+        context::node(context, right.source_unit, right.declaration_node).span, left.source_unit,
+        context::node(context, left.source_unit, left.declaration_node).span, symbol_id);
+}
+
+fn validate_selective_import_pair(
+    context: *context::Context, left: context::Import, right: context::Import, symbols: *const context::Symbol) {
+    let none: usize = context::no_id();
+    if (left.selective_node == none || right.selective_node == none) {
+        return;
+    }
+    for (var left_symbol_id: usize = 0; left_symbol_id < context->symbol_count; left_symbol_id += 1) {
+        let left_symbol: context::Symbol = symbols[left_symbol_id];
+        if (!import_exposes_symbol(context, left, left_symbol)) {
+            continue;
+        }
+        for (var right_symbol_id: usize = 0; right_symbol_id < context->symbol_count; right_symbol_id += 1) {
+            let right_symbol: context::Symbol = symbols[right_symbol_id];
+            let right_is_exposed: bool = import_exposes_symbol(context, right, right_symbol);
+            let names_match: bool = symbols_have_same_name(context, left_symbol, right_symbol);
+            if (right_is_exposed && names_match) {
+                diagnose_import_collision(context, left, right, right_symbol_id);
+            }
+        }
+    }
+}
+
+fn validate_import_collisions(
+    context: *context::Context, module_record: context::Module,
+    imports: *const context::Import, symbols: *const context::Symbol) {
+    for (var left_index: usize = 0; left_index < module_record.import_count; left_index += 1) {
+        let left: context::Import = imports[module_record.first_import + left_index];
+        for (var right_index: usize = left_index + 1; right_index < module_record.import_count; right_index += 1) {
+            let right: context::Import = imports[module_record.first_import + right_index];
+            validate_selective_import_pair(context, left, right, symbols);
+        }
+    }
+}
+
+fn local_symbol_is_visible(symbol: context::Symbol, module_id: usize) -> bool {
+    return symbol.module_id == module_id && symbol.kind != context::SymbolKind.enum_member;
+}
+
+fn diagnose_local_import_collision(
+    context: *context::Context, local: context::Symbol, imported: context::Symbol, imported_id: usize) {
+    context::add_diagnostic(
+        context, context::DiagnosticKind.duplicate_name, local.declaration_unit,
+        context::token(context, local.declaration_unit, local.name_token).span, imported.declaration_unit,
+        context::token(context, imported.declaration_unit, imported.name_token).span, imported_id);
+}
+
+fn validate_local_import_collisions(
+    context: *context::Context, module_id: usize, module_record: context::Module,
+    imports: *const context::Import, symbols: *const context::Symbol) {
+    for (var local_id: usize = 0; local_id < context->symbol_count; local_id += 1) {
+        let local: context::Symbol = symbols[local_id];
+        if (!local_symbol_is_visible(local, module_id)) {
+            continue;
+        }
+        for (var import_index: usize = 0; import_index < module_record.import_count; import_index += 1) {
+            let import_record: context::Import = imports[module_record.first_import + import_index];
+            if (import_record.selective_node == context::no_id()) {
+                continue;
+            }
+            for (var imported_id: usize = 0; imported_id < context->symbol_count; imported_id += 1) {
+                let imported: context::Symbol = symbols[imported_id];
+                let imported_is_exposed: bool = import_exposes_symbol(context, import_record, imported);
+                let names_match: bool = symbols_have_same_name(context, local, imported);
+                if (imported_is_exposed && names_match) {
+                    diagnose_local_import_collision(context, local, imported, imported_id);
+                }
+            }
+        }
+    }
+}
+
+fn selective_name_is_exported(
+    context: *context::Context, import_record: context::Import,
+    name: syntax::SyntaxNode, symbols: *const context::Symbol) -> bool {
+    for (var symbol_id: usize = 0; symbol_id < context->symbol_count; symbol_id += 1) {
+        let symbol: context::Symbol = symbols[symbol_id];
+        if (!symbol_is_exported_from(symbol, import_record.target_module)) {
+            continue;
+        }
+        if (context::tokens_equal(
+                context, import_record.source_unit, name.token_index, symbol.declaration_unit, symbol.name_token)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn validate_selective_import(
+    context: *context::Context, import_record: context::Import, symbols: *const context::Symbol) {
+    if (import_record.selective_node == context::no_id()) {
+        return;
+    }
+    let container: syntax::SyntaxNode = context::node(context, import_record.source_unit, import_record.selective_node);
+    if (container.child_count == 0) {
+        context::add_diagnostic(
+            context, context::DiagnosticKind.empty_selective_import, import_record.source_unit,
+            context::node(context, import_record.source_unit, import_record.declaration_node).span,
+            context::no_id(), context::empty_span(), 0);
+    }
+    for (var child: usize = container.first_child;
+        child != context::no_id();
+        child = context::node(context, import_record.source_unit, child).next_sibling) {
+        let name: syntax::SyntaxNode = context::node(context, import_record.source_unit, child);
+        let duplicate: usize = previous_selective_name(context, import_record, container, child);
+        if (duplicate != context::no_id()) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.duplicate_selective_import_name, import_record.source_unit,
+                name.span, import_record.source_unit,
+                context::node(context, import_record.source_unit, duplicate).span, name.token_index);
+        }
+        if (!selective_name_is_exported(context, import_record, name, symbols)) {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.unknown_selective_import, import_record.source_unit,
+                name.span, context::no_id(), context::empty_span(), name.token_index);
+        }
+    }
+}
+
+fn validate_selective_imports(
+    context: *context::Context, module_record: context::Module,
+    imports: *const context::Import, symbols: *const context::Symbol) {
+    for (var index: usize = 0; index < module_record.import_count; index += 1) {
+        validate_selective_import(context, imports[module_record.first_import + index], symbols);
+    }
+}
+
 fn validate_imported_names(context: *context::Context) -> bool {
-    let modules: *const context::Module = context->modules.data as
-            *const context::Module;
-    let imports: *const context::Import = context->imports.data as
-            *const context::Import;
-    let symbols: *const context::Symbol = context->symbols.data as
-            *const context::Symbol;
-    var module_id: usize = 0;
-    while (module_id < context->module_count) {
+    let modules: *const context::Module = context->modules.data as *const context::Module;
+    let imports: *const context::Import = context->imports.data as *const context::Import;
+    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    for (var module_id: usize = 0; module_id < context->module_count; module_id += 1) {
         let module_record: context::Module = modules[module_id];
-        var left_import_index: usize = 0;
-        while (left_import_index < module_record.import_count) {
-            let left_import: context::Import = imports[ module_record.first_import + left_import_index];
-            var right_import_index: usize = left_import_index + 1;
-            while (right_import_index < module_record.import_count) {
-                let right_import: context::Import = imports[ module_record.first_import + right_import_index];
-                if (left_import.selective_node != context::no_id() && right_import.selective_node != context::no_id()) {
-                    var left_symbol_id: usize = 0;
-                    while (left_symbol_id < context->symbol_count) {
-                        let left_symbol: context::Symbol = symbols[left_symbol_id];
-                        if (left_symbol.module_id == left_import.target_module && (left_symbol.flags &
-                                (context::SymbolFlag.exported as usize)) != 0 &&
-                            names::import_binds_symbol(
-                                context, left_import, left_symbol)) {
-                            var right_symbol_id: usize = 0;
-                            while (right_symbol_id < context->symbol_count) {
-                                let right_symbol: context::Symbol = symbols[right_symbol_id];
-                                if (right_symbol.module_id == right_import.target_module && (right_symbol.flags &
-                                        (context::SymbolFlag.exported as usize)) != 0 &&
-                                    names::import_binds_symbol(context, right_import, right_symbol) &&
-                                    symbols_have_same_name(
-                                        context, left_symbol, right_symbol)) {
-                                    context::add_diagnostic(
-                                        context, context::DiagnosticKind.ambiguous_import, right_import.source_unit,
-                                        context::node(
-                                            context, right_import.source_unit, right_import.declaration_node).span,
-                                        left_import.source_unit,
-                                        context::node(
-                                            context, left_import.source_unit, left_import.declaration_node).span,
-                                        right_symbol_id);
-                                }
-                                right_symbol_id += 1;
-                            }
-                        }
-                        left_symbol_id += 1;
-                    }
-                }
-                right_import_index += 1;
-            }
-            left_import_index += 1;
-        }
-
-        var local_symbol_id: usize = 0;
-        while (local_symbol_id < context->symbol_count) {
-            let local_symbol: context::Symbol = symbols[local_symbol_id];
-            if (local_symbol.module_id == module_id && local_symbol.kind != context::SymbolKind.enum_member) {
-                var import_index: usize = 0;
-                while (import_index < module_record.import_count) {
-                    let import_record: context::Import = imports[ module_record.first_import + import_index];
-                    if (import_record.selective_node != context::no_id()) {
-                        var imported_symbol_id: usize = 0;
-                        while (imported_symbol_id < context->symbol_count) {
-                            let imported_symbol: context::Symbol = symbols[imported_symbol_id];
-                            if (imported_symbol.module_id == import_record.target_module && (imported_symbol.flags &
-                                    (context::SymbolFlag.exported as usize)) != 0 &&
-                                names::import_binds_symbol(context, import_record, imported_symbol) &&
-                                symbols_have_same_name(
-                                    context, local_symbol, imported_symbol)) {
-                                context::add_diagnostic(
-                                    context, context::DiagnosticKind.duplicate_name, local_symbol.declaration_unit,
-                                    context::token(context, local_symbol.declaration_unit,
-                                        local_symbol.name_token).span, imported_symbol.declaration_unit,
-                                    context::token(
-                                        context, imported_symbol.declaration_unit, imported_symbol.name_token).span,
-                                    imported_symbol_id);
-                            }
-                            imported_symbol_id += 1;
-                        }
-                    }
-                    import_index += 1;
-                }
-            }
-            local_symbol_id += 1;
-        }
-
-        // Every name listed by a selective import must be exported by the
-        // target module; an empty `::{}` list is diagnosed here too.
-        var selective_import_index: usize = 0;
-        while (selective_import_index < module_record.import_count) {
-            let selective_import: context::Import = imports[ module_record.first_import + selective_import_index];
-            if (selective_import.selective_node != context::no_id()) {
-                let container: syntax::SyntaxNode =
-                    context::node(context, selective_import.source_unit, selective_import.selective_node);
-                if (container.child_count == 0) {
-                    context::add_diagnostic(
-                        context, context::DiagnosticKind.empty_selective_import, selective_import.source_unit,
-                        context::node(context, selective_import.source_unit, selective_import.declaration_node).span,
-                        context::no_id(), context::empty_span(), 0);
-                }
-                var name_child: usize = container.first_child;
-                while (name_child != context::no_id()) {
-                    let name_node: syntax::SyntaxNode =
-                        context::node(context, selective_import.source_unit, name_child);
-                    let duplicate_name: usize =
-                        previous_selective_name(context, selective_import, container, name_child);
-                    if (duplicate_name != context::no_id()) {
-                        context::add_diagnostic(
-                            context, context::DiagnosticKind.duplicate_selective_import_name,
-                            selective_import.source_unit, name_node.span, selective_import.source_unit,
-                            context::node(context, selective_import.source_unit, duplicate_name).span,
-                            name_node.token_index);
-                    }
-                    var exported_found: bool = false;
-                    var target_symbol_id: usize = 0;
-                    while (target_symbol_id < context->symbol_count) {
-                        let target_symbol: context::Symbol = symbols[target_symbol_id];
-                        if (target_symbol.module_id == selective_import.target_module && (target_symbol.flags &
-                                (context::SymbolFlag.exported as usize)) != 0 &&
-                            context::tokens_equal(
-                                context, selective_import.source_unit, name_node.token_index, target_symbol
-                                    .declaration_unit, target_symbol.name_token)) {
-                            exported_found = true;
-                            break;
-                        }
-                        target_symbol_id += 1;
-                    }
-                    if (!exported_found) {
-                        context::add_diagnostic(
-                            context, context::DiagnosticKind.unknown_selective_import, selective_import.source_unit,
-                            name_node.span, context::no_id(), context::empty_span(), name_node.token_index);
-                    }
-                    name_child = name_node.next_sibling;
-                }
-            }
-            selective_import_index += 1;
-        }
-        module_id += 1;
+        validate_import_collisions(context, module_record, imports, symbols);
+        validate_local_import_collisions(context, module_id, module_record, imports, symbols);
+        validate_selective_imports(context, module_record, imports, symbols);
     }
     return context->error == runtime::Error.none;
 }
@@ -472,15 +493,13 @@ fn mark_reachable(context: *context::Context, module_id: usize, depth: usize) ->
     modules[module_id].reachable = true;
     let first_import: usize = modules[module_id].first_import;
     let import_count: usize = modules[module_id].import_count;
-    var index: usize = 0;
-    while (index < import_count) {
+    for (var index: usize = 0; index < import_count; index += 1) {
         let imports: *const context::Import = context->imports.data as
                 *const context::Import;
         if (!mark_reachable(
             context, imports[first_import + index].target_module, depth + 1)) {
             return false;
         }
-        index += 1;
     }
     return true;
 }
@@ -495,15 +514,13 @@ fn validate_reachability(context: *context::Context, root_module: usize) -> bool
     }
     let modules: *const context::Module = context->modules.data as
             *const context::Module;
-    var module_id: usize = 0;
-    while (module_id < context->module_count) {
+    for (var module_id: usize = 0; module_id < context->module_count; module_id += 1) {
         if (!modules[module_id].reachable) {
             context::add_diagnostic(
                 context, context::DiagnosticKind.unreachable_module, modules[module_id].name_unit,
                 context::node(context, modules[module_id].name_unit, modules[module_id].name_node).span,
                 context::no_id(), context::empty_span(), module_id);
         }
-        module_id += 1;
     }
     return true;
 }

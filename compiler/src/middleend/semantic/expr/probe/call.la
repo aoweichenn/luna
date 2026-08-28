@@ -481,6 +481,26 @@ enum BindingRank: usize {
     exact = 0, qualified = 1, temporary = 2, value = 3, no_match = 18446744073709551615,
 }
 
+fn receiver_binding_rank(required: callable::ReceiverKind, actual: category::Category) -> usize {
+    if (!receiver_is_compatible(required, actual)) {
+        return BindingRank.no_match as usize;
+    }
+    switch (required) {
+    case callable::ReceiverKind.writable, callable::ReceiverKind.writable_volatile {
+        return BindingRank.exact as usize;
+    }
+    case callable::ReceiverKind.read_only, callable::ReceiverKind.read_only_volatile {
+        if (category::is_expiring(actual)) {
+            return BindingRank.temporary as usize;
+        }
+        return category::is_writable(actual) ? BindingRank.qualified as usize : BindingRank.exact as usize;
+    }
+    default {
+        return BindingRank.exact as usize;
+    }
+    }
+}
+
 struct CandidateMatch {
     status: Status;
     rank: usize;
@@ -524,7 +544,8 @@ fn candidate_call_status(
     let callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
     var child: usize = callee.next_sibling;
     var candidate_status: Status = Status.compatible;
-    var candidate_rank: usize = 0;
+    var candidate_rank: usize = callable::has_receiver(function.identity) ?
+        receiver_binding_rank(function.identity.receiver, target.receiver_category) : BindingRank.exact as usize;
     for (var argument_index: usize = 0; argument_index < argument_count; argument_index += 1) {
         let variadic_extra: bool = argument_index >= parameter_count;
         let expected_type: usize = variadic_extra ? context::no_id() :
@@ -1038,6 +1059,12 @@ fn probe_intrinsic(context: *context::Context, node: syntax::SyntaxNode, expecte
     }
     if (entry.operand_class == intrinsics::IntrinsicOperandClass.rtti) {
         return probe_rtti_intrinsic(context, node, entry, expected_type);
+    }
+    if (entry.operand_class == intrinsics::IntrinsicOperandClass.type_property) {
+        let argument: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+        let type_id: usize = types::resolve_type_expression(context, context->current_unit, argument);
+        return type_id == context::no_id() ? invalid_result() :
+            type_result(expected_type, type_info::BuiltinType.boolean as usize);
     }
     let first_expected: usize = entry.operand_class == intrinsics::IntrinsicOperandClass.integer_overflow ?
         context::no_id() : expected_type;

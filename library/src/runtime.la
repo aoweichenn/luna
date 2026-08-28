@@ -137,7 +137,7 @@ fn standard_error() -> File {
     };
 }
 
-fn file_open_read(path: *const u8) -> FileResult {
+fn file_open_with_flags(path: *const u8, flags: usize, mode: usize) -> FileResult {
     if (path == null) {
         return {
             file = invalid_file(), error = Error.bad_address,
@@ -146,34 +146,22 @@ fn file_open_read(path: *const u8) -> FileResult {
 
     let result: isize = syscall::call4(
         LinuxSystemCall.open_at as usize, LinuxDescriptor.current_directory as isize as usize, path as usize,
-        LinuxOpenFlags.read_only_close_on_exec as usize, 0);
+        flags, mode);
     return file_result_from_raw(result);
+}
+
+fn file_open_read(path: *const u8) -> FileResult {
+    return file_open_with_flags(path, LinuxOpenFlags.read_only_close_on_exec as usize, 0);
 }
 
 fn file_create(path: *const u8) -> FileResult {
-    if (path == null) {
-        return {
-            file = invalid_file(), error = Error.bad_address,
-        };
-    }
-
-    let result: isize = syscall::call4(
-        LinuxSystemCall.open_at as usize, LinuxDescriptor.current_directory as isize as usize, path as usize,
-        LinuxOpenFlags.create_write_truncate_close_on_exec as usize, LinuxFileMode.readable_writable as usize);
-    return file_result_from_raw(result);
+    return file_open_with_flags(
+        path, LinuxOpenFlags.create_write_truncate_close_on_exec as usize, LinuxFileMode.readable_writable as usize);
 }
 
 fn file_create_exclusive(path: *const u8) -> FileResult {
-    if (path == null) {
-        return {
-            file = invalid_file(), error = Error.bad_address,
-        };
-    }
-
-    let result: isize = syscall::call4(
-        LinuxSystemCall.open_at as usize, LinuxDescriptor.current_directory as isize as usize, path as usize,
-        LinuxOpenFlags.create_write_exclusive_close_on_exec as usize, LinuxFileMode.readable_writable as usize);
-    return file_result_from_raw(result);
+    return file_open_with_flags(
+        path, LinuxOpenFlags.create_write_exclusive_close_on_exec as usize, LinuxFileMode.readable_writable as usize);
 }
 
 fn file_make_executable(file: File) -> Error {
@@ -215,7 +203,7 @@ fn file_close(file: File) -> Error {
     return error_from_raw(syscall::call1(LinuxSystemCall.close as usize, file.descriptor as usize));
 }
 
-fn file_read(file: File, buffer: *u8, length: usize) -> IoResult {
+fn file_transfer(file: File, buffer_address: usize, length: usize, operation: LinuxSystemCall) -> IoResult {
     if (file.descriptor < 0) {
         return {
             count = 0, error = Error.bad_descriptor,
@@ -226,35 +214,22 @@ fn file_read(file: File, buffer: *u8, length: usize) -> IoResult {
             count = 0, error = Error.none,
         };
     }
-    if (buffer == null) {
+    if (buffer_address == 0) {
         return {
             count = 0, error = Error.bad_address,
         };
     }
 
     return io_result_from_raw(
-        syscall::call3(LinuxSystemCall.read as usize, file.descriptor as usize, buffer as usize, length), length);
+        syscall::call3(operation as usize, file.descriptor as usize, buffer_address, length), length);
+}
+
+fn file_read(file: File, buffer: *u8, length: usize) -> IoResult {
+    return file_transfer(file, buffer as usize, length, LinuxSystemCall.read);
 }
 
 fn file_write(file: File, buffer: *const u8, length: usize) -> IoResult {
-    if (file.descriptor < 0) {
-        return {
-            count = 0, error = Error.bad_descriptor,
-        };
-    }
-    if (length == 0) {
-        return {
-            count = 0, error = Error.none,
-        };
-    }
-    if (buffer == null) {
-        return {
-            count = 0, error = Error.bad_address,
-        };
-    }
-
-    return io_result_from_raw(
-        syscall::call3(LinuxSystemCall.write as usize, file.descriptor as usize, buffer as usize, length), length);
+    return file_transfer(file, buffer as usize, length, LinuxSystemCall.write);
 }
 
 fn path_replace(source: *const u8, destination: *const u8) -> Error {
@@ -306,4 +281,3 @@ fn memory_unmap(memory: Memory) -> Error {
     return error_from_raw(
         syscall::call2(LinuxSystemCall.unmap_memory as usize, memory.address as usize, memory.length));
 }
-

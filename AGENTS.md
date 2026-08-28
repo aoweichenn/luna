@@ -54,6 +54,41 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
 
 ## Style
 
+- `docs/modernization.md` is the mandatory architecture contract for every
+  new or rewritten library, compiler, backend and driver source. Review it
+  before changing subsystem structure. A migration batch must move toward
+  that design and must not introduce new historical bootstrap patterns.
+- Prefer object-oriented Luna for stateful abstractions. Lexers, parsers,
+  semantic sessions, builders, code generators, assemblers, readers/writers,
+  linkers, command services and resource owners are classes with private state
+  and methods. Do not organize them as a state struct passed through a family
+  of free procedures.
+- Use `struct` only for passive values, syntax/IR/ABI records and transparent
+  views. Types with invariants, behavior or owned resources are classes.
+  Resource classes use explicit `init`, move construction where transfer is
+  required, and `deinit`.
+- Use generics for reusable results, typed views, containers and algorithms.
+  Do not maintain multiple type-specific ownership/container implementations
+  when one generic abstraction expresses the contract.
+- Every subsystem plan must review current Luna classes, generic
+  classes/functions, composition, access control, constructors/destructors,
+  copy/move special members, overloads/defaults, operators, bound methods,
+  friends, virtual dispatch and RTTI. Adopt every feature that naturally
+  strengthens that boundary and record why the others do not apply. A rewrite
+  that only modernizes loops while retaining a suitable state-pointer/free-
+  function design is not accepted.
+- Standard-library public APIs follow the C++ standard-library naming model:
+  lowercase module/type/function names such as `luna.std.vector`,
+  `vector<Value>`, `span<Value>`, `expected<Value, Error>`, `move`,
+  `push_back`, `size`, `capacity`, `data`, `reserve`, `clear`, `value` and
+  `error`. Match C++ spelling and
+  semantics whenever Luna supports them; document intentional differences.
+- Compiler and toolchain domain classes follow LLVM/Clang-style cohesive
+  domain naming rather than mechanically copying std lowercase names. Module
+  names still remain short and map to meaningful C++ subsystem concepts.
+- Apply Strategy, State, Builder, Facade and RAII only for real variation,
+  phase or lifetime boundaries. Pattern-shaped indirection without a concrete
+  responsibility is rejected.
 - Prefer the highest-level, most expressive feature accepted by the current
   Luna toolchain. Use `for` for bounded/indexed traversal, `switch` for kind
   dispatch, and stateful abstractions for error propagation; do not simulate
@@ -72,6 +107,24 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
   boundaries. Additional `.la` files may implement the same module and share
   its private declarations/imports; use a new submodule only for a real
   dependency boundary. Register every implementation path in `LIBRARIES`.
+- A facade should normally stay below 250 lines and an implementation unit
+  should normally stay in the 150-800 line range. Split at coherent class
+  method families or passes, not arbitrary line counts. Empty/one-line
+  implementation units and `common`, `misc`, `helpers`, `utils`, `api` or
+  `model` dumping-ground files are forbidden.
+- Directories follow the same rule in every tree: they represent either a real
+  module or multiple cohesive implementation families of one substantial
+  module. Collapse repeated single-child directories; do not create a
+  directory for one trivial file.
+- Module names are short dependency names, not file paths. The modernization
+  target uses `luna.compiler.*`; the historical `luna.bootstrap.*` prefix is
+  being removed and must not appear in new modules. `api`, `model`, `state`,
+  `lookup`, `visibility`, `support`, `value` and `call` are implementation-file
+  concerns unless an import-graph proof shows an independent public boundary.
+- Prefer same-module implementation splits over submodules. Before retaining
+  or adding a submodule, prove that it has a coherent contract, has a consumer
+  independent of the parent facade, clarifies an acyclic import boundary, and
+  is not merely shortening a file.
 - A submodule may never import its parent facade (imports are acyclic);
   when a pass must recurse through the facade, hand the entry point
   down as a function pointer (see the `Lowerer` type in

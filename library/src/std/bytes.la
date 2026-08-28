@@ -110,6 +110,28 @@ fn push(buffer: Buffer, value: u8) -> BufferResult {
     return result(updated, runtime::Error.none);
 }
 
+struct AppendSource {
+    offset: usize;
+    aliases_buffer: bool;
+    valid: bool;
+}
+
+fn resolve_append_source(buffer: Buffer, data: *const u8, length: usize) -> AppendSource {
+    let source_address: *const u8 = data;
+    let buffer_address: *const u8 = buffer.data as *const u8;
+    if (buffer.capacity == 0 || source_address < buffer_address) {
+        return {offset = 0, aliases_buffer = false, valid = true};
+    }
+    let source_offset: usize = source_address - buffer_address;
+    if (source_offset >= buffer.capacity) {
+        return {offset = 0, aliases_buffer = false, valid = true};
+    }
+    if (source_offset > buffer.length || length > buffer.length - source_offset) {
+        return {offset = 0, aliases_buffer = false, valid = false};
+    }
+    return {offset = source_offset, aliases_buffer = true, valid = true};
+}
+
 fn append(buffer: Buffer, data: *const u8, length: usize) -> BufferResult {
     if (!is_valid(buffer)) {
         return result(buffer, runtime::Error.invalid_argument);
@@ -125,18 +147,9 @@ fn append(buffer: Buffer, data: *const u8, length: usize) -> BufferResult {
         return result(buffer, runtime::Error.out_of_memory);
     }
 
-    let source_address: *const u8 = data;
-    let buffer_address: *const u8 = buffer.data as *const u8;
-    var aliases_buffer: bool = false;
-    var source_offset: usize = 0;
-    if (buffer.capacity != 0 && source_address >= buffer_address) {
-        source_offset = source_address - buffer_address;
-        if (source_offset < buffer.capacity) {
-            if (source_offset > buffer.length || length > buffer.length - source_offset) {
-                return result(buffer, runtime::Error.invalid_argument);
-            }
-            aliases_buffer = true;
-        }
+    let source: AppendSource = resolve_append_source(buffer, data, length);
+    if (!source.valid) {
+        return result(buffer, runtime::Error.invalid_argument);
     }
 
     let old_length: usize = buffer.length;
@@ -145,7 +158,7 @@ fn append(buffer: Buffer, data: *const u8, length: usize) -> BufferResult {
         return reserved;
     }
     var updated: Buffer = reserved.buffer;
-    let actual_source: *const u8 = aliases_buffer ? &updated.data[source_offset] as *const u8 : data;
+    let actual_source: *const u8 = source.aliases_buffer ? &updated.data[source.offset] as *const u8 : data;
     let move_error: runtime::Error = memory::move(&updated.data[old_length], actual_source, length);
     if (move_error != runtime::Error.none) {
         return result(updated, move_error);

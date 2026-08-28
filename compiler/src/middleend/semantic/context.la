@@ -663,6 +663,95 @@ fn type_record(context: *Context, type_id: usize) -> type_info::Record {
     return result.record;
 }
 
+fn function_has_special_parameter(context: *Context, function: Function, owner_type: usize) -> bool {
+    if (function.parameter_count != 1) {
+        return false;
+    }
+    let parameters: *const Parameter = context->parameters.data as *const Parameter;
+    let parameter: type_info::Record = type_record(context, parameters[function.first_parameter].type_id);
+    if (parameter.kind != type_info::Kind.reference || parameter.element_type != owner_type) {
+        return false;
+    }
+    let read_only: bool = (parameter.flags & (type_info::Flag.read_only as usize)) != 0;
+    let rvalue: bool = (parameter.flags & (type_info::Flag.rvalue_reference as usize)) != 0;
+    let copy_parameter: bool = read_only && !rvalue;
+    let move_parameter: bool = !read_only && rvalue;
+    return copy_parameter || move_parameter;
+}
+
+fn function_is_special_member(context: *Context, function: Function, owner_type: usize) -> bool {
+    if (function.identity.owner_type != owner_type) {
+        return false;
+    }
+    if (function.identity.kind == callable::Kind.destructor) {
+        return true;
+    }
+    let constructor: bool = function.identity.kind == callable::Kind.constructor;
+    let assignment: bool = function.identity.kind == callable::Kind.operator_method &&
+        function.return_type == type_info::BuiltinType.type_void as usize;
+    let lifecycle_operation: bool = constructor || assignment;
+    return lifecycle_operation && function_has_special_parameter(context, function, owner_type);
+}
+
+fn type_declares_special_member(context: *Context, owner_type: usize) -> bool {
+    let functions: *const Function = context->functions.data as *const Function;
+    for (var function_id: usize = 0; function_id < context->function_count; function_id += 1) {
+        if (function_is_special_member(context, functions[function_id], owner_type)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn type_is_trivially_copyable_at(context: *Context, type_id: usize, depth: usize) -> bool {
+    if (type_id >= context->types.type_count || depth >= Limit.maximum_type_depth as usize) {
+        return false;
+    }
+    let record: type_info::Record = type_record(context, type_id);
+    if (record.kind == type_info::Kind.array) {
+        return type_is_trivially_copyable_at(context, record.element_type, depth + 1);
+    }
+    if (!type_info::is_record(record.kind)) {
+        return true;
+    }
+    if (record.kind == type_info::Kind.class_type && type_declares_special_member(context, type_id)) {
+        return false;
+    }
+    let has_base: bool = record.base_type != no_id();
+    if (has_base && !type_is_trivially_copyable_at(context, record.base_type, depth + 1)) {
+        return false;
+    }
+    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    for (var index: usize = 0; index < record.field_count; index += 1) {
+        let field_type: usize = fields[record.first_field + index].type_id;
+        if (!type_is_trivially_copyable_at(context, field_type, depth + 1)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn type_is_trivially_copyable(context: *Context, type_id: usize) -> bool {
+    return type_is_trivially_copyable_at(context, type_id, 0);
+}
+
+fn type_is_trivially_relocatable(context: *Context, type_id: usize) -> bool {
+    if (type_id >= context->types.type_count) {
+        return false;
+    }
+    let record: type_info::Record = type_record(context, type_id);
+    let kind_is_invalid: bool = record.kind == type_info::Kind.invalid || record.kind == type_info::Kind.type_void;
+    let storage_is_invalid: bool = record.kind == type_info::Kind.reference || record.size_bytes == 0;
+    let unsupported_flags: usize = (type_info::Flag.flexible as usize) | (type_info::Flag.header as usize);
+    let layout_is_unsupported: bool = (record.flags & unsupported_flags) != 0;
+    let complete: bool = (record.flags & (type_info::Flag.complete as usize)) != 0;
+    let type_is_invalid: bool = kind_is_invalid || storage_is_invalid;
+    if (type_is_invalid || layout_is_unsupported) {
+        return false;
+    }
+    return complete && type_is_trivially_copyable(context, type_id);
+}
+
 fn token_equals_bytes(
     context: *Context, unit_index: usize, token_index: usize, bytes: *const u8, length: usize) -> bool {
     if (bytes == null) {
