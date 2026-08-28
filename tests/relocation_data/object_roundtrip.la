@@ -4,6 +4,7 @@ import luna.compiler.x86.assembler as assembler;
 import luna.compiler.x86.elf as elf;
 import luna.compiler.x86.object as object;
 import luna.runtime;
+import luna.std.binary as binary;
 import luna.std.bytes as bytes;
 import luna.std.string_view as string_views;
 
@@ -49,6 +50,78 @@ fn relocation_table_is_valid(value: object::Object) -> bool {
 
 fn first_error(current: runtime::Error, next: runtime::Error) -> runtime::Error {
     return current == runtime::Error.none ? next : current;
+}
+
+fn load_is_rejected(data: *const u8, length: usize) -> bool {
+    let loaded: object::Result = elf::load(data, length);
+    let rejected: bool = loaded.error != runtime::Error.none;
+    let release_error: runtime::Error = object::release(loaded.object);
+    return rejected && release_error == runtime::Error.none;
+}
+
+fn mutation_is_rejected(source: bytes::Buffer, offset: usize, value: u8) -> bool {
+    if (offset >= source.length) {
+        return false;
+    }
+    let copied: bytes::BufferResult = bytes::from(source.data as *const u8, source.length);
+    if (copied.error != runtime::Error.none) {
+        return false;
+    }
+    copied.buffer.data[offset] = value;
+    let rejected: bool = load_is_rejected(copied.buffer.data as *const u8, copied.buffer.length);
+    let release_error: runtime::Error = bytes::release(copied.buffer);
+    return rejected && release_error == runtime::Error.none;
+}
+
+fn section_header(source: bytes::Buffer, expected_kind: u32) -> usize {
+    var table_offset: u64 = 0;
+    var section_count: u16 = 0;
+    if (!binary::read_u64(source.data as *const u8, source.length, 40, &table_offset) ||
+        !binary::read_u16(source.data as *const u8, source.length, 60, &section_count)) {
+        return source.length;
+    }
+    for (var index: usize = 0; index < section_count as usize; index += 1) {
+        let header: usize = table_offset as usize + index * 64;
+        var kind: u32 = 0;
+        if (!binary::read_u32(source.data as *const u8, source.length, header + 4, &kind)) {
+            return source.length;
+        }
+        if (kind == expected_kind) {
+            return header;
+        }
+    }
+    return source.length;
+}
+
+fn malformed_elf_is_rejected(source: bytes::Buffer) -> bool {
+    if (source.length < 64) {
+        return false;
+    }
+    for (var length: usize = 0; length < 64; length += 1) {
+        if (!load_is_rejected(source.data as *const u8, length)) {
+            return false;
+        }
+    }
+    if (!mutation_is_rejected(source, 0, 0) || !mutation_is_rejected(source, 47, 255)) {
+        return false;
+    }
+    var section_offset: u64 = 0;
+    if (!binary::read_u64(source.data as *const u8, source.length, 40, &section_offset)) {
+        return false;
+    }
+    if (!mutation_is_rejected(source, section_offset as usize + 4, 1)) {
+        return false;
+    }
+    let symtab_header: usize = section_header(source, 2);
+    if (!mutation_is_rejected(source, symtab_header + 40, 0)) {
+        return false;
+    }
+    let rela_header: usize = section_header(source, 4);
+    var relocation_offset: u64 = 0;
+    if (!binary::read_u64(source.data as *const u8, source.length, rela_header + 24, &relocation_offset)) {
+        return false;
+    }
+    return mutation_is_rejected(source, relocation_offset as usize + 15, 255);
 }
 
 fn numeric_labels_are_valid() -> bool {
@@ -137,6 +210,11 @@ fn main() -> i32 {
     let elf_bytes: bytes::BufferResult = elf::save(assembled.object);
     if (elf_bytes.error != runtime::Error.none) {
         return 6;
+    }
+    if (!malformed_elf_is_rejected(elf_bytes.buffer)) {
+        bytes::release(elf_bytes.buffer);
+        object::release(assembled.object);
+        return 11;
     }
     let elf_object: object::Result = elf::load(elf_bytes.buffer.data as *const u8, elf_bytes.buffer.length);
     if (elf_object.error != runtime::Error.none || !relocation_table_is_valid(elf_object.object)) {

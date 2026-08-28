@@ -470,3 +470,37 @@ unresolved fixups. Three assemblies of the 3,069,988-byte `sem_funcs.s` took
 0.767, 0.774 and 0.762 seconds and produced an object byte-identical to the
 previous assembler. The promoted executable is 4,704,081 bytes with SHA-256
 `001fb90a511648f25d255320ae9761045625832ef4ee8145784d5b1a2c78142a`.
+
+## 2026-08-28: promotion to the object-oriented ELF toolchain
+
+The anchor now contains the stage-fixed `luna` executable from the ELF object
+I/O RAII snapshot accompanying this provenance note. The former Reader and
+Writer state records and free-procedure families are replaced by private
+`ElfReader` and `ElfWriter` operation classes. Constructors establish every
+owned vector, scratch buffer and partial object; `take_result()` transfers a
+completed result; deterministic destruction releases every unfinished path.
+
+Untrusted wire integers are decoded once into closed enums. Section, symbol,
+special section-index and relocation kinds use `switch` in the Reader;
+object sections, symbol kinds, relocation kinds and content sources use
+`switch` in the Writer. Range and resource checks retain short named
+predicates with at most two logical clauses. A sticky writer state replaces
+long chains of conditional field emissions. The implementation also fixes a
+synthetic-symbol-name view that previously could outlive its local array.
+
+Typed `vector<InputSection>`, `vector<OutputSection>` and
+`vector<SymbolMapping>` storage replaces raw byte tables. The domain-specific
+mapping record deliberately prevents a duplicate cross-module
+`vector<usize>` monomorph until the Luna object format supports COMDAT or weak
+ODR merging. Format decoding, Reader, Writer and facade responsibilities stay
+in separate implementation files behind one `luna.compiler.x86.elf`
+interface.
+
+Remote x86-64 verification on `caw` built the complete 75-module graph through
+`stage-transition`, `stage-next` and `stage-fixed` with `verify --fresh` in
+130.58 seconds; every next/fixed assembly, object and executable artifact was
+byte-identical. The final test run passed 443/443 with no skips, including six
+ELF/relocation integration probes and malformed-header, section-table,
+symbol-table and relocation-symbol boundaries. Audit and formatting gates
+were green. The promoted executable is 4,728,657 bytes with SHA-256
+`248fa7666daea68c5e23b0c783ec4c566582327ff2855e4d5897ce6810ab963d`.

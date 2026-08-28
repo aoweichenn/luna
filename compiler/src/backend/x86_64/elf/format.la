@@ -9,7 +9,7 @@ fn pad_to(buffer: *bytes::Buffer, offset: usize) -> bool {
     if (buffer == null || buffer->length > offset) {
         return false;
     }
-    while (buffer->length < offset) {
+    for (var index: usize = buffer->length; index < offset; index += 1) {
         let appended: bytes::BufferResult = bytes::push(*buffer, 0);
         *buffer = appended.buffer;
         if (appended.error != runtime::Error.none) {
@@ -17,4 +17,230 @@ fn pad_to(buffer: *bytes::Buffer, offset: usize) -> bool {
         }
     }
     return true;
+}
+
+// ELF wire 数值是不可信整数；在边界一次性解码封闭集合，后续 Reader 只使用 enum + switch，
+// 不允许任意整数伪装成格式种类。
+impl ElfReader {
+    priv fn read_u16(offset: usize, value: *u16) -> bool {
+        return binary::read_u16(this->input, this->input_size, offset, value);
+    }
+
+    priv fn read_u32(offset: usize, value: *u32) -> bool {
+        return binary::read_u32(this->input, this->input_size, offset, value);
+    }
+
+    priv fn read_u64(offset: usize, value: *u64) -> bool {
+        return binary::read_u64(this->input, this->input_size, offset, value);
+    }
+
+    priv fn decode_section_type(value: u32) -> SectionType {
+        switch (value) {
+        case 0 {
+            return SectionType.none;
+        }
+        case 1 {
+            return SectionType.progbits;
+        }
+        case 2 {
+            return SectionType.symtab;
+        }
+        case 3 {
+            return SectionType.strtab;
+        }
+        case 4 {
+            return SectionType.rela;
+        }
+        case 7 {
+            return SectionType.note;
+        }
+        case 8 {
+            return SectionType.nobits;
+        }
+        case 9 {
+            return SectionType.rel;
+        }
+        default {
+            return SectionType.unsupported;
+        }
+        }
+    }
+
+    priv fn decode_symbol_type(value: usize) -> SymbolType {
+        switch (value) {
+        case 0 {
+            return SymbolType.notype;
+        }
+        case 1 {
+            return SymbolType.object;
+        }
+        case 2 {
+            return SymbolType.function;
+        }
+        case 3 {
+            return SymbolType.section;
+        }
+        case 4 {
+            return SymbolType.file;
+        }
+        case 5 {
+            return SymbolType.common;
+        }
+        case 6 {
+            return SymbolType.tls;
+        }
+        default {
+            return SymbolType.unsupported;
+        }
+        }
+    }
+
+    priv fn decode_relocation_type(value: usize) -> RelocationType {
+        switch (value) {
+        case 1 {
+            return RelocationType.absolute64;
+        }
+        case 2 {
+            return RelocationType.pc32;
+        }
+        case 4 {
+            return RelocationType.plt32;
+        }
+        case 10 {
+            return RelocationType.absolute32;
+        }
+        case 11 {
+            return RelocationType.signed32;
+        }
+        default {
+            return RelocationType.unsupported;
+        }
+        }
+    }
+
+    priv fn decode_section_placement(value: usize) -> SectionPlacement {
+        switch (value) {
+        case 1 {
+            return SectionPlacement.writable;
+        }
+        case 4 {
+            return SectionPlacement.executable;
+        }
+        default {
+            return SectionPlacement.read_only;
+        }
+        }
+    }
+
+    priv fn decode_symbol_section(value: usize) -> SymbolSectionKind {
+        switch (value) {
+        case 0 {
+            return SymbolSectionKind.undefined;
+        }
+        case 65522 {
+            return SymbolSectionKind.common;
+        }
+        default {
+            return value >= (SectionIndex.reserve_low as usize) ?
+                SymbolSectionKind.reserved : SymbolSectionKind.ordinary;
+        }
+        }
+    }
+
+    priv fn parse_header() -> bool {
+        let bytes: *const u8 = this->input;
+        let length: usize = this->input_size;
+        let identity: [7]u8 = { 127, 69, 76, 70, 2, 1, 1 };
+        for (var index: usize = 0; index < 7; index += 1) {
+            if (bytes[index] != identity[index]) {
+                return this->fail(runtime::Error.invalid_argument);
+            }
+        }
+        var elf_type: u16 = 0;
+        var machine: u16 = 0;
+        var version: u32 = 0;
+        var section_offset: u64 = 0;
+        var program_count: u16 = 0;
+        var header_size: u16 = 0;
+        var section_header_size: u16 = 0;
+        var section_count_field: u16 = 0;
+        if (!this->read_u16(16, &elf_type) || !this->read_u16(18, &machine)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!this->read_u32(20, &version) || !this->read_u64(40, &section_offset)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!this->read_u16(52, &header_size) || !this->read_u16(56, &program_count)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!this->read_u16(58, &section_header_size) || !this->read_u16(60, &section_count_field)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (elf_type != 1 || machine != 62) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (version != 1 || program_count != 0) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let header_sizes_are_valid: bool = header_size == (Limit.header_size as usize) as u16 &&
+            section_header_size == (Limit.section_size as usize) as u16;
+        if (!header_sizes_are_valid || section_offset == 0) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let maximum_section_offset: u64 = (length as u64) - (Limit.section_size as usize) as u64;
+        if (section_offset > maximum_section_offset) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        var section_count: usize = section_count_field as usize;
+        if (section_count == 0) {
+            // e_shnum 为零时采用扩展 section 编号，真实数量保存在 section 0 的 sh_size。
+            var extended: u64 = 0;
+            if (!this->read_u64((section_offset as usize) + 32, &extended) || extended == 0) {
+                return this->fail(runtime::Error.invalid_argument);
+            }
+            if (extended > (Limit.maximum_sections as usize) as u64) {
+                return this->fail(runtime::Error.invalid_argument);
+            }
+            section_count = extended as usize;
+        }
+        let table_offset: usize = section_offset as usize;
+        if (section_count > Limit.maximum_sections as usize || section_count >
+            (length - table_offset) / (Limit.section_size as usize)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        for (var index: usize = 0; index < section_count; index += 1) {
+            let base: usize = table_offset + index * (Limit.section_size as usize);
+            var kind: u32 = 0;
+            var flags: u64 = 0;
+            var offset: u64 = 0;
+            var size: u64 = 0;
+            var link: u32 = 0;
+            var info: u32 = 0;
+            var alignment: u64 = 0;
+            var entry_size: u64 = 0;
+            if (!this->read_u32(base + 4, &kind) || !this->read_u64(base + 8, &flags)) {
+                return this->fail(runtime::Error.invalid_argument);
+            }
+            if (!this->read_u64(base + 24, &offset) || !this->read_u64(base + 32, &size)) {
+                return this->fail(runtime::Error.invalid_argument);
+            }
+            if (!this->read_u32(base + 40, &link) || !this->read_u32(base + 44, &info)) {
+                return this->fail(runtime::Error.invalid_argument);
+            }
+            if (!this->read_u64(base + 48, &alignment) || !this->read_u64(base + 56, &entry_size)) {
+                return this->fail(runtime::Error.invalid_argument);
+            }
+            let section: InputSection = {
+                region = object::Section.undefined, region_offset = 0,
+                symbol = Limit.no_symbol as usize, kind = this->decode_section_type(kind), flags = flags as usize,
+                offset = offset as usize, size = size as usize, link = link as usize, info = info as usize,
+                alignment = alignment as usize, entry_size = entry_size as usize,
+            };
+            let append_error: runtime::Error = this->sections.push_back(section);
+            if (append_error != runtime::Error.none) {
+                return this->fail(append_error);
+            }
+        }
+        return true;
+    }
 }
