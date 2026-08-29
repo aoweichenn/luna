@@ -276,6 +276,14 @@ owner imports, preparing both tables for later session absorption.
 The seventh batch makes TypeTable the sole base/vptr authority, removes those
 mirrors from ClassRecord and replaces ClassTable's writable projections with
 focused hierarchy, virtual-slot and runtime-metadata publication methods.
+The eighth batch gives all fixed semantic pass entries one runtime-readiness
+contract and routes them through SemanticSession. Ordinary diagnostics remain
+collectable, while a runtime failure prevents every later pass from mutating
+the transitional Context.
+The ninth batch folds `functions.ir` into the real `functions` module while
+retaining `functions/ir.la` as a cohesive implementation unit. The reverse
+parent import and one interface/object/registry boundary disappear; sema and
+expression probe consume the parent contract directly.
 
 `ir::Module` owns the completed typed CFG, `ir::Builder` owns its append-only
 construction phase, and the private `Verifier` owns whole-module validation

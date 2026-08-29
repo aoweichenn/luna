@@ -32,8 +32,8 @@ or when several Luna sessions are present.
 ## Repository state
 
 - Branch: `main`
-- Base commit: `39a2d87187970be33d4c1cdb3ae7cd34dc23ecaa`
-  (`refactor: modernize semantic metadata ownership`)
+- Base commit: `d58b0165a176d28dc0c1e6fd0822de23919c257a`
+  (`refactor: canonicalize class metadata invariants`)
 - `origin/main` matched that commit when this snapshot was refreshed.
 - The IR modernization and its anchor promotion are committed and pushed.
 - The semantic ownership batches and their anchor promotion are committed and
@@ -44,10 +44,12 @@ or when several Luna sessions are present.
 - The documentation credibility pass, including six `docs/codebase-*.md`
   audit volumes and updates to current/historical documentation, is committed
   and pushed as `e362685c74ba3c0d518814519a21142a1da06eb8`.
-- The canonical class metadata-invariant batch is validated and its caw
-  stage-fixed executable is promoted. Source, docs, tests, handoff and anchor
-  promotion belong to the requested current commit/push; compare HEAD with
-  `origin/main` after recovery to confirm the push completed.
+- The canonical class metadata-invariant batch and anchor promotion are
+  committed and pushed as `d58b0165a176d28dc0c1e6fd0822de23919c257a`.
+- The semantic-pass runtime-readiness and `functions.ir` contraction batches
+  are validated and their combined caw stage-fixed executable is promoted.
+  Source, docs, tests, handoff and anchor promotion belong to the requested
+  current commit/push; compare HEAD with `origin/main` after recovery.
 - `advice.md` is an untracked user-owned file and has not been modified as part
   of the IR or semantic work.
 - Anchor before this work:
@@ -68,6 +70,14 @@ or when several Luna sessions are present.
   `7dcc139c0b50ad7361faa5581fd25ae90b0c4d6f3a87243b5c1f13f6553eccb5`,
   5,179,219 bytes. It is the byte-identical caw stage-fixed artifact from the
   combined ClassTable, GenericTable and passive-record extraction stack.
+- Promoted canonical class metadata anchor:
+  `ef79139adae0cf3cf65efa45a20b0886a670c7f6f9e16015fae6f2918748f629`,
+  5,187,411 bytes. It is the byte-identical caw stage-fixed artifact from the
+  canonical base/vptr and focused ClassTable mutation batch.
+- Promoted semantic pass/functions anchor:
+  `6dda0fc3a0e2e9af2dee0d7522ddf49df24b6b7ba041a80f72b21891f11b74c0`,
+  5,187,411 bytes. It contains the runtime-readiness pass contract and
+  `functions.ir` module contraction.
 
 ## Engineering direction established in this conversation
 
@@ -544,6 +554,95 @@ The verified caw stage-fixed binary is copied into `anchor/luna`,
 the same requested commit/push as the source, docs, test and this handoff.
 Preserve untracked `advice.md`.
 
+## Completed local task: semantic pass runtime-readiness contract
+
+The implementation, focused contract, documentation and remote validation are
+complete locally but not committed:
+
+- all 29 fixed semantic entries share the private
+  `SemanticPass = fn(*Context) -> bool` shape;
+- their top-level `bool` uniformly means runtime readiness; alignment and
+  bit-field entries no longer return semantic invalidity after successfully
+  recording a diagnostic;
+- `SemanticSession::run_pass` invokes a pass only while `Context.error` is
+  `none`, consumes its result and turns an unexplained `false` into
+  `invalid_argument`;
+- the 29 calls remain explicit and ordered in `run()` rather than being hidden
+  in a function table;
+- entry/reachability remains a bound session concern because its parameterized
+  operation can legitimately return `false` after adding a resource-limit
+  diagnostic; the adapter distinguishes diagnostics from unexplained failure;
+- the bit-field helper is now void and its top-level pass uses the same runtime
+  contract as every other entry;
+- touched consteval bounded scans use `for`, every changed condition has at
+  most two logical clauses, and only syntax-chain/non-uniform grouping loops
+  retain `while`;
+- the relocation-data large contract compiles a source with an invalid
+  alignment and a later unknown name, then requires both diagnostics while the
+  SemanticResult runtime error remains `none`;
+- architecture, modernization, semantic, test and roadmap documents describe
+  the new dual-channel contract.
+
+Final isolated validation host and workspace:
+
+- host `caw`, x86-64 WSL2 Linux 6.6.87.2, Python 3.13.9;
+- workspace
+  `/home/aoweichen/codex-workspaces/luna-sema-pass-contract-YrGkudXI`;
+- formatter: zero files needing reflow and zero token drift;
+- audit: 66 modules, one driver, 32 interfaces and 56 library objects;
+- initial cold stage-next build: 15.06 seconds;
+- final `verify --fresh`: transition/next/fixed completed in
+  14.85/14.89/14.89 seconds and every next/fixed assembly, object and
+  executable was byte-identical;
+- pre- and post-fixed-point suites: `450 passed, 0 failed, 0 skipped`;
+- verified stage-fixed `luna`: 5,187,411 bytes, SHA-256
+  `97b41af437705cabd44a7458b43e32dc66cd53adda16dac9980435ea5ce3dd63`.
+
+The verified combined caw stage-fixed binary is copied into `anchor/luna`;
+hashes and provenance are refreshed. Source, docs, test, SESSION and promotion
+belong to the same requested commit/push. Preserve untracked `advice.md`.
+
+## Completed local task: `functions.ir` module contraction
+
+The bounded module-graph cleanup is complete locally on top of the validated
+semantic-pass contract:
+
+- `compiler/src/middleend/semantic/functions/ir.la` now implements the parent
+  `luna.bootstrap.middleend.semantic.functions` module;
+- the 142-line implementation remains a cohesive IR function/receiver/
+  parameter construction family rather than being merged into `functions.la`;
+- the parent functions interface exports `create_ir_functions` and
+  `create_ir_function_instance` and remains 74 lines;
+- sema and expression probe consume the existing `functions::` qualifier;
+- the child interface and `sem_funcs_ir` registry/object boundary are removed;
+- `sem_funcs` registers all ten implementation units, and AGENTS plus
+  architecture/semantic/test/roadmap documents record the same-module split;
+- no compatibility alias, forwarding module or extra directory was added.
+
+The first parallel build exposed one remaining parent qualifier inside the
+merged implementation (`functions::function_receiver_type`) as
+`unknown_module_qualifier`; removing that now-invalid self-qualification fixed
+the source rather than restoring a parent import.
+
+Final isolated validation host and workspace:
+
+- host `caw`, x86-64 WSL2 Linux 6.6.87.2, Python 3.13.9;
+- workspace
+  `/home/aoweichen/codex-workspaces/luna-functions-ir-contract-kINQ4A3z`;
+- formatter: zero files needing reflow and zero token drift;
+- audit: 65 modules, one driver, 32 driver interfaces and 55 library objects;
+- merged `sem_funcs` compilation: 4.50 seconds in the corrected incremental
+  build;
+- final `verify --fresh`: transition/next/fixed completed in
+  14.88/14.89/14.93 seconds and every next/fixed artifact was byte-identical;
+- pre- and post-fixed-point suites: `450 passed, 0 failed, 0 skipped`;
+- verified stage-fixed `luna`: 5,187,411 bytes, SHA-256
+  `6dda0fc3a0e2e9af2dee0d7522ddf49df24b6b7ba041a80f72b21891f11b74c0`.
+
+The latest combined stage-fixed artifact is promoted. The requested commit/push
+must include source, deleted child interface, registry, docs, tests, SESSION and
+anchor together. Preserve `advice.md`.
+
 ## Recovery checklist
 
 1. Confirm the session UUID and working directory shown above.
@@ -551,7 +650,6 @@ Preserve untracked `advice.md`.
 3. Run `git status --short`, `git diff --stat` and inspect the table/domain stack.
 4. Preserve `advice.md` and all existing comments/changes.
 5. Do not redo the completed IR, semantic ownership or domain work.
-6. The earlier compiler/domain and documentation work is already pushed. Do
-   not redo it. For the canonical class-metadata batch, only confirm whether
-   the requested commit/push reached `origin/main`; implementation, validation
-   and promotion are complete.
+6. All earlier work is pushed. For the semantic pass/functions batches, only
+   confirm whether the requested current commit/push reached `origin/main`;
+   implementation, validation and promotion are complete.

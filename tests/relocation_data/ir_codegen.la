@@ -295,12 +295,60 @@ fn generic_table_move_is_valid() -> bool {
     return generic_table_failure_is_sticky(declaration);
 }
 
+fn semantic_diagnostic_flow_is_valid() -> bool {
+    let source: string_views::string_view_result = string_views::from_c_string(
+        "module tests.semantic_diagnostic_probe;\n@align(3) struct Bad {\n    value: i32;\n}\n"
+        "fn main() -> i32 {\n    return missing_fn();\n}\n", 256);
+    let path: string_views::string_view_result = string_views::from_c_string("semantic-diagnostic-probe.la", 64);
+    if (source.error != runtime::Error.none || path.error != runtime::Error.none) {
+        return false;
+    }
+    let frontend: parser::FrontendResult = parser::frontend_parse(source.view);
+    let frontend_view: parser::FrontendView = frontend.view();
+    let frontend_has_diagnostics: bool = !frontend_view.lex.diagnostics.empty() ||
+        !frontend_view.parse.diagnostics.empty();
+    if (frontend_view.error != runtime::Error.none || frontend_has_diagnostics) {
+        return false;
+    }
+    var input: context::Input = context::Input(true);
+    let unit: context::Unit = {
+        source = source.view, tokens = frontend_view.lex.tokens, tree = frontend_view.parse.tree,
+        path_offset = 0, path_length = 0,
+    };
+    if (input.add(unit, path.view) != runtime::Error.none) {
+        return false;
+    }
+    let semantic: context::SemanticResult = sema::check(input.view());
+    if (semantic.error != runtime::Error.none || semantic.diagnostics.size() < 2) {
+        return false;
+    }
+    let diagnostics: context::DiagnosticView = semantic.diagnostics.view();
+    var alignment_was_reported: bool = false;
+    var unknown_name_was_reported: bool = false;
+    for (var index: usize = 0; index < diagnostics.size(); index += 1) {
+        let result: context::DiagnosticResult = diagnostics.get(index);
+        if (result.error != runtime::Error.none) {
+            return false;
+        }
+        if (result.diagnostic.kind == context::DiagnosticKind.invalid_alignment) {
+            alignment_was_reported = true;
+        }
+        if (result.diagnostic.kind == context::DiagnosticKind.unknown_name) {
+            unknown_name_was_reported = true;
+        }
+    }
+    return alignment_was_reported && unknown_name_was_reported;
+}
+
 fn main() -> i32 {
     if (!class_table_move_is_valid()) {
         return 32;
     }
     if (!generic_table_move_is_valid()) {
         return 33;
+    }
+    if (!semantic_diagnostic_flow_is_valid()) {
+        return 34;
     }
     let source: string_views::string_view_result = string_views::from_c_string(
         "module tests.relocation_probe;\nextern fn dispatch_target() -> i32;\n", 96);

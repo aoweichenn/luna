@@ -1083,3 +1083,38 @@ post-fixed-point suite passed 450/450 with no failures or skips.
 
 The promoted 5,187,411-byte executable has SHA-256
 `ef79139adae0cf3cf65efa45a20b0886a670c7f6f9e16015fae6f2918748f629`.
+
+## 2026-08-29: promotion to the semantic pass contract toolchain
+
+The anchor now contains the stage-fixed `luna` executable from the semantic
+pass-contract and function-module contraction batches accompanying this note.
+All 29 fixed semantic entries share one runtime-readiness function-pointer
+shape. `SemanticSession::run_pass` preserves their explicit source order,
+continues after ordinary diagnostics, skips later passes after a runtime error
+and rejects an unexplained false result as an internal invariant failure.
+
+Alignment and bit-field entry passes now use the same runtime contract as the
+other entries. Their local validity remains in diagnostics. The touched
+consteval implementation uses bounded `for` traversal, named predicates and
+conditions with at most two logical clauses; only syntax-chain and non-uniform
+bit-field grouping loops retain `while`. The relocation-data contract proves
+that a pre-layout invalid-alignment diagnostic does not prevent a later
+unknown-name diagnostic and does not create a runtime error.
+
+The former `luna.bootstrap.middleend.semantic.functions.ir` child module is
+folded into its real parent. `functions/ir.la` remains a cohesive same-module
+IR construction unit; sema and expression probe consume the parent interface.
+The child interface, reverse parent import, registry node and linked object are
+removed without a forwarding alias.
+
+Remote x86-64 verification used the isolated caw workspace
+`/home/aoweichen/codex-workspaces/luna-functions-ir-contract-kINQ4A3z` on WSL2
+Linux 6.6.87.2 with Python 3.13.9. Audit reported 65 modules, one driver, 32
+driver interfaces and 55 library objects; formatting reported zero files
+needing reflow and zero token drift. The final fresh transition/next/fixed
+stages completed in 14.88/14.89/14.93 seconds, and every next/fixed artifact
+was byte-identical. Both complete test runs passed 450/450 with no failures or
+skips.
+
+The promoted 5,187,411-byte executable has SHA-256
+`6dda0fc3a0e2e9af2dee0d7522ddf49df24b6b7ba041a80f72b21891f11b74c0`.

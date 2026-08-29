@@ -178,6 +178,13 @@ DiagnosticBuffer owners through one transparent result record. Driver code
 borrows completed resources and relies on RAII rather than a manual semantic
 result release function. The driver also exclusively owns move-only semantic
 Input storage; Context and CodeGenerator receive only a borrowed InputView.
+The fixed semantic entries share one function-pointer shape and return only
+runtime readiness; diagnostics remain an independent, accumulating channel.
+The session skips all later entries after the first runtime failure without
+hiding the explicit source-level pass order in a table.
+IR function construction belongs to the same `functions` module as callable
+ordering and signatures; its separate implementation file is not a child
+module and does not import its parent facade.
 See [the semantic pipeline contract](sema.md).
 
 Callable identity, expression value categories and stable passive class/generic

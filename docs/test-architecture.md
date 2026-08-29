@@ -66,6 +66,10 @@ IR/semantic ownership 契约由 relocation-data 专用协议覆盖：move-only I
 确认原 Builder 已关闭。随后它破坏全局引用目标与零占位字节，确认独立验证拒绝损坏状态，恢复后重新接受，并覆盖
 函数地址到对象重定位和最终链接的完整路径。
 
+同一大用例还构造一个同时包含非法 alignment 与未知名字的源码：前者在类型布局前产生普通诊断，后者只能在最终
+statement lowering 中产生。契约要求 SemanticResult 的 runtime error 仍为 none，且两个诊断都存在，从而证明
+Session 在普通诊断后继续、只在 runtime failure 后停止后续 pass。
+
 同一 relocation-data 大用例直接构造`ClassTable`，一次覆盖 record、field、method 和 friend 四个 typed vector，
 验证三类成员切片的连续性、hierarchy flag、virtual slot、descriptor/vtable publication、move 后目标所有权、
 moved-from 空状态以及首错粘滞。ClassRecord 不再包含 base/vptr 镜像，因此该用例也固定 ClassTable 的只读
@@ -79,6 +83,9 @@ semantic domain 收缩不新增逐概念编译用例；现有 overload、class p
 reference binding、value category、lifetime 和负诊断 corpus 原样覆盖`luna.compiler.sema.domain`。`audit`验证旧
 callable/value 模块已经消失；本批图审查另外确认 class/generic owner 只由 Context 直接导入。relocation-data
 大契约继续校验迁移后记录布局和 table ABI。
+
+`functions.ir` 收缩同样不增加行为用例：Sema 的批次入口和 expression probe 的泛型实例路径继续覆盖两个 IR
+construction 入口，`audit`则要求旧 child interface/registry node 消失，并确认 parent `functions`对象包含该实现。
 
 这些任务仍使用独立工作目录，并与 suite 一起进入有界并行 worker pool。
 

@@ -324,6 +324,8 @@ the archived Luna 0 self-hosting milestone named `M4` above.
 - [x] move-only typed GenericTable with transactional instance indexes
 - [x] class/generic passive metadata extraction into `luna.compiler.sema.domain`
 - [x] canonical TypeTable base/vptr facts and focused ClassTable mutation boundary
+- [x] SemanticSession runtime-readiness pass contract and diagnostic continuation
+- [x] `functions.ir` child-module contraction into same-module implementation
 - [ ] semantic-pipeline state classes and module contraction
 - [x] backend and command-service state classes
 - [ ] remaining `luna.bootstrap.*` namespace/module contraction

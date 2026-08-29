@@ -8,9 +8,14 @@ import luna.bootstrap.middleend.semantic.types as types;
 import luna.compiler.syntax as syntax;
 import luna.runtime as runtime;
 
+enum BitfieldLimit: usize {
+    maximum_width = 64,
+}
+
 fn alignment_value_is_valid(value: u64) -> bool {
-    return value != 0 && value <= context::Limit.maximum_attribute_alignment as
-                usize as u64 && (value & (value - 1)) == 0;
+    let bounded: bool = value != 0 && value <= context::Limit.maximum_attribute_alignment as usize as u64;
+    let power_of_two: bool = (value & (value - 1)) == 0;
+    return bounded && power_of_two;
 }
 
 fn declaration_alignment(context: *context::Context, unit_index: usize, declaration_node: usize) -> model::Alignment {
@@ -24,9 +29,9 @@ fn declaration_alignment(context: *context::Context, unit_index: usize, declarat
     }
     let argument_node: syntax::SyntaxNode = context::node(context, unit_index, argument);
     let value: model::Value = engine::expression(context, unit_index, argument);
-    if (value.error || !value.is_constant || value.is_boolean ||
-        !alignment_value_is_valid(
-            value.value)) {
+    let constant_integer: bool = value.is_constant && !value.is_boolean;
+    let value_is_valid: bool = !value.error && constant_integer;
+    if (!value_is_valid || !alignment_value_is_valid(value.value)) {
         context::add_diagnostic(
             context, context::DiagnosticKind.invalid_alignment, unit_index, argument_node.span, context::no_id(),
             context::empty_span(), declaration_node);
@@ -42,18 +47,15 @@ fn declaration_alignment(context: *context::Context, unit_index: usize, declarat
 fn resolve_alignment_attributes(context: *context::Context) -> bool {
     let none: usize = context::no_id();
     let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
-    var valid: bool = true;
-    var symbol_id: usize = 0;
-    while (symbol_id < context->symbol_count && context->error == runtime::Error.none) {
+    for (var symbol_id: usize = 0;
+        symbol_id < context->symbol_count && context->error == runtime::Error.none; symbol_id += 1) {
         let symbol: context::Symbol = symbols[symbol_id];
         if (symbol.kind == context::SymbolKind.named_type) {
             let record: type_info::Record = context::type_record(context, symbol.type_id);
             if (record.kind == type_info::Kind.structure || record.kind == type_info::Kind.record_union) {
                 let type_alignment: model::Alignment =
                     declaration_alignment(context, symbol.declaration_unit, symbol.declaration_node);
-                if (!type_alignment.valid) {
-                    valid = false;
-                } else if (type_alignment.alignment != 0) {
+                if (type_alignment.valid && type_alignment.alignment != 0) {
                     builder::append_alignment_override(
                         context, symbol.declaration_unit, symbol.declaration_node, type_alignment.alignment);
                 }
@@ -65,9 +67,7 @@ fn resolve_alignment_attributes(context: *context::Context) -> bool {
                     if (node.kind == syntax::SyntaxKind.field_declaration) {
                         let field_alignment: model::Alignment = declaration_alignment(context, symbol.declaration_unit,
                             child);
-                        if (!field_alignment.valid) {
-                            valid = false;
-                        } else if (field_alignment.alignment != 0) {
+                        if (field_alignment.valid && field_alignment.alignment != 0) {
                             builder::append_alignment_override(
                                 context, symbol.declaration_unit, child, field_alignment.alignment);
                         }
@@ -76,23 +76,20 @@ fn resolve_alignment_attributes(context: *context::Context) -> bool {
                 }
             }
         }
-        symbol_id += 1;
     }
-    return valid && context->error == runtime::Error.none;
+    return context->error == runtime::Error.none;
 }
 
-fn resolve_bitfield_attribute(
-    context: *context::Context, unit_index: usize, attribute_node: syntax::SyntaxNode) -> bool {
+fn resolve_bitfield_attribute(context: *context::Context, unit_index: usize, attribute_node: syntax::SyntaxNode) {
     let none: usize = context::no_id();
     if (attribute_node.parent == none) {
-        return true;
+        return;
     }
     let parent: syntax::SyntaxNode = context::node(context, unit_index, attribute_node.parent);
     if (parent.kind != syntax::SyntaxKind.field_declaration) {
-        // Mis-mounted; validate_attributes already reported it.
-        return true;
+        // validate_attributes 已经报告挂载位置错误。
+        return;
     }
-    var valid: bool = true;
     var bit_offset: usize = 0;
     var child: usize = attribute_node.first_child;
     while (child != none && context->error == runtime::Error.none) {
@@ -101,29 +98,31 @@ fn resolve_bitfield_attribute(
             context::add_diagnostic(
                 context, context::DiagnosticKind.invalid_bitfield, unit_index, argument.span, none,
                 context::empty_span(), child);
-            valid = false;
             break;
         }
         let segments: *const context::BitfieldSegment = context->bitfield_segments.data as
                 *const context::BitfieldSegment;
         var duplicate: bool = false;
-        var segment_id: usize = 0;
-        while (segment_id < context->bitfield_segment_count) {
-            if (segments[segment_id].declaration_unit == unit_index && segments[segment_id].declaration_node ==
-                    attribute_node.parent &&
-                context::tokens_equal(
+        for (var segment_id: usize = 0; segment_id < context->bitfield_segment_count; segment_id += 1) {
+            let same_owner: bool = segments[segment_id].declaration_unit == unit_index &&
+                segments[segment_id].declaration_node == attribute_node.parent;
+            if (!same_owner) {
+                continue;
+            }
+            if (context::tokens_equal(
                     context, unit_index, argument.token_index, unit_index, segments[segment_id].name_token)) {
                 duplicate = true;
             }
-            segment_id += 1;
         }
         let width: model::Value = engine::expression(context, unit_index, argument.first_child);
-        if (duplicate || width.error || !width.is_constant || width.is_boolean || width.value == 0 ||
-            width.value > 64) {
+        let constant_integer: bool = width.is_constant && !width.is_boolean;
+        let value_is_valid: bool = !width.error && constant_integer;
+        let width_is_valid: bool = width.value != 0 && width.value <= BitfieldLimit.maximum_width as usize as u64;
+        let invalid_value: bool = !value_is_valid || !width_is_valid;
+        if (duplicate || invalid_value) {
             context::add_diagnostic(
                 context, context::DiagnosticKind.invalid_bitfield, unit_index, argument.span, none,
                 context::empty_span(), child);
-            valid = false;
             break;
         }
         if (!builder::append_bitfield_segment(
@@ -131,16 +130,14 @@ fn resolve_bitfield_attribute(
                     declaration_unit = unit_index, declaration_node = attribute_node.parent,
                     name_token = argument.token_index, bit_offset = bit_offset, bit_width = width.value as usize,
                 })) {
-            return false;
+            return;
         }
         bit_offset += width.value as usize;
         child = argument.next_sibling;
     }
-    return valid && context->error == runtime::Error.none;
 }
 
 fn resolve_bitfield_attributes(context: *context::Context) -> bool {
-    var valid: bool = true;
     for (var unit_index: usize = 0;
         unit_index < context->input.size() && context->error == runtime::Error.none;
         unit_index += 1) {
@@ -149,33 +146,33 @@ fn resolve_bitfield_attributes(context: *context::Context) -> bool {
             node_index < unit->tree.size() && context->error == runtime::Error.none;
             node_index += 1) {
             let node: syntax::SyntaxNode = context::node(context, unit_index, node_index);
-            if (node.kind == syntax::SyntaxKind.attribute &&
+            let bitfield_attribute: bool = node.kind == syntax::SyntaxKind.attribute &&
                 attributes::find_attribute(
-                    context, unit_index, node.token_index) == (attributes::Attribute.bits as usize) &&
-                !resolve_bitfield_attribute(
-                    context, unit_index, node)) {
-                valid = false;
+                    context, unit_index, node.token_index) == (attributes::Attribute.bits as usize);
+            if (bitfield_attribute) {
+                resolve_bitfield_attribute(context, unit_index, node);
             }
         }
     }
-    return valid && context->error == runtime::Error.none;
+    return context->error == runtime::Error.none;
 }
 
-// The storage type is only known after layout resolution, so the integer
-// kind and exact width-sum checks live in a second pass.
+// 布局解析后才能得到存储类型，因此整数种类和位宽总和在第二个 pass 中校验。
+fn bitfield_segment_has_owner(segment: context::BitfieldSegment, owner: context::BitfieldSegment) -> bool {
+    return segment.declaration_unit == owner.declaration_unit && segment.declaration_node == owner.declaration_node;
+}
+
 fn validate_bitfields(context: *context::Context) -> bool {
     let none: usize = context::no_id();
     let segments: *const context::BitfieldSegment = context->bitfield_segments.data as
             *const context::BitfieldSegment;
     let fields: *const type_info::Field = context->types.field_data() as *const type_info::Field;
-    var valid: bool = true;
     var index: usize = 0;
     while (index < context->bitfield_segment_count && context->error == runtime::Error.none) {
         let first: context::BitfieldSegment = segments[index];
         var total: usize = 0;
         var group_end: usize = index;
-        while (group_end < context->bitfield_segment_count && segments[group_end].declaration_unit ==
-                first.declaration_unit && segments[group_end].declaration_node == first.declaration_node) {
+        while (group_end < context->bitfield_segment_count && bitfield_segment_has_owner(segments[group_end], first)) {
             total += segments[group_end].bit_width;
             group_end += 1;
         }
@@ -187,12 +184,11 @@ fn validate_bitfields(context: *context::Context) -> bool {
                     context, context::DiagnosticKind.invalid_bitfield, first.declaration_unit,
                     context::node(context, first.declaration_unit, first.declaration_node).span,
                     none, context::empty_span(), field_id);
-                valid = false;
             }
         }
         index = group_end;
     }
-    return valid && context->error == runtime::Error.none;
+    return context->error == runtime::Error.none;
 }
 
 fn check_assert(context: *context::Context, unit_index: usize, node_index: usize) -> bool {
@@ -301,19 +297,17 @@ fn collect_constants_in_unit(
     return context->error == runtime::Error.none;
 }
 
-// Resolves one collected constant on demand: evaluates its initializer,
-// checks conformance and marks it resolved. The resolving flag breaks
-// initializer cycles (A through B back to A), which simply fail as
-// non-constant; the fixpoint below reports whatever stays unresolved.
+// 按需求解已收集常量：计算初始化式、校验类型并标记完成。
+// resolving 标志切断初始化环；未被不动点求解的常量最终统一报告。
 fn collect_constant_declarations(context: *context::Context) -> bool {
-    var module_id: usize = 0;
-    while (module_id < context->module_count && context->error == runtime::Error.none) {
+    for (var module_id: usize = 0;
+        module_id < context->module_count && context->error == runtime::Error.none; module_id += 1) {
         let modules: *const context::Module = context->modules.data as *const context::Module;
         if (!collect_constants_in_unit(context, module_id, modules[module_id].interface_unit, true)) {
             return false;
         }
-        var implementation_index: usize = 0;
-        while (implementation_index < modules[module_id].implementation_count) {
+        for (var implementation_index: usize = 0;
+            implementation_index < modules[module_id].implementation_count; implementation_index += 1) {
             let implementation_unit: usize =
                 names::module_implementation_unit(context, module_id, implementation_index);
             if (implementation_unit == context::no_id() ||
@@ -321,17 +315,13 @@ fn collect_constant_declarations(context: *context::Context) -> bool {
                     context, module_id, implementation_unit, false)) {
                 return false;
             }
-            implementation_index += 1;
         }
-        module_id += 1;
     }
     return context->error == runtime::Error.none;
 }
 
-// Array length expressions are folded here because type resolution cannot
-// import consteval (consteval already imports types); the cached values are
-// read back by types::resolve_type_node. The walk covers every
-// node of every unit, including function bodies.
+// consteval 已依赖 types，类型解析不能反向导入它，因此数组长度在这里提前折叠并缓存。
+// 扫描覆盖每个单元的全部节点，包括函数体。
 fn prescan_array_lengths(context: *context::Context) -> bool {
     for (var unit_index: usize = 0;
         unit_index < context->input.size() && context->error == runtime::Error.none;
@@ -341,13 +331,15 @@ fn prescan_array_lengths(context: *context::Context) -> bool {
             node_index < unit->tree.size() && context->error == runtime::Error.none;
             node_index += 1) {
             let node: syntax::SyntaxNode = context::node(context, unit_index, node_index);
-            if (node.kind == syntax::SyntaxKind.type_array && (node.flags &
-                    (syntax::SyntaxFlag.flexible as usize)) == 0 && node.child_count == 2) {
+            let array_node: bool = node.kind == syntax::SyntaxKind.type_array;
+            let sized_array: bool = (node.flags & (syntax::SyntaxFlag.flexible as usize)) == 0 && node.child_count == 2;
+            if (array_node && sized_array) {
                 let value: model::Value = engine::expression(context, unit_index, node.first_child);
                 var entry: context::ArrayLength = {
                     unit_index = unit_index, node_index = node_index, value = 0, valid = false,
                 };
-                if (value.is_constant && !value.error && !value.is_boolean) {
+                let integer_constant: bool = value.is_constant && !value.is_boolean;
+                if (integer_constant && !value.error) {
                     entry.value = value.value;
                     entry.valid = true;
                 }
@@ -364,28 +356,27 @@ fn prescan_array_lengths(context: *context::Context) -> bool {
     return context->error == runtime::Error.none;
 }
 
-// Folds the enum discriminants that resolve_enum_layout left pending
-// (anything beyond signed integer literals) in declaration order, so
-// implicit members continue from the value of their explicit predecessor.
-// The resolving flag on the type symbol breaks discriminant cycles.
-// Forces every enum with pending discriminants to fold them; enums nothing
-// referenced during type resolution still get their values (or an // invalid_enum_value diagnostic) here.
+// 按声明顺序折叠布局阶段留下的枚举值，使隐式成员能承接前一个显式值。
+// 类型符号上的 resolving 标志切断枚举值环；即使枚举未被其他类型引用，也会在这里完成或报告错误。
 fn finalize_enum_constants(context: *context::Context) -> bool {
-    var symbol_id: usize = 0;
-    while (symbol_id < context->symbol_count && context->error == runtime::Error.none) {
+    for (var symbol_id: usize = 0;
+        symbol_id < context->symbol_count && context->error == runtime::Error.none; symbol_id += 1) {
         let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
         let symbol: context::Symbol = symbols[symbol_id];
-        if (symbol.kind == context::SymbolKind.named_type &&
-            context::type_record(context, symbol.type_id).kind == type_info::Kind.enumeration &&
-            types::require_complete_type(context, symbol.type_id) &&
-            !engine::resolve_enum_constant_values(
-                context, symbol.type_id)) {
+        if (symbol.kind != context::SymbolKind.named_type) {
+            continue;
+        }
+        let enumeration: bool = context::type_record(context, symbol.type_id).kind == type_info::Kind.enumeration;
+        if (!enumeration) {
+            continue;
+        }
+        let complete: bool = types::require_complete_type(context, symbol.type_id);
+        if (complete && !engine::resolve_enum_constant_values(context, symbol.type_id)) {
             context::add_diagnostic(
                 context, context::DiagnosticKind.invalid_enum_value, symbol.declaration_unit,
                 context::node(context, symbol.declaration_unit, symbol.declaration_node).span,
                 context::no_id(), context::empty_span(), symbol.type_id);
         }
-        symbol_id += 1;
     }
     return context->error == runtime::Error.none;
 }

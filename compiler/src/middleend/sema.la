@@ -9,7 +9,6 @@ import luna.bootstrap.middleend.semantic.classes as classes;
 import luna.bootstrap.middleend.semantic.consteval as consteval;
 import luna.bootstrap.middleend.semantic.consteval.engine as const_engine;
 import luna.bootstrap.middleend.semantic.functions as functions;
-import luna.bootstrap.middleend.semantic.functions.ir as function_ir;
 import luna.bootstrap.middleend.semantic.modules as modules;
 import luna.bootstrap.middleend.semantic.stmt as stmt;
 import luna.bootstrap.middleend.semantic.types as types;
@@ -20,6 +19,8 @@ import luna.runtime as runtime;
 enum SemanticPhase: usize {
     ready, complete, transferred,
 }
+
+type SemanticPass = fn(*context::Context) -> bool;
 
 class SemanticSession {
     priv state: context::Context;
@@ -36,10 +37,35 @@ impl SemanticSession {
         this->phase = SemanticPhase.ready;
     }
 
-    priv fn select_entry() -> bool {
+    priv fn run_pass(pass: SemanticPass) {
+        if (this->state.error != runtime::Error.none) {
+            return;
+        }
+        let completed: bool = pass(&this->state);
+        if (!completed && this->state.error == runtime::Error.none) {
+            this->state.error = runtime::Error.invalid_argument;
+        }
+    }
+
+    priv fn validate_reachability(root_module: usize) {
+        let diagnostic_count: usize = this->state.diagnostics.size();
+        let completed: bool = modules::validate_reachability(&this->state, root_module);
+        let no_runtime_error: bool = this->state.error == runtime::Error.none;
+        let no_diagnostic: bool = this->state.diagnostics.size() == diagnostic_count;
+        let unexplained_failure: bool = !completed && no_runtime_error;
+        if (unexplained_failure && no_diagnostic) {
+            this->state.error = runtime::Error.invalid_argument;
+        }
+    }
+
+    priv fn select_entry() {
         let session: *context::Context = &this->state;
+        if (session->error != runtime::Error.none) {
+            return;
+        }
         if (!session->input.executable()) {
-            return modules::validate_reachability(session, names::unit_module(session, 0));
+            this->validate_reachability(names::unit_module(session, 0));
+            return;
         }
         let none: usize = context::no_id();
         let functions: *const context::Function = session->functions.data as *const context::Function;
@@ -68,7 +94,7 @@ impl SemanticSession {
             context::add_diagnostic(
                 session, context::DiagnosticKind.missing_definition, 0, context::empty_span(), none,
                 context::empty_span(), 0);
-            return false;
+            return;
         }
         let entry_function: context::Function = functions[entry];
         var has_command_line_parameters: bool = false;
@@ -100,13 +126,13 @@ impl SemanticSession {
                 session, context::DiagnosticKind.signature_mismatch, symbol.declaration_unit,
                 context::node(session, symbol.declaration_unit, symbol.declaration_node).span,
                 none, context::empty_span(), entry);
-            return false;
+            return;
         }
         if (!session->ir.set_entry(entry_function.ir_function)) {
             session->error = session->ir.error();
-            return false;
+            return;
         }
-        return modules::validate_reachability(session, names::unit_module(session, entry_function.implementation_unit));
+        this->validate_reachability(names::unit_module(session, entry_function.implementation_unit));
     }
 
     priv fn finish() {
@@ -130,35 +156,35 @@ impl SemanticSession {
             return;
         }
 
-        modules::collect_modules(&this->state);
-        modules::collect_imports(&this->state);
-        modules::validate_import_graph(&this->state);
-        attributes::validate_attributes(&this->state);
-        types::collect_named_types(&this->state);
-        classes::collect_classes(&this->state);
-        classes::collect_bases(&this->state);
-        classes::prepare_layouts(&this->state);
-        functions::collect_const_functions(&this->state);
-        consteval::collect_constant_declarations(&this->state);
-        consteval::prescan_array_lengths(&this->state);
-        consteval::resolve_alignment_attributes(&this->state);
-        consteval::resolve_bitfield_attributes(&this->state);
-        types::resolve_all_types(&this->state);
-        classes::collect_friends(&this->state);
-        classes::collect_fields(&this->state);
-        classes::validate_classes(&this->state);
-        consteval::validate_bitfields(&this->state);
-        const_engine::resolve_constants(&this->state);
-        consteval::finalize_enum_constants(&this->state);
-        functions::collect_functions(&this->state);
-        classes::collect_methods(&this->state);
-        classes::validate_methods(&this->state);
-        consteval::check_module_asserts(&this->state);
-        modules::validate_imported_names(&this->state);
-        visibility::validate_public_types(&this->state);
-        function_ir::create_ir_functions(&this->state);
-        classes::create_vtables(&this->state);
-        stmt::lower_functions(&this->state);
+        this->run_pass(modules::collect_modules);
+        this->run_pass(modules::collect_imports);
+        this->run_pass(modules::validate_import_graph);
+        this->run_pass(attributes::validate_attributes);
+        this->run_pass(types::collect_named_types);
+        this->run_pass(classes::collect_classes);
+        this->run_pass(classes::collect_bases);
+        this->run_pass(classes::prepare_layouts);
+        this->run_pass(functions::collect_const_functions);
+        this->run_pass(consteval::collect_constant_declarations);
+        this->run_pass(consteval::prescan_array_lengths);
+        this->run_pass(consteval::resolve_alignment_attributes);
+        this->run_pass(consteval::resolve_bitfield_attributes);
+        this->run_pass(types::resolve_all_types);
+        this->run_pass(classes::collect_friends);
+        this->run_pass(classes::collect_fields);
+        this->run_pass(classes::validate_classes);
+        this->run_pass(consteval::validate_bitfields);
+        this->run_pass(const_engine::resolve_constants);
+        this->run_pass(consteval::finalize_enum_constants);
+        this->run_pass(functions::collect_functions);
+        this->run_pass(classes::collect_methods);
+        this->run_pass(classes::validate_methods);
+        this->run_pass(consteval::check_module_asserts);
+        this->run_pass(modules::validate_imported_names);
+        this->run_pass(visibility::validate_public_types);
+        this->run_pass(functions::create_ir_functions);
+        this->run_pass(classes::create_vtables);
+        this->run_pass(stmt::lower_functions);
         this->select_entry();
         if (this->state.error == runtime::Error.none && !this->state.generics.is_valid()) {
             this->state.error = runtime::Error.invalid_argument;

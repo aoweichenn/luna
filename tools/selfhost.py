@@ -254,9 +254,6 @@ LIBRARIES = {
         "middleend/semantic/functions/generics",
         "middleend/semantic/functions/methods",
         "middleend/semantic/functions/special",
-    ),
-    "sem_funcs_ir": compiler_module(
-        "luna.bootstrap.middleend.semantic.functions.ir",
         "middleend/semantic/functions/ir",
     ),
     "sem_lifetime": compiler_module(

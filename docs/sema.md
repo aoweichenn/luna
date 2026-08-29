@@ -4,7 +4,7 @@
 
 The semantic pipeline validates the parsed source-module graph, constructs the
 canonical type model and lowers checked functions into `luna.compiler.ir`.
-This document records the first seven ownership/domain batches of its modernization.
+This document records the first nine ownership/domain batches of its modernization.
 
 The root module is still named `luna.bootstrap.middleend.sema` while the
 downstream semantic dependency graph is contracted incrementally. The current
@@ -134,6 +134,19 @@ invalid-input early return from bypassing common work cleanup, prevents a
 second result transfer and gives later semantic passes one stable owning
 object into which methods can migrate.
 
+The 29 fixed pipeline entries share one private `SemanticPass` function-pointer
+shape. Their `bool` now means only “the Context runtime channel remains usable”;
+ordinary semantic invalidity is represented by diagnostics and does not stop
+later diagnostic collection. `SemanticSession::run_pass` skips invocation once
+`Context.error` is non-`none` and converts an unexplained `false` without a
+runtime error into `invalid_argument`. The pass order remains 29 explicit
+method calls rather than an opaque function table.
+
+Reachability is parameterized and may return `false` after successfully adding
+a resource-limit diagnostic, so entry selection has a separate bound adapter.
+It distinguishes a recorded diagnostic from an unexplained failure using the
+diagnostic count and preserves the same runtime/diagnostic channel split.
+
 ## Input ownership and borrowing
 
 `Input` is the move-only RAII owner of semantic source-unit records and path
@@ -223,6 +236,16 @@ the three resource destructors.
 These calls remain focused lower-level pass functions for now. Wrapping the
 sequence in a session does not falsely turn each existing pass into a method;
 methods migrate only when their state and dependency boundary are redesigned.
+Alignment and bit-field entry passes now return runtime readiness like every
+other pipeline entry; their internal validation helpers may still use local
+boolean validity while emitting diagnostics.
+
+Function IR construction is part of the `functions` module rather than a
+`functions.ir` child module. Its cohesive implementation remains in
+`semantic/functions/ir.la`, while `create_ir_functions` and
+`create_ir_function_instance` are declared by the 74-line parent interface.
+Sema and expression probe now consume one `functions` dependency; the child
+interface, reverse parent import, registry node and linked object are removed.
 
 ## Entry selection
 
@@ -248,6 +271,7 @@ sets the IR entry through `ir::Builder` before graph reachability validation.
 | `semantic/generics/storage.la` | GenericTable lifetime, declarations, bindings and read-only projections |
 | `semantic/generics/instances.la` | canonical instance insertion, hash rebuilding and reverse maps |
 | `semantic/generics/validation.la` | declarations, slices, indexes, maps and final-state validation |
+| `semantic/functions/ir.la` | same-module IR function, receiver and parameter construction |
 | `middleend/sema.la` | private SemanticSession, phase orchestration, entry selection and result transfer |
 | `semantic/context.la` | transitional Context storage and shared low-level services |
 | `semantic/context/input.la` | Input owner, InputView validation and Context unit/path access |
@@ -272,7 +296,7 @@ independently.
 | Copy/move | Input, DiagnosticBuffer, ClassTable and GenericTable are move-only; views are copied borrows |
 | Overloads/defaults | no operation has one semantic family that benefits from overloads or a meaningful default |
 | Operators | no natural value operator exists for a semantic session or diagnostic stream |
-| Bound methods | pipeline, diagnostics, metadata construction and index mutation are bound to their owners |
+| Bound methods | owner mutations remain bound; SemanticPass is a plain function pointer because passes capture no receiver |
 | Friends | unnecessary because the public methods preserve the required boundaries |
 | Virtual dispatch/RTTI | rejected: these are closed compile-time domains without runtime substitution |
 
