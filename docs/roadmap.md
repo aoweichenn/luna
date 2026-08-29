@@ -309,7 +309,7 @@ the archived Luna 0 self-hosting milestone named `M4` above.
 - [x] generic container foundation and first compiler adoption
 - [x] modular behavior-test suites and bounded parallel execution
 - [x] indexed assembler symbol table and large-object performance gate
-- [x] x86-64 backend contraction from 20 historical modules to six
+- [x] x86-64 backend contraction from 20 historical modules to five
       `luna.compiler.x86.*` modules, with one interface and multiple
       implementation files per module
 - [ ] standard-library RAII migration and `luna.runtime` decomposition

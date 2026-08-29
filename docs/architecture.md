@@ -2,20 +2,24 @@
 
 ## Non-negotiable boundaries
 
-Stage 0 is C23; the fixed-point compiler is Luna. Luna source is never
-translated to C. The initial target is exactly
+This branch is pure Luna. The hosted C23 reconstruction seed and its C/C++
+test infrastructure are archived on `m0`; the current branch's sole binary
+trust root is the promoted multi-command `anchor/luna`. Luna source is never
+translated to C. The only target is exactly
 `x86_64-unknown-linux-gnu`: x86-64 instructions, System V calling convention
 and ELF64 objects or executables.
 
-Stage 0 is authoritative only for the frozen Luna 0 reconstruction language.
-Luna 1 semantics are owned by the self-hosted compiler and are introduced
-with a versioned stage protocol and a two-step bootstrap before compiler
-sources may use them. This boundary is defined in
+The archived m0 seed is authoritative only as provenance for the frozen Luna 0
+reconstruction language. Current language semantics are owned by the
+self-hosted compiler. A new feature first lands using syntax accepted by the
+current anchor, passes a cold fixed-point transition, and only then may compiler
+sources adopt it. The historical language-version boundary is recorded in
 [the bootstrap language version contract](bootstrap-language-versions.md).
 
-Generated target programs are freestanding and never depend on libc. Stage 0
-is a hosted C23 tool, but its host-library use is confined to that compiler
-process. Later compiler stages are themselves freestanding Luna executables.
+Generated target programs are freestanding and never depend on libc. The
+archived m0 reconstruction compiler was a hosted C23 tool, but no hosted
+compiler, assembler or linker participates in the current production or
+self-host pipeline. Every current stage is a freestanding Luna executable.
 The project-owned x86-64 Linux system-call ABI layer
 converts System V calls with zero to six arguments to the kernel register ABI
 and invokes `syscall` directly. The Luna runtime and standard library must be
@@ -25,13 +29,11 @@ interfaces described as C ABI layouts — the kernel UAPI first — and never
 implies linking glibc, musl or any libc; adopting one would be a separate
 explicit boundary decision.
 
-The compiler owns the language semantics. The hosted stage-0 path encodes
-x86-64 instructions into ELF64 relocatable objects directly. The self-hosted
-path emits the same closed instruction dialect, assembles it into the strict
+The compiler owns the language semantics. The current self-hosted path emits a
+closed instruction dialect, assembles it into the strict
 `LUNAOBJ1` bootstrap format and links that format into a static ELF64
 executable. Its assembler and linker are Luna modules. LLVM MC and LLD remain
-independent test oracles only; neither is used by a production or bootstrap
-toolchain stage.
+outside the production and bootstrap pipeline.
 
 External C functions are represented directly throughout the pipeline; Luna
 never generates a C translation unit. The final ELF link may combine a

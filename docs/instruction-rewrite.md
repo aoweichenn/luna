@@ -1,5 +1,10 @@
 # x86-64 allocation-aware instruction rewrite
 
+> **Historical m0 design record.** This document describes the archived C23
+> reconstruction/MIR pipeline and commands absent from the current pure-Luna
+> `main` branch. It is retained as design history, not current implementation or
+> CLI documentation. See `architecture.md` and `codebase-backend.md` for current state.
+
 Luna consumes verified ABI, liveness and register-allocation results through a
 separate rewrite boundary:
 

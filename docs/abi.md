@@ -1,5 +1,10 @@
 # x86-64 System V ABI analysis
 
+> **Historical m0 design record.** This document describes the archived C23
+> reconstruction/MIR pipeline and commands absent from the current pure-Luna
+> `main` branch. It is retained as design history, not current implementation or
+> CLI documentation. See `architecture.md` and `codebase-backend.md` for current state.
+
 Luna has one owned ABI-analysis layer between verified x86-64 machine IR and
 assembly emission. It is a correctness contract, not an optimization pass.
 The bootstrap target is exactly `x86_64-unknown-linux-gnu`.

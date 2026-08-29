@@ -1,5 +1,10 @@
 # Bootstrap language versions
 
+> **Historical m0 design record.** This document defines the archived C23
+> reconstruction seed's language-version boundary. It is retained as provenance
+> and design history, not as current build or CLI documentation. See
+> `architecture.md`, `language.md` and `roadmap.md` for the current branch.
+
 Luna separates the language needed to reconstruct the first self-hosted
 compiler from the language implemented by that compiler. This prevents every
 post-bootstrap language feature from requiring a second implementation in the

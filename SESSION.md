@@ -32,17 +32,18 @@ or when several Luna sessions are present.
 ## Repository state
 
 - Branch: `main`
-- Base commit: `3b782cb6b42aea1079687e1af0b7b5de0a4133be`
-  (`refactor: contract semantic domain modules`)
-- `origin/main` matched that commit when this snapshot was written.
+- Base commit: `39a2d87187970be33d4c1cdb3ae7cd34dc23ecaa`
+  (`refactor: modernize semantic metadata ownership`)
+- `origin/main` matched that commit when this snapshot was refreshed.
 - The IR modernization and its anchor promotion are committed and pushed.
 - The semantic ownership batches and their anchor promotion are committed and
   pushed.
 - The semantic domain batch and its anchor promotion are committed and pushed.
 - The ClassTable, GenericTable and passive-metadata domain batches plus anchor
-  promotion belong to the requested combined commit containing this handoff.
-  Compare HEAD with `origin/main` after recovery to determine whether the push
-  completed.
+  promotion are committed and pushed.
+- The current working tree contains a documentation-only credibility pass:
+  six untracked `docs/codebase-*.md` audit volumes plus updates to current and
+  historical tracked documentation. It has not been committed or pushed.
 - `advice.md` is an untracked user-owned file and has not been modified as part
   of the IR or semantic work.
 - Anchor before this work:
@@ -206,11 +207,11 @@ Implemented boundaries:
 - `docs/sema.md` records the feature review, current ABI constraint and the
   incremental path toward domain extraction and session contraction.
 
-The public result deliberately remains a struct. The current unoptimized ABI
-does not reliably transfer a large public class containing both TypeTable and
-Module; behavior stays in the private session while the public record only
-bundles already-RAII fields. Attempts to force the decorative class boundary
-were rejected rather than committed as a workaround.
+The public result deliberately remains a struct because it is a passive,
+one-shot phase result with no invariant or behavior beyond its RAII members.
+The language could express a movable class here, but that would add a
+decorative boundary rather than a concrete responsibility. Behavior stays in
+the private SemanticSession.
 
 Final caw workspace:
 `/home/aoweichen/codex-workspaces/luna-sema-input-a62vqBCj`
@@ -449,6 +450,45 @@ tests are complete. The byte-identical fixed artifact has been promoted and
 belongs to the requested combined commit/push. The next batch should contract
 Context/lookup/builder into the planned `luna.compiler.sema.session` boundary.
 
+## Active local task: codebase audit documentation credibility pass
+
+The user added six untracked audit volumes and asked for a careful source-based
+review. The current documentation-only working tree does the following:
+
+- adds a uniform non-normative, commit-bound snapshot banner to all six
+  `docs/codebase-*.md` files;
+- corrects repository, lexer, syntax, IR, Context, ClassTable and test counts
+  against commit `39a2d87` and the current source;
+- removes the false syntax-tree contiguous-child invariant and records the
+  actual `next_sibling` traversal contract;
+- separates confirmed defects, unproven risks and explicit correctness-first
+  non-goals, especially for duplicated `base_type`, semantic pass `bool`
+  results, backend register allocation and quadratic-path claims;
+- corrects invalid remediation advice: same-module `.la` files cannot import
+  one another, probe/emitter flows should share pure predicates rather than be
+  merged, and an additional mutator must not preserve a duplicated source of
+  truth;
+- updates `docs/architecture.md`, `docs/execution-semantics.md` and the top of
+  `anchor/PROVENANCE.md` to describe the current pure-Luna/single-anchor branch;
+- labels seven unmarked MIR/register-allocation documents, `next-steps.md` and
+  `backend-modules.md` as historical snapshots;
+- repairs the removed `unified-tool-driver.md` links and the roadmap's backend
+  module count.
+
+Static validation already completed:
+
+- 692 tracked Luna `.la`/`.lh` files and 60,829 lines;
+- 122 `TokenKind`, 79 `SyntaxKind` and 38 IR `Opcode` entries;
+- all relative Markdown links resolve across all 57 docs;
+- `git diff --check` and no-index whitespace checks for all six untracked audit
+  volumes pass.
+
+No build, fixed-point verification or test suite was run: this pass changes
+documentation only, and the user explicitly does not want a full build for a
+documentation edit. Before handoff, inspect the complete diff once more and
+preserve untracked user-owned `advice.md`. No commit or push has been requested
+for this documentation pass.
+
 ## Recovery checklist
 
 1. Confirm the session UUID and working directory shown above.
@@ -456,6 +496,5 @@ Context/lookup/builder into the planned `luna.compiler.sema.session` boundary.
 3. Run `git status --short`, `git diff --stat` and inspect the table/domain stack.
 4. Preserve `advice.md` and all existing comments/changes.
 5. Do not redo the completed IR, semantic ownership or domain work.
-6. Compare HEAD with `origin/main`. If the requested combined commit or push is
-   absent, resume only that interrupted operation; do not redo implementation,
-   promotion or cold validation. Preserve `advice.md`.
+6. The compiler/domain work is already pushed. Resume the active documentation
+   pass only; do not redo implementation, promotion or cold validation.

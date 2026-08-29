@@ -15,7 +15,7 @@ optimization.
 
 The compiler, assembler and linker remain independent modules; only their
 driver and distribution artifact are unified. See
-[`unified-tool-driver.md`](unified-tool-driver.md).
+[`tools.md`](tools.md).
 
 ## Archived reconstruction boundary
 
@@ -84,7 +84,7 @@ success status 42.
 
 The object-format, stage-driver and reconstruction sections below preserve the
 archived m0 contract. Current command limits and behavior are defined by the
-pure-Luna driver sources and [`unified-tool-driver.md`](unified-tool-driver.md).
+pure-Luna driver sources and [`tools.md`](tools.md).
 
 ## Bootstrap object format
 

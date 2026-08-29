@@ -1,5 +1,10 @@
 # Debug information
 
+> **Historical m0 design record.** This document describes the archived C23
+> reconstruction/MIR pipeline and commands absent from the current pure-Luna
+> `main` branch. It is retained as design history, not current implementation or
+> CLI documentation. See `architecture.md` and `codebase-backend.md` for current state.
+
 Luna's bootstrap compiler emits source-level debug information without a host
 assembler, host linker or target C runtime. The first complete contract covers:
 

@@ -1,11 +1,16 @@
 # Next steps
 
-Working plan for the pure-Luna branch after m1.1 (foundation trio) and
-the post-m1.1 refactor. Sequencing rationale lives here; accepted
-surface syntax is recorded in `syntax-plan.md` as it lands, and
-implementation status is tracked in `roadmap.md`.
+> **Historical planning snapshot.** This file preserves sequencing decisions
+> through the 443-test backend-modernization period. Its status counts,
+> three-binary commands and “next” actions are not current instructions. Use
+> `roadmap.md`, `SESSION.md`, `architecture.md` and the current source tree for
+> active status.
 
-## Status snapshot
+This was the working plan after m1.1 and the post-m1.1 refactor. Accepted
+surface syntax remains recorded in `syntax-plan.md`; current implementation
+status is tracked in `roadmap.md`.
+
+## Historical status snapshot
 
 | Area | State |
 | --- | --- |
@@ -167,7 +172,7 @@ definitions are green behind the 409-case suite and fixed-point verification.
 The exact M4 source revision is promoted into `anchor/`, so compiler sources
 may now adopt generic declarations under the ordinary fixed-point discipline.
 Reference types and object lifetime work form the next language-design phase.
-The independent packaging cleanup in [`unified-tool-driver.md`](unified-tool-driver.md)
+The independent packaging cleanup now recorded in [`tools.md`](tools.md)
 replaces the three emitted tool binaries with one command-dispatched `luna`
 before that language work begins.
 

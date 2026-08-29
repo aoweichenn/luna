@@ -355,19 +355,21 @@ file and memory resources. Its read and write operations perform exactly one
 system call, expose short counts and do not hide `interrupted` or
 `would_block`.
 
-The `luna.std.memory`, `luna.std.bytes`, `luna.std.string_view`, `luna.std.path` and
-`luna.std.io` modules build allocation, buffering, UTF-8 validation, path
-termination and complete-I/O policies only on that runtime layer. Owning
-structures are copyable at the language level, but copying does not duplicate
-the resource: successful transforms transfer the documented release obligation
-to the result, and successful release invalidates every handle copy. This
-target-side restriction does not apply to the hosted C23 bootstrap compiler
-and does not prohibit an application from explicitly linking a caller-supplied
-object through `extern fn`.
+The standard-library allocation, buffering, string/view, path and I/O modules
+build only on that runtime layer. Modernized owning classes such as
+`byte_buffer`, `string`, `vector<Value>` and the standard containers are
+move-only RAII owners: transfer uses move construction/assignment and normal
+scope exit runs `deinit`. Transitional passive APIs such as `luna.std.bytes`
+and `luna.std.path` retain explicit result/release contracts until their RAII
+migration lands; callers must not shallow-copy their owning handles. This
+boundary does not prohibit an application from explicitly linking a
+caller-supplied object through `extern fn`.
 
 ## Optimization boundary
 
-The bootstrap compiler performs no optimization. Its verified x86-64 rewrite
-uses assigned physical registers and dense spill slots while retaining the
-direct correctness-first instruction expansions used by differential tests.
-Any future optimizing backend must reproduce this contract exactly.
+The current compiler performs no optimization. Its x86-64 backend lowers typed
+IR directly, gives every value a deterministic stack home and uses physical
+registers as scratch while emitting correctness-first instruction expansions.
+There is no current machine-IR, liveness or register-allocation stage. Any
+future optimizing backend must preserve the observable execution contract
+defined above.

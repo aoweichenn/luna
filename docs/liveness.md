@@ -1,5 +1,10 @@
 # x86-64 liveness analysis
 
+> **Historical m0 design record.** This document describes the archived C23
+> reconstruction/MIR pipeline and commands absent from the current pure-Luna
+> `main` branch. It is retained as design history, not current implementation or
+> CLI documentation. See `architecture.md` and `codebase-backend.md` for current state.
+
 Luna computes virtual-register liveness immediately after verified x86-64
 machine IR lowering:
 

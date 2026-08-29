@@ -1,5 +1,10 @@
 # x86-64 instruction-level differential testing
 
+> **Historical m0 design record.** This document describes the archived C23
+> reconstruction/MIR pipeline and commands absent from the current pure-Luna
+> `main` branch. It is retained as design history, not current implementation or
+> CLI documentation. See `architecture.md` and `codebase-backend.md` for current state.
+
 The instruction-level differential suite is the semantic gate between verified
 machine IR and emitted x86-64. It deliberately performs no optimization and
 does not reuse the x86-64 emitter to calculate expected results.

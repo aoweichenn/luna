@@ -1,5 +1,10 @@
 # x86-64 register allocation
 
+> **Historical m0 design record.** This document describes the archived C23
+> reconstruction/MIR pipeline and commands absent from the current pure-Luna
+> `main` branch. It is retained as design history, not current implementation or
+> CLI documentation. See `architecture.md` and `codebase-backend.md` for current state.
+
 Luna computes a deterministic physical-location plan after verified x86-64
 machine IR and verified liveness:
 
