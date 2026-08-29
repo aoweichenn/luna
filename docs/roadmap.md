@@ -323,6 +323,7 @@ the archived Luna 0 self-hosting milestone named `M4` above.
 - [x] move-only typed ClassTable with bound contiguous-slice construction
 - [x] move-only typed GenericTable with transactional instance indexes
 - [x] class/generic passive metadata extraction into `luna.compiler.sema.domain`
+- [x] canonical TypeTable base/vptr facts and focused ClassTable mutation boundary
 - [ ] semantic-pipeline state classes and module contraction
 - [x] backend and command-service state classes
 - [ ] remaining `luna.bootstrap.*` namespace/module contraction

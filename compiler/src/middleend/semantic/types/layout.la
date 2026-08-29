@@ -19,31 +19,29 @@ fn extend_class_layout(
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    var records: *domain::ClassRecord = context->classes.record_data() as *domain::ClassRecord;
+    let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
     let record: domain::ClassRecord = records[record_id];
+    let type_record: type_info::Record = context::type_record(context, type_id);
     let polymorphic: bool = (record.flags & (domain::ClassFlag.polymorphic as usize)) != 0;
     if (!polymorphic) {
-        if (record.vptr_offset != context::no_id()) {
+        if (type_record.vptr_offset != context::no_id()) {
             context->error = runtime::Error.invalid_argument;
             return false;
         }
         return true;
     }
-    let base_record_id: usize = class_record_id(context, record.base_type);
+    let base_record_id: usize = class_record_id(context, type_record.base_type);
     if (base_record_id != context::no_id()) {
         let base: domain::ClassRecord = records[base_record_id];
         let base_is_polymorphic: bool = (base.flags & (domain::ClassFlag.polymorphic as usize)) != 0;
         if (base_is_polymorphic) {
-            if (base.vptr_offset == context::no_id()) {
+            let base_type: type_info::Record = context::type_record(context, type_record.base_type);
+            if (base_type.vptr_offset == context::no_id()) {
                 context->error = runtime::Error.invalid_argument;
                 return false;
             }
-            context->error = context->types.set_vptr(type_id, base.vptr_offset);
-            if (context->error != runtime::Error.none) {
-                return false;
-            }
-            records[record_id].vptr_offset = base.vptr_offset;
-            return true;
+            context->error = context->types.set_vptr(type_id, base_type.vptr_offset);
+            return context->error == runtime::Error.none;
         }
     }
     var vptr_offset: usize = 0;
@@ -57,12 +55,10 @@ fn extend_class_layout(
         report_type_declaration(context, context::DiagnosticKind.object_too_large, type_id, vptr_offset);
         return false;
     }
-    records = context->classes.record_data() as *domain::ClassRecord;
     context->error = context->types.set_vptr(type_id, vptr_offset);
     if (context->error != runtime::Error.none) {
         return false;
     }
-    records[record_id].vptr_offset = vptr_offset;
     *size_bytes = vptr_offset + pointer_size;
     if (*alignment_bytes < domain::ClassLayout.vptr_alignment_bytes as usize) {
         *alignment_bytes = domain::ClassLayout.vptr_alignment_bytes as usize;
@@ -85,13 +81,14 @@ fn anonymous_record_type(context: *context::Context, unit_index: usize, node_ind
     let kind: type_info::Kind = node.kind == syntax::SyntaxKind.structure_declaration ? type_info::Kind.structure :
             type_info::Kind.record_union;
     let records: *const type_info::Record = context->types.record_data() as *const type_info::Record;
-    var type_id: usize = type_info::BuiltinType.count as usize;
-    while (type_id < context->types.size()) {
-        if (records[type_id].kind == kind && records[type_id].declaration_unit == unit_index &&
-            records[type_id].declaration_node == node_index) {
+    for (var type_id: usize = type_info::BuiltinType.count as usize;
+        type_id < context->types.size(); type_id += 1) {
+        let kind_matches: bool = records[type_id].kind == kind;
+        let source_matches: bool = records[type_id].declaration_unit == unit_index &&
+            records[type_id].declaration_node == node_index;
+        if (kind_matches && source_matches) {
             return type_id;
         }
-        type_id += 1;
     }
     let added: type_info::IdResult = context->types.add_named(kind, unit_index, node_index, node.token_index, false);
     context->error = added.error;
@@ -104,12 +101,10 @@ fn anonymous_record_type(context: *context::Context, unit_index: usize, node_ind
 fn find_type_symbol(context: *context::Context, type_id: usize) -> usize {
     let symbols: *const context::Symbol = context->symbols.data as
             *const context::Symbol;
-    var index: usize = 0;
-    while (index < context->symbol_count) {
+    for (var index: usize = 0; index < context->symbol_count; index += 1) {
         if (symbols[index].kind == context::SymbolKind.named_type && symbols[index].type_id == type_id) {
             return index;
         }
-        index += 1;
     }
     return context::no_id();
 }
@@ -316,8 +311,7 @@ fn resolve_record_layout(context: *context::Context, type_id: usize, record: typ
                 field_node = field_declaration.next_sibling;
                 continue;
             }
-            // A flexible member is legal solely in last position of a
-            // structure; the record then becomes a header type.
+            // 柔性成员只能位于结构体末尾；包含它的记录随后成为 header 类型。
             var last: bool = true;
             var following: usize = field_declaration.next_sibling;
             while (following != context::no_id()) {
@@ -335,13 +329,17 @@ fn resolve_record_layout(context: *context::Context, type_id: usize, record: typ
                 continue;
             }
             has_flexible = true;
-        } else if (field_record.record.kind == type_info::Kind.type_void || field_record.record.size_bytes == 0 ||
-            (field_record.record.flags & (type_info::Flag.header as usize)) != 0) {
-            context::add_diagnostic(
-                context, context::DiagnosticKind.incomplete_type, record.declaration_unit, field_declaration.span,
-                context::no_id(), context::empty_span(), field_type);
-            field_node = field_declaration.next_sibling;
-            continue;
+        } else {
+            let field_has_storage: bool = field_record.record.kind != type_info::Kind.type_void &&
+                field_record.record.size_bytes != 0;
+            let field_is_header: bool = (field_record.record.flags & (type_info::Flag.header as usize)) != 0;
+            if (!field_has_storage || field_is_header) {
+                context::add_diagnostic(
+                    context, context::DiagnosticKind.incomplete_type, record.declaration_unit, field_declaration.span,
+                    context::no_id(), context::empty_span(), field_type);
+                field_node = field_declaration.next_sibling;
+                continue;
+            }
         }
         var field_offset: usize = 0;
         let field_override: usize = builder::alignment_override(context, record.declaration_unit, field_node);
@@ -486,7 +484,9 @@ fn resolve_enum_layout(context: *context::Context, type_id: usize, record: type_
         } else {
             var value: u64 = next_value;
             var pending: bool = false;
-            let implicit_overflow: bool = member.child_count == 0 && !next_value_valid && !chain_pending;
+            let implicit_value: bool = member.child_count == 0;
+            let next_value_overflowed: bool = !next_value_valid && !chain_pending;
+            let implicit_overflow: bool = implicit_value && next_value_overflowed;
             if (implicit_overflow ||
                 !enum_value(
                     context, record.declaration_unit, member, underlying.record.kind, next_value, &value, &pending)) {
@@ -548,7 +548,8 @@ fn resolve_alias(context: *context::Context, type_id: usize, record: type_info::
         return false;
     }
     let target: type_info::Record = context::type_record(context, target_type);
-    if (target.kind == type_info::Kind.type_void || target.size_bytes == 0 || target.kind == type_info::Kind.alias) {
+    let target_kind_is_invalid: bool = target.kind == type_info::Kind.type_void || target.kind == type_info::Kind.alias;
+    if (target_kind_is_invalid || target.size_bytes == 0) {
         context::add_diagnostic(
             context, context::DiagnosticKind.invalid_type_alias, record.declaration_unit,
             context::node(context, record.declaration_unit, target_node).span,
@@ -618,24 +619,25 @@ fn resolve_layout(context: *context::Context, type_id: usize) -> bool {
 }
 
 fn resolve_all_types(context: *context::Context) -> bool {
-    var type_id: usize = type_info::BuiltinType.count as usize;
-    while (type_id < context->types.size() && context->error == runtime::Error.none) {
+    for (var type_id: usize = type_info::BuiltinType.count as usize;
+        type_id < context->types.size() && context->error == runtime::Error.none; type_id += 1) {
         resolve_layout(context, type_id);
-        type_id += 1;
     }
     return context->error == runtime::Error.none;
 }
 
 fn find_enum_member(context: *context::Context, type_id: usize, unit_index: usize, name_token: usize) -> usize {
     let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
-    var index: usize = 0;
-    while (index < context->symbol_count) {
-        if (symbols[index].kind == context::SymbolKind.enum_member && symbols[index].type_id == type_id &&
-            context::tokens_equal(
-                context, unit_index, name_token, symbols[index].declaration_unit, symbols[index].name_token)) {
+    for (var index: usize = 0; index < context->symbol_count; index += 1) {
+        let symbol: context::Symbol = symbols[index];
+        let identity_matches: bool = symbol.kind == context::SymbolKind.enum_member && symbol.type_id == type_id;
+        if (!identity_matches) {
+            continue;
+        }
+        if (context::tokens_equal(
+                context, unit_index, name_token, symbol.declaration_unit, symbol.name_token)) {
             return index;
         }
-        index += 1;
     }
     return context::no_id();
 }

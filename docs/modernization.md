@@ -273,6 +273,9 @@ owner and strong publication boundaries. The sixth batch moves stable passive
 class/generic metadata into `luna.compiler.sema.domain` after proving the
 acyclic types-to-domain-to-owner-to-Context order; only Context retains direct
 owner imports, preparing both tables for later session absorption.
+The seventh batch makes TypeTable the sole base/vptr authority, removes those
+mirrors from ClassRecord and replaces ClassTable's writable projections with
+focused hierarchy, virtual-slot and runtime-metadata publication methods.
 
 `ir::Module` owns the completed typed CFG, `ir::Builder` owns its append-only
 construction phase, and the private `Verifier` owns whole-module validation

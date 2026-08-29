@@ -248,15 +248,18 @@ class, field-access and method records; `semantic.classes.model` is now only the
 move-only `ClassTable` construction owner over four typed vectors. Semantic
 context owns the table as one validated lifecycle unit; automatic destruction
 replaces manual release, and bound append methods preserve contiguous field,
-method and friend slices while retaining the first failure. Collection, layout
-and access passes sit above context rather than importing the owner directly.
+method and friend slices while retaining the first failure. TypeTable alone
+owns base and vptr layout facts; ClassRecord does not mirror them. Const table
+projections serve readers, while focused methods publish hierarchy flags,
+virtual slots, descriptors and vtables. Collection, layout and access passes
+sit above context rather than importing the owner directly.
 The class pass records nominal identities after named-type collection, lets the
 shared record-layout pass resolve complete non-polymorphic storage, then builds
 contiguous per-class field and method slices. Field slices follow layout order;
 method slices are selected from the canonical callable order one owner at a
 time, so class-record order and global function order are never accidentally
 coupled. The validator checks those slices, explicit access, dispatch policy,
-the single-base relation, absence of vptrs and class-value composition.
+the canonical TypeTable base/vptr relation and class-value composition.
 
 M4 generic metadata follows the same split. Domain defines declarations,
 parameters, active bindings and instance states; `semantic.generics.model` is
@@ -273,12 +276,12 @@ ordinary typed IR. Statement lowering processes canonical ordinary roots first
 and then a bounded concrete-instance worklist, so recursive instantiation does
 not require a generic backend representation.
 
-M3.1 adds one canonical `base_type` field to the semantic type record. The class
-metadata record mirrors that relation, but layout, field lookup, IR member
-verification and x86-64 ABI classification all consume the type relation rather
-than copied inherited fields. Layout resolves the base first, begins direct
-field placement at the base's padded size and keeps the base address at offset
-zero. A bounded DFS over class records validates cycles and final bases.
+M3.1 adds one canonical `base_type` field to the semantic type record. TypeTable
+is now the only owner of that relation; layout, class policy, field lookup, IR
+member verification and x86-64 ABI classification all consume it directly.
+Layout resolves the base first, begins direct field placement at the base's
+padded size and keeps the base address at offset zero. A bounded DFS over class
+identities validates cycles and final bases.
 
 After direct methods are collected, a base-first DFS state machine analyzes
 each hierarchy independently of source order. Exact method keys ignore owner

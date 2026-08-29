@@ -28,6 +28,9 @@ TypeTable 是 move-only RAII 类。Semantic Context 直接拥有它，Semantic R
 不再手工释放类型缓冲。IR verifier、ABI classifier、FramePlan 和 CodeGenerator 全部通过 `TypeTable const&`
 借用，CodeGenerator 只在一次 emit 会话内保存 const 指针，不复制或延长所有者生命周期。
 
+class 的 `base_type` 与 `vptr_offset` 也是 TypeTable 的唯一类型/布局事实。ClassRecord 不保存镜像；语义层的
+层次分析、虚分派和 RTTI 通过 type ID 读取同一 Record，避免阶段间双写同步。
+
 `record_data()` 与 `field_data()` 提供 C++ 容器风格的 typed contiguous data 边界。const overload 服务验证、IR
 和 Codegen；mutable overload 只服务类型构造阶段与独立破坏性验证测试。调用方不能观察容量、分离底层分配
 或释放存储，所有权始终留在 TypeTable。

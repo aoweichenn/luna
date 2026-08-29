@@ -67,8 +67,9 @@ IR/semantic ownership 契约由 relocation-data 专用协议覆盖：move-only I
 函数地址到对象重定位和最终链接的完整路径。
 
 同一 relocation-data 大用例直接构造`ClassTable`，一次覆盖 record、field、method 和 friend 四个 typed vector，
-验证三类成员切片的连续性、move 后目标所有权、moved-from 空状态以及首错粘滞。该契约复用既有编译/链接协议，
-不为每个 class-model 规则新增一次工具链启动。
+验证三类成员切片的连续性、hierarchy flag、virtual slot、descriptor/vtable publication、move 后目标所有权、
+moved-from 空状态以及首错粘滞。ClassRecord 不再包含 base/vptr 镜像，因此该用例也固定 ClassTable 的只读
+projection 边界。该契约复用既有编译/链接协议，不为每个 class-model 规则新增一次工具链启动。
 
 该大用例也直接构造`GenericTable`：验证声明参数连续切片、实例去重、16 到 32 bucket 的 rehash、type/function
 反向映射、active-binding 回滚、深验证、move/moved-from 和首错粘滞。generic model 的索引与生命周期契约因此

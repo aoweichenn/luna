@@ -54,13 +54,7 @@ fn class_flags(context: *context::Context, record: type_info::Record) -> usize {
 }
 
 fn append_class(context: *context::Context, type_id: usize, record: type_info::Record) -> bool {
-    let none: usize = context::no_id();
-    let class_record: domain::ClassRecord = {
-        type_id = type_id, base_type = none, first_field = none, field_count = 0,
-        first_method = none, method_count = 0, first_friend = none, friend_count = 0,
-        vptr_offset = none, descriptor_global = none, vtable_global = none, flags = class_flags(context, record),
-    };
-    context->error = context->classes.append_record(class_record);
+    context->error = context->classes.append_record(type_id, class_flags(context, record));
     return context->error == runtime::Error.none;
 }
 
@@ -154,10 +148,6 @@ fn set_base_relation(
         return;
     }
     context->error = context->types.set_base(records[record_id].type_id, base_type);
-    if (context->error == runtime::Error.none) {
-        let writable: *domain::ClassRecord = context->classes.record_data() as *domain::ClassRecord;
-        writable[record_id].base_type = base_type;
-    }
 }
 
 fn collect_class_base(context: *context::Context, record_id: usize, record: type_info::Record) {
@@ -173,7 +163,7 @@ fn collect_class_base(context: *context::Context, record_id: usize, record: type
 }
 
 fn validate_base_chain(context: *context::Context, record: domain::ClassRecord) {
-    var current: usize = record.base_type;
+    var current: usize = context::type_record(context, record.type_id).base_type;
     for (var depth: usize = 0; current != context::no_id(); depth += 1) {
         if (depth >= context::Limit.maximum_type_depth as usize || current == record.type_id) {
             let derived: type_info::Record = context::type_record(context, record.type_id);
@@ -183,13 +173,7 @@ fn validate_base_chain(context: *context::Context, record: domain::ClassRecord) 
                 context, context::DiagnosticKind.inheritance_cycle, derived, declaration.first_child, current);
             return;
         }
-        let base_record: usize = find_record(context, current);
-        if (base_record == context::no_id()) {
-            return;
-        }
-        let records: *const domain::ClassRecord = context->classes.record_data() as
-                *const domain::ClassRecord;
-        current = records[base_record].base_type;
+        current = context::type_record(context, current).base_type;
     }
 }
 
@@ -210,13 +194,14 @@ fn collect_bases(context: *context::Context) -> bool {
 }
 
 fn base_type(context: *context::Context, type_id: usize) -> usize {
-    let record_id: usize = find_record(context, type_id);
-    if (record_id == context::no_id()) {
+    if (type_id >= context->types.size()) {
         return context::no_id();
     }
-    let records: *const domain::ClassRecord = context->classes.record_data() as
-            *const domain::ClassRecord;
-    return records[record_id].base_type;
+    let record: type_info::Record = context::type_record(context, type_id);
+    if (record.kind != type_info::Kind.class_type) {
+        return context::no_id();
+    }
+    return record.base_type;
 }
 
 fn is_base_of(context: *context::Context, candidate_base: usize, derived_type: usize) -> bool {
@@ -390,7 +375,7 @@ fn collect_friends(context: *context::Context) -> bool {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    var records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
+    let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
     for (var record_id: usize = 0;
         record_id < context->classes.record_count() && context->error == runtime::Error.none;
         record_id += 1) {
@@ -447,33 +432,35 @@ fn class_layout_is_valid(context: *context::Context, record: domain::ClassRecord
     type_record: type_info::Record) -> bool {
     let polymorphic: bool = (record.flags & (domain::ClassFlag.polymorphic as usize)) != 0;
     if (!polymorphic) {
-        return record.vptr_offset == context::no_id() && type_record.vptr_offset == context::no_id();
+        return type_record.vptr_offset == context::no_id();
     }
-    if (record.vptr_offset == context::no_id() || record.vptr_offset != type_record.vptr_offset) {
+    if (type_record.vptr_offset == context::no_id()) {
         return false;
     }
     let pointer_size: usize = domain::ClassLayout.vptr_size_bytes as usize;
     let pointer_alignment: usize = domain::ClassLayout.vptr_alignment_bytes as usize;
-    let pointer_range_is_valid: bool = record.vptr_offset <= type_record.size_bytes &&
-        pointer_size <= type_record.size_bytes - record.vptr_offset;
+    let pointer_range_is_valid: bool = type_record.vptr_offset <= type_record.size_bytes &&
+        pointer_size <= type_record.size_bytes - type_record.vptr_offset;
     let pointer_alignment_is_valid: bool = type_record.alignment_bytes >= pointer_alignment &&
-        (record.vptr_offset & (pointer_alignment - 1)) == 0;
+        (type_record.vptr_offset & (pointer_alignment - 1)) == 0;
     if (!pointer_range_is_valid || !pointer_alignment_is_valid) {
         return false;
     }
-    let base_record_id: usize = find_record(context, record.base_type);
+    let inherited_type: usize = type_record.base_type;
+    let base_record_id: usize = find_record(context, inherited_type);
     if (base_record_id != context::no_id()) {
         let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
         let base: domain::ClassRecord = records[base_record_id];
         let base_is_polymorphic: bool = (base.flags & (domain::ClassFlag.polymorphic as usize)) != 0;
         if (base_is_polymorphic) {
-            return record.vptr_offset == base.vptr_offset;
+            return type_record.vptr_offset == context::type_record(context, inherited_type).vptr_offset;
         }
     }
-    let base_size: usize = record.base_type == context::no_id() ? 0 :
-        context::type_record(context, record.base_type).size_bytes;
+    let base_size: usize = inherited_type == context::no_id() ? 0 :
+        context::type_record(context, inherited_type).size_bytes;
     var expected_offset: usize = 0;
-    return context::align_up(base_size, pointer_alignment, &expected_offset) && record.vptr_offset == expected_offset;
+    return context::align_up(base_size, pointer_alignment, &expected_offset) &&
+        type_record.vptr_offset == expected_offset;
 }
 
 fn record_is_valid(
@@ -484,13 +471,12 @@ fn record_is_valid(
     require(&validator, type_record.kind == type_info::Kind.class_type);
     require(&validator, (type_record.flags & (type_info::Flag.complete as usize)) != 0);
     require(&validator, type_record.size_bytes != 0 && type_record.alignment_bytes != 0);
-    require(&validator, record.base_type == type_record.base_type);
     require(&validator, record.descriptor_global == context::no_id() && record.vtable_global == context::no_id());
     require(&validator, class_layout_is_valid(context, record, type_record));
     require(&validator, field_slice_is_valid(context, record, type_record));
     require(&validator, empty_slice_is_valid(record.first_method, record.method_count));
     require(&validator, friend_slice_is_valid(context, record, expected_friend));
-    let layout_flags: usize = record.vptr_offset == context::no_id() ? domain::ClassFlag.none as usize :
+    let layout_flags: usize = type_record.vptr_offset == context::no_id() ? domain::ClassFlag.none as usize :
         domain::ClassFlag.polymorphic as usize;
     require(&validator, record.flags == (class_flags(context, type_record) | layout_flags));
     return validator.valid;
@@ -754,9 +740,9 @@ fn prepare_class_layout(context: *context::Context, record_id: usize, states: *u
         return;
     }
     states[record_id] = HierarchyState.visiting as u8;
-    var records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
+    let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
     let record: domain::ClassRecord = records[record_id];
-    let base_record_id: usize = find_record(context, record.base_type);
+    let base_record_id: usize = find_record(context, base_type(context, record.type_id));
     if (base_record_id != context::no_id()) {
         prepare_class_layout(context, base_record_id, states, depth + 1);
     }
@@ -765,8 +751,7 @@ fn prepare_class_layout(context: *context::Context, record_id: usize, states: *u
         (updated_records[base_record_id].flags & (domain::ClassFlag.polymorphic as usize)) != 0;
     let introduces_polymorphism: bool = class_declares_virtual_contract(context, record);
     if (inherits_polymorphism || introduces_polymorphism) {
-        let writable: *domain::ClassRecord = context->classes.record_data() as *domain::ClassRecord;
-        writable[record_id].flags |= domain::ClassFlag.polymorphic as usize;
+        context->error = context->classes.mark_polymorphic(record_id);
     }
     states[record_id] = HierarchyState.complete as u8;
 }
@@ -848,7 +833,7 @@ fn method_is_shadowed(context: *context::Context, lookup_type: usize, function_i
                 return true;
             }
         }
-        current = record.base_type;
+        current = base_type(context, record.type_id);
     }
     return false;
 }
@@ -898,7 +883,7 @@ fn inherited_method_named_like_field(context: *context::Context, owner_type: usi
                 return method_index;
             }
         }
-        current = record.base_type;
+        current = base_type(context, record.type_id);
     }
     return context::no_id();
 }
@@ -944,7 +929,7 @@ fn inherited_method(context: *context::Context, owner_type: usize, function_id: 
                 return method_index;
             }
         }
-        current = record.base_type;
+        current = base_type(context, record.type_id);
     }
     return context::no_id();
 }
@@ -977,7 +962,7 @@ fn hierarchy_slot_count(context: *context::Context, type_id: usize) -> usize {
                 count = method_record.virtual_slot + 1;
             }
         }
-        current = record.base_type;
+        current = base_type(context, record.type_id);
     }
     return count;
 }
@@ -1030,7 +1015,7 @@ fn override_is_valid(
 }
 
 fn analyze_method(context: *context::Context, method_index: usize, next_slot: *usize) {
-    var methods: *domain::ClassMethod = context->classes.method_data() as *domain::ClassMethod;
+    let methods: *const domain::ClassMethod = context->classes.method_data() as *const domain::ClassMethod;
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
     let method_record: domain::ClassMethod = methods[method_index];
@@ -1042,14 +1027,15 @@ fn analyze_method(context: *context::Context, method_index: usize, next_slot: *u
     if (has_override_relation) {
         valid_override = override_is_valid(context, function, inherited_index, requested);
     }
-    methods = context->classes.method_data() as *domain::ClassMethod;
     if (valid_override) {
-        methods[method_index].virtual_slot = methods[inherited_index].virtual_slot;
+        context->error = context->classes.assign_virtual_slot(method_index, methods[inherited_index].virtual_slot);
         return;
     }
     if (dispatch_is_virtual(method_record.dispatch)) {
-        methods[method_index].virtual_slot = *next_slot;
-        *next_slot += 1;
+        context->error = context->classes.assign_virtual_slot(method_index, *next_slot);
+        if (context->error == runtime::Error.none) {
+            *next_slot += 1;
+        }
     }
 }
 
@@ -1071,19 +1057,19 @@ fn effective_method_for_slot(context: *context::Context, type_id: usize, slot: u
                 return method_index;
             }
         }
-        current = record.base_type;
+        current = base_type(context, record.type_id);
     }
     return context::no_id();
 }
 
 fn update_hierarchy_flags(context: *context::Context, record_id: usize) {
-    var records: *domain::ClassRecord = context->classes.record_data() as *domain::ClassRecord;
+    let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
     let type_id: usize = records[record_id].type_id;
     let slot_count: usize = hierarchy_slot_count(context, type_id);
     if (slot_count != 0) {
-        records[record_id].flags |= domain::ClassFlag.polymorphic as usize;
+        context->error = context->classes.mark_polymorphic(record_id);
     }
-    for (var slot: usize = 0; slot < slot_count; slot += 1) {
+    for (var slot: usize = 0; slot < slot_count && context->error == runtime::Error.none; slot += 1) {
         let method_index: usize = effective_method_for_slot(context, type_id, slot);
         if (method_index == context::no_id()) {
             continue;
@@ -1091,31 +1077,28 @@ fn update_hierarchy_flags(context: *context::Context, record_id: usize) {
         let methods: *const domain::ClassMethod = context->classes.method_data() as
                 *const domain::ClassMethod;
         if (methods[method_index].dispatch == domain::MethodDispatch.abstract_method) {
-            records = context->classes.record_data() as *domain::ClassRecord;
-            records[record_id].flags |= domain::ClassFlag.abstract_class as usize;
+            context->error = context->classes.mark_abstract(record_id);
             return;
         }
     }
 }
 
 fn update_rtti_flag(context: *context::Context, record_id: usize) {
-    var records: *domain::ClassRecord = context->classes.record_data() as *domain::ClassRecord;
+    let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
     let record: domain::ClassRecord = records[record_id];
     let type_record: type_info::Record = context::type_record(context, record.type_id);
     let declaration: syntax::SyntaxNode = context::node(
         context, type_record.declaration_unit, type_record.declaration_node);
     let explicitly_enabled: bool = attributes::declaration_has_attribute(
         context, type_record.declaration_unit, declaration, attributes::Attribute.rtti);
-    let base_record_id: usize = find_record(context, record.base_type);
+    let base_record_id: usize = find_record(context, base_type(context, record.type_id));
     var inherited: bool = false;
     if (base_record_id != context::no_id()) {
-        records = context->classes.record_data() as *domain::ClassRecord;
         inherited = (records[base_record_id].flags & (domain::ClassFlag.rtti as usize)) != 0;
     }
     let non_root_annotation: bool = explicitly_enabled && base_record_id != context::no_id();
     let invalid_non_root: bool = non_root_annotation && !inherited;
     let enabled: bool = explicitly_enabled || inherited;
-    records = context->classes.record_data() as *domain::ClassRecord;
     let polymorphic: bool = (records[record_id].flags & (domain::ClassFlag.polymorphic as usize)) != 0;
     let invalid_shape: bool = enabled && !polymorphic;
     if (invalid_non_root || invalid_shape) {
@@ -1125,7 +1108,7 @@ fn update_rtti_flag(context: *context::Context, record_id: usize) {
         return;
     }
     if (enabled) {
-        records[record_id].flags |= domain::ClassFlag.rtti as usize;
+        context->error = context->classes.enable_rtti(record_id);
     }
 }
 
@@ -1145,16 +1128,22 @@ fn analyze_class_hierarchy(context: *context::Context, record_id: usize, states:
             *const domain::ClassRecord;
     let record: domain::ClassRecord = records[record_id];
     validate_inherited_field_names(context, record);
-    let base_record: usize = find_record(context, record.base_type);
+    let inherited_type: usize = base_type(context, record.type_id);
+    let base_record: usize = find_record(context, inherited_type);
     if (base_record != context::no_id()) {
         analyze_class_hierarchy(context, base_record, states, depth + 1);
     }
-    var next_slot: usize = record.base_type == context::no_id() ? 0 : hierarchy_slot_count(context, record.base_type);
-    for (var index: usize = 0; index < record.method_count; index += 1) {
+    var next_slot: usize = inherited_type == context::no_id() ? 0 : hierarchy_slot_count(context, inherited_type);
+    for (var index: usize = 0;
+        index < record.method_count && context->error == runtime::Error.none; index += 1) {
         analyze_method(context, record.first_method + index, &next_slot);
     }
-    update_hierarchy_flags(context, record_id);
-    update_rtti_flag(context, record_id);
+    if (context->error == runtime::Error.none) {
+        update_hierarchy_flags(context, record_id);
+    }
+    if (context->error == runtime::Error.none) {
+        update_rtti_flag(context, record_id);
+    }
     states[record_id] = HierarchyState.complete as u8;
 }
 
@@ -1321,7 +1310,7 @@ fn create_descriptor(context: *context::Context, record_id: usize, states: *u8, 
         states[record_id] = HierarchyState.complete as u8;
         return record.descriptor_global == context::no_id();
     }
-    let base_record_id: usize = find_record(context, record.base_type);
+    let base_record_id: usize = find_record(context, base_type(context, record.type_id));
     if (base_record_id != context::no_id() && !create_descriptor(context, base_record_id, states, depth + 1)) {
         return false;
     }
@@ -1341,8 +1330,10 @@ fn create_descriptor(context: *context::Context, record_id: usize, states: *u8, 
             return false;
         }
     }
-    let writable: *domain::ClassRecord = context->classes.record_data() as *domain::ClassRecord;
-    writable[record_id].descriptor_global = global_id;
+    context->error = context->classes.publish_descriptor(record_id, global_id);
+    if (context->error != runtime::Error.none) {
+        return false;
+    }
     states[record_id] = HierarchyState.complete as u8;
     return true;
 }
@@ -1446,9 +1437,8 @@ fn create_vtable(context: *context::Context, record_id: usize) -> bool {
     if (context->error != runtime::Error.none) {
         return false;
     }
-    let writable: *domain::ClassRecord = context->classes.record_data() as *domain::ClassRecord;
-    writable[record_id].vtable_global = global_id;
-    return true;
+    context->error = context->classes.publish_vtable(record_id, global_id);
+    return context->error == runtime::Error.none;
 }
 
 fn create_vtables(context: *context::Context) -> bool {
@@ -1495,12 +1485,10 @@ fn vtable_global(context: *context::Context, type_id: usize) -> usize {
 }
 
 fn vptr_offset(context: *context::Context, type_id: usize) -> usize {
-    let record_id: usize = find_record(context, type_id);
-    if (record_id == context::no_id()) {
+    if (find_record(context, type_id) == context::no_id()) {
         return context::no_id();
     }
-    let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
-    return records[record_id].vptr_offset;
+    return context::type_record(context, type_id).vptr_offset;
 }
 
 fn method_record(context: *context::Context, function_id: usize) -> domain::ClassMethod {
@@ -1541,13 +1529,14 @@ fn dispatch_plan(
         return direct_dispatch_plan();
     }
     let method_is_virtual: bool = dispatch_is_virtual(selected_method.dispatch);
-    let layout_is_valid: bool = record.vptr_offset != context::no_id() &&
+    let layout_vptr_offset: usize = vptr_offset(context, static_type);
+    let layout_is_valid: bool = layout_vptr_offset != context::no_id() &&
         selected_method.virtual_slot != context::no_id();
     if (!method_is_virtual || !layout_is_valid) {
         return direct_dispatch_plan();
     }
     return {
-        kind = domain::CallDispatch.virtual_call, vptr_offset = record.vptr_offset,
+        kind = domain::CallDispatch.virtual_call, vptr_offset = layout_vptr_offset,
         virtual_slot = selected_method.virtual_slot,
     };
 }

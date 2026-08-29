@@ -4,7 +4,7 @@
 
 The semantic pipeline validates the parsed source-module graph, constructs the
 canonical type model and lowers checked functions into `luna.compiler.ir`.
-This document records the first six ownership/domain batches of its modernization.
+This document records the first seven ownership/domain batches of its modernization.
 
 The root module is still named `luna.bootstrap.middleend.sema` while the
 downstream semantic dependency graph is contracted incrementally. The current
@@ -15,7 +15,7 @@ has already become private.
 
 `luna.compiler.sema.domain` is the first modern semantic dependency boundary.
 It replaces the historical callable and value-category modules and now owns
-the stable passive class/generic metadata in one 161-line interface with two
+the stable passive class/generic metadata in one 158-line interface with two
 same-module behavior implementation units.
 
 The module contains only closed, passive compiler-domain values:
@@ -52,8 +52,9 @@ domain `ClassRecord`, `ClassField`, `ClassMethod` and `ClassFriend` values plus
 a sticky runtime error. Context owns one table; normal Context destruction
 destroys its vectors, so semantic cleanup has no class-model release call.
 
-The four append methods are the only storage-growth boundary. A class record
-starts with an absent first index and a zero count. The first field, method or
+The four append methods are the only storage-growth boundary. `append_record`
+accepts only a type identity and declaration flags, then constructs every empty
+slice and unpublished metadata field internally. The first field, method or
 friend captures the current typed-vector end; every later append must continue
 exactly at that end. This preserves the existing contiguous per-class slices
 without exposing byte sizes, casts or synchronized storage counts to callers.
@@ -66,11 +67,14 @@ moved-from vector returns to a valid empty state and the source error resets to
 relocation contract verifies this state as well as all three slice families
 and sticky failure behavior.
 
-Typed mutable and const `*_data()` overloads remain a transitional pass
-boundary. Current hierarchy, layout, vtable and descriptor passes still update
-completed class records in place. They no longer know the storage mechanism,
-but those mutations should become focused `ClassTable` methods when the class
-passes move behind the future private semantic-session boundary.
+TypeTable is the single source of truth for both the base relation and hidden
+vptr offset. ClassRecord no longer mirrors either value; it contains only class
+policy, member slices and published runtime metadata. Consumers receive const
+typed projections. Hierarchy and runtime-metadata phases mutate the table only
+through `mark_polymorphic`, `mark_abstract`, `enable_rtti`,
+`assign_virtual_slot`, `publish_descriptor` and `publish_vtable`. These bound
+operations validate the phase-specific precondition before publication, so no
+caller can retain a writable vector pointer across append or reallocation.
 
 ## Generic metadata ownership
 
@@ -186,12 +190,11 @@ delegates storage mutation and capacity enforcement to the bound owner method.
 - move-only `DiagnosticBuffer` ownership;
 - the semantic runtime error.
 
-The record is intentionally a struct in the current ABI. It has no behavior or
-independent invariant beyond bundling the three already-validated RAII owners
-for return-value transfer. The current unoptimized class ABI does not yet
-reliably transfer a large public class containing both TypeTable and Module;
-forcing a decorative result class would lose IR state. The private session
-therefore owns behavior, while the public record remains transparent and
+The record is intentionally a struct. It has no behavior or independent
+invariant beyond bundling the three already-validated RAII owners for
+return-value transfer. A movable class could express the same representation,
+but would add a decorative boundary without a responsibility. The private
+session owns behavior, while the public record remains transparent and
 move-only through its fields.
 
 `result_is_success` is a stateless final predicate. Success requires no runtime
@@ -241,7 +244,7 @@ sets the IR entry through `ir::Builder` before graph reachability validation.
 | --- | --- |
 | `semantic/domain/callable.la` | callable identity construction and validation |
 | `semantic/domain/category.la` | value-category projection and reference binding |
-| `semantic/classes/model.la` | ClassTable typed ownership, contiguous-slice construction and sticky failure |
+| `semantic/classes/model.la` | ClassTable typed ownership, slice construction, hierarchy publication and sticky failure |
 | `semantic/generics/storage.la` | GenericTable lifetime, declarations, bindings and read-only projections |
 | `semantic/generics/instances.la` | canonical instance insertion, hash rebuilding and reverse maps |
 | `semantic/generics/validation.la` | declarations, slices, indexes, maps and final-state validation |
@@ -267,7 +270,7 @@ independently.
 | Access control | session phase, metadata vectors, diagnostic storage and sticky errors are private |
 | Constructors/destructors | constructors establish ready/empty states; destructors close each resource path once |
 | Copy/move | Input, DiagnosticBuffer, ClassTable and GenericTable are move-only; views are copied borrows |
-| Overloads/defaults | ClassTable has mutable/const data overloads; no useful GenericTable default applies |
+| Overloads/defaults | no operation has one semantic family that benefits from overloads or a meaningful default |
 | Operators | no natural value operator exists for a semantic session or diagnostic stream |
 | Bound methods | pipeline, diagnostics, metadata construction and index mutation are bound to their owners |
 | Friends | unnecessary because the public methods preserve the required boundaries |
@@ -300,7 +303,8 @@ python3 tools/selfhost.py test
 ```
 
 The relocation-data contract exercises Input, ClassTable and GenericTable
-move/moved-from storage; class-member and generic-parameter slices; generic
+move/moved-from storage; class-member and generic-parameter slices; hierarchy
+flags, virtual-slot assignment and descriptor/vtable publication; generic
 rehash, deduplication, reverse maps and rollback; sticky owner failures;
 borrowed InputView use; and IR ownership transfer. The ordinary negative corpus
 exercises DiagnosticBuffer capacity, DiagnosticView lookup and stable leading

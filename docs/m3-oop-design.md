@@ -470,12 +470,12 @@ ordinary structure flags:
 ```text
 ClassRecord {
     type_id
-    base_type
     first_field / field_count
     first_method / method_count
-    vptr_offset
+    first_friend / friend_count
+    descriptor_global
     vtable_global
-    flags: exported, final, abstract, polymorphic
+    flags: exported, final, abstract, polymorphic, rtti
 }
 
 ClassField {
@@ -501,11 +501,11 @@ passive records. Semantic context alone owns the move-only `ClassTable` that
 stores them, so higher passes share one domain vocabulary without importing
 the construction owner or exposing unrelated class buffers.
 
-The ordinary type record mirrors `vptr_offset` as layout metadata. The generic
-type-table validator therefore recomputes hidden-pointer placement together
-with bases, direct fields, alignment and tail padding, while `ClassRecord`
-retains the same value for dispatch-policy queries. A disagreement is an
-internal invariant failure rather than an unchecked hidden gap.
+The ordinary type record is the sole owner of `base_type` and `vptr_offset`.
+The generic type-table validator recomputes hidden-pointer placement together
+with bases, direct fields, alignment and tail padding. Class policy and dispatch
+queries read those canonical type facts and never synchronize a second copy in
+ClassRecord.
 
 ### IR and backend
 

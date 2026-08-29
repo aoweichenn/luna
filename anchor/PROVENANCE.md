@@ -1050,3 +1050,36 @@ Their 59,678-, 251,976- and 418,393-byte objects have SHA-256
 and `d675e195f1dc9362e46ba71f69ee96cc1cc1e9025765a1b6b73b2042406444c9`.
 The promoted 5,179,219-byte executable has SHA-256
 `7dcc139c0b50ad7361faa5581fd25ae90b0c4d6f3a87243b5c1f13f6553eccb5`.
+
+## 2026-08-29: promotion to canonical class metadata invariants
+
+The anchor now contains the stage-fixed `luna` executable from the canonical
+class-metadata batch accompanying this note. TypeTable is the sole source of
+truth for class `base_type` and `vptr_offset`; ClassRecord no longer mirrors
+either value. Hierarchy, layout, access, RTTI and dispatch consumers read the
+canonical type record by ID.
+
+ClassTable no longer exports writable record, field, method or friend data
+pointers. It constructs empty records from a type identity and declaration
+flags, preserves contiguous member slices, and exposes focused publication
+operations for polymorphic/abstract/RTTI state, virtual slots, descriptors and
+vtables. These operations retain sticky failure semantics and enforce their
+phase-specific prerequisites before mutating storage.
+
+The relocation-data contract now covers the const projection boundary,
+hierarchy flags, virtual-slot assignment, descriptor/vtable publication,
+move/moved-from state and sticky failure. Touched semantic type-layout scans use
+bounded `for` traversal; their remaining `while` loops follow syntax sibling
+state, and no changed condition exceeds two logical clauses.
+
+Remote x86-64 verification used the isolated caw workspace
+`/home/aoweichen/codex-workspaces/luna-class-invariants-final-EZAFqyyZ` on WSL2
+Linux 6.6.87.2 with Python 3.13.9. Audit reported 66 modules, one driver, 32
+interfaces and 56 library objects; formatting reported zero files needing
+reflow and zero token drift. A fresh transition/next/fixed rebuild completed
+each stage in about 15 seconds, with the fixed stage at 15.11 seconds. Every
+next/fixed assembly, object and executable artifact was byte-identical, and the
+post-fixed-point suite passed 450/450 with no failures or skips.
+
+The promoted 5,187,411-byte executable has SHA-256
+`ef79139adae0cf3cf65efa45a20b0886a670c7f6f9e16015fae6f2918748f629`.

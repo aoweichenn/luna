@@ -15,12 +15,17 @@ fn class_slice_is_appendable(first: usize, count: usize, next: usize) -> bool {
     return first <= next && count == next - first;
 }
 
-fn record_slices_are_empty(record: domain::ClassRecord) -> bool {
-    let fields_are_empty: bool = class_slice_is_empty(record.first_field, record.field_count);
-    let methods_are_empty: bool = class_slice_is_empty(record.first_method, record.method_count);
-    let friends_are_empty: bool = class_slice_is_empty(record.first_friend, record.friend_count);
-    let members_are_empty: bool = fields_are_empty && methods_are_empty;
-    return members_are_empty && friends_are_empty;
+fn declaration_flags_are_valid(flags: usize) -> bool {
+    let allowed: usize = (domain::ClassFlag.exported as usize) | (domain::ClassFlag.final_class as usize);
+    return (flags & ~allowed) == 0;
+}
+
+fn class_record(type_id: usize, flags: usize) -> domain::ClassRecord {
+    let none: usize = Limit.maximum_size as usize;
+    return {
+        type_id = type_id, first_field = none, field_count = 0, first_method = none, method_count = 0,
+        first_friend = none, friend_count = 0, descriptor_global = none, vtable_global = none, flags = flags,
+    };
 }
 
 impl ClassTable {
@@ -41,10 +46,12 @@ impl ClassTable {
         return this->error_code == runtime::Error.none && this->storage_is_valid();
     }
 
-    priv fn can_append_record(record: domain::ClassRecord) const -> bool {
+    priv fn can_append_record(type_id: usize, flags: usize) const -> bool {
         let capacity_is_available: bool = this->records.size() != Limit.maximum_size as usize;
         let storage_is_ready: bool = this->ready() && capacity_is_available;
-        return storage_is_ready && record_slices_are_empty(record);
+        let identity_is_valid: bool = type_id != Limit.maximum_size as usize;
+        let declaration_is_valid: bool = identity_is_valid && declaration_flags_are_valid(flags);
+        return storage_is_ready && declaration_is_valid;
     }
 
     priv fn fail(error: runtime::Error) -> runtime::Error {
@@ -80,43 +87,27 @@ impl ClassTable {
         return this->friends.size();
     }
 
-    fn record_data() -> *domain::ClassRecord {
-        return this->records.empty() ? null : &this->records.get(0);
-    }
-
     fn record_data() const -> *const domain::ClassRecord {
         return this->records.empty() ? null : &this->records.get(0) as *const domain::ClassRecord;
-    }
-
-    fn field_data() -> *domain::ClassField {
-        return this->fields.empty() ? null : &this->fields.get(0);
     }
 
     fn field_data() const -> *const domain::ClassField {
         return this->fields.empty() ? null : &this->fields.get(0) as *const domain::ClassField;
     }
 
-    fn method_data() -> *domain::ClassMethod {
-        return this->methods.empty() ? null : &this->methods.get(0);
-    }
-
     fn method_data() const -> *const domain::ClassMethod {
         return this->methods.empty() ? null : &this->methods.get(0) as *const domain::ClassMethod;
-    }
-
-    fn friend_data() -> *domain::ClassFriend {
-        return this->friends.empty() ? null : &this->friends.get(0);
     }
 
     fn friend_data() const -> *const domain::ClassFriend {
         return this->friends.empty() ? null : &this->friends.get(0) as *const domain::ClassFriend;
     }
 
-    fn append_record(record: domain::ClassRecord) -> runtime::Error {
-        if (!this->can_append_record(record)) {
+    fn append_record(type_id: usize, flags: usize) -> runtime::Error {
+        if (!this->can_append_record(type_id, flags)) {
             return this->fail(runtime::Error.invalid_argument);
         }
-        let error: runtime::Error = this->records.push_back(record);
+        let error: runtime::Error = this->records.push_back(class_record(type_id, flags));
         return error == runtime::Error.none ? error : this->fail(error);
     }
 
@@ -177,6 +168,99 @@ impl ClassTable {
             this->records.get(record_id).first_friend = friend_id;
         }
         this->records.get(record_id).friend_count += 1;
+        return runtime::Error.none;
+    }
+
+    priv fn add_flag(record_id: usize, flag: domain::ClassFlag) -> runtime::Error {
+        if (!this->ready() || record_id >= this->records.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->records.get(record_id).flags |= flag as usize;
+        return runtime::Error.none;
+    }
+
+    fn mark_polymorphic(record_id: usize) -> runtime::Error {
+        return this->add_flag(record_id, domain::ClassFlag.polymorphic);
+    }
+
+    fn mark_abstract(record_id: usize) -> runtime::Error {
+        if (!this->ready() || record_id >= this->records.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let flags: usize = this->records.get(record_id).flags;
+        if ((flags & (domain::ClassFlag.polymorphic as usize)) == 0) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        return this->add_flag(record_id, domain::ClassFlag.abstract_class);
+    }
+
+    fn enable_rtti(record_id: usize) -> runtime::Error {
+        if (!this->ready() || record_id >= this->records.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let flags: usize = this->records.get(record_id).flags;
+        if ((flags & (domain::ClassFlag.polymorphic as usize)) == 0) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        return this->add_flag(record_id, domain::ClassFlag.rtti);
+    }
+
+    fn assign_virtual_slot(method_id: usize, virtual_slot: usize) -> runtime::Error {
+        let method_is_in_range: bool = method_id < this->methods.size();
+        let slot_is_valid: bool = virtual_slot != Limit.maximum_size as usize;
+        if (!this->ready() || !method_is_in_range) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let method_record: domain::ClassMethod = this->methods.get(method_id);
+        let virtual_dispatch: bool = method_record.dispatch == domain::MethodDispatch.virtual_method ||
+            method_record.dispatch == domain::MethodDispatch.abstract_method;
+        let slot_is_empty: bool = method_record.virtual_slot == Limit.maximum_size as usize;
+        let assignment_is_valid: bool = slot_is_valid && slot_is_empty;
+        if (!virtual_dispatch || !assignment_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->methods.get(method_id).virtual_slot = virtual_slot;
+        return runtime::Error.none;
+    }
+
+    fn publish_descriptor(record_id: usize, global_id: usize) -> runtime::Error {
+        let record_is_in_range: bool = record_id < this->records.size();
+        let global_is_valid: bool = global_id != Limit.maximum_size as usize;
+        if (!this->ready() || !record_is_in_range) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let record: domain::ClassRecord = this->records.get(record_id);
+        let rtti_is_enabled: bool = (record.flags & (domain::ClassFlag.rtti as usize)) != 0;
+        let metadata_is_empty: bool = record.descriptor_global == Limit.maximum_size as usize;
+        let publication_is_valid: bool = global_is_valid && metadata_is_empty;
+        if (!rtti_is_enabled || !publication_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->records.get(record_id).descriptor_global = global_id;
+        return runtime::Error.none;
+    }
+
+    fn publish_vtable(record_id: usize, global_id: usize) -> runtime::Error {
+        let record_is_in_range: bool = record_id < this->records.size();
+        let global_is_valid: bool = global_id != Limit.maximum_size as usize;
+        if (!this->ready() || !record_is_in_range) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let record: domain::ClassRecord = this->records.get(record_id);
+        let polymorphic: bool = (record.flags & (domain::ClassFlag.polymorphic as usize)) != 0;
+        let abstract_class: bool = (record.flags & (domain::ClassFlag.abstract_class as usize)) != 0;
+        let metadata_is_empty: bool = record.vtable_global == Limit.maximum_size as usize;
+        let class_is_concrete: bool = polymorphic && !abstract_class;
+        let publication_is_valid: bool = global_is_valid && metadata_is_empty;
+        if (!class_is_concrete || !publication_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let rtti_is_enabled: bool = (record.flags & (domain::ClassFlag.rtti as usize)) != 0;
+        let descriptor_is_ready: bool = !rtti_is_enabled || record.descriptor_global != Limit.maximum_size as usize;
+        if (!descriptor_is_ready) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->records.get(record_id).vtable_global = global_id;
         return runtime::Error.none;
     }
 

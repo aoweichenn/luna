@@ -18,7 +18,8 @@ enum ProbeLayout: usize {
 }
 
 enum ClassProbe: usize {
-    type_id = 1, friend_type = 2, field_id = 7, function_id = 11,
+    virtual_slot = 0, type_id = 1, friend_type = 2, field_id = 7, function_id = 11,
+    descriptor_global = 13, vtable_global = 17,
 }
 
 enum GenericProbe: usize {
@@ -51,30 +52,24 @@ fn first_error(current: runtime::Error, next: runtime::Error) -> runtime::Error 
     return current == runtime::Error.none ? next : current;
 }
 
-fn class_table_failure_is_sticky(record: domain::ClassRecord) -> bool {
+fn class_table_failure_is_sticky() -> bool {
     var rejected: class_model::ClassTable = class_model::ClassTable();
-    var malformed: domain::ClassRecord = record;
-    malformed.first_field = 0;
-    let rejected_error: runtime::Error = rejected.append_record(malformed);
+    let rejected_error: runtime::Error = rejected.append_record(context::no_id(), domain::ClassFlag.none as usize);
     let rejection_is_visible: bool = rejected_error == runtime::Error.invalid_argument &&
         rejected.error() == runtime::Error.invalid_argument;
     if (!rejection_is_visible || rejected.record_count() != 0) {
         return false;
     }
-    let next_error: runtime::Error = rejected.append_record(record);
+    let next_error: runtime::Error = rejected.append_record(
+        ClassProbe.type_id as usize, domain::ClassFlag.none as usize);
     return next_error == runtime::Error.invalid_argument && rejected.record_count() == 0;
 }
 
 fn class_table_move_is_valid() -> bool {
     let none: usize = context::no_id();
-    let record: domain::ClassRecord = {
-        type_id = ClassProbe.type_id as usize, base_type = none, first_field = none, field_count = 0,
-        first_method = none, method_count = 0, first_friend = none, friend_count = 0,
-        vptr_offset = none, descriptor_global = none, vtable_global = none,
-        flags = domain::ClassFlag.none as usize,
-    };
     var original: class_model::ClassTable = class_model::ClassTable();
-    if (original.append_record(record) != runtime::Error.none) {
+    if (original.append_record(ClassProbe.type_id as usize, domain::ClassFlag.none as usize) !=
+            runtime::Error.none) {
         return false;
     }
     let field: domain::ClassField = {
@@ -85,7 +80,7 @@ fn class_table_move_is_valid() -> bool {
     }
     let method_record: domain::ClassMethod = {
         function_id = ClassProbe.function_id as usize, access = domain::ClassAccess.protected_access,
-        dispatch = domain::MethodDispatch.direct, virtual_slot = none,
+        dispatch = domain::MethodDispatch.virtual_method, virtual_slot = none,
         flags = domain::MethodFlag.none as usize,
     };
     if (original.append_method(0, method_record) != runtime::Error.none) {
@@ -95,6 +90,17 @@ fn class_table_move_is_valid() -> bool {
         owner_type = ClassProbe.type_id as usize, friend_type = ClassProbe.friend_type as usize,
     };
     if (original.append_friend(0, friend_record) != runtime::Error.none) {
+        return false;
+    }
+    if (original.mark_polymorphic(0) != runtime::Error.none ||
+            original.assign_virtual_slot(0, ClassProbe.virtual_slot as usize) != runtime::Error.none) {
+        return false;
+    }
+    if (original.enable_rtti(0) != runtime::Error.none ||
+            original.publish_descriptor(0, ClassProbe.descriptor_global as usize) != runtime::Error.none) {
+        return false;
+    }
+    if (original.publish_vtable(0, ClassProbe.vtable_global as usize) != runtime::Error.none) {
         return false;
     }
 
@@ -129,7 +135,15 @@ fn class_table_move_is_valid() -> bool {
     if (!member_values_are_valid || !friend_value_is_valid) {
         return false;
     }
-    return class_table_failure_is_sticky(record);
+    let metadata_flags: usize = (domain::ClassFlag.polymorphic as usize) | (domain::ClassFlag.rtti as usize);
+    let metadata_is_valid: bool = moved_record.flags == metadata_flags &&
+        moved_record.descriptor_global == ClassProbe.descriptor_global as usize;
+    let dispatch_is_valid: bool = moved_record.vtable_global == ClassProbe.vtable_global as usize &&
+        moved.method_data()[0].virtual_slot == ClassProbe.virtual_slot as usize;
+    if (!metadata_is_valid || !dispatch_is_valid) {
+        return false;
+    }
+    return class_table_failure_is_sticky();
 }
 
 fn generic_probe_declaration() -> domain::GenericDeclaration {

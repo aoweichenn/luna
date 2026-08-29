@@ -44,6 +44,10 @@ or when several Luna sessions are present.
 - The documentation credibility pass, including six `docs/codebase-*.md`
   audit volumes and updates to current/historical documentation, is committed
   and pushed as `e362685c74ba3c0d518814519a21142a1da06eb8`.
+- The canonical class metadata-invariant batch is validated and its caw
+  stage-fixed executable is promoted. Source, docs, tests, handoff and anchor
+  promotion belong to the requested current commit/push; compare HEAD with
+  `origin/main` after recovery to confirm the push completed.
 - `advice.md` is an untracked user-owned file and has not been modified as part
   of the IR or semantic work.
 - Anchor before this work:
@@ -489,6 +493,57 @@ documentation edit. The complete diff and links were inspected, commit
 `e362685c74ba3c0d518814519a21142a1da06eb8` was pushed to `origin/main`, and
 untracked user-owned `advice.md` remains untouched.
 
+## Completed task: canonical class metadata invariants
+
+The source, test, documentation and anchor-promotion work is complete:
+
+- TypeTable is the single source of truth for class `base_type` and
+  `vptr_offset`; ClassRecord no longer mirrors either field;
+- ClassTable constructs empty records from `type_id` plus declaration flags,
+  exports only const typed projections and has no writable data-pointer escape;
+- `mark_polymorphic`, `mark_abstract`, `enable_rtti`,
+  `assign_virtual_slot`, `publish_descriptor` and `publish_vtable` are the only
+  hierarchy/runtime-metadata publication operations;
+- hierarchy, access, layout, RTTI, descriptor, vtable and dispatch consumers
+  read canonical TypeTable base/vptr facts;
+- `base_type` treats an out-of-range/no-owner identity as “no base” before
+  querying TypeTable, preserving protected-access diagnostics without turning
+  the sentinel into a runtime table error;
+- touched `semantic/types/layout.la` bounded scans now use `for`; its remaining
+  `while` loops follow sibling/member state, and its former three-clause
+  conditions use named predicates or early continuation;
+- the relocation-data contract covers const projections, hierarchy flags,
+  virtual-slot assignment, descriptor/vtable publication, move/moved-from
+  state and sticky failure;
+- architecture, semantic, type, OOP, test and roadmap documents record the new
+  authority and mutation boundary.
+
+Final isolated validation host and workspace:
+
+- host `caw`, x86-64 WSL2 Linux 6.6.87.2, Python 3.13.9;
+- workspace (removed after successful promotion)
+  `/home/aoweichen/codex-workspaces/luna-class-invariants-final-EZAFqyyZ`;
+- formatter: zero files needing reflow and zero token drift;
+- audit: 66 modules, one driver, 32 interfaces and 56 library objects;
+- initial cold stage-next build: 15.35 seconds;
+- final `verify --fresh`: transition/next/fixed all completed in about 15
+  seconds, fixed stage 15.11 seconds, with every assembly, object and `bin/luna`
+  byte-identical;
+- post-fixed-point suite: `450 passed, 0 failed, 0 skipped`;
+- verified stage-fixed `luna`: 5,187,411 bytes, SHA-256
+  `ef79139adae0cf3cf65efa45a20b0886a670c7f6f9e16015fae6f2918748f629`.
+
+One intermediate test run exposed protected access returning `missing_return`
+instead of `inaccessible_member`: canonical base lookup was querying TypeTable
+with the `no_owner` sentinel. The explicit range guard above fixed the cause;
+the focused probe returned status 162 and both subsequent full suites passed
+450/450.
+
+The verified caw stage-fixed binary is copied into `anchor/luna`,
+`anchor/SHA256SUMS` and provenance are refreshed, and the promotion belongs to
+the same requested commit/push as the source, docs, test and this handoff.
+Preserve untracked `advice.md`.
+
 ## Recovery checklist
 
 1. Confirm the session UUID and working directory shown above.
@@ -496,5 +551,7 @@ untracked user-owned `advice.md` remains untouched.
 3. Run `git status --short`, `git diff --stat` and inspect the table/domain stack.
 4. Preserve `advice.md` and all existing comments/changes.
 5. Do not redo the completed IR, semantic ownership or domain work.
-6. The compiler/domain and documentation work is already pushed. Do not redo
-   implementation, promotion, documentation correction or cold validation.
+6. The earlier compiler/domain and documentation work is already pushed. Do
+   not redo it. For the canonical class-metadata batch, only confirm whether
+   the requested commit/push reached `origin/main`; implementation, validation
+   and promotion are complete.
