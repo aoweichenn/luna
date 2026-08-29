@@ -87,6 +87,12 @@ callable/value 模块已经消失；本批图审查另外确认 class/generic ow
 `functions.ir` 收缩同样不增加行为用例：Sema 的批次入口和 expression probe 的泛型实例路径继续覆盖两个 IR
 construction 入口，`audit`则要求旧 child interface/registry node 消失，并确认 parent `functions`对象包含该实现。
 
+`types.visibility` 收缩继续使用现有 private-type exposure、generic public argument、anonymous field、base class 和
+function signature 负例；`audit`要求 visibility child interface/registry node 消失，Sema 只保留 parent `types`依赖。
+
+`types.lookup` 收缩继续由直接字段、匿名提升、继承字段、ambiguous field、offsetof、initializer 和 member access
+用例覆盖；`audit`要求 lookup child interface/registry node 消失，五个消费族统一使用 parent `types::lookup_field`。
+
 这些任务仍使用独立工作目录，并与 suite 一起进入有界并行 worker pool。
 
 Lexer、Syntax 与 Parser 契约属于 frontend 专用协议：消费端只携带相应接口独立编译，再链接 stage 中单独

@@ -225,13 +225,7 @@ LIBRARIES = {
         "luna.bootstrap.middleend.semantic.types",
         "middleend/semantic/types",
         "middleend/semantic/types/layout",
-    ),
-    "sem_types_lookup": compiler_module(
-        "luna.bootstrap.middleend.semantic.types.lookup",
         "middleend/semantic/types/lookup",
-    ),
-    "sem_types_visibility": compiler_module(
-        "luna.bootstrap.middleend.semantic.types.visibility",
         "middleend/semantic/types/visibility",
     ),
     "sem_classes": compiler_module("luna.bootstrap.middleend.semantic.classes", "middleend/semantic/classes"),

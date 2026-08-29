@@ -284,6 +284,14 @@ The ninth batch folds `functions.ir` into the real `functions` module while
 retaining `functions/ir.la` as a cohesive implementation unit. The reverse
 parent import and one interface/object/registry boundary disappear; sema and
 expression probe consume the parent contract directly.
+The tenth batch folds `types.visibility` into `types`. Its recursive helpers
+become module-private, the parent interface exports only the pipeline entry,
+and one more reverse parent import plus interface/object/registry boundary is
+removed without merging the implementation file into the type resolver.
+The eleventh batch folds `types.lookup` into the same parent. Only the complete
+field-lookup operation remains public; direct and anonymous-promotion helpers
+become private, while the algorithm keeps its own same-module implementation
+file and all five consumer families drop the child import.
 
 `ir::Module` owns the completed typed CFG, `ir::Builder` owns its append-only
 construction phase, and the private `Verifier` owns whole-module validation

@@ -1118,3 +1118,33 @@ skips.
 
 The promoted 5,187,411-byte executable has SHA-256
 `6dda0fc3a0e2e9af2dee0d7522ddf49df24b6b7ba041a80f72b21891f11b74c0`.
+
+## 2026-08-29: promotion to contracted type-pass modules
+
+The anchor now contains the stage-fixed `luna` executable from the type-pass
+module-contraction batch accompanying this note. The former `types.visibility`
+and `types.lookup` child modules are folded into their real parent,
+`luna.bootstrap.middleend.semantic.types`. Their cohesive implementations
+remain in `types/visibility.la` and `types/lookup.la`; no compatibility alias or
+forwarding module remains.
+
+The parent interface exports only the independently consumed
+`validate_public_types` and `lookup_field` entries. Recursive visibility
+validation and field-search helpers remain module-private. The lookup unit uses
+bounded `for` traversal for direct, promoted-anonymous and inherited-field
+search, and neither touched implementation contains an over-budget condition.
+The 71-line parent interface, 141-line visibility pass and 84-line lookup
+family preserve narrow contracts without merging the implementations into a
+large facade.
+
+Remote x86-64 verification used the isolated caw workspace
+`/home/aoweichen/codex-workspaces/luna-types-lookup-8SzDKTlf` on WSL2 Linux
+6.6.87.2 with Python 3.13.9. Audit reported 63 modules, one driver, 32 driver
+interfaces and 53 library objects; formatting reported zero files needing
+reflow and zero token drift. The initial cold stage-next build completed in
+15.88 seconds. The final fresh transition/next/fixed stages completed in
+15.37/15.64/15.97 seconds, and every next/fixed artifact was byte-identical.
+Both complete test runs passed 450/450 with no failures or skips.
+
+The promoted 5,187,411-byte executable has SHA-256
+`2aa8853e6ee05237f71f052b00415733abc03a70397798ff974bbae424497ab5`.

@@ -32,8 +32,8 @@ or when several Luna sessions are present.
 ## Repository state
 
 - Branch: `main`
-- Base commit: `d58b0165a176d28dc0c1e6fd0822de23919c257a`
-  (`refactor: canonicalize class metadata invariants`)
+- Base commit: `1803af7be30abbb060fd715bb28356f8dc6593eb`
+  (`refactor: tighten semantic pipeline boundaries`)
 - `origin/main` matched that commit when this snapshot was refreshed.
 - The IR modernization and its anchor promotion are committed and pushed.
 - The semantic ownership batches and their anchor promotion are committed and
@@ -47,9 +47,12 @@ or when several Luna sessions are present.
 - The canonical class metadata-invariant batch and anchor promotion are
   committed and pushed as `d58b0165a176d28dc0c1e6fd0822de23919c257a`.
 - The semantic-pass runtime-readiness and `functions.ir` contraction batches
-  are validated and their combined caw stage-fixed executable is promoted.
-  Source, docs, tests, handoff and anchor promotion belong to the requested
-  current commit/push; compare HEAD with `origin/main` after recovery.
+  plus their combined anchor promotion are committed and pushed as
+  `1803af7be30abbb060fd715bb28356f8dc6593eb`.
+- The current working tree contains the independently validated and promoted
+  `types.visibility` and `types.lookup` module contractions. They belong to the
+  requested combined commit and push; reconcile HEAD and `origin/main` after
+  recovery to determine whether that final operation completed.
 - `advice.md` is an untracked user-owned file and has not been modified as part
   of the IR or semantic work.
 - Anchor before this work:
@@ -78,6 +81,10 @@ or when several Luna sessions are present.
   `6dda0fc3a0e2e9af2dee0d7522ddf49df24b6b7ba041a80f72b21891f11b74c0`,
   5,187,411 bytes. It contains the runtime-readiness pass contract and
   `functions.ir` module contraction.
+- Promoted semantic type-pass anchor:
+  `2aa8853e6ee05237f71f052b00415733abc03a70397798ff974bbae424497ab5`,
+  5,187,411 bytes. It contains the contracted visibility and field-lookup
+  implementations in their parent `types` module.
 
 ## Engineering direction established in this conversation
 
@@ -587,7 +594,8 @@ Final isolated validation host and workspace:
 
 - host `caw`, x86-64 WSL2 Linux 6.6.87.2, Python 3.13.9;
 - workspace
-  `/home/aoweichen/codex-workspaces/luna-sema-pass-contract-YrGkudXI`;
+  `/home/aoweichen/codex-workspaces/luna-sema-pass-contract-YrGkudXI`
+  (removed after promotion);
 - formatter: zero files needing reflow and zero token drift;
 - audit: 66 modules, one driver, 32 interfaces and 56 library objects;
 - initial cold stage-next build: 15.06 seconds;
@@ -628,7 +636,8 @@ Final isolated validation host and workspace:
 
 - host `caw`, x86-64 WSL2 Linux 6.6.87.2, Python 3.13.9;
 - workspace
-  `/home/aoweichen/codex-workspaces/luna-functions-ir-contract-kINQ4A3z`;
+  `/home/aoweichen/codex-workspaces/luna-functions-ir-contract-kINQ4A3z`
+  (removed after promotion);
 - formatter: zero files needing reflow and zero token drift;
 - audit: 65 modules, one driver, 32 driver interfaces and 55 library objects;
 - merged `sem_funcs` compilation: 4.50 seconds in the corrected incremental
@@ -643,6 +652,85 @@ The latest combined stage-fixed artifact is promoted. The requested commit/push
 must include source, deleted child interface, registry, docs, tests, SESSION and
 anchor together. Preserve `advice.md`.
 
+## Completed local task: `types.visibility` module contraction
+
+The bounded visibility-module cleanup is complete locally on top of
+`1803af7`:
+
+- `compiler/src/middleend/semantic/types/visibility.la` now implements the
+  parent `luna.bootstrap.middleend.semantic.types` module;
+- the 141-line implementation remains a cohesive recursive visibility pass and
+  is not merged into `types.la`;
+- only `validate_public_types` is added to the parent interface, which remains
+  68 lines;
+- `public_type_is_valid` and `public_anonymous_fields_valid` are now
+  module-private because no independent consumer exists;
+- sema invokes `types::validate_public_types` through its existing dependency;
+- the child interface and `sem_types_visibility` registry/object boundary are
+  removed without a compatibility alias;
+- AGENTS plus architecture/modernization/semantic/test/roadmap documents record
+  `types/visibility.la` as a same-module implementation unit.
+
+Final isolated validation host and workspace:
+
+- host `caw`, x86-64 WSL2 Linux 6.6.87.2, Python 3.13.9;
+- workspace
+  `/home/aoweichen/codex-workspaces/luna-types-visibility-XkGHfCq4`
+  (removed after the lookup batch superseded it);
+- formatter: zero files needing reflow and zero token drift;
+- audit: 64 modules, one driver, 32 driver interfaces and 54 library objects;
+- initial cold stage-next build: 14.98 seconds;
+- final `verify --fresh`: transition/next/fixed completed in
+  15.00/14.93/14.82 seconds and every next/fixed artifact was byte-identical;
+- pre- and post-fixed-point suites: `450 passed, 0 failed, 0 skipped`;
+- verified stage-fixed `luna`: 5,187,411 bytes, SHA-256
+  `aa85abea9c5e7e0eaa8ff00775243739b7ecb82be99e27c44f77878671e03e55`.
+
+The newer combined type-pass artifact is promoted. The requested commit/push
+must include this source, the deleted child interface, registry, AGENTS, docs,
+SESSION and anchor together. Preserve `advice.md`.
+
+## Completed local task: `types.lookup` module contraction
+
+The field-lookup module cleanup is complete locally on top of the validated
+visibility batch:
+
+- `compiler/src/middleend/semantic/types/lookup.la` now implements the parent
+  `luna.bootstrap.middleend.semantic.types` module;
+- the 84-line implementation remains a cohesive direct, anonymous-promotion
+  and inherited-field lookup family;
+- only `lookup_field` is added to the parent interface, which remains 71 lines;
+- `find_field` and `lookup_promoted_field` are module-private because no
+  independent consumer exists;
+- consteval plus expression probe/access/operators/initializer already consume
+  `types`, so all five families now call `types::lookup_field` and drop the
+  child import;
+- both hand-written indexed loops in the touched lookup implementation use
+  `for`; it has no over-budget condition and no `while`;
+- the child interface and `sem_types_lookup` registry/object boundary are
+  removed without a compatibility alias;
+- AGENTS and architecture/modernization/semantic/test/roadmap documents record
+  lookup and visibility as same-module type-pass implementations.
+
+Final isolated validation host and workspace:
+
+- host `caw`, x86-64 WSL2 Linux 6.6.87.2, Python 3.13.9;
+- workspace
+  `/home/aoweichen/codex-workspaces/luna-types-lookup-8SzDKTlf`
+  (removed after promotion);
+- formatter: zero files needing reflow and zero token drift;
+- audit: 63 modules, one driver, 32 driver interfaces and 53 library objects;
+- initial cold stage-next build: 15.88 seconds;
+- final `verify --fresh`: transition/next/fixed completed in
+  15.37/15.64/15.97 seconds and every next/fixed artifact was byte-identical;
+- pre- and post-fixed-point suites: `450 passed, 0 failed, 0 skipped`;
+- verified stage-fixed `luna`: 5,187,411 bytes, SHA-256
+  `2aa8853e6ee05237f71f052b00415733abc03a70397798ff974bbae424497ab5`.
+
+The latest artifact is promoted. The requested commit/push must include both
+deleted child interfaces, source, consumers, registry, AGENTS, docs, SESSION
+and anchor together. Preserve `advice.md`.
+
 ## Recovery checklist
 
 1. Confirm the session UUID and working directory shown above.
@@ -650,6 +738,5 @@ anchor together. Preserve `advice.md`.
 3. Run `git status --short`, `git diff --stat` and inspect the table/domain stack.
 4. Preserve `advice.md` and all existing comments/changes.
 5. Do not redo the completed IR, semantic ownership or domain work.
-6. All earlier work is pushed. For the semantic pass/functions batches, only
-   confirm whether the requested current commit/push reached `origin/main`;
-   implementation, validation and promotion are complete.
+6. All implementation, remote validation and promotion work is complete. Only
+   confirm the requested combined commit/push and preserve `advice.md`.

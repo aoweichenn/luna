@@ -167,11 +167,11 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
   `compiler/src/middleend/semantic/`, with the pipeline entry remaining
   in `compiler/src/middleend/sema.la`; imports flow strictly downward in
   this order: `callable`, `value`, `classes/model`, `context` (+ `context/{lookup,builder}`),
-  `attributes`, `modules`, `types` (+ `types/{lookup,visibility}`),
+  `attributes`, `modules`, `types`,
   `classes`, `consteval` (+ `consteval/{model,engine}`), `intrinsics`,
   `functions`, `lifetime`, `expr` (+ `expr/{base,numeric,
   strings,api,probe,initializer,access,operators}`), `stmt` (+
-  `stmt/{api,labels}`). The same-module files `types/layout.la`,
+  `stmt/{api,labels}`). The same-module files `types/{layout,lookup,visibility}.la`,
   `consteval/engine/execute.la`,
   `functions/{const,signature,overloads,bindings,defaults,generics,methods,special,ir}.la`, plus
   `expr/probe/{operators,call}.la`, are implementation splits, not

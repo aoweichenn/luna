@@ -185,6 +185,12 @@ hiding the explicit source-level pass order in a table.
 IR function construction belongs to the same `functions` module as callable
 ordering and signatures; its separate implementation file is not a child
 module and does not import its parent facade.
+Public-type visibility belongs to the `types` module and remains a separate
+same-module implementation pass; recursive visibility helpers are private and
+sema consumes only `types::validate_public_types`.
+Direct, anonymous-promotion and inherited field lookup are one private
+algorithm family behind `types::lookup_field`; consteval and expression passes
+do not import a lookup child module.
 See [the semantic pipeline contract](sema.md).
 
 Callable identity, expression value categories and stable passive class/generic

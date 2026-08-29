@@ -4,7 +4,7 @@
 
 The semantic pipeline validates the parsed source-module graph, constructs the
 canonical type model and lowers checked functions into `luna.compiler.ir`.
-This document records the first nine ownership/domain batches of its modernization.
+This document records the first eleven ownership/domain batches of its modernization.
 
 The root module is still named `luna.bootstrap.middleend.sema` while the
 downstream semantic dependency graph is contracted incrementally. The current
@@ -247,6 +247,21 @@ Function IR construction is part of the `functions` module rather than a
 Sema and expression probe now consume one `functions` dependency; the child
 interface, reverse parent import, registry node and linked object are removed.
 
+Public-type visibility is likewise a parent `types` responsibility. The
+141-line `types/visibility.la` implementation retains its recursive generic and
+anonymous-field checks, but only `validate_public_types` is exported through
+the 68-line parent interface. The two recursive helpers are module-private;
+sema imports no visibility child facade, and the child interface/registry/object
+boundary is removed.
+
+Field lookup is also a parent `types` operation. The 84-line
+`types/lookup.la` implementation retains direct, anonymous-promotion and base
+search as one recursive algorithm family. Only `lookup_field` is exported
+through the 71-line parent interface; direct and promoted helpers are private.
+Consteval and expression passes already consume `types`, so their child lookup
+imports and the remaining visibility-independent interface/object/registry
+boundary are removed.
+
 ## Entry selection
 
 Entry selection is now a bound session operation. Function traversal uses
@@ -271,6 +286,8 @@ sets the IR entry through `ir::Builder` before graph reachability validation.
 | `semantic/generics/storage.la` | GenericTable lifetime, declarations, bindings and read-only projections |
 | `semantic/generics/instances.la` | canonical instance insertion, hash rebuilding and reverse maps |
 | `semantic/generics/validation.la` | declarations, slices, indexes, maps and final-state validation |
+| `semantic/types/visibility.la` | same-module exported-type, generic argument and anonymous-field visibility |
+| `semantic/types/lookup.la` | same-module direct, anonymous-promotion and inherited field lookup |
 | `semantic/functions/ir.la` | same-module IR function, receiver and parameter construction |
 | `middleend/sema.la` | private SemanticSession, phase orchestration, entry selection and result transfer |
 | `semantic/context.la` | transitional Context storage and shared low-level services |
