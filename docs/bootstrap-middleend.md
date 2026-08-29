@@ -10,6 +10,9 @@
 > The current typed IR is the move-only RAII `luna.compiler.ir::Module`, built
 > through `ir::Builder` and verified by a private phase object; its contract is
 > recorded in `ir.md`.
+> The current root semantic lifecycle is owned by a private SemanticSession,
+> move-only Input and typed RAII diagnostics; its incremental contract is
+> recorded in `sema.md`.
 
 M4 now contains a separately compiled Luna implementation of name resolution,
 strong type checking, target layout and verified Typed IR construction. It

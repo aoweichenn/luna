@@ -893,3 +893,60 @@ its 839,840-byte object has SHA-256
 `d3f6f321922baea2b6ae6faada43dcbb382e674d9a8110b3a41236cea2a9f8ad`.
 The promoted 5,085,011-byte executable has SHA-256
 `282845d879d1b67169604ebc08481c3a4c286b2a737dd7db84fb3c520c609d94`.
+
+## 2026-08-29: promotion to the semantic ownership toolchain
+
+The anchor now contains the stage-fixed `luna` executable from the two
+semantic ownership batches accompanying this provenance note. The root
+semantic implementation constructs one private `SemanticSession` with
+ready/complete/transferred phases, centralized entry selection, common
+transient-work cleanup and one result transfer. Invalid input follows the same
+cleanup path as ordinary compilation.
+
+Semantic diagnostics are no longer an untyped byte buffer with a manually
+synchronized count. `DiagnosticBuffer` is a move-only RAII owner over
+`vector<Diagnostic>`, while `DiagnosticView` exposes bounded read-only
+`empty`, `size` and `get` operations. `SemanticResult` remains a transparent
+one-shot transfer record composed from TypeTable, IR Module, DiagnosticBuffer
+and runtime error; each resource member owns its own deterministic lifetime,
+so the driver no longer calls a semantic result release procedure.
+
+Semantic `Input` is now a move-only RAII owner over `vector<Unit>` and
+`byte_buffer` path storage. Unit append is transactional and rolls path bytes
+back if the typed record append fails. `InputView` validates borrowed unit,
+source, token, syntax and path ranges. The driver is the sole owner; Context,
+SemanticSession and CodeGenerator receive only a view that cannot outlive the
+owner. Bounded source-unit traversal uses `for`, and no migrated condition
+exceeds two logical clauses.
+
+The context module adds same-module `context/input.la` and
+`context/diagnostics.la` implementation units; neither is an independently
+importable submodule. The broader 23,000-line semantic graph remains
+incremental rather than being hidden behind forwarding modules or merged into
+one large file.
+
+Remote x86-64 verification in the isolated caw workspace
+`/home/aoweichen/codex-workspaces/luna-sema-input-a62vqBCj` built the complete
+67-module, 57-library-object graph through transition, next and fixed stages.
+The cold stage times were 14.17, 14.33 and 14.22 seconds; every next/fixed
+assembly, object and executable artifact was byte-identical. Audit and
+formatting gates were green, and the post-fixed-point suite passed 450/450
+with no failures or skips.
+
+Before these ownership batches, `sem_ctx` plus `sema` compiled sequentially in
+a median 0.716067 seconds and produced 829,959 total assembly bytes. The final
+pair compiled in a median 1.034350 seconds and produced 1,313,915 bytes. The
+typed vectors, owner/view validation and session lifecycle account for the
+recorded correctness-first structural cost; no premature indexing or codegen
+deduplication was mixed into the migration.
+
+The final semantic context assembly has SHA-256
+`fd20b3fddbfe4adccac86dff49d62ee874e317e7f2b2a3ade51ee44d2da0f511`;
+its 393,973-byte object has SHA-256
+`17cdc7a432fdcf6175518cb16c1c8ae395abb1888a99413cc43c04585124c1e6`.
+The root semantic assembly has SHA-256
+`6704a1431ac803f68970d1054c0d7e9fa06a9a729f20566b7124a8989252de71`;
+its 188,626-byte object has SHA-256
+`33cc22878790ebb4e378fe53901d3da61f516f5e4f1ec366e203fe141f9cb028`.
+The promoted 5,113,683-byte executable has SHA-256
+`6cb79e335847a054aa4322139fe3a212a6598b18b778d34dfdbd5219f00d3846`.

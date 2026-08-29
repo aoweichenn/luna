@@ -169,6 +169,15 @@ layout-query instruction.
 Semantic Result receives the table by move; IR verification and x86-64 lowering
 borrow it by const reference. No consumer owns or releases a raw type buffer.
 
+The root semantic implementation constructs one private `SemanticSession` per
+invocation. It owns ready, complete and transferred phases, centralizes
+transient-work cleanup and transfers TypeTable, IR Module and typed
+DiagnosticBuffer owners through one transparent result record. Driver code
+borrows completed resources and relies on RAII rather than a manual semantic
+result release function. The driver also exclusively owns move-only semantic
+Input storage; Context and CodeGenerator receive only a borrowed InputView.
+See [the semantic pipeline contract](sema.md).
+
 Compilation is split into global and local phases:
 
 1. load, lex and parse every source unit;

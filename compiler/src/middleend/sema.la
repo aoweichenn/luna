@@ -18,123 +18,179 @@ import luna.compiler.ir as ir;
 import luna.compiler.types as type_info;
 import luna.runtime as runtime;
 
-fn select_entry(context: *context::Context) -> bool {
-    if (!context->input.executable) {
-        return modules::validate_reachability(context, names::unit_module(context, 0));
-    }
-    let none: usize = context::no_id();
-    let functions: *const context::Function = context->functions.data as
-            *const context::Function;
-    let symbols: *const context::Symbol = context->symbols.data as
-            *const context::Symbol;
-    var entry: usize = none;
-    var function_id: usize = 0;
-    while (function_id < context->function_count) {
-        let function: context::Function = functions[function_id];
-        let symbol: context::Symbol = symbols[function.symbol_id];
-        if (function.implementation_unit != none &&
-            context::token_equals_bytes(
-                context, symbol.declaration_unit, symbol.name_token, "main", 4)) {
-            if (entry != none) {
-                context::add_diagnostic(
-                    context, context::DiagnosticKind.duplicate_function, symbol.declaration_unit,
-                    context::token(context, symbol.declaration_unit, symbol.name_token).span,
-                    symbols[functions[entry].symbol_id].declaration_unit,
-                    context::token(
-                        context, symbols[functions[entry].symbol_id].declaration_unit,
-                        symbols[functions[entry].symbol_id].name_token).span, function_id);
-            }
-            entry = function_id;
-        }
-        function_id += 1;
-    }
-    if (entry == none) {
-        context::add_diagnostic(
-            context, context::DiagnosticKind.missing_definition, 0, context::empty_span(), none, context::empty_span(),
-            0);
-        return false;
-    }
-    let entry_function: context::Function = functions[entry];
-    var has_command_line_parameters: bool = false;
-    if (entry_function.parameter_count == 2) {
-        let parameters: *const context::Parameter = context->parameters.data as
-                *const context::Parameter;
-        let argument_count_type: usize = parameters[entry_function.first_parameter].type_id;
-        let argument_vector_type: usize = parameters[entry_function.first_parameter + 1].type_id;
-        let outer: type_info::Record = context::type_record(context, argument_vector_type);
-        if (outer.kind == type_info::Kind.pointer && (outer.flags & (type_info::Flag.read_only as usize)) == 0) {
-            let inner: type_info::Record = context::type_record(context, outer.element_type);
-            has_command_line_parameters = argument_count_type == type_info::BuiltinType.unsigned_size as usize &&
-                inner.kind == type_info::Kind.pointer && (inner.flags & (type_info::Flag.read_only as usize)) != 0 &&
-                inner.element_type == type_info::BuiltinType.unsigned_8 as usize;
-        }
-    }
-    if ((entry_function.parameter_count != 0 && !has_command_line_parameters) || entry_function.return_type !=
-            type_info::BuiltinType.signed_32 as usize || (entry_function.flags &
-            (context::SymbolFlag.external as usize)) != 0) {
-        let symbol: context::Symbol = symbols[entry_function.symbol_id];
-        context::add_diagnostic(
-            context, context::DiagnosticKind.signature_mismatch, symbol.declaration_unit,
-            context::node(context, symbol.declaration_unit, symbol.declaration_node).span,
-            none, context::empty_span(), entry);
-        return false;
-    }
-    context->ir.set_entry(entry_function.ir_function);
-    return modules::validate_reachability(context, names::unit_module(context, entry_function.implementation_unit));
+enum SemanticPhase: usize {
+    ready, complete, transferred,
 }
 
-fn check(input: context::Input) -> context::Result {
-    var context: context::Context = context::context_init(input);
-    if (!context::input_is_valid(input)) {
-        context::add_diagnostic(
-            &context, context::DiagnosticKind.invalid_input, context::no_id(), context::empty_span(), context::no_id(),
-            context::empty_span(), 0);
+class SemanticSession {
+    priv state: context::Context;
+    priv phase: SemanticPhase;
+
+    pub init(input: context::InputView);
+    pub fn run();
+    pub fn take_result() -> context::SemanticResult;
+    pub deinit();
+}
+
+impl SemanticSession {
+    init(input: context::InputView): state = context::context_init(input) {
+        this->phase = SemanticPhase.ready;
+    }
+
+    priv fn select_entry() -> bool {
+        let session: *context::Context = &this->state;
+        if (!session->input.executable()) {
+            return modules::validate_reachability(session, names::unit_module(session, 0));
+        }
+        let none: usize = context::no_id();
+        let functions: *const context::Function = session->functions.data as *const context::Function;
+        let symbols: *const context::Symbol = session->symbols.data as *const context::Symbol;
+        var entry: usize = none;
+        for (var function_id: usize = 0; function_id < session->function_count; function_id += 1) {
+            let function: context::Function = functions[function_id];
+            let symbol: context::Symbol = symbols[function.symbol_id];
+            let has_implementation: bool = function.implementation_unit != none;
+            let is_main: bool = context::token_equals_bytes(
+                session, symbol.declaration_unit, symbol.name_token, "main", 4);
+            if (has_implementation && is_main) {
+                if (entry != none) {
+                    context::add_diagnostic(
+                        session, context::DiagnosticKind.duplicate_function, symbol.declaration_unit,
+                        context::token(session, symbol.declaration_unit, symbol.name_token).span,
+                        symbols[functions[entry].symbol_id].declaration_unit,
+                        context::token(
+                            session, symbols[functions[entry].symbol_id].declaration_unit,
+                            symbols[functions[entry].symbol_id].name_token).span, function_id);
+                }
+                entry = function_id;
+            }
+        }
+        if (entry == none) {
+            context::add_diagnostic(
+                session, context::DiagnosticKind.missing_definition, 0, context::empty_span(), none,
+                context::empty_span(), 0);
+            return false;
+        }
+        let entry_function: context::Function = functions[entry];
+        var has_command_line_parameters: bool = false;
+        if (entry_function.parameter_count == 2) {
+            let parameters: *const context::Parameter = session->parameters.data as *const context::Parameter;
+            let argument_count_type: usize = parameters[entry_function.first_parameter].type_id;
+            let argument_vector_type: usize = parameters[entry_function.first_parameter + 1].type_id;
+            let outer: type_info::Record = context::type_record(session, argument_vector_type);
+            let outer_is_pointer: bool = outer.kind == type_info::Kind.pointer;
+            let outer_is_mutable: bool = (outer.flags & (type_info::Flag.read_only as usize)) == 0;
+            if (outer_is_pointer && outer_is_mutable) {
+                let inner: type_info::Record = context::type_record(session, outer.element_type);
+                let count_type_is_valid: bool = argument_count_type == type_info::BuiltinType.unsigned_size as usize;
+                let inner_is_pointer: bool = inner.kind == type_info::Kind.pointer;
+                let inner_is_read_only: bool = (inner.flags & (type_info::Flag.read_only as usize)) != 0;
+                let character_type_is_valid: bool = inner.element_type == type_info::BuiltinType.unsigned_8 as usize;
+                let inner_pointer_is_valid: bool = inner_is_pointer && inner_is_read_only;
+                has_command_line_parameters = count_type_is_valid && inner_pointer_is_valid;
+                has_command_line_parameters = has_command_line_parameters && character_type_is_valid;
+            }
+        }
+        let parameters_are_valid: bool = entry_function.parameter_count == 0 || has_command_line_parameters;
+        let return_type_is_valid: bool = entry_function.return_type == type_info::BuiltinType.signed_32 as usize;
+        let function_is_external: bool = (entry_function.flags & (context::SymbolFlag.external as usize)) != 0;
+        let signature_is_valid: bool = parameters_are_valid && return_type_is_valid;
+        if (!signature_is_valid || function_is_external) {
+            let symbol: context::Symbol = symbols[entry_function.symbol_id];
+            context::add_diagnostic(
+                session, context::DiagnosticKind.signature_mismatch, symbol.declaration_unit,
+                context::node(session, symbol.declaration_unit, symbol.declaration_node).span,
+                none, context::empty_span(), entry);
+            return false;
+        }
+        if (!session->ir.set_entry(entry_function.ir_function)) {
+            session->error = session->ir.error();
+            return false;
+        }
+        return modules::validate_reachability(session, names::unit_module(session, entry_function.implementation_unit));
+    }
+
+    priv fn finish() {
+        let work_error: runtime::Error = context::context_release_work(&this->state);
+        if (this->state.error == runtime::Error.none) {
+            this->state.error = work_error;
+        }
+        this->phase = SemanticPhase.complete;
+    }
+
+    fn run() {
+        if (this->phase != SemanticPhase.ready) {
+            this->state.error = runtime::Error.invalid_argument;
+            return;
+        }
+        if (!this->state.input.is_valid()) {
+            context::add_diagnostic(
+                &this->state, context::DiagnosticKind.invalid_input, context::no_id(), context::empty_span(),
+                context::no_id(), context::empty_span(), 0);
+            this->finish();
+            return;
+        }
+
+        modules::collect_modules(&this->state);
+        modules::collect_imports(&this->state);
+        modules::validate_import_graph(&this->state);
+        attributes::validate_attributes(&this->state);
+        types::collect_named_types(&this->state);
+        classes::collect_classes(&this->state);
+        classes::collect_bases(&this->state);
+        classes::prepare_layouts(&this->state);
+        functions::collect_const_functions(&this->state);
+        consteval::collect_constant_declarations(&this->state);
+        consteval::prescan_array_lengths(&this->state);
+        consteval::resolve_alignment_attributes(&this->state);
+        consteval::resolve_bitfield_attributes(&this->state);
+        types::resolve_all_types(&this->state);
+        classes::collect_friends(&this->state);
+        classes::collect_fields(&this->state);
+        classes::validate_classes(&this->state);
+        consteval::validate_bitfields(&this->state);
+        const_engine::resolve_constants(&this->state);
+        consteval::finalize_enum_constants(&this->state);
+        functions::collect_functions(&this->state);
+        classes::collect_methods(&this->state);
+        classes::validate_methods(&this->state);
+        consteval::check_module_asserts(&this->state);
+        modules::validate_imported_names(&this->state);
+        visibility::validate_public_types(&this->state);
+        function_ir::create_ir_functions(&this->state);
+        classes::create_vtables(&this->state);
+        stmt::lower_functions(&this->state);
+        this->select_entry();
+        if (this->state.error == runtime::Error.none && !generic_model::is_valid(this->state.generics)) {
+            this->state.error = runtime::Error.invalid_argument;
+        }
+        this->finish();
+    }
+
+    fn take_result() -> context::SemanticResult {
+        if (this->phase != SemanticPhase.complete) {
+            return {
+                types = type_info::TypeTable(), ir = ir::Module(), diagnostics = context::DiagnosticBuffer(),
+                error = runtime::Error.invalid_argument,
+            };
+        }
+        var built_ir: ir::Module = this->state.ir.take_module();
+        this->phase = SemanticPhase.transferred;
         return {
-            types = context.types as type_info::TypeTable&&, ir = context.ir.take_module(),
-            diagnostics = context.diagnostics, error = context.error,
+            types = this->state.types as type_info::TypeTable&&, ir = built_ir as ir::Module&&,
+            diagnostics = this->state.diagnostics as context::DiagnosticBuffer&&, error = this->state.error,
         };
     }
 
-    modules::collect_modules(&context);
-    modules::collect_imports(&context);
-    modules::validate_import_graph(&context);
-    attributes::validate_attributes(&context);
-    types::collect_named_types(&context);
-    classes::collect_classes(&context);
-    classes::collect_bases(&context);
-    classes::prepare_layouts(&context);
-    functions::collect_const_functions(&context);
-    consteval::collect_constant_declarations(&context);
-    consteval::prescan_array_lengths(&context);
-    consteval::resolve_alignment_attributes(&context);
-    consteval::resolve_bitfield_attributes(&context);
-    types::resolve_all_types(&context);
-    classes::collect_friends(&context);
-    classes::collect_fields(&context);
-    classes::validate_classes(&context);
-    consteval::validate_bitfields(&context);
-    const_engine::resolve_constants(&context);
-    consteval::finalize_enum_constants(&context);
-    functions::collect_functions(&context);
-    classes::collect_methods(&context);
-    classes::validate_methods(&context);
-    consteval::check_module_asserts(&context);
-    modules::validate_imported_names(&context);
-    visibility::validate_public_types(&context);
-    function_ir::create_ir_functions(&context);
-    classes::create_vtables(&context);
-    stmt::lower_functions(&context);
-    select_entry(&context);
-    if (context.error == runtime::Error.none && !generic_model::is_valid(context.generics)) {
-        context.error = runtime::Error.invalid_argument;
+    deinit() {
+        if (this->phase == SemanticPhase.ready) {
+            context::context_release_work(&this->state);
+        }
     }
+}
 
-    let work_error: runtime::Error = context::context_release_work(&context);
-    if (context.error == runtime::Error.none) {
-        context.error = work_error;
-    }
-    return {
-        types = context.types as type_info::TypeTable&&, ir = context.ir.take_module(),
-        diagnostics = context.diagnostics, error = context.error,
-    };
+fn check(input: context::InputView) -> context::SemanticResult {
+    var session: SemanticSession = SemanticSession(input);
+    session.run();
+    return session.take_result();
 }

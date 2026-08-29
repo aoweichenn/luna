@@ -317,6 +317,8 @@ the archived Luna 0 self-hosting milestone named `M4` above.
 - [x] move-only RAII TypeTable and `luna.compiler.types` contraction
 - [x] move-only RAII IR Module, exclusive Builder, private Verifier and
       `luna.compiler.ir` contraction
+- [x] private SemanticSession phase owner and typed RAII semantic diagnostics
+- [x] move-only semantic Input owner and borrowed InputView consumers
 - [ ] semantic-pipeline state classes and module contraction
 - [x] backend and command-service state classes
 - [ ] remaining `luna.bootstrap.*` namespace/module contraction

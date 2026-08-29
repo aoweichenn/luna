@@ -260,33 +260,35 @@ fn add_semantic_input(
         return false;
     }
     let view: string_views::string_view_result = string_views::from_bytes(source.data as *const u8, source.length);
-    return view.error == runtime::Error.none &&
-        context::input_add(
-            input, {
-                source = view.view, tokens = frontend.lex.tokens, tree = frontend.parse.tree,
-                path_offset = 0, path_length = 0,
-            }, path);
+    if (view.error != runtime::Error.none) {
+        return false;
+    }
+    return input->add({
+        source = view.view, tokens = frontend.lex.tokens, tree = frontend.parse.tree, path_offset = 0, path_length = 0,
+    }, path) == runtime::Error.none;
 }
 
-fn semantic_status(semantic: context::Result const&) -> i32 {
+fn semantic_status(semantic: context::SemanticResult const&) -> i32 {
     if (semantic.error == runtime::Error.out_of_memory) {
         return CompileStatus.resource_limit as i32;
     }
-    if (semantic.diagnostics.count == 0) {
+    let diagnostics: context::DiagnosticView = semantic.diagnostics.view();
+    if (diagnostics.empty()) {
         return CompileStatus.semantic_error as i32;
     }
-    let diagnostic: context::DiagnosticResult = context::diagnostic_get(semantic.diagnostics, 0);
+    let diagnostic: context::DiagnosticResult = diagnostics.get(0);
     if (diagnostic.error != runtime::Error.none) {
         return CompileStatus.semantic_error as i32;
     }
     return CompileStatus.semantic_diagnostic_base as i32 + diagnostic.diagnostic.kind as usize as i32;
 }
 
-fn report_semantic(semantic: context::Result const&) -> runtime::Error {
-    if (semantic.diagnostics.count == 0) {
+fn report_semantic(semantic: context::SemanticResult const&) -> runtime::Error {
+    let diagnostics: context::DiagnosticView = semantic.diagnostics.view();
+    if (diagnostics.empty()) {
         return runtime::Error.none;
     }
-    let diagnostic: context::DiagnosticResult = context::diagnostic_get(semantic.diagnostics, 0);
+    let diagnostic: context::DiagnosticResult = diagnostics.get(0);
     if (diagnostic.error != runtime::Error.none) {
         return diagnostic.error;
     }
@@ -424,7 +426,7 @@ impl CompileCommand {
         }
     }
 
-    var input: context::Input = context::input_empty(executable);
+    var input: context::Input = context::Input(executable);
     var added: bool = true;
     for (var index: usize = 0; index < source_count && added; index += 1) {
         let frontend: FrontendViewResult = frontends.get(index);
@@ -447,12 +449,12 @@ impl CompileCommand {
         }
     }
     if (!added) {
-        context::input_release(input);
         release_sources(&sources[0], source_count);
         return CompileStatus.semantic_error as i32;
     }
 
-    var semantic: context::Result = sema::check(input);
+    let input_view: context::InputView = input.view();
+    var semantic: context::SemanticResult = sema::check(input_view);
     if (!context::result_is_success(semantic)) {
         let status: i32 = semantic_status(semantic);
         if (semantic.error == runtime::Error.out_of_memory) {
@@ -460,19 +462,15 @@ impl CompileCommand {
         } else {
             report_semantic(semantic);
         }
-        context::result_release(semantic as context::Result&&);
-        context::input_release(input);
         release_sources(&sources[0], source_count);
         return status;
     }
-    let backend: codegen::BackendResult = codegen::emit_assembly(input, semantic.ir, semantic.types);
+    let backend: codegen::BackendResult = codegen::emit_assembly(input_view, semantic.ir, semantic.types);
     if (!codegen::backend_is_success(
-            backend, input, semantic.ir, semantic.types)) {
+            backend, input_view, semantic.ir, semantic.types)) {
         let backend_status: i32 = backend.error == runtime::Error.out_of_memory ?
                 CompileStatus.resource_limit as i32 : CompileStatus.backend_error as i32;
         codegen::backend_release(backend);
-        context::result_release(semantic as context::Result&&);
-        context::input_release(input);
         release_sources(&sources[0], source_count);
         return backend_status;
     }
@@ -481,15 +479,11 @@ impl CompileCommand {
         output_path, backend.assembly.data as *const u8, backend.assembly.length);
 
     let backend_error: runtime::Error = codegen::backend_release(backend);
-    let semantic_error: runtime::Error = context::result_release(semantic as context::Result&&);
-    let input_error: runtime::Error = context::input_release(input);
     let sources_error: runtime::Error = release_sources(&sources[0], source_count);
     if (write_error != runtime::Error.none) {
         return CompileStatus.output_error as i32;
     }
-    var release_error: runtime::Error = first_error(backend_error, semantic_error);
-    release_error = first_error(release_error, input_error);
-    release_error = first_error(release_error, sources_error);
+    let release_error: runtime::Error = first_error(backend_error, sources_error);
     if (release_error != runtime::Error.none) {
         return CompileStatus.release_error as i32;
     }

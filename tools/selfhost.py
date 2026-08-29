@@ -199,7 +199,12 @@ LIBRARIES = {
         "luna.bootstrap.middleend.semantic.generics.model",
         "middleend/semantic/generics/model",
     ),
-    "sem_ctx": compiler_module("luna.bootstrap.middleend.semantic.context", "middleend/semantic/context"),
+    "sem_ctx": compiler_module(
+        "luna.bootstrap.middleend.semantic.context",
+        "middleend/semantic/context",
+        "middleend/semantic/context/input",
+        "middleend/semantic/context/diagnostics",
+    ),
     "sem_ctx_lookup": compiler_module(
         "luna.bootstrap.middleend.semantic.context.lookup",
         "middleend/semantic/context/lookup",

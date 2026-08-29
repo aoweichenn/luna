@@ -1,0 +1,195 @@
+module luna.bootstrap.middleend.semantic.context;
+
+fn empty_unit() -> Unit {
+    return {
+        source = {data = null, length = 0}, tokens = lexer::TokenView(null, 0),
+        tree = syntax::SyntaxView(null, 0, 0, syntax::no_index()), path_offset = 0, path_length = 0,
+    };
+}
+
+fn source_is_valid(source: string_views::string_view) -> bool {
+    if (!string_views::is_valid_utf8(source)) {
+        return false;
+    }
+    for (var index: usize = 0; index < source.length; index += 1) {
+        if (source.data[index] == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn unit_is_valid(unit: Unit) -> bool {
+    let source_and_tokens_are_valid: bool = source_is_valid(unit.source) && unit.tokens.is_valid();
+    let tree_and_count_are_valid: bool = unit.tree.is_valid() && unit.tokens.size() == unit.tree.token_count();
+    return source_and_tokens_are_valid && tree_and_count_are_valid;
+}
+
+impl InputView {
+    init(units: *const Unit, unit_count: usize, paths: *const u8, path_byte_count: usize, executable: bool) {
+        this->unit_pointer = units;
+        this->unit_count = unit_count;
+        this->path_pointer = paths;
+        this->path_byte_count = path_byte_count;
+        this->executable_mode = executable;
+    }
+
+    fn storage_is_valid() const -> bool {
+        let units_exist: bool = this->unit_pointer != null || this->unit_count == 0;
+        let paths_exist: bool = this->path_pointer != null || this->path_byte_count == 0;
+        let count_is_bounded: bool = this->unit_count <= Limit.maximum_modules as usize * 2;
+        let storage_exists: bool = units_exist && paths_exist;
+        return storage_exists && count_is_bounded;
+    }
+
+    fn is_valid() const -> bool {
+        if (!this->storage_is_valid() || this->unit_count == 0) {
+            return false;
+        }
+        for (var index: usize = 0; index < this->unit_count; index += 1) {
+            let unit: Unit = this->unit_pointer[index];
+            let path_length_is_valid: bool = unit.path_length <= this->path_byte_count;
+            let path_offset_is_valid: bool = path_length_is_valid &&
+                unit.path_offset <= this->path_byte_count - unit.path_length;
+            if (!unit_is_valid(unit) || !path_offset_is_valid) {
+                return false;
+            }
+            let path_data: *const u8 = unit.path_length == 0 ? null : &this->path_pointer[unit.path_offset];
+            let path: string_views::string_view_result = string_views::from_bytes(path_data, unit.path_length);
+            if (path.error != runtime::Error.none) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn empty() const -> bool {
+        return this->unit_count == 0;
+    }
+
+    fn size() const -> usize {
+        return this->unit_count;
+    }
+
+    fn data() const -> *const Unit {
+        return this->unit_pointer;
+    }
+
+    fn executable() const -> bool {
+        return this->executable_mode;
+    }
+
+    fn unit(index: usize) const -> UnitResult {
+        if (!this->storage_is_valid() || index >= this->unit_count) {
+            return {unit = empty_unit(), error = runtime::Error.invalid_argument};
+        }
+        return {unit = this->unit_pointer[index], error = runtime::Error.none};
+    }
+
+    fn path(index: usize) const -> string_views::string_view_result {
+        let selected: UnitResult = this->unit(index);
+        if (selected.error != runtime::Error.none) {
+            return {view = {data = null, length = 0}, error = selected.error};
+        }
+        let unit: Unit = selected.unit;
+        let path_length_is_valid: bool = unit.path_length <= this->path_byte_count;
+        let path_offset_is_valid: bool = path_length_is_valid &&
+            unit.path_offset <= this->path_byte_count - unit.path_length;
+        if (!path_offset_is_valid) {
+            return {view = {data = null, length = 0}, error = runtime::Error.invalid_argument};
+        }
+        let path_data: *const u8 = unit.path_length == 0 ? null : &this->path_pointer[unit.path_offset];
+        return string_views::from_bytes(path_data, unit.path_length);
+    }
+}
+
+impl Input {
+    init(executable: bool): units = vector::vector<Unit>(), paths = buffer::byte_buffer() {
+        this->error_code = runtime::Error.none;
+        this->executable_mode = executable;
+    }
+
+    init(other: Input&&): units = other.units as vector::vector<Unit>&&, paths = other.paths as buffer::byte_buffer&& {
+        this->error_code = other.error_code;
+        this->executable_mode = other.executable_mode;
+        other.error_code = runtime::Error.none;
+    }
+
+    priv fn ready() const -> bool {
+        return this->error_code == runtime::Error.none && this->storage_is_valid();
+    }
+
+    priv fn fail(error: runtime::Error) -> runtime::Error {
+        if (this->error_code == runtime::Error.none) {
+            this->error_code = error;
+        }
+        return this->error_code;
+    }
+
+    fn storage_is_valid() const -> bool {
+        return this->units.is_valid() && this->paths.is_valid();
+    }
+
+    fn is_valid() const -> bool {
+        return this->ready() && this->view().is_valid();
+    }
+
+    fn empty() const -> bool {
+        return this->units.empty();
+    }
+
+    fn size() const -> usize {
+        return this->units.size();
+    }
+
+    fn error() const -> runtime::Error {
+        return this->error_code;
+    }
+
+    fn add(unit: Unit, path: string_views::string_view) -> runtime::Error {
+        let path_storage_exists: bool = path.data != null || path.length == 0;
+        let path_is_valid: bool = path_storage_exists && string_views::is_valid_utf8(path);
+        if (!this->ready() || !unit_is_valid(unit)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!path_is_valid || this->units.size() >= Limit.maximum_modules as usize * 2) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        var record: Unit = unit;
+        record.path_offset = this->paths.size();
+        record.path_length = path.length;
+        let path_error: runtime::Error = this->paths.append(path.data, path.length);
+        if (path_error != runtime::Error.none) {
+            return this->fail(path_error);
+        }
+        let unit_error: runtime::Error = this->units.push_back(record);
+        if (unit_error != runtime::Error.none) {
+            let rollback_error: runtime::Error = this->paths.truncate(record.path_offset);
+            return this->fail(rollback_error == runtime::Error.none ? unit_error : rollback_error);
+        }
+        return runtime::Error.none;
+    }
+
+    fn view() const -> InputView {
+        let units: *const Unit = this->units.empty() ? null : &this->units.get(0) as *const Unit;
+        return InputView(units, this->units.size(), this->paths.data(), this->paths.size(), this->executable_mode);
+    }
+
+    deinit() {
+    }
+}
+
+fn input_unit(context: *Context, unit_index: usize) -> *const Unit {
+    if (context == null || unit_index >= context->input.size()) {
+        return null;
+    }
+    return &context->input.data()[unit_index];
+}
+
+fn unit_path(context: *Context, unit_index: usize) -> string_views::string_view {
+    if (context == null) {
+        return {data = null, length = 0};
+    }
+    let path: string_views::string_view_result = context->input.path(unit_index);
+    return path.error == runtime::Error.none ? path.view : {data = null, length = 0};
+}

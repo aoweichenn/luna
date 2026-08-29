@@ -255,6 +255,13 @@ or strategy objects. Builders own append/rollback invariants. Expression and
 statement recursion is expressed through methods or a narrow strategy object,
 not parent-facade imports.
 
+The first landed semantic batch gives the root pipeline an explicit private
+session lifecycle and replaces byte-oriented diagnostics with typed RAII
+DiagnosticBuffer/DiagnosticView boundaries. The remaining Context and module
+contraction are deliberately incremental. The second batch makes Input a
+move-only typed owner and passes InputView downward to Context and CodeGenerator
+instead of shallow-copying ownership; see `docs/sema.md`.
+
 `ir::Module` owns the completed typed CFG, `ir::Builder` owns its append-only
 construction phase, and the private `Verifier` owns whole-module validation
 state. IR enums and records remain passive structs. Stateless opcode/type

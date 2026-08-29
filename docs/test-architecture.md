@@ -60,10 +60,11 @@ TypeTable 契约使用显式 `UNITS` 一次编译真实的六个 `luna.compiler.
 builtins、canonicalization、callable 参数、布局、move/moved-from 和独立破坏性验证，不把每项规则拆成
 单独工具链启动。
 
-IR 契约由 relocation-data 专用协议覆盖：语义结果把 move-only `ir::Module` 转移给 `ir::Builder` 继续构造，
-再以一次性 transfer 取回完成模块交给验证器和代码生成器，并确认原 Builder 已关闭。用例同时破坏全局引用目标
-与零占位字节，确认独立验证拒绝损坏状态，恢复后重新接受，并继续覆盖函数地址从 typed IR 到对象重定位和最终
-链接的完整路径。
+IR/semantic ownership 契约由 relocation-data 专用协议覆盖：move-only Input 在创建 InputView 前完成所有权转移，
+私有 SemanticSession 再把 TypeTable、move-only `ir::Module`和 typed DiagnosticBuffer 转移进透明结果记录，不再
+要求手工 release。用例继续把 Module 转移给`ir::Builder`构造全局引用，再以一次性 transfer 取回完成模块，并
+确认原 Builder 已关闭。随后它破坏全局引用目标与零占位字节，确认独立验证拒绝损坏状态，恢复后重新接受，并覆盖
+函数地址到对象重定位和最终链接的完整路径。
 
 这些任务仍使用独立工作目录，并与 suite 一起进入有界并行 worker pool。
 

@@ -14,176 +14,22 @@ fn empty_span() -> lexer::SourceSpan {
     };
 }
 
-fn invalid_diagnostic()
-    -> Diagnostic {
-    let none: usize = no_id();
-    return {
-        kind = DiagnosticKind.invalid_input, unit_index = none, span = empty_span(), related_unit = none,
-        related_span = empty_span(), detail = 0,
-    };
-}
-
-fn input_empty(executable: bool) -> Input {
-    return {
-        units = bytes::empty(), paths = bytes::empty(), unit_count = 0, executable = executable,
-    };
-}
-
-fn input_storage_is_valid(input: Input) -> bool {
-    let buffers_are_valid: bool = bytes::is_valid(input.units) && bytes::is_valid(input.paths);
-    let storage_is_shaped: bool = input.units.length % sizeof(Unit) == 0 &&
-        input.unit_count == input.units.length / sizeof(Unit);
-    if (!buffers_are_valid || !storage_is_shaped) {
-        return false;
-    }
-    return input.unit_count <= Limit.maximum_modules as usize * 2;
-}
-
-fn source_is_valid(source: string_views::string_view) -> bool {
-    if (!string_views::is_valid_utf8(source)) {
-        return false;
-    }
-    for (var index: usize = 0; index < source.length; index += 1) {
-        if (source.data[index] == 0) {
-            return false;
-        }
-    }
-    return true;
-}
-
-fn unit_is_valid(unit: Unit) -> bool {
-    let source_and_tokens_are_valid: bool = source_is_valid(unit.source) && unit.tokens.is_valid();
-    let tree_and_count_are_valid: bool = unit.tree.is_valid() && unit.tokens.size() == unit.tree.token_count();
-    return source_and_tokens_are_valid && tree_and_count_are_valid;
-}
-
-fn input_is_valid(input: Input) -> bool {
-    let has_valid_storage: bool = input_storage_is_valid(input) && input.unit_count != 0;
-    let count_is_valid: bool = input.unit_count <= Limit.maximum_modules as usize * 2;
-    if (!has_valid_storage || !count_is_valid) {
-        return false;
-    }
-    let units: *const Unit = input.units.data as *const Unit;
-    for (var index: usize = 0; index < input.unit_count; index += 1) {
-        let path_length_is_valid: bool = units[index].path_length <= input.paths.length;
-        let path_offset_is_valid: bool = path_length_is_valid &&
-            units[index].path_offset <= input.paths.length - units[index].path_length;
-        if (!unit_is_valid(units[index]) || !path_offset_is_valid) {
-            return false;
-        }
-    }
-    return true;
-}
-
-fn input_add(input: *Input, unit: Unit, path: string_views::string_view) -> bool {
-    if (input == null) {
-        return false;
-    }
-    if (!input_storage_is_valid(*input) || !unit_is_valid(unit)) {
-        return false;
-    }
-    let path_is_valid: bool = path.data != null || path.length == 0;
-    let has_capacity: bool = input->unit_count < Limit.maximum_modules as usize * 2;
-    if (!path_is_valid || !has_capacity) {
-        return false;
-    }
-    var record: Unit = unit;
-    record.path_offset = input->paths.length;
-    record.path_length = path.length;
-    let path_appended: bytes::BufferResult = bytes::append(input->paths, path.data, path.length);
-    input->paths = path_appended.buffer;
-    if (path_appended.error != runtime::Error.none) {
-        return false;
-    }
-    let appended: bytes::BufferResult = bytes::append(
-        input->units, (&record) as *const Unit as *const u8, sizeof(Unit));
-    input->units = appended.buffer;
-    if (appended.error != runtime::Error.none) {
-        return false;
-    }
-    input->unit_count += 1;
-    return true;
-}
-
-fn input_release(input: Input) -> runtime::Error {
-    if (!input_storage_is_valid(input)) {
-        return runtime::Error.invalid_argument;
-    }
-    let units_error: runtime::Error = bytes::release(input.units);
-    let paths_error: runtime::Error = bytes::release(input.paths);
-    return units_error != runtime::Error.none ? units_error : paths_error;
-}
-
-fn diagnostics_empty()
-    -> DiagnosticBuffer {
-    return {
-        storage = bytes::empty(), count = 0,
-    };
-}
-
-fn diagnostics_storage_is_valid(diagnostics: DiagnosticBuffer) -> bool {
-    return bytes::is_valid(diagnostics.storage) && diagnostics.storage.length % sizeof(Diagnostic) == 0 &&
-        diagnostics.count <= Limit.maximum_diagnostics as usize && diagnostics.count == diagnostics.storage.length /
-                sizeof(Diagnostic);
-}
-
-fn diagnostic_get(diagnostics: DiagnosticBuffer, index: usize) -> DiagnosticResult {
-    if (!diagnostics_storage_is_valid(
-            diagnostics) || index >= diagnostics.count) {
-        return {
-            diagnostic = invalid_diagnostic(), error = runtime::Error.invalid_argument,
-        };
-    }
-    let records: *const Diagnostic = diagnostics.storage.data as
-            *const Diagnostic;
-    return {
-        diagnostic = records[index], error = runtime::Error.none,
-    };
-}
-
 fn add_diagnostic(
     context: *Context, kind: DiagnosticKind, unit_index: usize, span: lexer::SourceSpan, related_unit: usize,
     related_span: lexer::SourceSpan, detail: usize) -> bool {
     if (context->error != runtime::Error.none) {
         return false;
     }
-    if (context->diagnostics.count >= Limit.maximum_diagnostics as usize) {
-        context->error = runtime::Error.out_of_memory;
-        return false;
-    }
     let diagnostic: Diagnostic = {
         kind = kind, unit_index = unit_index, span = span, related_unit = related_unit, related_span = related_span,
         detail = detail,
     };
-    let appended: bytes::BufferResult = bytes::append(
-        context->diagnostics.storage, (&diagnostic) as
-            *const Diagnostic as *const u8, sizeof(Diagnostic));
-    context->diagnostics.storage = appended.buffer;
-    context->error = appended.error;
-    if (appended.error == runtime::Error.none) {
-        context->diagnostics.count += 1;
-        return true;
-    }
-    return false;
-}
-
-fn result_is_success(result: Result const&) -> bool {
-    let status_is_success: bool = result.error == runtime::Error.none && result.diagnostics.count == 0;
-    let stores_are_valid: bool = result.types.is_valid(true) && result.ir.is_valid(result.types);
-    return status_is_success && stores_are_valid;
+    context->error = context->diagnostics.add(diagnostic);
+    return context->error == runtime::Error.none;
 }
 
 fn release_error(current: runtime::Error, next: runtime::Error) -> runtime::Error {
     return current == runtime::Error.none ? next : current;
-}
-
-fn result_release(result: Result&&) -> runtime::Error {
-    let diagnostics_are_valid: bool = diagnostics_storage_is_valid(result.diagnostics);
-    let stores_are_valid: bool = result.types.storage_is_valid() && result.ir.storage_is_valid();
-    if (!diagnostics_are_valid || !stores_are_valid) {
-        return runtime::Error.invalid_argument;
-    }
-    return bytes::release(result.diagnostics.storage);
 }
 
 enum ContextStorageCount: usize {
@@ -284,7 +130,7 @@ fn context_record_storage_is_valid(context: *const Context) -> bool {
         (&records[0]) as *const ContextStorageRecord, ContextStorageCount.records as usize);
 }
 
-fn context_storage_is_valid(context: *Context) -> bool {
+fn context_storage_is_valid(context: *const Context) -> bool {
     if (context == null) {
         return false;
     }
@@ -295,13 +141,13 @@ fn context_storage_is_valid(context: *Context) -> bool {
     context_storage_require(&validator, generic_model::storage_is_valid(context->generics));
     context_storage_require(&validator, context->scope_depth <= Limit.maximum_scope_depth as usize &&
         context->type_depth <= Limit.maximum_type_depth as usize);
-    context_storage_require(&validator, diagnostics_storage_is_valid(context->diagnostics));
+    context_storage_require(&validator, context->diagnostics.is_valid());
     context_storage_require(&validator, context->types.storage_is_valid());
     context_storage_require(&validator, context->ir.storage_is_valid());
     return validator.valid;
 }
 
-fn context_init(input: Input) -> Context {
+fn context_init(input: InputView) -> Context {
     var type_table: type_info::TypeTable = type_info::TypeTable();
     let type_error: runtime::Error = type_table.error();
     return {
@@ -321,14 +167,14 @@ fn context_init(input: Input) -> Context {
         pending_gotos = bytes::empty(), pending_goto_count = 0, goto_locals = bytes::empty(),
         loop_labels = bytes::empty(), loop_label_count = 0, pending_loop_label = no_id(), const_call_depth = 0,
         const_steps = 0, types = type_table as type_info::TypeTable&&, ir = ir::Builder(),
-        diagnostics = diagnostics_empty(), error = type_error, current_function = no_id(), current_unit = no_id(),
+        diagnostics = DiagnosticBuffer(), error = type_error, current_function = no_id(), current_unit = no_id(),
         scope_depth = 0, type_depth = 0, break_block = no_id(), continue_block = no_id(),
         break_local_count = 0, continue_local_count = 0,
     };
 }
 
 fn context_release_work(context: *Context) -> runtime::Error {
-    if (!context_storage_is_valid(context)) {
+    if (!context_storage_is_valid(context as *const Context)) {
         return runtime::Error.invalid_argument;
     }
     var error: runtime::Error = bytes::release(context->units);
@@ -357,26 +203,6 @@ fn context_release_work(context: *Context) -> runtime::Error {
     error = release_error(error, bytes::release(context->goto_locals));
     error = release_error(error, bytes::release(context->loop_labels));
     return error;
-}
-
-fn input_unit(context: *Context, unit_index: usize) -> *const Unit {
-    if (context == null || unit_index >= context->input.unit_count) {
-        return null;
-    }
-    let units: *const Unit = context->input.units.data as
-            *const Unit;
-    return &units[unit_index];
-}
-
-fn unit_path(context: *Context, unit_index: usize) -> string_views::string_view {
-    let unit: *const Unit = input_unit(context, unit_index);
-    if (unit == null || unit->path_length == 0) {
-        return { data = null, length = 0 };
-    }
-    let paths: *const u8 = context->input.paths.data as *const u8;
-    return {
-        data = &paths[unit->path_offset], length = unit->path_length,
-    };
 }
 
 fn node(context: *Context, unit_index: usize, node_index: usize) -> syntax::SyntaxNode {

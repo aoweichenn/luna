@@ -10,8 +10,10 @@ import luna.compiler.ir as ir;
 import luna.compiler.lexer as lexer;
 import luna.compiler.types as type_info;
 import luna.runtime;
+import luna.std.buffer as buffer;
 import luna.std.bytes;
 import luna.std.string_view as string_views;
+import luna.std.vector as vector;
 
 export enum DiagnosticKind: usize {
     invalid_input, duplicate_interface, duplicate_implementation, unknown_import, self_import, duplicate_import,
@@ -41,8 +43,7 @@ export enum DiagnosticKind: usize {
     invalid_generic_use, generic_resource_limit, invalid_reference, invalid_destructor,
 }
 
-// path_offset/path_length name the source file (as the driver received it)
-// inside the input's paths byte buffer; @file() emits those bytes.
+// path_offset/path_length 在输入路径字节中定位驱动接收的源文件名；@file() 发射该切片。
 export struct Unit {
     source: string_views::string_view;
     tokens: lexer::TokenView;
@@ -51,11 +52,45 @@ export struct Unit {
     path_length: usize;
 }
 
-export struct Input {
-    units: bytes::Buffer;
-    paths: bytes::Buffer;
-    unit_count: usize;
-    executable: bool;
+export struct UnitResult {
+    unit: Unit;
+    error: runtime::Error;
+}
+
+export class InputView {
+    priv unit_pointer: *const Unit;
+    priv unit_count: usize;
+    priv path_pointer: *const u8;
+    priv path_byte_count: usize;
+    priv executable_mode: bool;
+
+    pub init(units: *const Unit, unit_count: usize, paths: *const u8, path_byte_count: usize, executable: bool);
+    pub fn storage_is_valid() const -> bool;
+    pub fn is_valid() const -> bool;
+    pub fn empty() const -> bool;
+    pub fn size() const -> usize;
+    pub fn data() const -> *const Unit;
+    pub fn executable() const -> bool;
+    pub fn unit(index: usize) const -> UnitResult;
+    pub fn path(index: usize) const -> string_views::string_view_result;
+}
+
+export class Input {
+    priv units: vector::vector<Unit>;
+    priv paths: buffer::byte_buffer;
+    priv error_code: runtime::Error;
+    priv executable_mode: bool;
+
+    pub init(executable: bool);
+    pub init(other: Input&&);
+    pub fn storage_is_valid() const -> bool;
+    pub fn is_valid() const -> bool;
+    pub fn empty() const -> bool;
+    pub fn size() const -> usize;
+    pub fn error() const -> runtime::Error;
+    pub fn add(unit: Unit, path: string_views::string_view) -> runtime::Error;
+    pub fn view() const -> InputView;
+    pub deinit();
 }
 
 export struct Diagnostic {
@@ -67,20 +102,40 @@ export struct Diagnostic {
     detail: usize;
 }
 
-export struct DiagnosticBuffer {
-    storage: bytes::Buffer;
-    count: usize;
-}
-
-export struct Result {
-    types: type_info::TypeTable;
-    ir: ir::Module;
-    diagnostics: DiagnosticBuffer;
+export struct DiagnosticResult {
+    diagnostic: Diagnostic;
     error: runtime::Error;
 }
 
-export struct DiagnosticResult {
-    diagnostic: Diagnostic;
+export class DiagnosticView {
+    priv data_pointer: *const Diagnostic;
+    priv element_count: usize;
+
+    pub init(data: *const Diagnostic, count: usize);
+    pub fn is_valid() const -> bool;
+    pub fn empty() const -> bool;
+    pub fn size() const -> usize;
+    pub fn get(index: usize) const -> DiagnosticResult;
+}
+
+export class DiagnosticBuffer {
+    priv values: vector::vector<Diagnostic>;
+
+    pub init();
+    pub init(other: DiagnosticBuffer&&);
+    pub fn is_valid() const -> bool;
+    pub fn empty() const -> bool;
+    pub fn size() const -> usize;
+    pub fn add(diagnostic: Diagnostic) -> runtime::Error;
+    pub fn view() const -> DiagnosticView;
+    pub deinit();
+}
+
+// 语义结果是一次性传输记录；三个资源成员各自通过 RAII 管理生命周期。
+export struct SemanticResult {
+    types: type_info::TypeTable;
+    ir: ir::Module;
+    diagnostics: DiagnosticBuffer;
     error: runtime::Error;
 }
 
@@ -342,7 +397,7 @@ export struct ArrayLength {
 }
 
 export struct Context {
-    input: Input;
+    input: InputView;
     units: bytes::Buffer;
     unit_count: usize;
     modules: bytes::Buffer;
@@ -410,41 +465,17 @@ export fn no_id() -> usize;
 
 export fn empty_span() -> lexer::SourceSpan;
 
-export fn invalid_diagnostic() -> Diagnostic;
-
-export fn input_empty( executable: bool ) -> Input;
-
-export fn input_storage_is_valid( input: Input ) -> bool;
-
-export fn source_is_valid( source: string_views::string_view ) -> bool;
-
-export fn unit_is_valid( unit: Unit ) -> bool;
-
-export fn input_is_valid( input: Input ) -> bool;
-
-export fn input_add( input: *Input, unit: Unit, path: string_views::string_view ) -> bool;
-
-export fn input_release( input: Input ) -> runtime::Error;
-
-export fn diagnostics_empty() -> DiagnosticBuffer;
-
-export fn diagnostics_storage_is_valid( diagnostics: DiagnosticBuffer ) -> bool;
-
-export fn diagnostic_get( diagnostics: DiagnosticBuffer, index: usize ) -> DiagnosticResult;
-
 export fn add_diagnostic(
     context: *Context, kind: DiagnosticKind, unit_index: usize, span: lexer::SourceSpan, related_unit: usize,
     related_span: lexer::SourceSpan, detail: usize) -> bool;
 
-export fn result_is_success( result: Result const& ) -> bool;
+export fn result_is_success(result: SemanticResult const&) -> bool;
 
 export fn release_error( current: runtime::Error, next: runtime::Error ) -> runtime::Error;
 
-export fn result_release( result: Result&& ) -> runtime::Error;
+export fn context_storage_is_valid(context: *const Context) -> bool;
 
-export fn context_storage_is_valid( context: *Context ) -> bool;
-
-export fn context_init( input: Input ) -> Context;
+export fn context_init(input: InputView) -> Context;
 
 export fn context_release_work( context: *Context ) -> runtime::Error;
 

@@ -32,14 +32,15 @@ or when several Luna sessions are present.
 ## Repository state
 
 - Branch: `main`
-- Base commit: `4198d247df3ccd8bdf337e1d07614bfb466ce319`
-  (`refactor: make type table RAII`)
+- Base commit: `11c5bc7003b615aa8c95599030db3ba00badc358`
+  (`refactor: make IR a RAII module`)
 - `origin/main` matched that commit when this snapshot was written.
-- The IR modernization was developed from the base above and is complete.
-  Use `git status` and `git log` to determine whether the promotion commit has
-  already landed; never discard an in-progress working tree.
+- The IR modernization and its anchor promotion are committed and pushed.
+- The semantic ownership batches described below and their anchor promotion
+  are committed locally. Compare HEAD with `origin/main` to determine whether
+  the user has subsequently requested a push.
 - `advice.md` is an untracked user-owned file and has not been modified as part
-  of the IR work.
+  of the IR or semantic work.
 - Anchor before this work:
   `c8e6dbac2dac2b97c146efb761943fbd2da70634731daa59f3e1817afc0e4f5a`,
   4,994,899 bytes.
@@ -47,6 +48,10 @@ or when several Luna sessions are present.
   `282845d879d1b67169604ebc08481c3a4c286b2a737dd7db84fb3c520c609d94`,
   5,085,011 bytes. It is the byte-identical caw stage-fixed artifact described
   in `anchor/PROVENANCE.md`.
+- Promoted semantic ownership anchor:
+  `6cb79e335847a054aa4322139fe3a212a6598b18b778d34dfdbd5219f00d3846`,
+  5,113,683 bytes. It is the byte-identical caw stage-fixed artifact described
+  in the latest provenance entry.
 
 ## Engineering direction established in this conversation
 
@@ -165,13 +170,73 @@ fixed point, test suite, benchmark and anchor promotion are complete. The
 promotion belongs to the same pushed change as the source. If `git status` is
 clean and the branch contains that change, no IR task remains.
 
+## Active task: semantic ownership foundation
+
+The first two semantic modernization batches are complete in the working tree.
+They do not rename or blindly merge the 23,000-line semantic dependency graph.
+
+Implemented boundaries:
+
+- a private `SemanticSession` owns one ready/complete/transferred pipeline and
+  centralizes transient-work cleanup, entry selection and one result transfer;
+- `DiagnosticBuffer` is a move-only RAII owner over `vector<Diagnostic>`;
+- `DiagnosticView` is the bounded read-only consumer surface;
+- `Input` is a move-only RAII owner over `vector<Unit>` and `byte_buffer`;
+- `InputView` is the read-only unit/path/mode boundary stored by Context and
+  CodeGenerator while the driver retains the owner;
+- `SemanticResult` is a transparent one-shot transfer record composed from
+  TypeTable, IR Module, DiagnosticBuffer and runtime error;
+- manual semantic-result release is deleted from the driver and test;
+- invalid input now follows the same work-cleanup path as normal compilation;
+- `context/diagnostics.la` is a same-module implementation unit registered
+  under `sem_ctx`, not a new submodule;
+- `context/input.la` owns Input/InputView validation, transactional append and
+  Context unit/path access without creating an input submodule;
+- `docs/sema.md` records the feature review, current ABI constraint and the
+  incremental path toward domain extraction and session contraction.
+
+The public result deliberately remains a struct. The current unoptimized ABI
+does not reliably transfer a large public class containing both TypeTable and
+Module; behavior stays in the private session while the public record only
+bundles already-RAII fields. Attempts to force the decorative class boundary
+were rejected rather than committed as a workaround.
+
+Final caw workspace:
+`/home/aoweichen/codex-workspaces/luna-sema-input-a62vqBCj`
+
+Validation evidence:
+
+- audit: 67 modules, one driver, 33 interfaces and 57 library objects;
+- formatter: zero files needing reflow and zero token drift;
+- no newly introduced condition above two clauses and no new `while`;
+- cold transition/next/fixed: 14.17/14.33/14.22 seconds;
+- every next/fixed assembly, object and executable artifact byte-identical;
+- post-fixed-point tests: `450 passed, 0 failed, 0 skipped`.
+
+Before semantic ownership work, `sem_ctx` plus `sema` compiled sequentially in
+0.728413, 0.716067 and 0.714139 seconds; median 0.716067 seconds and 829,959
+total assembly bytes. The diagnostic/session batch reached a 0.856256-second
+median and 1,063,972 bytes. The final Input/InputView pair compiled in
+1.031824, 1.034350 and 1.036203 seconds; median 1.034350 seconds and 1,313,915
+total assembly bytes.
+Final hashes are
+`fd20b3fddbfe4adccac86dff49d62ee874e317e7f2b2a3ade51ee44d2da0f511`
+for `sem_ctx.s` and
+`6704a1431ac803f68970d1054c0d7e9fa06a9a729f20566b7124a8989252de71`
+for `sema.s`.
+
+The ownership batches and anchor promotion are complete and committed locally;
+`advice.md` remains excluded. Do not push unless the user separately asks. The
+next implementation batch should extract passive semantic domain records
+before contracting Context/lookup/builder.
+
 ## Recovery checklist
 
 1. Confirm the session UUID and working directory shown above.
 2. Read `AGENTS.md`, this file and the global engineering skill completely.
-3. Run `git status --short`, `git diff --stat` and inspect the actual IR diff.
+3. Run `git status --short`, `git diff --stat` and inspect the semantic ownership diff.
 4. Preserve `advice.md` and all existing comments/changes.
-5. Do not redo the completed Module/Builder/Verifier migration or rerun cold
+5. Do not redo the completed IR or semantic ownership work or rerun cold
    validation unless the source changes.
-6. Confirm the promotion commit is present on `origin/main`; otherwise resume
-   only the interrupted commit/push operation.
+6. Confirm the semantic ownership commit is present locally. Push remains a
+   separate explicit user action.

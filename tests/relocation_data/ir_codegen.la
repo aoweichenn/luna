@@ -52,17 +52,26 @@ fn main() -> i32 {
     if (frontend_view.error != runtime::Error.none || frontend_has_diagnostics) {
         return 2;
     }
-    var input: context::Input = context::input_empty(false);
+    var prepared_input: context::Input = context::Input(false);
     let unit: context::Unit = {
         source = source.view, tokens = frontend_view.lex.tokens, tree = frontend_view.parse.tree,
         path_offset = 0, path_length = 0,
     };
-    if (!context::input_add(&input, unit, path.view)) {
+    if (prepared_input.add(unit, path.view) != runtime::Error.none) {
         return 3;
     }
-    var semantic: context::Result = sema::check(input);
-    if (!context::result_is_success(semantic) || semantic.ir.view().function_count != 1) {
-        return 4;
+    var input: context::Input = utility::move(prepared_input);
+    let input_move_is_valid: bool = input.is_valid() && prepared_input.storage_is_valid();
+    if (!input_move_is_valid || prepared_input.size() != 0) {
+        return 31;
+    }
+    let input_view: context::InputView = input.view();
+    var semantic: context::SemanticResult = sema::check(input_view);
+    if (!context::result_is_success(semantic)) {
+        return 26;
+    }
+    if (semantic.ir.view().function_count != 1) {
+        return 28;
     }
 
     var ir_builder: ir::Builder = ir::Builder(utility::move(semantic.ir));
@@ -124,7 +133,7 @@ fn main() -> i32 {
     references[2].target_id = base_descriptor;
 
     let empty_backend: codegen::BackendResult = codegen::backend_empty();
-    if (codegen::backend_is_success(empty_backend, input, built_ir, semantic.types)) {
+    if (codegen::backend_is_success(empty_backend, input_view, built_ir, semantic.types)) {
         return 15;
     }
     if (codegen::backend_release(empty_backend) != runtime::Error.none) {
@@ -132,13 +141,13 @@ fn main() -> i32 {
     }
 
     references[0].target_id = ir::no_id();
-    let rejected_backend: codegen::BackendResult = codegen::emit_assembly(input, built_ir, semantic.types);
+    let rejected_backend: codegen::BackendResult = codegen::emit_assembly(input_view, built_ir, semantic.types);
     let rejected_storage_is_valid: bool = bytes::is_valid(rejected_backend.assembly) &&
         rejected_backend.assembly.length == 0;
     let rejected_result_is_valid: bool = rejected_backend.error == runtime::Error.invalid_argument &&
         rejected_storage_is_valid;
     if (!rejected_result_is_valid ||
-        codegen::backend_is_success(rejected_backend, input, built_ir, semantic.types)) {
+        codegen::backend_is_success(rejected_backend, input_view, built_ir, semantic.types)) {
         return 17;
     }
     if (codegen::backend_release(rejected_backend) != runtime::Error.none) {
@@ -146,10 +155,10 @@ fn main() -> i32 {
     }
     references[0].target_id = 0;
 
-    let first_backend: codegen::BackendResult = codegen::emit_assembly(input, built_ir, semantic.types);
-    let second_backend: codegen::BackendResult = codegen::emit_assembly(input, built_ir, semantic.types);
-    let first_is_valid: bool = codegen::backend_is_success(first_backend, input, built_ir, semantic.types);
-    let second_is_valid: bool = codegen::backend_is_success(second_backend, input, built_ir, semantic.types);
+    let first_backend: codegen::BackendResult = codegen::emit_assembly(input_view, built_ir, semantic.types);
+    let second_backend: codegen::BackendResult = codegen::emit_assembly(input_view, built_ir, semantic.types);
+    let first_is_valid: bool = codegen::backend_is_success(first_backend, input_view, built_ir, semantic.types);
+    let second_is_valid: bool = codegen::backend_is_success(second_backend, input_view, built_ir, semantic.types);
     if (!first_is_valid || !second_is_valid) {
         return 19;
     }
@@ -164,7 +173,5 @@ fn main() -> i32 {
 
     var release_error: runtime::Error = codegen::backend_release(second_backend);
     release_error = first_error(release_error, codegen::backend_release(first_backend));
-    release_error = first_error(release_error, context::result_release(semantic as context::Result&&));
-    release_error = first_error(release_error, context::input_release(input));
     return release_error == runtime::Error.none ? 42 : 22;
 }
