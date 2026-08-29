@@ -13,6 +13,8 @@
 > The current root semantic lifecycle is owned by a private SemanticSession,
 > move-only Input and typed RAII diagnostics; its incremental contract is
 > recorded in `sema.md`.
+> Callable identity and value-category rules now share the modern
+> `luna.compiler.sema.domain` foundation.
 
 M4 now contains a separately compiled Luna implementation of name resolution,
 strong type checking, target layout and verified Typed IR construction. It

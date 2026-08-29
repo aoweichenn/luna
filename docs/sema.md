@@ -4,12 +4,40 @@
 
 The semantic pipeline validates the parsed source-module graph, constructs the
 canonical type model and lowers checked functions into `luna.compiler.ir`.
-This document records the first two ownership batches of its modernization.
+This document records the first three ownership/domain batches of its modernization.
 
 The root module is still named `luna.bootstrap.middleend.sema` while the
 downstream semantic dependency graph is contracted incrementally. The current
 batch does not rename the graph or claim that the large transitional Context
 has already become private.
+
+## Domain foundation
+
+`luna.compiler.sema.domain` is the first modern semantic dependency boundary.
+It replaces the historical callable and value-category modules with one
+51-line interface and two same-module implementation units.
+
+The module contains only closed, passive compiler-domain values:
+
+- `CallableKind`, `ReceiverKind` and `CallableIdentity` describe free
+  functions, methods and receiver qualification;
+- `ValueCategory` and `ReferenceRank` describe expression storage and
+  reference-binding rank;
+- stateless predicates validate identities, compare ownership, project value
+  categories and compute reference compatibility.
+
+Names are intentionally explicit after the merge: generic `Kind`, `Identity`
+and `Category` became `CallableKind`, `CallableIdentity` and `ValueCategory`.
+Closed-kind behavior uses `switch`; the module owns no allocation or mutable
+session state and therefore needs no class hierarchy, virtual dispatch or
+runtime RTTI.
+
+Both historical modules depended only on `luna.compiler.types`. The combined
+module preserves that downward dependency, removes one interface and one
+linked object, and lets consumers that previously imported both concepts use
+one `domain::` dependency. Class and generic model Stores are deliberately not
+included: they still own raw buffers, indexes and hash buckets and must become
+RAII abstractions before their passive records can move into this boundary.
 
 ## Session lifecycle
 
@@ -144,14 +172,17 @@ sets the IR entry through `ir::Builder` before graph reachability validation.
 
 | file | responsibility |
 | --- | --- |
+| `semantic/domain/callable.la` | callable identity construction and validation |
+| `semantic/domain/category.la` | value-category projection and reference binding |
 | `middleend/sema.la` | private SemanticSession, phase orchestration, entry selection and result transfer |
 | `semantic/context.la` | transitional Context storage and shared low-level services |
 | `semantic/context/input.la` | Input owner, InputView validation and Context unit/path access |
 | `semantic/context/diagnostics.la` | DiagnosticView, DiagnosticBuffer and final success predicate |
 
-`context/diagnostics.la` is an additional implementation of the existing
-context module, not a new diagnostics submodule. The build registry lists it
-under `sem_ctx`; no consumer imports it independently.
+The two domain files implement one real `luna.compiler.sema.domain` module.
+`context/input.la` and `context/diagnostics.la` are additional implementations
+of the existing context module, not new submodules; no consumer imports them
+independently.
 
 ## Current Luna feature review
 
@@ -169,17 +200,23 @@ under `sem_ctx`; no consumer imports it independently.
 | Friends | unnecessary because the public methods preserve the required boundaries |
 | Virtual dispatch/RTTI | rejected: pass order and diagnostics are closed compile-time domains without runtime substitution |
 
+The domain module adopts enums, structs and switch-based free predicates
+because its values are passive and stateless. Adding a class merely to group
+those functions would introduce pattern-shaped indirection without an owner.
+
 ## Deliberately deferred work
 
 The next semantic batches should remain independently green:
 
-1. extract passive semantic records into the planned
-   `luna.compiler.sema.domain` foundation;
-2. contract context/lookup/builder into a coherent session module after its
+1. make class and generic model Stores move-only RAII owners, separating their
+   passive records from mutable indexes;
+2. extend `luna.compiler.sema.domain` only with the passive class/generic
+   records whose ownership has been separated;
+3. contract context/lookup/builder into a coherent session module after its
    interface can remain narrow;
-3. migrate pass families to bound methods or focused strategy objects where
+4. migrate pass families to bound methods or focused strategy objects where
    they own real state;
-4. rename the remaining `luna.bootstrap.middleend.semantic.*` graph only when
+5. rename the remaining `luna.bootstrap.middleend.semantic.*` graph only when
    the new dependency boundary is acyclic and independently useful.
 
 ## Validation gates

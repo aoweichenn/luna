@@ -13,8 +13,8 @@ import luna.bootstrap.middleend.semantic.expr.probe as probe;
 import luna.bootstrap.middleend.semantic.functions as functions;
 import luna.bootstrap.middleend.semantic.lifetime as lifetime;
 import luna.bootstrap.middleend.semantic.types as types;
-import luna.bootstrap.middleend.semantic.value as category;
 import luna.compiler.ir as ir;
+import luna.compiler.sema.domain as domain;
 import luna.compiler.types as type_info;
 import luna.runtime as runtime;
 
@@ -168,7 +168,7 @@ fn lower_unary(context: *context::Context, node_id: usize, node: syntax::SyntaxN
                 context::empty_span(), operand.bitfield_segment);
             return base::invalid_expression();
         }
-        if (!category::is_addressable(operand.category)) {
+        if (!domain::is_addressable(operand.category)) {
             context::add_diagnostic(
                 context, context::DiagnosticKind.invalid_lvalue, context->current_unit, node.span, context::no_id(),
                 context::empty_span(), operand.type_id);
@@ -183,14 +183,14 @@ fn lower_unary(context: *context::Context, node_id: usize, node: syntax::SyntaxN
             return base::invalid_expression();
         }
         let pointer: type_info::IdResult =
-            context->types.pointer(operand.type_id, !category::is_writable(operand.category),
-                category::is_volatile(operand.category));
+            context->types.pointer(operand.type_id, !domain::is_writable(operand.category),
+                domain::is_volatile(operand.category));
         context->error = pointer.error;
         var result: context::Expression = operand;
         result.type_id = pointer.type_id;
         result.value_id = operand.address_id;
         result.address_id = context::no_id();
-        result.category = category::Category.rvalue;
+        result.category = domain::ValueCategory.rvalue;
         return result;
     }
     if (operation == lexer::TokenKind.star) {
@@ -211,7 +211,7 @@ fn lower_unary(context: *context::Context, node_id: usize, node: syntax::SyntaxN
         builder::emit_void(context, check);
         let result: context::Expression = {
             type_id = operand_record.element_type, value_id = context::no_id(), address_id = operand.value_id,
-            constant_value = 0, has_constant = false, category = category::pointee(operand_record), valid = true,
+            constant_value = 0, has_constant = false, category = domain::pointee(operand_record), valid = true,
             bitfield_segment = context::no_id(),
         };
         return builder::load_lvalue(context, node, result);
@@ -259,7 +259,7 @@ fn lower_unary(context: *context::Context, node_id: usize, node: syntax::SyntaxN
     }
     return {
         type_id = operand.type_id, value_id = value_id, address_id = context::no_id(), constant_value = constant_value,
-        has_constant = has_constant, category = category::Category.rvalue,
+        has_constant = has_constant, category = domain::ValueCategory.rvalue,
         valid = value_id != context::no_id(), bitfield_segment = context::no_id(),
     };
 }
@@ -370,9 +370,9 @@ fn lower_cast(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
         let operand: context::Expression = api::invoke(lowerer, context, node.first_child, target_record.element_type);
         let read_only: bool = (target_record.flags & (type_info::Flag.read_only as usize)) != 0;
         let rvalue: bool = (target_record.flags & (type_info::Flag.rvalue_reference as usize)) != 0;
-        let stored: bool = operand.valid && category::has_storage(operand.category);
-        let writable: bool = read_only || category::is_writable(operand.category);
-        let category_is_valid: bool = rvalue ? stored : category::is_lvalue(operand.category);
+        let stored: bool = operand.valid && domain::has_storage(operand.category);
+        let writable: bool = read_only || domain::is_writable(operand.category);
+        let category_is_valid: bool = rvalue ? stored : domain::is_lvalue(operand.category);
         if (!writable || !category_is_valid) {
             context::add_diagnostic(
                 context, context::DiagnosticKind.invalid_cast, context->current_unit, node.span, context::no_id(),
@@ -380,7 +380,7 @@ fn lower_cast(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
             return base::invalid_expression();
         }
         var result: context::Expression = operand;
-        result.category = rvalue ? category::xvalue(read_only) : category::lvalue(!read_only, false);
+        result.category = rvalue ? domain::xvalue(read_only) : domain::lvalue(!read_only, false);
         return result;
     }
     let target_storage: usize = target_record.kind == type_info::Kind.enumeration ?
@@ -418,7 +418,7 @@ fn lower_cast(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
     let value_id: usize = builder::emit_value(context, instruction, target_type);
     return {
         type_id = target_type, value_id = value_id, address_id = context::no_id(), constant_value = 0,
-        has_constant = false, category = category::Category.rvalue,
+        has_constant = false, category = domain::ValueCategory.rvalue,
         valid = value_id != context::no_id(), bitfield_segment = context::no_id(),
     };
 }
@@ -489,12 +489,12 @@ fn lower_short_circuit(
     context->current_block = merge_block;
     let source: context::Expression = {
         type_id = type_info::BuiltinType.boolean as usize, value_id = none, address_id = address, constant_value = 0,
-        has_constant = false, category = category::lvalue(false, false), valid = true,
+        has_constant = false, category = domain::lvalue(false, false), valid = true,
         bitfield_segment = context::no_id(),
     };
     let result: context::Expression = builder::load_lvalue(context, node, source);
     var final_result: context::Expression = result;
-    final_result.category = category::Category.rvalue;
+    final_result.category = domain::ValueCategory.rvalue;
     return final_result;
 }
 
@@ -590,7 +590,7 @@ fn lower_binary(context: *context::Context, node_id: usize, node: syntax::Syntax
         let value_id: usize = emit_pointer_offset(context, node, pointer_value, pointer_type, count_value);
         return {
             type_id = pointer_type, value_id = value_id, address_id = context::no_id(), constant_value = 0,
-            has_constant = false, category = category::Category.rvalue,
+            has_constant = false, category = domain::ValueCategory.rvalue,
             valid = value_id != context::no_id(), bitfield_segment = context::no_id(),
         };
     }
@@ -620,7 +620,7 @@ fn lower_binary(context: *context::Context, node_id: usize, node: syntax::Syntax
         return {
             type_id = type_info::BuiltinType.unsigned_size as usize, value_id = byte_distance,
             address_id = context::no_id(), constant_value = 0, has_constant = false,
-            category = category::Category.rvalue, valid = byte_distance != context::no_id(),
+            category = domain::ValueCategory.rvalue, valid = byte_distance != context::no_id(),
             bitfield_segment = context::no_id(),
         };
     }
@@ -644,7 +644,7 @@ fn lower_binary(context: *context::Context, node_id: usize, node: syntax::Syntax
         let value_id: usize = builder::emit_value(context, instruction, type_info::BuiltinType.boolean as usize);
         return {
             type_id = type_info::BuiltinType.boolean as usize, value_id = value_id, address_id = context::no_id(),
-            constant_value = 0, has_constant = false, category = category::Category.rvalue,
+            constant_value = 0, has_constant = false, category = domain::ValueCategory.rvalue,
             valid = value_id != context::no_id(), bitfield_segment = context::no_id(),
         };
     }
@@ -679,7 +679,7 @@ fn lower_binary(context: *context::Context, node_id: usize, node: syntax::Syntax
     let value_id: usize = builder::emit_value(context, instruction, result_type);
     return {
         type_id = result_type, value_id = value_id, address_id = context::no_id(), constant_value = 0,
-        has_constant = false, category = category::Category.rvalue,
+        has_constant = false, category = domain::ValueCategory.rvalue,
         valid = value_id != context::no_id(), bitfield_segment = context::no_id(),
     };
 }
@@ -739,12 +739,12 @@ fn lower_scalar_conditional(
     let result_address: usize = builder::address_of_slot(context, node, result_slot, then_value.type_id, false, false);
     let source: context::Expression = {
         type_id = then_value.type_id, value_id = none, address_id = result_address, constant_value = 0,
-        has_constant = false, category = category::lvalue(false, false), valid = true,
+        has_constant = false, category = domain::lvalue(false, false), valid = true,
         bitfield_segment = context::no_id(),
     };
     let result: context::Expression = builder::load_lvalue(context, node, source);
     var final_result: context::Expression = result;
-    final_result.category = category::Category.rvalue;
+    final_result.category = domain::ValueCategory.rvalue;
     return final_result;
 }
 
@@ -835,18 +835,18 @@ fn lower_conditional_at(
         }
         return {
             type_id = result_type, value_id = none, address_id = result_address, constant_value = 0,
-            has_constant = false, category = category::Category.temporary, valid = true,
+            has_constant = false, category = domain::ValueCategory.temporary, valid = true,
                 bitfield_segment = context::no_id(),
         };
     }
     let source: context::Expression = {
         type_id = result_type, value_id = none, address_id = result_address, constant_value = 0,
-        has_constant = false, category = category::lvalue(false, false), valid = true,
+        has_constant = false, category = domain::lvalue(false, false), valid = true,
         bitfield_segment = context::no_id(),
     };
     let result: context::Expression = builder::load_lvalue(context, node, source);
     var final_result: context::Expression = result;
-    final_result.category = category::Category.rvalue;
+    final_result.category = domain::ValueCategory.rvalue;
     return final_result;
 }
 
@@ -889,7 +889,7 @@ fn lower_va_arg(context: *context::Context, node: syntax::SyntaxNode, lowerer: a
     if (!list.valid) {
         return list;
     }
-    if (!category::is_assignable(list.category) || list.type_id != (type_info::BuiltinType.va_list_type as usize)) {
+    if (!domain::is_assignable(list.category) || list.type_id != (type_info::BuiltinType.va_list_type as usize)) {
         context::add_diagnostic(
             context, context::DiagnosticKind.invalid_va_list, context->current_unit, node.span, none,
             context::empty_span(), 0);
@@ -916,7 +916,7 @@ fn lower_va_arg(context: *context::Context, node: syntax::SyntaxNode, lowerer: a
     let value_id: usize = builder::emit_value(context, instruction, type_id);
     return {
         type_id = type_id, value_id = value_id, address_id = none, constant_value = 0, has_constant = false,
-        category = category::Category.rvalue, valid = value_id != none, bitfield_segment = none,
+        category = domain::ValueCategory.rvalue, valid = value_id != none, bitfield_segment = none,
     };
 }
 

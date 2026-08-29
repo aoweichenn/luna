@@ -1,0 +1,165 @@
+module luna.compiler.sema.domain;
+
+fn lvalue(writable: bool, volatile_access: bool) -> ValueCategory {
+    if (volatile_access) {
+        return writable ? ValueCategory.writable_volatile_lvalue : ValueCategory.volatile_lvalue;
+    }
+    return writable ? ValueCategory.writable_lvalue : ValueCategory.read_only_lvalue;
+}
+
+fn xvalue(read_only: bool) -> ValueCategory {
+    return read_only ? ValueCategory.read_only_xvalue : ValueCategory.xvalue;
+}
+
+fn pointee(pointer: type_info::Record) -> ValueCategory {
+    if (pointer.kind != type_info::Kind.pointer) {
+        return ValueCategory.rvalue;
+    }
+    let writable: bool = (pointer.flags & (type_info::Flag.read_only as usize)) == 0;
+    let volatile_access: bool = (pointer.flags & (type_info::Flag.volatile_pointee as usize)) != 0;
+    return lvalue(writable, volatile_access);
+}
+
+fn project(source: ValueCategory) -> ValueCategory {
+    switch (source) {
+    case ValueCategory.temporary, ValueCategory.temporary_bitfield {
+        return ValueCategory.temporary;
+    }
+    case ValueCategory.read_only_lvalue, ValueCategory.read_only_bitfield {
+        return ValueCategory.read_only_lvalue;
+    }
+    case ValueCategory.writable_lvalue, ValueCategory.writable_bitfield {
+        return ValueCategory.writable_lvalue;
+    }
+    case ValueCategory.volatile_lvalue, ValueCategory.volatile_bitfield {
+        return ValueCategory.volatile_lvalue;
+    }
+    case ValueCategory.writable_volatile_lvalue, ValueCategory.writable_volatile_bitfield {
+        return ValueCategory.writable_volatile_lvalue;
+    }
+    case ValueCategory.xvalue, ValueCategory.read_only_xvalue {
+        return source;
+    }
+    default {
+        return ValueCategory.rvalue;
+    }
+    }
+}
+
+fn as_bitfield(source: ValueCategory) -> ValueCategory {
+    switch (source) {
+    case ValueCategory.read_only_lvalue, ValueCategory.read_only_bitfield {
+        return ValueCategory.read_only_bitfield;
+    }
+    case ValueCategory.writable_lvalue, ValueCategory.writable_bitfield {
+        return ValueCategory.writable_bitfield;
+    }
+    case ValueCategory.volatile_lvalue, ValueCategory.volatile_bitfield {
+        return ValueCategory.volatile_bitfield;
+    }
+    case ValueCategory.writable_volatile_lvalue, ValueCategory.writable_volatile_bitfield {
+        return ValueCategory.writable_volatile_bitfield;
+    }
+    case ValueCategory.temporary, ValueCategory.temporary_bitfield {
+        return ValueCategory.temporary_bitfield;
+    }
+    case ValueCategory.xvalue, ValueCategory.read_only_xvalue {
+        return ValueCategory.temporary_bitfield;
+    }
+    default {
+        return ValueCategory.rvalue;
+    }
+    }
+}
+
+fn is_lvalue(category: ValueCategory) -> bool {
+    switch (category) {
+    case ValueCategory.read_only_lvalue, ValueCategory.writable_lvalue,
+        ValueCategory.volatile_lvalue, ValueCategory.writable_volatile_lvalue,
+        ValueCategory.read_only_bitfield, ValueCategory.writable_bitfield,
+        ValueCategory.volatile_bitfield, ValueCategory.writable_volatile_bitfield {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn is_xvalue(category: ValueCategory) -> bool {
+    return category == ValueCategory.xvalue || category == ValueCategory.read_only_xvalue;
+}
+
+fn is_expiring(category: ValueCategory) -> bool {
+    return is_xvalue(category) || is_temporary(category);
+}
+
+fn has_storage(category: ValueCategory) -> bool {
+    return category != ValueCategory.rvalue;
+}
+
+fn is_addressable(category: ValueCategory) -> bool {
+    switch (category) {
+    case ValueCategory.read_only_lvalue, ValueCategory.writable_lvalue,
+        ValueCategory.volatile_lvalue, ValueCategory.writable_volatile_lvalue,
+        ValueCategory.xvalue, ValueCategory.read_only_xvalue {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn is_assignable(category: ValueCategory) -> bool {
+    switch (category) {
+    case ValueCategory.writable_lvalue, ValueCategory.writable_volatile_lvalue,
+        ValueCategory.writable_bitfield, ValueCategory.writable_volatile_bitfield, ValueCategory.xvalue {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn is_writable(category: ValueCategory) -> bool {
+    return is_assignable(category);
+}
+
+fn is_volatile(category: ValueCategory) -> bool {
+    switch (category) {
+    case ValueCategory.volatile_lvalue, ValueCategory.writable_volatile_lvalue,
+        ValueCategory.volatile_bitfield, ValueCategory.writable_volatile_bitfield {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn is_temporary(category: ValueCategory) -> bool {
+    return category == ValueCategory.temporary || category == ValueCategory.temporary_bitfield;
+}
+
+fn reference_binding_rank(reference: type_info::Record, actual: ValueCategory) -> usize {
+    if (reference.kind != type_info::Kind.reference) {
+        return type_info::no_id();
+    }
+    let read_only: bool = (reference.flags & (type_info::Flag.read_only as usize)) != 0;
+    let rvalue: bool = (reference.flags & (type_info::Flag.rvalue_reference as usize)) != 0;
+    if (rvalue) {
+        if (!is_expiring(actual)) {
+            return type_info::no_id();
+        }
+        return read_only ? ReferenceRank.qualified as usize : ReferenceRank.exact as usize;
+    }
+    if (is_lvalue(actual)) {
+        if (!read_only && !is_writable(actual)) {
+            return type_info::no_id();
+        }
+        return read_only && is_writable(actual) ? ReferenceRank.qualified as usize : ReferenceRank.exact as usize;
+    }
+    return read_only && is_expiring(actual) ? ReferenceRank.temporary as usize : type_info::no_id();
+}

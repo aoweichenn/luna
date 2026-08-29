@@ -5,7 +5,6 @@ import luna.bootstrap.middleend.semantic.context.builder as builder;
 import luna.bootstrap.middleend.semantic.context.lookup as names;
 
 import luna.bootstrap.middleend.semantic.attributes as attributes;
-import luna.bootstrap.middleend.semantic.callable as callable;
 import luna.bootstrap.middleend.semantic.classes as classes;
 import luna.bootstrap.middleend.semantic.consteval as consteval;
 import luna.bootstrap.middleend.semantic.consteval.engine as const_engine;
@@ -22,9 +21,9 @@ import luna.bootstrap.middleend.semantic.generics;
 import luna.bootstrap.middleend.semantic.lifetime as lifetime;
 import luna.bootstrap.middleend.semantic.stmt.labels as labels;
 import luna.bootstrap.middleend.semantic.types as types;
-import luna.bootstrap.middleend.semantic.value as category;
 import luna.compiler.ir as ir;
 import luna.compiler.lexer as lexer;
+import luna.compiler.sema.domain as domain;
 import luna.compiler.syntax as syntax;
 import luna.compiler.types as type_info;
 import luna.runtime as runtime;
@@ -50,7 +49,7 @@ fn bind_reference(
     context: *context::Context, node: syntax::SyntaxNode,
     reference_type: usize, source: context::Expression) -> context::Expression {
     let reference: type_info::Record = context::type_record(context, reference_type);
-    let binding_rank: usize = category::reference_binding_rank(reference, source.category);
+    let binding_rank: usize = domain::reference_binding_rank(reference, source.category);
     let type_matches: bool = source.valid && source.type_id == reference.element_type;
     let binding_exists: bool = binding_rank != type_info::no_id() && source.address_id != context::no_id();
     if (!type_matches || !binding_exists) {
@@ -63,7 +62,7 @@ fn bind_reference(
     let value_id: usize = builder::emit_value(context, conversion, reference_type);
     return {
         type_id = reference_type, value_id = value_id, address_id = context::no_id(),
-        constant_value = 0, has_constant = false, category = category::Category.rvalue,
+        constant_value = 0, has_constant = false, category = domain::ValueCategory.rvalue,
         valid = value_id != context::no_id(), bitfield_segment = context::no_id(),
     };
 }
@@ -199,7 +198,7 @@ fn lower_variable(context: *context::Context, node_id: usize, node: syntax::Synt
     if (reference_type) {
         let reference_source: context::Expression = initializer;
         initializer = bind_reference(context, initializer_node, type_id, initializer);
-        if (reference_source.valid && category::is_temporary(reference_source.category)) {
+        if (reference_source.valid && domain::is_temporary(reference_source.category)) {
             lifetime::adopt_temporary(
                 context, temporary_start, reference_source.address_id, &cleanup_type_id, &cleanup_address);
         }
@@ -321,9 +320,9 @@ fn lower_assignment(context: *context::Context, node_id: usize, node: syntax::Sy
     }
     let target_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
     let target: context::Expression = expr::lower_expression(context, node.first_child, context::no_id());
-    if (!target.valid || !category::is_assignable(target.category)) {
+    if (!target.valid || !domain::is_assignable(target.category)) {
         context::add_diagnostic(
-            context, category::is_lvalue(target.category) ? context::DiagnosticKind.immutable_assignment :
+            context, domain::is_lvalue(target.category) ? context::DiagnosticKind.immutable_assignment :
                 context::DiagnosticKind.invalid_lvalue, context->current_unit, target_node.span, context::no_id(),
             context::empty_span(), target.type_id);
         return false;
@@ -390,7 +389,7 @@ fn lower_assignment(context: *context::Context, node_id: usize, node: syntax::Sy
                 operators::emit_pointer_offset(context, node, target.value_id, target.type_id, count_value);
             stored.type_id = target.type_id;
             stored.address_id = context::no_id();
-            stored.category = category::Category.rvalue;
+            stored.category = domain::ValueCategory.rvalue;
             stored.value_id = result_value;
             stored.valid = result_value != context::no_id();
         } else {
@@ -930,7 +929,7 @@ fn lower_va_start(context: *context::Context, node: syntax::SyntaxNode) -> bool 
     if (!list.valid) {
         return false;
     }
-    if (!category::is_assignable(list.category) || list.type_id != (type_info::BuiltinType.va_list_type as usize)) {
+    if (!domain::is_assignable(list.category) || list.type_id != (type_info::BuiltinType.va_list_type as usize)) {
         context::add_diagnostic(
             context, context::DiagnosticKind.invalid_va_list, context->current_unit, node.span, none,
             context::empty_span(), 0);
@@ -1260,9 +1259,9 @@ fn lower_function_active(context: *context::Context, function_id: usize) -> bool
     context->continue_local_count = 0;
     context->current_block = builder::add_current_block(context);
     add_parameter_locals(context, function_id);
-    if (function.identity.kind == callable::Kind.constructor) {
+    if (function.identity.kind == domain::CallableKind.constructor) {
         lower_constructor_block(context, body_node, function);
-    } else if (function.identity.kind == callable::Kind.destructor) {
+    } else if (function.identity.kind == domain::CallableKind.destructor) {
         lower_destructor_block(context, body_node, function);
     } else {
         lower_block(context, body_node);

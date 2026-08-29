@@ -319,6 +319,7 @@ the archived Luna 0 self-hosting milestone named `M4` above.
       `luna.compiler.ir` contraction
 - [x] private SemanticSession phase owner and typed RAII semantic diagnostics
 - [x] move-only semantic Input owner and borrowed InputView consumers
+- [x] callable/value contraction into `luna.compiler.sema.domain`
 - [ ] semantic-pipeline state classes and module contraction
 - [x] backend and command-service state classes
 - [ ] remaining `luna.bootstrap.*` namespace/module contraction

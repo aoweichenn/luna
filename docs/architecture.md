@@ -178,6 +178,11 @@ result release function. The driver also exclusively owns move-only semantic
 Input storage; Context and CodeGenerator receive only a borrowed InputView.
 See [the semantic pipeline contract](sema.md).
 
+Callable identity and expression value-category records now live in the
+acyclic `luna.compiler.sema.domain` foundation. The former callable/value
+modules are removed; resource-owning class and generic Stores remain separate
+until their own RAII migrations establish a valid ownership split.
+
 Compilation is split into global and local phases:
 
 1. load, lex and parse every source unit;

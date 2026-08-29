@@ -32,13 +32,15 @@ or when several Luna sessions are present.
 ## Repository state
 
 - Branch: `main`
-- Base commit: `11c5bc7003b615aa8c95599030db3ba00badc358`
-  (`refactor: make IR a RAII module`)
+- Base commit: `520fbb6e63cae396c276eba30b9e96e3afe55fe0`
+  (`refactor: make semantic ownership RAII`)
 - `origin/main` matched that commit when this snapshot was written.
 - The IR modernization and its anchor promotion are committed and pushed.
-- The semantic ownership batches described below and their anchor promotion
-  are committed locally. Compare HEAD with `origin/main` to determine whether
-  the user has subsequently requested a push.
+- The semantic ownership batches and their anchor promotion are committed and
+  pushed.
+- The semantic domain batch and its anchor promotion belong to the same commit
+  containing this handoff. Compare HEAD with `origin/main` to determine whether
+  the requested push completed.
 - `advice.md` is an untracked user-owned file and has not been modified as part
   of the IR or semantic work.
 - Anchor before this work:
@@ -52,6 +54,9 @@ or when several Luna sessions are present.
   `6cb79e335847a054aa4322139fe3a212a6598b18b778d34dfdbd5219f00d3846`,
   5,113,683 bytes. It is the byte-identical caw stage-fixed artifact described
   in the latest provenance entry.
+- Promoted semantic domain anchor:
+  `da919a6f4f0e7e278e0561714df6f11fcb80c2efe4d0cd07fd061d6f4ff04db9`,
+  5,113,683 bytes. It is the byte-identical domain stage-fixed artifact.
 
 ## Engineering direction established in this conversation
 
@@ -225,18 +230,60 @@ for `sem_ctx.s` and
 `6704a1431ac803f68970d1054c0d7e9fa06a9a729f20566b7124a8989252de71`
 for `sema.s`.
 
-The ownership batches and anchor promotion are complete and committed locally;
-`advice.md` remains excluded. Do not push unless the user separately asks. The
-next implementation batch should extract passive semantic domain records
-before contracting Context/lookup/builder.
+The ownership batches and anchor promotion are committed and pushed;
+`advice.md` remains excluded. Their planned callable/value domain extraction
+is recorded in the active batch below.
+
+## Active task: semantic domain foundation
+
+The first semantic module-contraction batch is complete in the working tree:
+
+- historical callable and value modules are replaced by one
+  `luna.compiler.sema.domain` dependency;
+- `CallableKind`, `ReceiverKind`, `CallableIdentity`, `ValueCategory` and
+  `ReferenceRank` are explicit passive domain types;
+- callable identity and value-category behavior remains stateless switch-based
+  predicates split across `domain/callable.la` and `domain/category.la`;
+- all 16 consumers use one `domain::` qualifier; four former double-import
+  sites now have one edge;
+- old module names, qualifiers, interfaces and registered objects are absent;
+- class/generic model Stores remain separate because they still own mutable
+  buffers, indexes and hash buckets and require dedicated RAII migrations.
+
+The graph contracts from 67 to 66 modules, 33 to 32 interfaces in the driver
+closure and 57 to 56 library objects. The domain interface is 51 lines;
+callable/category implementations are 69 and 165 lines. They contain no
+`while` and no condition above two logical clauses.
+
+Final caw workspace:
+`/home/aoweichen/codex-workspaces/luna-sema-domain-gZkjyFuJ`
+
+Validation evidence:
+
+- audit and formatter/token-drift gates passed;
+- cold transition/next/fixed: 14.23/14.29/14.13 seconds;
+- every next/fixed artifact was byte-identical;
+- post-fixed-point tests: `450 passed, 0 failed, 0 skipped`.
+
+The old callable/value modules compiled sequentially in 0.075489, 0.075557
+and 0.074303 seconds; median 0.075489 seconds and 140,335 total assembly
+bytes. The final domain module compiled in 0.052045, 0.051286 and 0.051717
+seconds; median 0.051717 seconds and 115,658 bytes, SHA-256
+`ed3b1abc40726a8d335d0f426714fc522a553372035d3f12bca612245f3327cc`.
+
+The batch and anchor promotion are complete. If the working tree is clean and
+`origin/main` contains this change, no domain task remains; `advice.md` stays
+excluded. The next implementation work should make class and generic model
+Stores move-only RAII owners before considering their passive records for the
+domain module.
 
 ## Recovery checklist
 
 1. Confirm the session UUID and working directory shown above.
 2. Read `AGENTS.md`, this file and the global engineering skill completely.
-3. Run `git status --short`, `git diff --stat` and inspect the semantic ownership diff.
+3. Run `git status --short`, `git diff --stat` and inspect the semantic domain diff.
 4. Preserve `advice.md` and all existing comments/changes.
-5. Do not redo the completed IR or semantic ownership work or rerun cold
+5. Do not redo the completed IR, semantic ownership or domain work or rerun cold
    validation unless the source changes.
-6. Confirm the semantic ownership commit is present locally. Push remains a
-   separate explicit user action.
+6. If the semantic domain commit/push is absent, resume only that interrupted
+   operation; do not redo implementation or validation.

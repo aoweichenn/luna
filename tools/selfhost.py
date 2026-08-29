@@ -189,8 +189,11 @@ LIBRARIES = {
         "middleend/ir/validation",
         "middleend/ir/verify",
     ),
-    "sem_callable": compiler_module("luna.bootstrap.middleend.semantic.callable", "middleend/semantic/callable"),
-    "sem_value": compiler_module("luna.bootstrap.middleend.semantic.value", "middleend/semantic/value"),
+    "sem_domain": compiler_module(
+        "luna.compiler.sema.domain",
+        "middleend/semantic/domain/callable",
+        "middleend/semantic/domain/category",
+    ),
     "sem_class_model": compiler_module(
         "luna.bootstrap.middleend.semantic.classes.model",
         "middleend/semantic/classes/model",

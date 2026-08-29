@@ -152,9 +152,9 @@ fn function_value_expression(
 
 fn invalid_call_target() -> CallTarget {
     return {
-        binding_id = context::no_id(), kind = callable::Kind.free_function, owner_type = context::no_id(),
+        binding_id = context::no_id(), kind = domain::CallableKind.free_function, owner_type = context::no_id(),
         receiver_node = context::no_id(), receiver_type = context::no_id(),
-        receiver_category = category::Category.rvalue, receiver_source = ReceiverSource.none,
+        receiver_category = domain::ValueCategory.rvalue, receiver_source = ReceiverSource.none,
         name_token = context::no_id(), valid = false,
     };
 }
@@ -183,9 +183,9 @@ fn constructor_call_target(context: *context::Context, callee: syntax::SyntaxNod
     let binding_id: usize = functions::lookup_constructor_binding(context, owner_type);
     let constructible: bool = !classes::class_is_abstract(context, owner_type);
     return {
-        binding_id = binding_id, kind = callable::Kind.constructor, owner_type = owner_type,
+        binding_id = binding_id, kind = domain::CallableKind.constructor, owner_type = owner_type,
         receiver_node = context::no_id(), receiver_type = owner_type,
-        receiver_category = category::Category.writable_lvalue, receiver_source = ReceiverSource.construction,
+        receiver_category = domain::ValueCategory.writable_lvalue, receiver_source = ReceiverSource.construction,
         name_token = context::no_id(), valid = binding_id != context::no_id() && constructible,
     };
 }
@@ -216,9 +216,9 @@ fn static_call_target(context: *context::Context, base: syntax::SyntaxNode, memb
     }
     let binding_id: usize = lookup_member_binding(context, owner_type, member.token_index);
     return {
-        binding_id = binding_id, kind = callable::Kind.static_method, owner_type = owner_type,
+        binding_id = binding_id, kind = domain::CallableKind.static_method, owner_type = owner_type,
         receiver_node = context::no_id(), receiver_type = context::no_id(),
-        receiver_category = category::Category.rvalue, receiver_source = ReceiverSource.none,
+        receiver_category = domain::ValueCategory.rvalue, receiver_source = ReceiverSource.none,
         name_token = member.token_index, valid = binding_id != context::no_id(),
     };
 }
@@ -232,15 +232,15 @@ fn instance_call_target(
     }
     let operation: lexer::TokenKind = context::token(context, context->current_unit, callee.token_index).kind;
     var owner_type: usize = base.type_id;
-    var receiver_category: category::Category = base.category;
+    var receiver_category: domain::ValueCategory = base.category;
     if (operation == lexer::TokenKind.arrow) {
         let pointer: type_info::Record = context::type_record(context, base.type_id);
         if (pointer.kind != type_info::Kind.pointer) {
             return invalid_call_target();
         }
         owner_type = pointer.element_type;
-        receiver_category = category::pointee(pointer);
-    } else if (operation != lexer::TokenKind.dot || !category::has_storage(base.category)) {
+        receiver_category = domain::pointee(pointer);
+    } else if (operation != lexer::TokenKind.dot || !domain::has_storage(base.category)) {
         return invalid_call_target();
     }
     if (context::type_record(context, owner_type).kind != type_info::Kind.class_type) {
@@ -251,7 +251,7 @@ fn instance_call_target(
     }
     let binding_id: usize = lookup_member_binding(context, owner_type, member.token_index);
     return {
-        binding_id = binding_id, kind = callable::Kind.instance_method, owner_type = owner_type,
+        binding_id = binding_id, kind = domain::CallableKind.instance_method, owner_type = owner_type,
         receiver_node = callee.first_child, receiver_type = base_node.kind == syntax::SyntaxKind.invalid ?
             context::no_id() : base.type_id, receiver_category = receiver_category,
         receiver_source = ReceiverSource.expression, name_token = member.token_index,
@@ -259,35 +259,35 @@ fn instance_call_target(
     };
 }
 
-fn current_receiver_category(context: *context::Context) -> category::Category {
+fn current_receiver_category(context: *context::Context) -> domain::ValueCategory {
     if (context->current_function >= context->function_count) {
-        return category::Category.rvalue;
+        return domain::ValueCategory.rvalue;
     }
     let functions_data: *const context::Function = context->functions.data as
             *const context::Function;
     let function: context::Function = functions_data[context->current_function];
     switch (function.identity.receiver) {
-    case callable::ReceiverKind.writable {
-        return category::Category.writable_lvalue;
+    case domain::ReceiverKind.writable {
+        return domain::ValueCategory.writable_lvalue;
     }
-    case callable::ReceiverKind.read_only {
-        return category::Category.read_only_lvalue;
+    case domain::ReceiverKind.read_only {
+        return domain::ValueCategory.read_only_lvalue;
     }
-    case callable::ReceiverKind.writable_volatile {
-        return category::Category.writable_volatile_lvalue;
+    case domain::ReceiverKind.writable_volatile {
+        return domain::ValueCategory.writable_volatile_lvalue;
     }
-    case callable::ReceiverKind.read_only_volatile {
-        return category::Category.volatile_lvalue;
+    case domain::ReceiverKind.read_only_volatile {
+        return domain::ValueCategory.volatile_lvalue;
     }
     default {
-        return category::Category.rvalue;
+        return domain::ValueCategory.rvalue;
     }
     }
 }
 
 fn super_call_target(context: *context::Context, base: syntax::SyntaxNode, member: syntax::SyntaxNode) -> CallTarget {
     var invalid: CallTarget = invalid_call_target();
-    invalid.kind = callable::Kind.instance_method;
+    invalid.kind = domain::CallableKind.instance_method;
     invalid.receiver_source = ReceiverSource.current_object;
     invalid.name_token = member.token_index;
     if (base.kind != syntax::SyntaxKind.super_expression) {
@@ -301,19 +301,20 @@ fn super_call_target(context: *context::Context, base: syntax::SyntaxNode, membe
     let current: context::Function = functions_data[context->current_function];
     let owner_type: usize = classes::base_type(context, current.identity.owner_type);
     invalid.owner_type = owner_type;
-    if (!callable::has_receiver(current.identity) || owner_type == context::no_id()) {
+    if (!domain::has_receiver(current.identity) || owner_type == context::no_id()) {
         return invalid;
     }
     let constructor: bool = context::token_equals_bytes(context, context->current_unit, member.token_index, "init", 4);
-    if (constructor && current.identity.kind != callable::Kind.constructor) {
-        invalid.kind = callable::Kind.constructor;
+    if (constructor && current.identity.kind != domain::CallableKind.constructor) {
+        invalid.kind = domain::CallableKind.constructor;
         invalid.name_token = context::no_id();
         return invalid;
     }
     let binding_id: usize = constructor ? functions::lookup_constructor_binding(context, owner_type) :
         lookup_member_binding(context, owner_type, member.token_index);
     return {
-        binding_id = binding_id, kind = constructor ? callable::Kind.constructor : callable::Kind.instance_method,
+        binding_id = binding_id,
+            kind = constructor ? domain::CallableKind.constructor : domain::CallableKind.instance_method,
         owner_type = owner_type, receiver_node = context::no_id(), receiver_type = current.identity.owner_type,
         receiver_category = current_receiver_category(context), receiver_source = ReceiverSource.current_object,
         name_token = constructor ? context::no_id() : member.token_index, valid = binding_id != context::no_id(),
@@ -352,7 +353,7 @@ fn resolve_bound_method(context: *context::Context, node: syntax::SyntaxNode, ex
         return {status = ResolutionStatus.no_match, function_id = context::no_id()};
     }
     let target: CallTarget = member_value_target(context, node);
-    if (!target.valid || target.kind != callable::Kind.instance_method) {
+    if (!target.valid || target.kind != domain::CallableKind.instance_method) {
         return {status = ResolutionStatus.no_match, function_id = context::no_id()};
     }
     var selected: usize = context::no_id();
@@ -406,16 +407,16 @@ fn direct_call_target(context: *context::Context, node: syntax::SyntaxNode) -> C
     }
     let binding_id: usize = direct_call_binding(context, callee);
     return {
-        binding_id = binding_id, kind = callable::Kind.free_function, owner_type = callable::no_owner(),
+        binding_id = binding_id, kind = domain::CallableKind.free_function, owner_type = domain::no_owner(),
         receiver_node = context::no_id(), receiver_type = context::no_id(),
-        receiver_category = category::Category.rvalue, receiver_source = ReceiverSource.none,
+        receiver_category = domain::ValueCategory.rvalue, receiver_source = ReceiverSource.none,
         name_token = context::no_id(), valid = binding_id != context::no_id(),
     };
 }
 
 fn operator_call_target(context: *context::Context, node: syntax::SyntaxNode) -> CallTarget {
     var target: CallTarget = invalid_call_target();
-    target.kind = callable::Kind.operator_method;
+    target.kind = domain::CallableKind.operator_method;
     target.receiver_source = ReceiverSource.expression;
     target.receiver_node = node.first_child;
     target.name_token = node.token_index;
@@ -437,19 +438,19 @@ fn operator_call_target(context: *context::Context, node: syntax::SyntaxNode) ->
     return target;
 }
 
-fn receiver_is_compatible(required: callable::ReceiverKind, actual: category::Category) -> bool {
+fn receiver_is_compatible(required: domain::ReceiverKind, actual: domain::ValueCategory) -> bool {
     switch (required) {
-    case callable::ReceiverKind.writable {
-        return actual == category::Category.writable_lvalue;
+    case domain::ReceiverKind.writable {
+        return actual == domain::ValueCategory.writable_lvalue;
     }
-    case callable::ReceiverKind.read_only {
-        return category::has_storage(actual) && !category::is_volatile(actual);
+    case domain::ReceiverKind.read_only {
+        return domain::has_storage(actual) && !domain::is_volatile(actual);
     }
-    case callable::ReceiverKind.writable_volatile {
-        return actual == category::Category.writable_volatile_lvalue;
+    case domain::ReceiverKind.writable_volatile {
+        return actual == domain::ValueCategory.writable_volatile_lvalue;
     }
-    case callable::ReceiverKind.read_only_volatile {
-        return category::is_volatile(actual);
+    case domain::ReceiverKind.read_only_volatile {
+        return domain::is_volatile(actual);
     }
     default {
         return false;
@@ -471,7 +472,7 @@ fn candidate_target_is_compatible(context: *context::Context, function: context:
     if (!candidate_owner_is_compatible(context, function, target)) {
         return false;
     }
-    if (!callable::has_receiver(function.identity)) {
+    if (!domain::has_receiver(function.identity)) {
         return true;
     }
     return receiver_is_compatible(function.identity.receiver, target.receiver_category);
@@ -481,19 +482,19 @@ enum BindingRank: usize {
     exact = 0, qualified = 1, temporary = 2, value = 3, no_match = 18446744073709551615,
 }
 
-fn receiver_binding_rank(required: callable::ReceiverKind, actual: category::Category) -> usize {
+fn receiver_binding_rank(required: domain::ReceiverKind, actual: domain::ValueCategory) -> usize {
     if (!receiver_is_compatible(required, actual)) {
         return BindingRank.no_match as usize;
     }
     switch (required) {
-    case callable::ReceiverKind.writable, callable::ReceiverKind.writable_volatile {
+    case domain::ReceiverKind.writable, domain::ReceiverKind.writable_volatile {
         return BindingRank.exact as usize;
     }
-    case callable::ReceiverKind.read_only, callable::ReceiverKind.read_only_volatile {
-        if (category::is_expiring(actual)) {
+    case domain::ReceiverKind.read_only, domain::ReceiverKind.read_only_volatile {
+        if (domain::is_expiring(actual)) {
             return BindingRank.temporary as usize;
         }
-        return category::is_writable(actual) ? BindingRank.qualified as usize : BindingRank.exact as usize;
+        return domain::is_writable(actual) ? BindingRank.qualified as usize : BindingRank.exact as usize;
     }
     default {
         return BindingRank.exact as usize;
@@ -516,7 +517,7 @@ fn probe_parameter_argument(context: *context::Context, node_id: usize, paramete
     if (parameter.kind != type_info::Kind.reference) {
         return {status = Status.compatible, rank = BindingRank.value as usize};
     }
-    let rank: usize = category::reference_binding_rank(parameter, argument.category);
+    let rank: usize = domain::reference_binding_rank(parameter, argument.category);
     return rank == type_info::no_id() ? {status = Status.incompatible, rank = BindingRank.no_match as usize} :
         {status = Status.compatible, rank = rank};
 }
@@ -542,7 +543,7 @@ fn candidate_call_status(
     let callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
     var child: usize = callee.next_sibling;
     var candidate_status: Status = Status.compatible;
-    var candidate_rank: usize = callable::has_receiver(function.identity) ?
+    var candidate_rank: usize = domain::has_receiver(function.identity) ?
         receiver_binding_rank(function.identity.receiver, target.receiver_category) : BindingRank.exact as usize;
     for (var argument_index: usize = 0; argument_index < argument_count; argument_index += 1) {
         let variadic_extra: bool = argument_index >= parameter_count;
@@ -816,7 +817,7 @@ fn resolve_call_target(
     }
     let callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
     let generic_callee: bool = callee.kind == syntax::SyntaxKind.generic_expression && callee.child_count == 2;
-    let explicit_generic_call: bool = generic_callee && target.kind == callable::Kind.free_function;
+    let explicit_generic_call: bool = generic_callee && target.kind == domain::CallableKind.free_function;
     let explicit_arguments: usize = explicit_generic_call ?
         context::node(context, context->current_unit, callee.first_child).next_sibling : context::no_id();
     var resolution: Resolution = {status = ResolutionStatus.no_match, function_id = context::no_id()};
@@ -825,7 +826,7 @@ fn resolve_call_target(
         visit_target_candidates(context, node, target, &candidates);
         resolution = finish_candidate_resolution(candidates);
     }
-    if (resolution.status == ResolutionStatus.no_match && target.kind == callable::Kind.free_function) {
+    if (resolution.status == ResolutionStatus.no_match && target.kind == domain::CallableKind.free_function) {
         let generic: functions::GenericResolution = functions::resolve_generic_call(
             context, target.binding_id, node, explicit_arguments, generic_argument_type);
         switch (generic.status) {
@@ -857,9 +858,9 @@ fn resolve_call_target(
 
 fn resolve_call(context: *context::Context, node_id: usize, node: syntax::SyntaxNode, binding_id: usize) -> Resolution {
     let target: CallTarget = {
-        binding_id = binding_id, kind = callable::Kind.free_function, owner_type = callable::no_owner(),
+        binding_id = binding_id, kind = domain::CallableKind.free_function, owner_type = domain::no_owner(),
         receiver_node = context::no_id(), receiver_type = context::no_id(),
-        receiver_category = category::Category.rvalue, receiver_source = ReceiverSource.none,
+        receiver_category = domain::ValueCategory.rvalue, receiver_source = ReceiverSource.none,
         name_token = context::no_id(), valid = binding_id != context::no_id(),
     };
     return resolve_call_target(context, node_id, node, target);
@@ -922,7 +923,7 @@ fn probe_indirect_call(
         var result: Result = type_result(expected_type, result_type.element_type);
         let read_only: bool = (result_type.flags & (type_info::Flag.read_only as usize)) != 0;
         let rvalue: bool = (result_type.flags & (type_info::Flag.rvalue_reference as usize)) != 0;
-        result.category = rvalue ? category::xvalue(read_only) : category::lvalue(!read_only, false);
+        result.category = rvalue ? domain::xvalue(read_only) : domain::lvalue(!read_only, false);
         return result;
     }
     return materialized_result(context, expected_type, function_type.element_type);
@@ -935,7 +936,7 @@ fn probe_call(context: *context::Context, node_id: usize, node: syntax::SyntaxNo
     let callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
     let target: CallTarget = direct_call_target(context, node);
     if (!target.valid) {
-        if (target.kind == callable::Kind.constructor && target.owner_type != context::no_id()) {
+        if (target.kind == domain::CallableKind.constructor && target.owner_type != context::no_id()) {
             return incompatible_result();
         }
         return probe_indirect_call(context, node, callee, expected_type);
@@ -958,7 +959,7 @@ fn probe_call(context: *context::Context, node_id: usize, node: syntax::SyntaxNo
     if (result_record.kind == type_info::Kind.reference) {
         let read_only: bool = (result_record.flags & (type_info::Flag.read_only as usize)) != 0;
         let rvalue: bool = (result_record.flags & (type_info::Flag.rvalue_reference as usize)) != 0;
-        call_result.category = rvalue ? category::xvalue(read_only) : category::lvalue(!read_only, false);
+        call_result.category = rvalue ? domain::xvalue(read_only) : domain::lvalue(!read_only, false);
     }
     call_result.function_id = resolution.function_id;
     return call_result;

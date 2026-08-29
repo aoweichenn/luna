@@ -262,6 +262,11 @@ contraction are deliberately incremental. The second batch makes Input a
 move-only typed owner and passes InputView downward to Context and CodeGenerator
 instead of shallow-copying ownership; see `docs/sema.md`.
 
+The third batch contracts the two passive callable/value modules into
+`luna.compiler.sema.domain`, with explicit CallableKind/CallableIdentity and
+ValueCategory names. Resource-owning class/generic Stores remain outside the
+domain until their own invariants are modernized.
+
 `ir::Module` owns the completed typed CFG, `ir::Builder` owns its append-only
 construction phase, and the private `Verifier` owns whole-module validation
 state. IR enums and records remain passive structs. Stateless opcode/type

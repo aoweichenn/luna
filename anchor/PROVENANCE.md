@@ -950,3 +950,46 @@ its 188,626-byte object has SHA-256
 `33cc22878790ebb4e378fe53901d3da61f516f5e4f1ec366e203fe141f9cb028`.
 The promoted 5,113,683-byte executable has SHA-256
 `6cb79e335847a054aa4322139fe3a212a6598b18b778d34dfdbd5219f00d3846`.
+
+## 2026-08-29: promotion to the semantic domain toolchain
+
+The anchor now contains the stage-fixed `luna` executable from the first
+semantic module-contraction batch accompanying this provenance note. The
+historical `luna.bootstrap.middleend.semantic.callable` and
+`luna.bootstrap.middleend.semantic.value` modules are replaced atomically by
+one acyclic `luna.compiler.sema.domain` dependency. No forwarding modules or
+compatibility aliases remain.
+
+The domain exposes explicit passive `CallableKind`, `ReceiverKind`,
+`CallableIdentity`, `ValueCategory` and `ReferenceRank` types. Two same-module
+callable/category implementation units provide stateless switch-based identity,
+projection and reference-binding predicates. Sixteen consumers migrated to one
+`domain::` vocabulary; former double-import sites now have one dependency edge.
+
+Resource-owning class and generic model Stores are deliberately excluded from
+the domain. They still own raw buffers, indexes and hash buckets and must
+become move-only RAII owners before their passive records can cross this
+boundary. The batch therefore contracts only abstractions that are already
+stateless instead of hiding mutable ownership inside a dumping-ground module.
+
+The graph contracts from 67 to 66 modules, from 33 to 32 interfaces in the
+driver closure and from 57 to 56 linked library objects. The domain interface
+is 51 lines; callable/category implementations are 69 and 165 lines. They
+contain no `while` and no condition above two logical clauses.
+
+Remote x86-64 verification in the isolated caw workspace
+`/home/aoweichen/codex-workspaces/luna-sema-domain-gZkjyFuJ` built the complete
+graph through transition, next and fixed stages. The cold stage times were
+14.23, 14.29 and 14.13 seconds; every next/fixed artifact was byte-identical.
+Audit and formatting gates were green, and the post-fixed-point suite passed
+450/450 with no failures or skips.
+
+The historical callable/value modules compiled sequentially in a median
+0.075489 seconds and produced 140,335 total assembly bytes. The final single
+domain module compiled in a median 0.051717 seconds and produced 115,658 bytes.
+The final domain assembly has SHA-256
+`ed3b1abc40726a8d335d0f426714fc522a553372035d3f12bca612245f3327cc`;
+its 59,678-byte object has SHA-256
+`7ea996199025b102e9e7c76ec2cc9a5fb4ab0a416697cfd652d2be8f1d3a48ee`.
+The promoted 5,113,683-byte executable has SHA-256
+`da919a6f4f0e7e278e0561714df6f11fcb80c2efe4d0cd07fd061d6f4ff04db9`.

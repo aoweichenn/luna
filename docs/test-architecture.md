@@ -66,6 +66,10 @@ IR/semantic ownership 契约由 relocation-data 专用协议覆盖：move-only I
 确认原 Builder 已关闭。随后它破坏全局引用目标与零占位字节，确认独立验证拒绝损坏状态，恢复后重新接受，并覆盖
 函数地址到对象重定位和最终链接的完整路径。
 
+semantic domain 收缩不新增逐概念编译用例；现有 overload、method receiver、reference binding、value category、
+lifetime 和负诊断 corpus 原样覆盖新`luna.compiler.sema.domain`。`audit`另外验证旧 callable/value 模块、接口和
+对象已从注册表与 driver closure 同时消失。
+
 这些任务仍使用独立工作目录，并与 suite 一起进入有界并行 worker pool。
 
 Lexer、Syntax 与 Parser 契约属于 frontend 专用协议：消费端只携带相应接口独立编译，再链接 stage 中单独
