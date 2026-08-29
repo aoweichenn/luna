@@ -126,15 +126,15 @@ priv fn merge_leaf(
 }
 
 priv fn merge_type(
-    types: type_info::Table, type_id: usize, base_offset: usize, depth: usize,
+    types: type_info::TypeTable const&, type_id: usize, base_offset: usize, depth: usize,
     classification: *Classification) -> bool {
-    let input_is_valid: bool = type_id < types.type_count && depth <= AbiLimit.maximum_type_depth as usize;
+    let input_is_valid: bool = type_id < types.size() && depth <= AbiLimit.maximum_type_depth as usize;
     let output_is_valid: bool = classification != null && classification->first != Class.memory;
     if (!input_is_valid || !output_is_valid) {
         return this->set_memory(classification);
     }
-    let records: *const type_info::Record = types.types.data as *const type_info::Record;
-    let fields: *const type_info::Field = types.fields.data as *const type_info::Field;
+    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
+    let fields: *const type_info::Field = types.field_data() as *const type_info::Field;
     let record: type_info::Record = records[type_id];
     if (type_info::is_scalar(record.kind)) {
         return this->merge_leaf(
@@ -175,14 +175,14 @@ priv fn merge_type(
     return this->set_memory(classification);
 }
 
-priv fn classify(types: type_info::Table, type_id: usize) -> Classification {
+priv fn classify(types: type_info::TypeTable const&, type_id: usize) -> Classification {
     var result: Classification = {
         eightbyte_count = 0, first = Class.invalid, second = Class.invalid,
     };
-    if (!type_info::table_is_valid(types, true) || type_id >= types.type_count) {
+    if (!types.is_valid(true) || type_id >= types.size()) {
         return result;
     }
-    let records: *const type_info::Record = types.types.data as *const type_info::Record;
+    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
     let record: type_info::Record = records[type_id];
     if (!type_info::is_memory(record.kind) || record.size_bytes == 0) {
         return result;
@@ -281,8 +281,8 @@ priv fn add_stack_area(
     return aligned_offset + aligned_size;
 }
 
-priv fn build_return(function: *Function, types: type_info::Table) -> bool {
-    let records: *const type_info::Record = types.types.data as *const type_info::Record;
+priv fn build_return(function: *Function, types: type_info::TypeTable const&) -> bool {
+    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
     let record: type_info::Record = records[function->return_type];
     function->return_size_bytes = record.size_bytes;
     function->return_alignment_bytes = record.alignment_bytes;
@@ -349,7 +349,7 @@ priv fn build_scalar_parameter(function: *Function, parameter: *Parameter, recor
     return true;
 }
 
-priv fn build_aggregate_parameter(function: *Function, parameter: *Parameter, types: type_info::Table,
+priv fn build_aggregate_parameter(function: *Function, parameter: *Parameter, types: type_info::TypeTable const&,
     record: type_info::Record) -> bool {
     let classification: Classification = this->classify(types, parameter->type_id);
     var required_general: usize = 0;
@@ -413,8 +413,8 @@ priv fn build_aggregate_parameter(function: *Function, parameter: *Parameter, ty
 }
 
 priv fn build_parameter(function: *Function, ir_parameter: ir::Parameter,
-    parameter_index: usize, types: type_info::Table) -> bool {
-    let records: *const type_info::Record = types.types.data as *const type_info::Record;
+    parameter_index: usize, types: type_info::TypeTable const&) -> bool {
+    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
     let record: type_info::Record = records[ir_parameter.type_id];
     let none: usize = this->no_id();
     var parameter: Parameter = {
@@ -438,7 +438,7 @@ priv fn finish_function(function: *Function) -> bool {
     return frame_is_valid && this->add_function(*function) != this->no_id();
 }
 
-fn build(ir: ir::Store, types: type_info::Table) -> bool {
+fn build(ir: ir::Store, types: type_info::TypeTable const&) -> bool {
     if (!ir_check::is_valid(ir, types)) {
         return this->fail(runtime::Error.invalid_argument);
     }
@@ -475,10 +475,10 @@ fn build(ir: ir::Store, types: type_info::Table) -> bool {
             return this->ready() ? this->fail(runtime::Error.invalid_argument) : false;
         }
     }
-    let type_records: *const type_info::Record = types.types.data as *const type_info::Record;
-    let type_fields: *const type_info::Field = types.fields.data as *const type_info::Field;
+    let type_records: *const type_info::Record = types.record_data() as *const type_info::Record;
+    let type_fields: *const type_info::Field = types.field_data() as *const type_info::Field;
     for (var signature_type: usize = 0;
-        signature_type < types.type_count && this->ready();
+        signature_type < types.size() && this->ready();
         signature_type += 1) {
         let record: type_info::Record = type_records[signature_type];
         if (record.kind != type_info::Kind.function_pointer) {
@@ -513,7 +513,7 @@ fn build(ir: ir::Store, types: type_info::Table) -> bool {
     return this->ready();
 }
 
-fn is_valid(ir: ir::Store, types: type_info::Table) const -> bool {
+fn is_valid(ir: ir::Store, types: type_info::TypeTable const&) const -> bool {
     if (!this->ready() || !this->storage_is_valid()) {
         return false;
     }

@@ -94,8 +94,8 @@ fn try_define_opaque_class(
         report_opaque_class(context, unit_index, declaration, duplicate, symbol.type_id);
         return true;
     }
-    context->error = type_info::table_define_opaque_class(
-        context->types, symbol.type_id, unit_index, declaration_id, declaration.token_index);
+    context->error = context->types.define_opaque_class(symbol.type_id, unit_index, declaration_id,
+        declaration.token_index);
     return true;
 }
 
@@ -107,12 +107,9 @@ fn append_named_type(
     if (opaque_class && !opaque_declaration_is_valid(context, unit_index, declaration, interface_unit)) {
         report_opaque_class(context, unit_index, declaration, context::no_id(), context::no_id());
     }
-    let type_id: usize = context->types.type_count;
-    let added: type_info::TableResult = opaque_class ? type_info::table_add_opaque_class(
-            context->types, unit_index, declaration_id, declaration.token_index, exported) :
-        type_info::table_add_named(
-            context->types, type_kind, unit_index, declaration_id, declaration.token_index, exported);
-    context->types = added.table;
+    let added: type_info::IdResult = opaque_class ?
+        context->types.add_opaque_class(unit_index, declaration_id, declaration.token_index, exported) :
+        context->types.add_named(type_kind, unit_index, declaration_id, declaration.token_index, exported);
     context->error = added.error;
     if (added.error != runtime::Error.none) {
         return;
@@ -124,6 +121,7 @@ fn append_named_type(
     if (interface_unit) {
         flags |= context::SymbolFlag.interface_declaration as usize;
     }
+    let type_id: usize = added.type_id;
     names::append_symbol(
         context, {
             kind = context::SymbolKind.named_type, module_id = module_id, declaration_unit = unit_index,
@@ -235,8 +233,8 @@ fn collect_types_in_unit(context: *context::Context, module_id: usize, unit_inde
 }
 
 fn validate_opaque_definitions(context: *context::Context) {
-    let records: *const type_info::Record = context->types.types.data as *const type_info::Record;
-    for (var type_id: usize = type_info::BuiltinType.count as usize; type_id < context->types.type_count;
+    let records: *const type_info::Record = context->types.record_data() as *const type_info::Record;
+    for (var type_id: usize = type_info::BuiltinType.count as usize; type_id < context->types.size();
         type_id += 1) {
         let record: type_info::Record = records[type_id];
         if (!type_info::is_opaque_class(record) || type_info::has_opaque_definition(record)) {
@@ -248,9 +246,6 @@ fn validate_opaque_definitions(context: *context::Context) {
 }
 
 fn collect_named_types(context: *context::Context) -> bool {
-    let created: type_info::TableResult = type_info::table_create();
-    context->types = created.table;
-    context->error = created.error;
     for (var module_id: usize = 0;
         module_id < context->module_count && context->error == runtime::Error.none;
         module_id += 1) {
@@ -457,14 +452,13 @@ fn instantiate_generic_type(
         return context::no_id();
     }
     let exported: bool = (source.flags & (syntax::SyntaxFlag.exported as usize)) != 0;
-    let added: type_info::TableResult = type_info::table_add_named(
-        context->types, type_kind, declaration.unit_index, declaration.node_index, declaration.name_token, exported);
-    context->types = added.table;
+    let added: type_info::IdResult = context->types.add_named(
+        type_kind, declaration.unit_index, declaration.node_index, declaration.name_token, exported);
     context->error = added.error;
     if (added.error != runtime::Error.none) {
         return context::no_id();
     }
-    let type_id: usize = context->types.type_count - 1;
+    let type_id: usize = added.type_id;
     context->error = generic_model::set_instance_result(
         &context->generics, instance_result.instance_id, type_id, context::no_id(),
         generic_model::InstanceState.resolving);
@@ -666,8 +660,8 @@ fn resolve_type_node(context: *context::Context, unit_index: usize, node_index: 
         if (node.child_count == 1) {
             let element_type: usize = resolve_type_node(context, unit_index, node.first_child);
             if (element_type != none) {
-                let result: type_info::IdResult = type_info::table_reference(
-                    &context->types, element_type, (node.flags & (syntax::SyntaxFlag.read_only as usize)) != 0,
+                let result: type_info::IdResult = context->types.reference(element_type,
+                    (node.flags & (syntax::SyntaxFlag.read_only as usize)) != 0,
                     (node.flags & (syntax::SyntaxFlag.rvalue_reference as usize)) != 0);
                 context->error = result.error;
                 return result.type_id;
@@ -678,8 +672,7 @@ fn resolve_type_node(context: *context::Context, unit_index: usize, node_index: 
             let element_type: usize = resolve_type_node(context, unit_index, node.first_child);
             if (element_type != none) {
                 let result: type_info::IdResult =
-                    type_info::table_pointer(
-                        &context->types, element_type, (node.flags & (syntax::SyntaxFlag.read_only as usize)) != 0,
+                    context->types.pointer(element_type, (node.flags & (syntax::SyntaxFlag.read_only as usize)) != 0,
                         (node.flags & (syntax::SyntaxFlag.volatile_ as usize)) != 0);
                 context->error = result.error;
                 return result.type_id;
@@ -702,7 +695,7 @@ fn resolve_type_node(context: *context::Context, unit_index: usize, node_index: 
                         context::empty_span(), flexible_element);
                     return none;
                 }
-                let result: type_info::IdResult = type_info::table_flexible_array(&context->types, flexible_element);
+                let result: type_info::IdResult = context->types.flexible_array(flexible_element);
                 context->error = result.error;
                 if (result.error == runtime::Error.none) {
                     return result.type_id;
@@ -776,8 +769,7 @@ fn resolve_type_node(context: *context::Context, unit_index: usize, node_index: 
                         context::empty_span(), element_type);
                     return none;
                 }
-                let result: type_info::IdResult =
-                    type_info::table_array(&context->types, element_type, element_count as usize);
+                let result: type_info::IdResult = context->types.array(element_type, element_count as usize);
                 context->error = result.error;
                 if (result.error == runtime::Error.none) {
                     return result.type_id;
@@ -833,7 +825,7 @@ fn resolve_class_expression(context: *context::Context, unit_index: usize, node:
 }
 
 fn opaque_value_is_available(context: *context::Context, type_id: usize, unit_index: usize) -> bool {
-    if (type_id >= context->types.type_count || unit_index >= context->input.unit_count) {
+    if (type_id >= context->types.size() || unit_index >= context->input.unit_count) {
         return false;
     }
     let record: type_info::Record = context::type_record(context, type_id);

@@ -1,0 +1,163 @@
+module luna.compiler.types;
+
+fn layout_parameters_are_valid(record: Record, size_bytes: usize, alignment_bytes: usize) -> bool {
+    let callable: bool = record.kind == Kind.function_pointer || record.kind == Kind.bound_method;
+    let declared: bool = kind_is_declared(record.kind) || callable;
+    let incomplete: bool = (record.flags & (Flag.complete as usize)) == 0;
+    if (!declared || !incomplete) {
+        return false;
+    }
+    if (size_bytes == 0 || alignment_bytes == 0) {
+        return false;
+    }
+    let alignment_is_bounded: bool = alignment_bytes <= TypeLimit.maximum_alignment as usize;
+    let alignment_is_power_of_two: bool = (alignment_bytes & (alignment_bytes - 1)) == 0;
+    let alignment_is_valid: bool = alignment_is_bounded && alignment_is_power_of_two;
+    return alignment_is_valid && size_bytes % alignment_bytes == 0;
+}
+
+impl TypeTable {
+    fn set_layout(type_id: usize, size_bytes: usize, alignment_bytes: usize) -> runtime::Error {
+        if (!this->ready() || type_id >= this->records.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!layout_parameters_are_valid(this->records.get(type_id), size_bytes, alignment_bytes)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->records.get(type_id).size_bytes = size_bytes;
+        this->records.get(type_id).alignment_bytes = alignment_bytes;
+        this->records.get(type_id).flags &= ~(Flag.resolving as usize);
+        this->records.get(type_id).flags |= Flag.complete as usize;
+        return runtime::Error.none;
+    }
+
+    fn set_packed(type_id: usize, packed: bool) -> runtime::Error {
+        if (!this->ready() || type_id >= this->records.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let record: Record = this->records.get(type_id);
+        if (record.kind != Kind.structure || (record.flags & (Flag.complete as usize)) != 0) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (packed) {
+            this->records.get(type_id).flags |= Flag.packed as usize;
+        } else {
+            this->records.get(type_id).flags &= ~(Flag.packed as usize);
+        }
+        return runtime::Error.none;
+    }
+
+    fn set_header(type_id: usize, header: bool) -> runtime::Error {
+        if (!this->ready() || type_id >= this->records.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let record: Record = this->records.get(type_id);
+        if (record.kind != Kind.structure || (record.flags & (Flag.complete as usize)) != 0) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (header) {
+            this->records.get(type_id).flags |= Flag.header as usize;
+        } else {
+            this->records.get(type_id).flags &= ~(Flag.header as usize);
+        }
+        return runtime::Error.none;
+    }
+
+    fn set_enum_underlying(type_id: usize, underlying_type: usize) -> runtime::Error {
+        let types_are_in_range: bool = type_id < this->records.size() && underlying_type < this->records.size();
+        if (!this->ready() || !types_are_in_range) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let kinds_are_valid: bool = this->records.get(type_id).kind == Kind.enumeration &&
+            is_integer(this->records.get(underlying_type).kind);
+        if (!kinds_are_valid || this->records.get(type_id).element_type != no_id()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->records.get(type_id).element_type = underlying_type;
+        return runtime::Error.none;
+    }
+
+    fn set_alias_target(type_id: usize, target_type: usize) -> runtime::Error {
+        let types_are_in_range: bool = type_id < this->records.size() && target_type < this->records.size();
+        if (!this->ready() || !types_are_in_range) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let alias: Record = this->records.get(type_id);
+        let alias_is_incomplete: bool = (alias.flags & (Flag.complete as usize)) == 0;
+        let alias_is_empty: bool = alias.element_type == no_id();
+        let alias_is_valid: bool = alias.kind == Kind.alias && alias_is_incomplete;
+        if (!alias_is_valid || !alias_is_empty) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let target: Record = this->records.get(target_type);
+        let target_is_complete: bool = (target.flags & (Flag.complete as usize)) != 0;
+        let target_kind_is_valid: bool = target.kind != Kind.invalid && target.kind != Kind.type_void;
+        let target_layout_exists: bool = target.size_bytes != 0 && target.alignment_bytes != 0;
+        let target_type_is_valid: bool = target_is_complete && target_kind_is_valid;
+        if (!target_type_is_valid || !target_layout_exists) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->records.get(type_id).element_type = target_type;
+        this->records.get(type_id).size_bytes = target.size_bytes;
+        this->records.get(type_id).alignment_bytes = target.alignment_bytes;
+        this->records.get(type_id).flags &= ~(Flag.resolving as usize);
+        this->records.get(type_id).flags |= Flag.complete as usize;
+        return runtime::Error.none;
+    }
+
+    fn set_base(type_id: usize, base_type: usize) -> runtime::Error {
+        let types_are_in_range: bool = type_id < this->records.size() && base_type < this->records.size();
+        if (!this->ready() || !types_are_in_range) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let derived: Record = this->records.get(type_id);
+        let base: Record = this->records.get(base_type);
+        let classes_are_valid: bool = derived.kind == Kind.class_type && base.kind == Kind.class_type;
+        let relation_is_empty: bool = derived.base_type == no_id() && type_id != base_type;
+        if (!classes_are_valid || !relation_is_empty) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->records.get(type_id).base_type = base_type;
+        return runtime::Error.none;
+    }
+
+    fn set_vptr(type_id: usize, vptr_offset: usize) -> runtime::Error {
+        if (!this->ready() || type_id >= this->records.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let pointer_alignment: usize = TypeLimit.target_pointer_alignment as usize;
+        let pointer_size: usize = TypeLimit.target_pointer_bytes as usize;
+        let offset_is_aligned: bool = (vptr_offset & (pointer_alignment - 1)) == 0;
+        let offset_is_bounded: bool = vptr_offset <= (TypeLimit.maximum_size as usize) - pointer_size;
+        if (!offset_is_aligned || !offset_is_bounded) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let record: Record = this->records.get(type_id);
+        let shape_is_valid: bool = record.kind == Kind.class_type && record.vptr_offset == no_id();
+        let state_is_incomplete: bool = (record.flags & (Flag.complete as usize)) == 0;
+        let state_is_resolving: bool = (record.flags & (Flag.resolving as usize)) != 0;
+        let state_is_valid: bool = state_is_incomplete && state_is_resolving;
+        if (!shape_is_valid || !state_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->records.get(type_id).vptr_offset = vptr_offset;
+        return runtime::Error.none;
+    }
+
+    fn set_resolving(type_id: usize, resolving: bool) -> runtime::Error {
+        let type_is_user_defined: bool = type_id >= BuiltinType.count as usize && type_id < this->records.size();
+        if (!this->ready() || !type_is_user_defined) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let record: Record = this->records.get(type_id);
+        if (!kind_is_declared(record.kind) || (record.flags & (Flag.complete as usize)) != 0) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (resolving) {
+            this->records.get(type_id).flags |= Flag.resolving as usize;
+        } else {
+            this->records.get(type_id).flags &= ~(Flag.resolving as usize);
+        }
+        return runtime::Error.none;
+    }
+}

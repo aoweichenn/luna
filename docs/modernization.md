@@ -142,7 +142,7 @@ contain files or child module/family directories at one level, never both.
 | `bootstrap.frontend.lexer` | `luna.compiler.lexer` | facade, session, keywords, literals, token |
 | `bootstrap.frontend.syntax` | `luna.compiler.syntax` | tree, builder, verify |
 | `bootstrap.frontend.parser.*` | `luna.compiler.parser` | facade, session, rules, literals, types, expression, statements, classes, declarations |
-| `bootstrap.middleend.type` | `luna.compiler.types` | storage, construction, validation, layout |
+| `bootstrap.middleend.type` | `luna.compiler.types` | storage, traits, construction, mutation, validation, layout |
 | `bootstrap.middleend.ir` + `ir.verify` | `luna.compiler.ir` | model, builder, validation |
 | semantic foundational records | `luna.compiler.sema.domain` | callable, value, classes, generics |
 | semantic `context.*` | `luna.compiler.sema.session` | session, names, builder |

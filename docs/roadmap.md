@@ -314,6 +314,7 @@ the archived Luna 0 self-hosting milestone named `M4` above.
       implementation files per module
 - [ ] standard-library RAII migration and `luna.runtime` decomposition
 - [x] object-oriented Lexer, Syntax and Parser with one modern module each
+- [x] move-only RAII TypeTable and `luna.compiler.types` contraction
 - [ ] semantic-pipeline state classes and module contraction
 - [x] backend and command-service state classes
 - [ ] remaining `luna.bootstrap.*` namespace/module contraction

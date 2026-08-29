@@ -1,0 +1,449 @@
+module luna.compiler.types;
+
+fn callable_record_is_valid(table: TypeTable const&, records: *const Record, record: Record,
+    expected_size: usize) -> bool {
+    let complete: bool = (record.flags & (Flag.complete as usize)) != 0;
+    let result_is_valid: bool = record.element_type < table.size() && records[record.element_type].kind != Kind.invalid;
+    if (!complete || !result_is_valid) {
+        return false;
+    }
+    let count_and_unit_are_empty: bool = record.element_count == 0 && record.declaration_unit == no_id();
+    let node_and_name_are_empty: bool = record.declaration_node == no_id() && record.name_token == no_id();
+    if (!count_and_unit_are_empty || !node_and_name_are_empty) {
+        return false;
+    }
+    let size_is_valid: bool = record.size_bytes == expected_size;
+    let alignment_is_valid: bool = record.alignment_bytes == TypeLimit.target_pointer_alignment as usize;
+    return size_is_valid && alignment_is_valid;
+}
+
+fn field_record_is_valid(table: TypeTable const&, records: *const Record, field: Field) -> bool {
+    if (field.owner_type >= table.size() || field.type_id >= table.size()) {
+        return false;
+    }
+    let owner: Record = records[field.owner_type];
+    let value: Record = records[field.type_id];
+    let parameter_owner: bool = owner.kind == Kind.function_pointer || owner.kind == Kind.bound_method;
+    let owner_accepts_fields: bool = parameter_owner || is_memory(owner.kind);
+    if (!owner_accepts_fields || value.kind == Kind.invalid) {
+        return false;
+    }
+    if (value.kind == Kind.type_void) {
+        return false;
+    }
+    if (!parameter_owner) {
+        let declaration_exists: bool = field.declaration_unit != no_id() && field.declaration_node != no_id();
+        if (!declaration_exists || field.name_token == no_id()) {
+            return false;
+        }
+    }
+    if (field.offset_bytes > owner.size_bytes) {
+        return false;
+    }
+    let value_is_complete: bool = (value.flags & (Flag.complete as usize)) != 0;
+    let flexible_zero_size: bool = (value.flags & (Flag.flexible as usize)) != 0;
+    let invalid_zero_size: bool = value.size_bytes == 0 && !flexible_zero_size;
+    if (!value_is_complete || invalid_zero_size) {
+        return false;
+    }
+    if (parameter_owner) {
+        return true;
+    }
+    return value.size_bytes <= owner.size_bytes - field.offset_bytes;
+}
+
+fn opaque_state_is_valid(record: Record, complete: bool, require_complete: bool) -> bool {
+    let opaque_class: bool = is_opaque_class(record);
+    let definition_flag: bool = (record.flags & (Flag.opaque_definition as usize)) != 0;
+    if (!opaque_class) {
+        return !definition_flag;
+    }
+    let exported: bool = (record.flags & (Flag.exported as usize)) != 0;
+    if (record.kind != Kind.class_type || !exported) {
+        return false;
+    }
+    if (definition_flag) {
+        return true;
+    }
+    return !complete && !require_complete;
+}
+
+fn reference_record_is_valid(record: Record, records: *const Record, type_count: usize) -> bool {
+    if (record.element_type >= type_count) {
+        return false;
+    }
+    let element_kind: Kind = records[record.element_type].kind;
+    let element_is_valid: bool = element_kind != Kind.invalid && element_kind != Kind.type_void;
+    let identity_is_empty: bool = record.element_count == 0 && record.declaration_unit == no_id();
+    let declaration_is_empty: bool = record.declaration_node == no_id() && record.name_token == no_id();
+    let fields_are_empty: bool = record.first_field == no_id() && record.field_count == 0;
+    let layout_is_valid: bool = record.size_bytes == TypeLimit.target_pointer_bytes as usize &&
+        record.alignment_bytes == TypeLimit.target_pointer_alignment as usize;
+    let complete: bool = (record.flags & (Flag.complete as usize)) != 0;
+    let qualifier_mask: usize = (Flag.read_only as usize) | (Flag.rvalue_reference as usize);
+    let flags_are_valid: bool = (record.flags & ~(qualifier_mask | (Flag.complete as usize))) == 0;
+    let identity_is_valid: bool = identity_is_empty && declaration_is_empty;
+    let representation_is_valid: bool = fields_are_empty && layout_is_valid;
+    let type_is_valid: bool = element_is_valid && identity_is_valid;
+    let storage_is_valid: bool = representation_is_valid && complete;
+    let record_is_valid: bool = type_is_valid && storage_is_valid;
+    return record_is_valid && flags_are_valid;
+}
+
+fn declaration_identity_is_empty(record: Record) -> bool {
+    let source_is_empty: bool = record.declaration_unit == no_id() && record.declaration_node == no_id();
+    return source_is_empty && record.name_token == no_id();
+}
+
+fn fields_are_empty(record: Record) -> bool {
+    return record.first_field == no_id() && record.field_count == 0;
+}
+
+fn base_relationship_is_valid(table: TypeTable const&, records: *const Record, index: usize, record: Record) -> bool {
+    if (record.base_type == no_id()) {
+        return true;
+    }
+    if (record.kind != Kind.class_type) {
+        return false;
+    }
+    if (record.base_type >= table.size() || record.base_type == index) {
+        return false;
+    }
+    let base: Record = records[record.base_type];
+    let base_is_complete: bool = (base.flags & (Flag.complete as usize)) != 0;
+    let derived_is_complete: bool = (record.flags & (Flag.complete as usize)) != 0;
+    let completeness_matches: bool = !derived_is_complete || base_is_complete;
+    return base.kind == Kind.class_type && completeness_matches;
+}
+
+fn record_header_is_valid(table: TypeTable const&, records: *const Record, index: usize, record: Record) -> bool {
+    let maximum_flags: usize = (Flag.rvalue_reference as usize) * 2 - 1;
+    let kind_is_known: bool = (record.kind as usize) <= (Kind.reference as usize);
+    let flags_are_known: bool = record.flags <= maximum_flags;
+    if (!kind_is_known || !flags_are_known) {
+        return false;
+    }
+    let vptr_is_allowed: bool = record.kind == Kind.class_type || record.vptr_offset == no_id();
+    return vptr_is_allowed && base_relationship_is_valid(table, records, index, record);
+}
+
+fn field_slice_is_valid(table: TypeTable const&, record: Record) -> bool {
+    if (record.field_count == 0) {
+        return record.first_field == no_id();
+    }
+    if (record.first_field >= table.field_size()) {
+        return false;
+    }
+    return record.field_count <= table.field_size() - record.first_field;
+}
+
+fn builtin_record_is_valid(record: Record, index: usize) -> bool {
+    let type_identity_is_empty: bool = record.element_type == no_id() && record.element_count == 0;
+    let declaration_is_empty: bool = declaration_identity_is_empty(record);
+    let representation_is_empty: bool = fields_are_empty(record);
+    let kind_matches: bool = record.kind == builtin_kind(index);
+    let size_matches: bool = record.size_bytes == builtin_size(index);
+    let alignment_matches: bool = record.alignment_bytes == builtin_alignment(index);
+    let type_identity_is_valid: bool = kind_matches && type_identity_is_empty;
+    let source_identity_is_valid: bool = declaration_is_empty && representation_is_empty;
+    let layout_is_valid: bool = size_matches && alignment_matches;
+    let identity_is_valid: bool = type_identity_is_valid && source_identity_is_valid;
+    let storage_is_valid: bool = layout_is_valid && record.flags == Flag.complete as usize;
+    return identity_is_valid && storage_is_valid;
+}
+
+fn pointer_identity_matches(left: Record, right: Record) -> bool {
+    let qualifier_mask: usize = (Flag.read_only as usize) | (Flag.volatile_pointee as usize);
+    let kind_and_type_match: bool = left.kind == Kind.pointer && left.element_type == right.element_type;
+    return kind_and_type_match && (left.flags & qualifier_mask) == (right.flags & qualifier_mask);
+}
+
+fn has_prior_pointer(records: *const Record, index: usize, record: Record) -> bool {
+    for (var previous: usize = BuiltinType.count as usize; previous < index; previous += 1) {
+        if (pointer_identity_matches(records[previous], record)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn pointer_record_is_valid(table: TypeTable const&, records: *const Record, index: usize, record: Record) -> bool {
+    if (record.element_type >= table.size()) {
+        return false;
+    }
+    let target_is_valid: bool = records[record.element_type].kind != Kind.invalid;
+    let count_is_empty: bool = record.element_count == 0;
+    let identity_is_empty: bool = declaration_identity_is_empty(record) && fields_are_empty(record);
+    let size_is_valid: bool = record.size_bytes == TypeLimit.target_pointer_bytes as usize;
+    let alignment_is_valid: bool = record.alignment_bytes == TypeLimit.target_pointer_alignment as usize;
+    let complete: bool = (record.flags & (Flag.complete as usize)) != 0;
+    let allowed_flags: usize = (Flag.complete as usize) | (Flag.read_only as usize) | (Flag.volatile_pointee as usize);
+    let flags_are_valid: bool = (record.flags & ~allowed_flags) == 0;
+    let type_is_valid: bool = target_is_valid && count_is_empty;
+    let storage_is_valid: bool = size_is_valid && alignment_is_valid;
+    let shape_is_valid: bool = identity_is_empty && storage_is_valid;
+    let record_is_valid: bool = type_is_valid && shape_is_valid;
+    let state_is_valid: bool = complete && flags_are_valid;
+    let unique: bool = !has_prior_pointer(records, index, record);
+    let shape_and_state_are_valid: bool = record_is_valid && state_is_valid;
+    return shape_and_state_are_valid && unique;
+}
+
+fn reference_identity_matches(left: Record, right: Record) -> bool {
+    let qualifier_mask: usize = (Flag.read_only as usize) | (Flag.rvalue_reference as usize);
+    let kind_and_type_match: bool = left.kind == Kind.reference && left.element_type == right.element_type;
+    return kind_and_type_match && (left.flags & qualifier_mask) == (right.flags & qualifier_mask);
+}
+
+fn has_prior_reference(records: *const Record, index: usize, record: Record) -> bool {
+    for (var previous: usize = BuiltinType.count as usize; previous < index; previous += 1) {
+        if (reference_identity_matches(records[previous], record)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn fixed_array_element_is_valid(table: TypeTable const&, records: *const Record, element_type: usize) -> bool {
+    if (element_type >= table.size()) {
+        return false;
+    }
+    let element: Record = records[element_type];
+    let defined_kind: bool = element.kind != Kind.invalid && element.kind != Kind.type_void;
+    let kind_is_valid: bool = defined_kind && element.kind != Kind.reference;
+    let complete: bool = (element.flags & (Flag.complete as usize)) != 0;
+    let storage_exists: bool = complete && element.size_bytes != 0;
+    return kind_is_valid && storage_exists;
+}
+
+fn flexible_array_element_is_valid(table: TypeTable const&, records: *const Record, element_type: usize) -> bool {
+    if (!fixed_array_element_is_valid(table, records, element_type)) {
+        return false;
+    }
+    let element: Record = records[element_type];
+    let forbidden_flags: usize = (Flag.flexible as usize) | (Flag.header as usize);
+    return (element.flags & forbidden_flags) == 0;
+}
+
+fn flexible_array_record_is_valid(table: TypeTable const&, records: *const Record, record: Record) -> bool {
+    let element_is_valid: bool = flexible_array_element_is_valid(table, records, record.element_type);
+    if (!element_is_valid) {
+        return false;
+    }
+    let element: Record = records[record.element_type];
+    let identity_is_empty: bool = declaration_identity_is_empty(record) && fields_are_empty(record);
+    let count_and_size_are_empty: bool = record.element_count == 0 && record.size_bytes == 0;
+    let alignment_matches: bool = record.alignment_bytes == element.alignment_bytes;
+    let expected_flags: usize = (Flag.complete as usize) | (Flag.flexible as usize);
+    let representation_is_valid: bool = count_and_size_are_empty && alignment_matches;
+    let storage_is_valid: bool = representation_is_valid && record.flags == expected_flags;
+    return identity_is_empty && storage_is_valid;
+}
+
+fn fixed_array_record_is_valid(table: TypeTable const&, records: *const Record, record: Record) -> bool {
+    if (!fixed_array_element_is_valid(table, records, record.element_type)) {
+        return false;
+    }
+    let element: Record = records[record.element_type];
+    let identity_is_empty: bool = declaration_identity_is_empty(record) && fields_are_empty(record);
+    let count_and_size_exist: bool = record.element_count != 0 && record.size_bytes != 0;
+    if (!identity_is_empty || !count_and_size_exist) {
+        return false;
+    }
+    if (record.element_count > (TypeLimit.maximum_size as usize) / element.size_bytes) {
+        return false;
+    }
+    let size_matches: bool = record.size_bytes == element.size_bytes * record.element_count;
+    let alignment_matches: bool = record.alignment_bytes == element.alignment_bytes;
+    let layout_matches: bool = size_matches && alignment_matches;
+    return layout_matches && record.flags == Flag.complete as usize;
+}
+
+fn has_prior_array(records: *const Record, index: usize, record: Record) -> bool {
+    for (var previous: usize = BuiltinType.count as usize; previous < index; previous += 1) {
+        let kind_and_type_match: bool =
+            records[previous].kind == Kind.array && records[previous].element_type == record.element_type;
+        if (kind_and_type_match && records[previous].element_count == record.element_count) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn array_record_is_valid(table: TypeTable const&, records: *const Record, index: usize, record: Record) -> bool {
+    let flexible: bool = (record.flags & (Flag.flexible as usize)) != 0;
+    let shape_is_valid: bool = flexible ? flexible_array_record_is_valid(table, records, record) :
+        fixed_array_record_is_valid(table, records, record);
+    return shape_is_valid && !has_prior_array(records, index, record);
+}
+
+fn callable_parameters_match(fields: *const Field, left: Record, right: Record) -> bool {
+    if (left.field_count != right.field_count) {
+        return false;
+    }
+    for (var parameter: usize = 0; parameter < left.field_count; parameter += 1) {
+        let left_type: usize = fields[left.first_field + parameter].type_id;
+        let right_type: usize = fields[right.first_field + parameter].type_id;
+        if (left_type != right_type) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn has_prior_callable(records: *const Record, fields: *const Field, index: usize, record: Record) -> bool {
+    for (var previous: usize = BuiltinType.count as usize; previous < index; previous += 1) {
+        let candidate: Record = records[previous];
+        let kind_and_result_match: bool =
+            candidate.kind == record.kind && candidate.element_type == record.element_type;
+        if (kind_and_result_match && callable_parameters_match(fields, candidate, record)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn callable_value_record_is_valid(
+    table: TypeTable const&, records: *const Record, fields: *const Field, index: usize, record: Record) -> bool {
+    let expected_size: usize = record.kind == Kind.function_pointer ?
+        TypeLimit.target_pointer_bytes as usize : TypeLimit.bound_method_bytes as usize;
+    let shape_is_valid: bool = callable_record_is_valid(table, records, record, expected_size);
+    return shape_is_valid && !has_prior_callable(records, fields, index, record);
+}
+
+fn alias_target_is_valid(table: TypeTable const&, records: *const Record, record: Record) -> bool {
+    if (record.element_type >= table.size()) {
+        return false;
+    }
+    let target: Record = records[record.element_type];
+    let target_is_complete: bool = (target.flags & (Flag.complete as usize)) != 0;
+    let target_kind_is_valid: bool = target.kind != Kind.invalid && target.kind != Kind.type_void;
+    let size_matches: bool = record.size_bytes == target.size_bytes;
+    let alignment_matches: bool = record.alignment_bytes == target.alignment_bytes;
+    let target_is_valid: bool = target_is_complete && target_kind_is_valid;
+    let layout_matches: bool = size_matches && alignment_matches;
+    return target_is_valid && layout_matches;
+}
+
+fn alias_record_is_valid(table: TypeTable const&, records: *const Record, record: Record) -> bool {
+    let declaration_exists: bool = record.declaration_unit != no_id() && record.declaration_node != no_id();
+    let identity_exists: bool = declaration_exists && record.name_token != no_id();
+    let representation_is_empty: bool = record.element_count == 0 && fields_are_empty(record);
+    if (!identity_exists || !representation_is_empty) {
+        return false;
+    }
+    let complete: bool = (record.flags & (Flag.complete as usize)) != 0;
+    let target_presence_matches: bool = complete ? record.element_type != no_id() : record.element_type == no_id();
+    if (!target_presence_matches) {
+        return false;
+    }
+    if (!complete) {
+        return true;
+    }
+    let resolving: bool = (record.flags & (Flag.resolving as usize)) != 0;
+    let layout_exists: bool = record.size_bytes != 0 && record.alignment_bytes != 0;
+    let target_is_valid: bool = alias_target_is_valid(table, records, record);
+    let representation_is_valid: bool = layout_exists && target_is_valid;
+    return !resolving && representation_is_valid;
+}
+
+fn named_record_is_valid(table: TypeTable const&, records: *const Record, record: Record,
+    require_complete: bool) -> bool {
+    let complete: bool = (record.flags & (Flag.complete as usize)) != 0;
+    if (!opaque_state_is_valid(record, complete, require_complete)) {
+        return false;
+    }
+    let declaration_exists: bool = record.declaration_unit != no_id() && record.declaration_node != no_id();
+    let identity_exists: bool = declaration_exists && record.name_token != no_id();
+    let requires_completion: bool = require_complete && !complete;
+    if (!identity_exists || requires_completion) {
+        return false;
+    }
+    if (record.element_count != 0) {
+        return false;
+    }
+    if (complete) {
+        let layout_exists: bool = record.size_bytes != 0 && record.alignment_bytes != 0;
+        let resolving: bool = (record.flags & (Flag.resolving as usize)) != 0;
+        if (!layout_exists || resolving) {
+            return false;
+        }
+    }
+    if (record.kind == Kind.enumeration && complete) {
+        if (record.element_type >= table.size()) {
+            return false;
+        }
+        return is_integer(records[record.element_type].kind);
+    }
+    return record.kind == Kind.enumeration || record.element_type == no_id();
+}
+
+fn record_kind_is_valid(
+    table: TypeTable const&, records: *const Record, fields: *const Field,
+    index: usize, record: Record, require_complete: bool) -> bool {
+    switch (record.kind) {
+    case Kind.pointer {
+        return pointer_record_is_valid(table, records, index, record);
+    }
+    case Kind.reference {
+        let shape_is_valid: bool = reference_record_is_valid(record, records, table.size());
+        return shape_is_valid && !has_prior_reference(records, index, record);
+    }
+    case Kind.array {
+        return array_record_is_valid(table, records, index, record);
+    }
+    case Kind.function_pointer, Kind.bound_method {
+        return callable_value_record_is_valid(table, records, fields, index, record);
+    }
+    case Kind.alias {
+        return alias_record_is_valid(table, records, record);
+    }
+    case Kind.structure, Kind.record_union, Kind.enumeration, Kind.class_type {
+        return named_record_is_valid(table, records, record, require_complete);
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn record_is_valid(
+    table: TypeTable const&, records: *const Record, fields: *const Field, index: usize,
+        require_complete: bool) -> bool {
+    let record: Record = records[index];
+    if (!record_header_is_valid(table, records, index, record)) {
+        return false;
+    }
+    let kind_is_valid: bool = index < BuiltinType.count as usize ? builtin_record_is_valid(record, index) :
+        record_kind_is_valid(table, records, fields, index, record, require_complete);
+    return kind_is_valid && field_slice_is_valid(table, record);
+}
+
+fn records_are_valid(table: TypeTable const&, records: *const Record, fields: *const Field,
+    require_complete: bool) -> bool {
+    for (var index: usize = 0; index < table.size(); index += 1) {
+        if (!record_is_valid(table, records, fields, index, require_complete)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn fields_are_valid(table: TypeTable const&, records: *const Record, fields: *const Field) -> bool {
+    for (var index: usize = 0; index < table.field_size(); index += 1) {
+        let field: Field = fields[index];
+        if (!field_record_is_valid(table, records, field)) {
+            return false;
+        }
+        let owner: Record = records[field.owner_type];
+        if (owner.field_count == 0) {
+            return false;
+        }
+        let precedes_slice: bool = index < owner.first_field;
+        let follows_slice: bool = index >= owner.first_field + owner.field_count;
+        if (precedes_slice || follows_slice) {
+            return false;
+        }
+    }
+    return true;
+}

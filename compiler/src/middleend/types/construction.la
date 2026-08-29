@@ -1,0 +1,317 @@
+module luna.compiler.types;
+
+fn field_slice_is_appendable(owner: Record, next_field: usize) -> bool {
+    if (owner.field_count == 0) {
+        return owner.first_field == no_id();
+    }
+    return owner.first_field <= next_field && owner.field_count == next_field - owner.first_field;
+}
+
+fn callable_owner_is_appendable(owner: Record, next_field: usize) -> bool {
+    let callable: bool = owner.kind == Kind.function_pointer || owner.kind == Kind.bound_method;
+    let incomplete: bool = (owner.flags & (Flag.complete as usize)) == 0;
+    if (!callable || !incomplete) {
+        return false;
+    }
+    if (owner.field_count == 0) {
+        return owner.first_field == no_id();
+    }
+    return owner.first_field + owner.field_count == next_field;
+}
+
+fn callable_parameter_is_valid(parameter: Record) -> bool {
+    switch (parameter.kind) {
+    case Kind.invalid, Kind.type_void, Kind.alias, Kind.array {
+        return false;
+    }
+    default {}
+    }
+    let complete: bool = (parameter.flags & (Flag.complete as usize)) != 0;
+    return complete && parameter.size_bytes != 0;
+}
+
+impl TypeTable {
+    fn add_named(
+        kind: Kind, declaration_unit: usize, declaration_node: usize, name_token: usize, exported: bool) -> IdResult {
+        let declaration_exists: bool = declaration_unit != no_id() && declaration_node != no_id();
+        let declaration_is_valid: bool = declaration_exists && name_token != no_id();
+        if (!kind_is_declared(kind) || !declaration_is_valid) {
+            return {type_id = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        var record: Record = invalid_record();
+        record.kind = kind;
+        record.declaration_unit = declaration_unit;
+        record.declaration_node = declaration_node;
+        record.name_token = name_token;
+        if (exported) {
+            record.flags = Flag.exported as usize;
+        }
+        return this->append_record(record);
+    }
+
+    fn add_opaque_class(
+        declaration_unit: usize, declaration_node: usize, name_token: usize, exported: bool) -> IdResult {
+        let added: IdResult = this->add_named(
+            Kind.class_type, declaration_unit, declaration_node, name_token, exported);
+        if (added.error != runtime::Error.none) {
+            return added;
+        }
+        this->records.get(added.type_id).flags |= Flag.opaque_class as usize;
+        return added;
+    }
+
+    fn define_opaque_class(
+        type_id: usize, definition_unit: usize, definition_node: usize, name_token: usize) -> runtime::Error {
+        if (!this->ready() || type_id >= this->records.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let none: usize = no_id();
+        let definition_exists: bool = definition_unit != none && definition_node != none;
+        if (!definition_exists || name_token == none) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let record: Record = this->records.get(type_id);
+        let opaque_class: bool = is_opaque_class(record);
+        let definition_is_missing: bool = !has_opaque_definition(record);
+        let incomplete: bool = (record.flags & (Flag.complete as usize)) == 0;
+        if (!opaque_class || !definition_is_missing) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!incomplete || (record.flags & (Flag.resolving as usize)) != 0) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->records.get(type_id).declaration_unit = definition_unit;
+        this->records.get(type_id).declaration_node = definition_node;
+        this->records.get(type_id).name_token = name_token;
+        this->records.get(type_id).flags |= Flag.opaque_definition as usize;
+        return runtime::Error.none;
+    }
+
+    fn pointer(element_type: usize, read_only: bool, volatile_pointee: bool) -> IdResult {
+        if (!this->ready() || element_type >= this->records.size()) {
+            return {type_id = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        if (this->records.get(element_type).kind == Kind.invalid) {
+            return {type_id = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        for (var index: usize = BuiltinType.count as usize; index < this->records.size(); index += 1) {
+            let record: Record = this->records.get(index);
+            let record_read_only: bool = (record.flags & (Flag.read_only as usize)) != 0;
+            let record_volatile: bool = (record.flags & (Flag.volatile_pointee as usize)) != 0;
+            let identity_matches: bool = record.kind == Kind.pointer && record.element_type == element_type;
+            let qualifiers_match: bool = record_read_only == read_only && record_volatile == volatile_pointee;
+            if (identity_matches && qualifiers_match) {
+                return {type_id = index, error = runtime::Error.none};
+            }
+        }
+
+        var record: Record = invalid_record();
+        record.kind = Kind.pointer;
+        record.element_type = element_type;
+        record.size_bytes = TypeLimit.target_pointer_bytes as usize;
+        record.alignment_bytes = TypeLimit.target_pointer_alignment as usize;
+        record.flags = Flag.complete as usize;
+        if (read_only) {
+            record.flags |= Flag.read_only as usize;
+        }
+        if (volatile_pointee) {
+            record.flags |= Flag.volatile_pointee as usize;
+        }
+        return this->append_record(record);
+    }
+
+    fn reference(element_type: usize, read_only: bool, rvalue: bool) -> IdResult {
+        if (!this->ready() || element_type >= this->records.size()) {
+            return {type_id = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        var target_type: usize = element_type;
+        var target_read_only: bool = read_only;
+        var target_rvalue: bool = rvalue;
+        if (this->records.get(target_type).kind == Kind.reference) {
+            let target: Record = this->records.get(target_type);
+            target_read_only = target_read_only || (target.flags & (Flag.read_only as usize)) != 0;
+            target_rvalue = target_rvalue && (target.flags & (Flag.rvalue_reference as usize)) != 0;
+            target_type = target.element_type;
+        }
+        let target: Record = this->records.get(target_type);
+        if (target.kind == Kind.invalid || target.kind == Kind.type_void) {
+            return {type_id = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        for (var index: usize = BuiltinType.count as usize; index < this->records.size(); index += 1) {
+            let record: Record = this->records.get(index);
+            let record_read_only: bool = (record.flags & (Flag.read_only as usize)) != 0;
+            let record_rvalue: bool = (record.flags & (Flag.rvalue_reference as usize)) != 0;
+            let identity_matches: bool = record.kind == Kind.reference && record.element_type == target_type;
+            let qualifiers_match: bool = record_read_only == target_read_only && record_rvalue == target_rvalue;
+            if (identity_matches && qualifiers_match) {
+                return {type_id = index, error = runtime::Error.none};
+            }
+        }
+
+        var record: Record = invalid_record();
+        record.kind = Kind.reference;
+        record.element_type = target_type;
+        record.size_bytes = TypeLimit.target_pointer_bytes as usize;
+        record.alignment_bytes = TypeLimit.target_pointer_alignment as usize;
+        record.flags = Flag.complete as usize;
+        if (target_read_only) {
+            record.flags |= Flag.read_only as usize;
+        }
+        if (target_rvalue) {
+            record.flags |= Flag.rvalue_reference as usize;
+        }
+        return this->append_record(record);
+    }
+
+    fn array(element_type: usize, element_count: usize) -> IdResult {
+        let request_is_valid: bool = this->ready() && element_type < this->records.size();
+        if (!request_is_valid || element_count == 0) {
+            return {type_id = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        let element: Record = this->records.get(element_type);
+        if (!this->fixed_array_element_is_valid(element_type)) {
+            return {type_id = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        if (element_count > (TypeLimit.maximum_size as usize) / element.size_bytes) {
+            return {type_id = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        for (var index: usize = BuiltinType.count as usize; index < this->records.size(); index += 1) {
+            let record: Record = this->records.get(index);
+            let identity_matches: bool = record.kind == Kind.array && record.element_type == element_type;
+            if (identity_matches && record.element_count == element_count) {
+                return {type_id = index, error = runtime::Error.none};
+            }
+        }
+
+        var record: Record = invalid_record();
+        record.kind = Kind.array;
+        record.element_type = element_type;
+        record.element_count = element_count;
+        record.size_bytes = element.size_bytes * element_count;
+        record.alignment_bytes = element.alignment_bytes;
+        record.flags = Flag.complete as usize;
+        return this->append_record(record);
+    }
+
+    fn flexible_array(element_type: usize) -> IdResult {
+        if (!this->ready() || element_type >= this->records.size()) {
+            return {type_id = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        let element: Record = this->records.get(element_type);
+        if (!this->flexible_array_element_is_valid(element_type)) {
+            return {type_id = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        for (var index: usize = BuiltinType.count as usize; index < this->records.size(); index += 1) {
+            let record: Record = this->records.get(index);
+            let identity_matches: bool = record.kind == Kind.array && record.element_type == element_type;
+            if (identity_matches && record.element_count == 0) {
+                return {type_id = index, error = runtime::Error.none};
+            }
+        }
+
+        var record: Record = invalid_record();
+        record.kind = Kind.array;
+        record.element_type = element_type;
+        record.element_count = 0;
+        record.size_bytes = 0;
+        record.alignment_bytes = element.alignment_bytes;
+        record.flags = (Flag.complete as usize) | (Flag.flexible as usize);
+        return this->append_record(record);
+    }
+
+    fn add_field(field: Field) -> runtime::Error {
+        let owner_is_valid: bool = this->ready() && field.owner_type < this->records.size();
+        let declaration_is_valid: bool = field.declaration_unit != no_id() && field.declaration_node != no_id();
+        let field_is_valid: bool = field.type_id < this->records.size() && field.name_token != no_id();
+        let alignment_is_bounded: bool = field.alignment_bytes <= TypeLimit.maximum_alignment as usize;
+        let no_alignment_override: bool = field.alignment_bytes == 0;
+        let nonzero_power_of_two: bool = field.alignment_bytes != 0 &&
+            (field.alignment_bytes & (field.alignment_bytes - 1)) == 0;
+        let alignment_is_power: bool = no_alignment_override || nonzero_power_of_two;
+        let identity_is_valid: bool = declaration_is_valid && field_is_valid;
+        let alignment_is_valid: bool = alignment_is_bounded && alignment_is_power;
+        let input_is_valid: bool = owner_is_valid && identity_is_valid;
+        if (!input_is_valid || !alignment_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let owner: Record = this->records.get(field.owner_type);
+        let owner_is_open: bool = is_named(owner.kind) && (owner.flags & (Flag.complete as usize)) == 0;
+        if (!owner_is_open || !field_slice_is_appendable(owner, this->fields.size())) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+
+        let field_id: usize = this->fields.size();
+        let error: runtime::Error = this->append_field(field);
+        if (error != runtime::Error.none) {
+            return error;
+        }
+        if (this->records.get(field.owner_type).field_count == 0) {
+            this->records.get(field.owner_type).first_field = field_id;
+        }
+        this->records.get(field.owner_type).field_count += 1;
+        return runtime::Error.none;
+    }
+
+    priv fn add_callable(kind: Kind, return_type: usize, size_bytes: usize) -> IdResult {
+        if (!this->ready() || return_type >= this->records.size()) {
+            return {type_id = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        if (kind != Kind.function_pointer && kind != Kind.bound_method) {
+            return {type_id = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        let result: Record = this->records.get(return_type);
+        let result_kind_is_valid: bool = result.kind != Kind.invalid && result.kind != Kind.alias;
+        let result_shape_is_valid: bool = result.kind != Kind.array && (result.flags & (Flag.complete as usize)) != 0;
+        if (!result_kind_is_valid || !result_shape_is_valid) {
+            return {type_id = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        var record: Record = invalid_record();
+        record.kind = kind;
+        record.element_type = return_type;
+        record.size_bytes = size_bytes;
+        record.alignment_bytes = TypeLimit.target_pointer_alignment as usize;
+        return this->append_record(record);
+    }
+
+    fn add_function_pointer(return_type: usize) -> IdResult {
+        return this->add_callable(Kind.function_pointer, return_type, TypeLimit.target_pointer_bytes as usize);
+    }
+
+    fn add_bound_method(return_type: usize) -> IdResult {
+        return this->add_callable(Kind.bound_method, return_type, TypeLimit.bound_method_bytes as usize);
+    }
+
+    fn add_parameter(owner_type: usize, parameter_type: usize) -> runtime::Error {
+        if (!this->ready() || owner_type >= this->records.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (parameter_type >= this->records.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let owner: Record = this->records.get(owner_type);
+        let parameter: Record = this->records.get(parameter_type);
+        let owner_is_valid: bool = callable_owner_is_appendable(owner, this->fields.size());
+        let parameter_is_valid: bool = callable_parameter_is_valid(parameter);
+        if (!owner_is_valid || !parameter_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (owner.field_count == TypeLimit.maximum_size as usize) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+
+        var field: Field = invalid_field();
+        field.owner_type = owner_type;
+        field.type_id = parameter_type;
+        field.offset_bytes = 0;
+        let field_id: usize = this->fields.size();
+        let error: runtime::Error = this->append_field(field);
+        if (error != runtime::Error.none) {
+            return error;
+        }
+        if (this->records.get(owner_type).field_count == 0) {
+            this->records.get(owner_type).first_field = field_id;
+        }
+        this->records.get(owner_type).field_count += 1;
+        return runtime::Error.none;
+    }
+}

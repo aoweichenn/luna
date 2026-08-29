@@ -146,34 +146,34 @@ fn instruction_operands_are_valid(
     return true;
 }
 
-fn carrier_matches_type(types: type_info::Table, carrier_type: usize, source_type: usize) -> bool {
+fn carrier_matches_type(types: type_info::TypeTable const&, carrier_type: usize, source_type: usize) -> bool {
     if (carrier_type == source_type) {
         return true;
     }
-    if (carrier_type >= types.type_count || source_type >= types.type_count) {
+    if (carrier_type >= types.size() || source_type >= types.size()) {
         return false;
     }
-    let records: *const type_info::Record = types.types.data as *const type_info::Record;
+    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
     return type_info::is_memory(records[source_type].kind) && records[carrier_type].kind ==
             type_info::Kind.pointer && records[carrier_type].element_type == source_type;
 }
 
-fn type_can_be_value(types: type_info::Table, type_id: usize) -> bool {
-    if (type_id >= types.type_count) {
+fn type_can_be_value(types: type_info::TypeTable const&, type_id: usize) -> bool {
+    if (type_id >= types.size()) {
         return false;
     }
-    let records: *const type_info::Record = types.types.data as *const type_info::Record;
+    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
     return records[type_id].kind != type_info::Kind.invalid && records[type_id].kind != type_info::Kind.type_void;
 }
 
 fn instruction_expects_result(instruction: model::Instruction, functions: *const model::Function,
-    types: type_info::Table) -> bool {
+    types: type_info::TypeTable const&) -> bool {
     if (instruction.opcode == model::Opcode.call) {
-        let records: *const type_info::Record = types.types.data as *const type_info::Record;
+        let records: *const type_info::Record = types.record_data() as *const type_info::Record;
         return records[ functions[instruction.auxiliary].return_type].kind != type_info::Kind.type_void;
     }
     if (instruction.opcode == model::Opcode.call_indirect) {
-        let records: *const type_info::Record = types.types.data as *const type_info::Record;
+        let records: *const type_info::Record = types.record_data() as *const type_info::Record;
         return records[instruction.type_id].kind != type_info::Kind.type_void;
     }
     if (instruction.opcode == model::Opcode.function_address) {
@@ -194,12 +194,12 @@ fn instruction_expects_result(instruction: model::Instruction, functions: *const
 }
 
 fn member_address_offset_is_valid(
-    types: type_info::Table, owner_type: usize, offset: usize, element_type: usize, depth: usize) -> bool {
+    types: type_info::TypeTable const&, owner_type: usize, offset: usize, element_type: usize, depth: usize) -> bool {
     if (depth > (model::Limit.maximum_type_depth as usize)) {
         return false;
     }
-    let records: *const type_info::Record = types.types.data as *const type_info::Record;
-    let fields: *const type_info::Field = types.fields.data as *const type_info::Field;
+    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
+    let fields: *const type_info::Field = types.field_data() as *const type_info::Field;
     let owner: type_info::Record = records[owner_type];
     var index: usize = 0;
     while (index < owner.field_count) {
@@ -231,9 +231,9 @@ fn member_address_offset_is_valid(
     return false;
 }
 
-fn member_address_is_valid(instruction: model::Instruction, types: type_info::Table,
+fn member_address_is_valid(instruction: model::Instruction, types: type_info::TypeTable const&,
     values: *const model::Value) -> bool {
-    let records: *const type_info::Record = types.types.data as *const type_info::Record;
+    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
     let source_pointer: type_info::Record = records[values[instruction.left].type_id];
     let result_pointer: type_info::Record = records[instruction.type_id];
     if (result_pointer.kind != type_info::Kind.pointer) {
@@ -261,10 +261,10 @@ fn member_address_is_valid(instruction: model::Instruction, types: type_info::Ta
 }
 
 fn instruction_types_are_valid(
-    instruction: model::Instruction, function_id: usize, types: type_info::Table, values: *const model::Value,
-    functions: *const model::Function, slots: *const model::Slot) -> bool {
+    instruction: model::Instruction, function_id: usize, types: type_info::TypeTable const&,
+        values: *const model::Value, functions: *const model::Function, slots: *const model::Slot) -> bool {
     let none: usize = model::no_id();
-    let records: *const type_info::Record = types.types.data as *const type_info::Record;
+    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
     let expects_result: bool = instruction_expects_result(instruction, functions, types);
     let requires_type: bool = expects_result || instruction.opcode == model::Opcode.zero_slot ||
         instruction.opcode == model::Opcode.memory_copy || instruction.opcode == model::Opcode.store ||
@@ -384,7 +384,7 @@ fn instruction_types_are_valid(
                 type_info::BuiltinType.boolean as usize;
     }
     if (instruction.opcode == model::Opcode.convert) {
-        return instruction.auxiliary < types.type_count && values[instruction.left].type_id == instruction.auxiliary &&
+        return instruction.auxiliary < types.size() && values[instruction.left].type_id == instruction.auxiliary &&
             type_info::is_scalar(records[instruction.auxiliary].kind) &&
             type_info::is_scalar(records[instruction.type_id].kind);
     }
@@ -428,7 +428,7 @@ fn instruction_types_are_valid(
         // Both walk a caller-owned va_list through a mutable pointer to it;
         // va_arg additionally yields a scalar at the requested width.
         let pointer: type_info::Record = records[values[instruction.left].type_id];
-        if (pointer.kind != type_info::Kind.pointer || pointer.element_type >= types.type_count ||
+        if (pointer.kind != type_info::Kind.pointer || pointer.element_type >= types.size() ||
             records[pointer.element_type].kind != type_info::Kind.va_list_type ||
             (pointer.flags & (type_info::Flag.read_only as usize)) != 0) {
             return false;
@@ -454,10 +454,10 @@ fn instruction_types_are_valid(
     return instruction.type_id == none;
 }
 
-fn is_valid(ir: model::Store, types: type_info::Table) -> bool {
+fn is_valid(ir: model::Store, types: type_info::TypeTable const&) -> bool {
     let none: usize = model::no_id();
     let storage_is_valid: bool = ir.error == runtime::Error.none && model::storage_is_valid(ir);
-    let model_is_valid: bool = model::function_signatures_are_valid(ir) && type_info::table_is_valid(types, true);
+    let model_is_valid: bool = model::function_signatures_are_valid(ir) && types.is_valid(true);
     let input_is_valid: bool = storage_is_valid && model_is_valid;
     let entry_is_valid: bool = ir.entry_function == none || ir.entry_function < ir.function_count;
     if (!input_is_valid || !entry_is_valid) {
@@ -473,7 +473,7 @@ fn is_valid(ir: model::Store, types: type_info::Table) -> bool {
     let blocks: *const model::Block = ir.blocks.data as *const model::Block;
     let instructions: *const model::Instruction = ir.instructions.data as *const model::Instruction;
     let arguments: *const model::Argument = ir.arguments.data as *const model::Argument;
-    let type_records: *const type_info::Record = types.types.data as *const type_info::Record;
+    let type_records: *const type_info::Record = types.record_data() as *const type_info::Record;
 
     var expected_global_offset: usize = 0;
     var expected_global_reference: usize = 0;
@@ -509,7 +509,7 @@ fn is_valid(ir: model::Store, types: type_info::Table) -> bool {
         let function: model::Function = functions[index];
         if (function.declaration_unit == none || function.declaration_node == none || function.name_token == none ||
             (function.linkage as usize) > (model::Linkage.external_c as usize) ||
-            function.return_type >= types.type_count || type_records[function.return_type].kind ==
+            function.return_type >= types.size() || type_records[function.return_type].kind ==
                 type_info::Kind.invalid ||
             !range_is_valid(function.first_parameter, function.parameter_count, ir.parameter_count) ||
             !range_is_valid(function.first_block, function.block_count, ir.block_count) ||
@@ -526,7 +526,7 @@ fn is_valid(ir: model::Store, types: type_info::Table) -> bool {
         var item: usize = 0;
         while (item < function.parameter_count) {
             let parameter: model::Parameter = parameters[function.first_parameter + item];
-            if (parameter.function_id != index || parameter.type_id >= types.type_count ||
+            if (parameter.function_id != index || parameter.type_id >= types.size() ||
                 !type_can_be_value(types, parameter.type_id) ||
                 parameter.slot_id >= ir.slot_count || slots[parameter.slot_id].function_id != index ||
                 slots[parameter.slot_id].type_id != parameter.type_id) {
@@ -664,7 +664,7 @@ fn is_valid(ir: model::Store, types: type_info::Table) -> bool {
         if ((instruction.opcode as usize) > (model::Opcode.va_list_arg as usize) ||
             instruction.opcode == model::Opcode.invalid || instruction.block_id >= ir.block_count ||
             instruction.span.line == 0 || instruction.span.column == 0 || (instruction.type_id != none &&
-                instruction.type_id >= types.type_count) || (instruction.result != none &&
+                instruction.type_id >= types.size()) || (instruction.result != none &&
                 (instruction.result >= ir.value_count || values[instruction.result].definition != index ||
                     values[instruction.result].block_id != instruction.block_id || values[instruction.result].type_id !=
                         instruction.type_id)) ||
@@ -681,7 +681,7 @@ fn is_valid(ir: model::Store, types: type_info::Table) -> bool {
                 call_variadic = functions[instruction.auxiliary].variadic;
             } else {
                 let callee_records: *const
-                    type_info::Record = types.types.data as
+                    type_info::Record = types.record_data() as
                         *const type_info::Record;
                 let callee: type_info::Record = callee_records[ values[instruction.left].type_id];
                 call_parameter_count = callee.field_count;
@@ -711,10 +711,10 @@ fn is_valid(ir: model::Store, types: type_info::Table) -> bool {
                             parameter_type = parameters[ functions[instruction.auxiliary].first_parameter +
                                         call_argument_count].type_id;
                         } else {
-                            let fields: *const type_info::Field = types.fields.data as
+                            let fields: *const type_info::Field = types.field_data() as
                                     *const type_info::Field;
                             let records: *const
-                                type_info::Record = types.types.data as
+                                type_info::Record = types.record_data() as
                                     *const type_info::Record;
                             let callee: type_info::Record = records[ values[instruction.left].type_id];
                             parameter_type = fields[ callee.first_field + call_argument_count].type_id;

@@ -4,6 +4,9 @@
 > this document describe the archived reconstruction. Current interfaces and
 > implementations live under `compiler/include/` and `compiler/src/` and are
 > compiled from source by `tools/selfhost.py`.
+>
+> The current pure-Luna type store is the move-only RAII
+> `luna.compiler.types::TypeTable`; its contract is recorded in `types.md`.
 
 M4 now contains a separately compiled Luna implementation of name resolution,
 strong type checking, target layout and verified Typed IR construction. It

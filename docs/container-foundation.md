@@ -206,6 +206,9 @@ allocation size，并立即把源 vector 恢复为空状态。它只用于 Objec
 6. 迁移 ELF/object/assembler 的字节流和记录数组；
 7. 删除最后一个旧 `bytes::Buffer`调用后删除 `luna.std.bytes`。
 
+类型表迁移现已完成：`luna.compiler.types::TypeTable` 使用 `vector<Record>` 与 `vector<Field>`，通过 move
+进入 Semantic Result，并向 IR/Codegen 暴露 const 借用；旧字节 Table 与手工 release 已删除。
+
 每个子系统必须原子迁移：同一容器不能同时维护旧字节长度和新元素计数。
 
 ### 首个编译器采用批次：初始化器下标集合

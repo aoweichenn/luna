@@ -164,6 +164,10 @@ and `offsetof` expressions are resolved against the same target layout records
 and lowered directly to typed `usize` constants; the IR has no host-dependent
 layout-query instruction.
 
+`luna.compiler.types::TypeTable` owns those records and fields as typed vectors.
+Semantic Result receives the table by move; IR verification and x86-64 lowering
+borrow it by const reference. No consumer owns or releases a raw type buffer.
+
 Compilation is split into global and local phases:
 
 1. load, lex and parse every source unit;

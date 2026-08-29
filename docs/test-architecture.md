@@ -56,6 +56,10 @@ harness 对满足以下条件的 expectation 自动生成少量大 suite 文件�
 - 带 import 的现有模块边界测试；
 - 重复使用同一 case 文件但采用不同单元顺序的 expectation。
 
+TypeTable 契约使用显式 `UNITS` 一次编译真实的六个 `luna.compiler.types` 实现单元及其依赖。它覆盖
+builtins、canonicalization、callable 参数、布局、move/moved-from 和独立破坏性验证，不把每项规则拆成
+单独工具链启动。
+
 这些任务仍使用独立工作目录，并与 suite 一起进入有界并行 worker pool。
 
 Lexer、Syntax 与 Parser 契约属于 frontend 专用协议：消费端只携带相应接口独立编译，再链接 stage 中单独

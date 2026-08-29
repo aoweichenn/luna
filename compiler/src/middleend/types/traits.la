@@ -1,0 +1,155 @@
+module luna.compiler.types;
+
+enum TypeBitWidth: usize {
+    byte = 8, half = 16, single = 32, double = 64,
+}
+
+fn builtin_record(kind: Kind, size_bytes: usize, alignment_bytes: usize) -> Record {
+    var record: Record = invalid_record();
+    record.kind = kind;
+    record.size_bytes = size_bytes;
+    record.alignment_bytes = alignment_bytes;
+    record.flags = Flag.complete as usize;
+    return record;
+}
+
+fn builtin_kind(index: usize) -> Kind {
+    if (index >= BuiltinType.count as usize) {
+        return Kind.invalid;
+    }
+    let kinds: [BuiltinType.count]Kind = {
+        Kind.invalid, Kind.type_void, Kind.boolean, Kind.signed_8, Kind.signed_16, Kind.signed_32,
+        Kind.signed_64, Kind.signed_size, Kind.unsigned_8, Kind.unsigned_16, Kind.unsigned_32,
+        Kind.unsigned_64, Kind.unsigned_size, Kind.float_32, Kind.float_64, Kind.va_list_type,
+    };
+    return kinds[index];
+}
+
+fn builtin_size(index: usize) -> usize {
+    if (index == BuiltinType.type_void as usize || index == BuiltinType.invalid as usize) {
+        return 0;
+    }
+    // System V va_list 由两个 u32 偏移和两个指针组成。
+    if (index == BuiltinType.va_list_type as usize) {
+        return TypeLimit.va_list_bytes as usize;
+    }
+    return bit_width(builtin_kind(index)) / TypeBitWidth.byte as usize;
+}
+
+fn builtin_alignment(index: usize) -> usize {
+    if (index == BuiltinType.va_list_type as usize) {
+        return TypeLimit.target_pointer_alignment as usize;
+    }
+    return builtin_size(index);
+}
+
+fn is_integer(kind: Kind) -> bool {
+    switch (kind) {
+    case Kind.signed_8, Kind.signed_16, Kind.signed_32, Kind.signed_64, Kind.signed_size,
+        Kind.unsigned_8, Kind.unsigned_16, Kind.unsigned_32, Kind.unsigned_64, Kind.unsigned_size {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn is_signed_integer(kind: Kind) -> bool {
+    switch (kind) {
+    case Kind.signed_8, Kind.signed_16, Kind.signed_32, Kind.signed_64, Kind.signed_size {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn is_float(kind: Kind) -> bool {
+    switch (kind) {
+    case Kind.float_32, Kind.float_64 {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn is_named(kind: Kind) -> bool {
+    switch (kind) {
+    case Kind.structure, Kind.record_union, Kind.enumeration, Kind.class_type {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn is_record(kind: Kind) -> bool {
+    switch (kind) {
+    case Kind.structure, Kind.record_union, Kind.class_type {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn is_scalar(kind: Kind) -> bool {
+    switch (kind) {
+    case Kind.boolean, Kind.pointer, Kind.enumeration, Kind.function_pointer, Kind.reference {
+        return true;
+    }
+    default {
+        return is_integer(kind) || is_float(kind);
+    }
+    }
+}
+
+fn is_memory(kind: Kind) -> bool {
+    switch (kind) {
+    case Kind.array, Kind.structure, Kind.record_union, Kind.va_list_type, Kind.class_type, Kind.bound_method {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn is_opaque_class(record: Record) -> bool {
+    return record.kind == Kind.class_type && (record.flags & (Flag.opaque_class as usize)) != 0;
+}
+
+fn has_opaque_definition(record: Record) -> bool {
+    return is_opaque_class(record) && (record.flags & (Flag.opaque_definition as usize)) != 0;
+}
+
+fn bit_width(kind: Kind) -> usize {
+    switch (kind) {
+    case Kind.boolean, Kind.signed_8, Kind.unsigned_8 {
+        return TypeBitWidth.byte as usize;
+    }
+    case Kind.signed_16, Kind.unsigned_16 {
+        return TypeBitWidth.half as usize;
+    }
+    case Kind.signed_32, Kind.unsigned_32, Kind.float_32 {
+        return TypeBitWidth.single as usize;
+    }
+    case Kind.signed_64, Kind.signed_size, Kind.unsigned_64, Kind.unsigned_size,
+        Kind.float_64, Kind.pointer, Kind.function_pointer, Kind.reference {
+        return TypeBitWidth.double as usize;
+    }
+    default {
+        return 0;
+    }
+    }
+}
+
+fn kind_is_declared(kind: Kind) -> bool {
+    return is_named(kind) || kind == Kind.alias;
+}

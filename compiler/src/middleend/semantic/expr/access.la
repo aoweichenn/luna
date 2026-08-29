@@ -15,8 +15,8 @@ import luna.bootstrap.middleend.semantic.functions as functions;
 import luna.bootstrap.middleend.semantic.lifetime as lifetime;
 import luna.bootstrap.middleend.semantic.types as types;
 import luna.bootstrap.middleend.semantic.value as category;
-import luna.bootstrap.middleend.type as type_info;
 import luna.compiler.lexer as lexer;
+import luna.compiler.types as type_info;
 import luna.runtime as runtime;
 import luna.std.bytes as bytes;
 
@@ -361,12 +361,10 @@ fn lower_bitfield_member(
     if (field_id == none) {
         return base::invalid_expression();
     }
-    let fields: *const type_info::Field = context->types.fields.data as
+    let fields: *const type_info::Field = context->types.field_data() as
             *const type_info::Field;
     let field: type_info::Field = fields[field_id];
-    let pointer: type_info::IdResult =
-        type_info::table_pointer(
-            &context->types, field.type_id, !category::is_writable(member_category),
+    let pointer: type_info::IdResult = context->types.pointer(field.type_id, !category::is_writable(member_category),
             category::is_volatile(member_category));
     context->error = pointer.error;
     var instruction: ir::Instruction = builder::instruction(ir::Opcode.member_address, node);
@@ -403,7 +401,7 @@ fn store_bitfield(
     if (!value.valid || !destination_is_valid) {
         return false;
     }
-    let fields: *const type_info::Field = context->types.fields.data as
+    let fields: *const type_info::Field = context->types.field_data() as
             *const type_info::Field;
     let field: type_info::Field = fields[field_id];
     if (value.type_id != field.type_id) {
@@ -527,7 +525,7 @@ fn lower_member(
     if (enum_member.valid) {
         return enum_member;
     }
-    if (expected_type < context->types.type_count &&
+    if (expected_type < context->types.size() &&
         context::type_record(context, expected_type).kind == type_info::Kind.bound_method) {
         return lower_bound_method(context, node, expected_type, lowerer);
     }
@@ -597,7 +595,7 @@ fn lower_member(
             context::empty_span(), owner_type);
         return base::invalid_expression();
     }
-    let fields: *const type_info::Field = context->types.fields.data as
+    let fields: *const type_info::Field = context->types.field_data() as
             *const type_info::Field;
     let field: type_info::Field = fields[lookup.field_id];
     if (owner_record.kind == type_info::Kind.class_type && !classes::field_is_accessible(context, lookup.field_id)) {
@@ -612,8 +610,7 @@ fn lower_member(
         // A flexible member access yields *T at the member offset, not an
         // array lvalue; it composes with raw-pointer indexing and arithmetic.
         let element_pointer: type_info::IdResult =
-            type_info::table_pointer(
-                &context->types, field_record.element_type, !category::is_writable(member_category),
+            context->types.pointer(field_record.element_type, !category::is_writable(member_category),
                 category::is_volatile(member_category));
         context->error = element_pointer.error;
         var flexible_instruction: ir::Instruction = builder::instruction(ir::Opcode.member_address, node);
@@ -626,9 +623,7 @@ fn lower_member(
             valid = flexible_address != context::no_id(), bitfield_segment = context::no_id(),
         };
     }
-    let pointer: type_info::IdResult =
-        type_info::table_pointer(
-            &context->types, field.type_id, !category::is_writable(member_category),
+    let pointer: type_info::IdResult = context->types.pointer(field.type_id, !category::is_writable(member_category),
             category::is_volatile(member_category));
     context->error = pointer.error;
     var instruction: ir::Instruction = builder::instruction(ir::Opcode.member_address, node);
@@ -698,9 +693,7 @@ fn lower_index(context: *context::Context, node: syntax::SyntaxNode, lowerer: ap
         return base::invalid_expression();
     }
     let element_record: type_info::Record = context::type_record(context, element_type);
-    let pointer: type_info::IdResult =
-        type_info::table_pointer(
-            &context->types, element_type, !category::is_writable(element_category),
+    let pointer: type_info::IdResult = context->types.pointer(element_type, !category::is_writable(element_category),
             category::is_volatile(element_category));
     context->error = pointer.error;
     var offset: ir::Instruction = builder::instruction(ir::Opcode.pointer_offset, node);
@@ -894,7 +887,7 @@ fn pointer_type(context: *context::Context, element_type: usize, read_only: bool
     if (context->error != runtime::Error.none) {
         return context::no_id();
     }
-    let result: type_info::IdResult = type_info::table_pointer(&context->types, element_type, read_only, false);
+    let result: type_info::IdResult = context->types.pointer(element_type, read_only, false);
     context->error = result.error;
     return result.error == runtime::Error.none ? result.type_id : context::no_id();
 }
@@ -956,7 +949,7 @@ fn bound_call_type(context: *context::Context, bound_type: usize) -> usize {
         parameter_types, (&receiver_type) as *const usize as *const u8, sizeof(usize));
     parameter_types = receiver.buffer;
     context->error = receiver.error;
-    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    let fields: *const type_info::Field = context->types.field_data() as *const type_info::Field;
     for (var index: usize = 0;
         index < record.field_count && context->error == runtime::Error.none;
         index += 1) {
@@ -1348,7 +1341,7 @@ fn lower_target_call_with_receiver(
         var parameter_type: usize = none;
         if (!variadic_extra) {
             let parameters: *const context::Parameter = context->parameters.data as *const context::Parameter;
-            let type_fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+            let type_fields: *const type_info::Field = context->types.field_data() as *const type_info::Field;
             parameter_type = call_parameter_type(
                 parameters, type_fields, first_parameter, index, parameters_from_fields);
         }

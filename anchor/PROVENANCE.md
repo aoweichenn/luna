@@ -794,3 +794,55 @@ its 756,785-byte object has SHA-256
 `23f32b330d098d95719aabf9b9241d528992e7dd022972b1540f74d7ed0fabf0`.
 The promoted executable is 4,998,995 bytes with SHA-256
 `1b10d3581f344af84de632990460e8479fe384e8d26245ede01376c203335694`.
+
+## 2026-08-29: promotion to the RAII TypeTable toolchain
+
+The anchor now contains the stage-fixed `luna` executable from the TypeTable
+modernization snapshot accompanying this provenance note. The historical
+`luna.bootstrap.middleend.type` module, public byte-buffer `Table`, shallow
+`TableResult` updates and manual release API are replaced atomically by
+`luna.compiler.types` and its move-only `TypeTable` class. No compatibility
+module or forwarding API remains.
+
+`Kind`, `BuiltinType`, `Flag`, `Record` and `Field` retain their values and
+passive ABI shapes. `TypeTable` privately composes `vector<Record>` and
+`vector<Field>`, constructs the 16 canonical builtins, owns sticky failure and
+releases storage through RAII. Its six same-module implementation units split
+storage, traits, construction, mutation, validation and target layout behind
+one 120-line interface.
+
+Semantic Context owns the table and Semantic Result receives it by move. IR
+verification, ABI classification, frame planning and code generation borrow a
+`TypeTable const&`; CodeGenerator stores only a const pointer for one emission
+session. All 29 direct importers migrated together. The build artifact key is
+now `types`, so the fixed graph contains `types.s` and `types.lo` rather than
+the historical singular names.
+
+The dedicated contract covers builtin identity, canonical pointer/reference/
+array construction, callable parameters, layout completion, move and
+moved-from states, plus deliberate record corruption and independent
+revalidation. The rewritten module has no indexed `while` traversal, and a
+focused scan of its interface, six implementations and contract found no
+condition above two logical clauses.
+
+Remote x86-64 verification on isolated `caw` built the complete 68-module,
+58-library-object graph through transition, next and fixed stages with
+`verify --fresh` in 54.88 seconds at 33,740 KiB maximum RSS. Every next/fixed
+assembly, object and executable artifact was byte-identical. Audit and
+formatting gates were green. The complete suite passed 450/450 with no failures
+or skips in 5.25 seconds at 27,200 KiB maximum RSS.
+
+With the preceding anchor compiling both source shapes, the old type module
+compiled in a median 0.857127 seconds and produced 976,009 assembly bytes. The
+final typed RAII module compiled in a median 1.124548 seconds and produced
+1,275,674 assembly bytes. Compile time rose about 31.2% and module assembly
+about 30.7% from typed vectors, move/RAII methods and explicit mutation and
+validation boundaries. This structural cost is recorded without reverting to
+raw byte storage or adding premature indexing.
+
+The final Types assembly has SHA-256
+`c3242742e302e84c837fbd208f747279612b691fa5fdc7780e62f6f7d293f535`;
+its 425,966-byte object has SHA-256
+`c7f2ba9e3495e6bf51624399b17095219d0428b3d963bb67451e63f297e2aaed`.
+The promoted executable is 4,994,899 bytes with SHA-256
+`c8e6dbac2dac2b97c146efb761943fbd2da70634731daa59f3e1817afc0e4f5a`.

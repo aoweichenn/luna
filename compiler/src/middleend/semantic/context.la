@@ -168,10 +168,9 @@ fn add_diagnostic(
     return false;
 }
 
-fn result_is_success(result: Result) -> bool {
+fn result_is_success(result: Result const&) -> bool {
     let status_is_success: bool = result.error == runtime::Error.none && result.diagnostics.count == 0;
-    let stores_are_valid: bool = type_info::table_is_valid(result.types, true) &&
-        ir_check::is_valid(result.ir, result.types);
+    let stores_are_valid: bool = result.types.is_valid(true) && ir_check::is_valid(result.ir, result.types);
     return status_is_success && stores_are_valid;
 }
 
@@ -179,14 +178,13 @@ fn release_error(current: runtime::Error, next: runtime::Error) -> runtime::Erro
     return current == runtime::Error.none ? next : current;
 }
 
-fn result_release(result: Result) -> runtime::Error {
+fn result_release(result: Result&&) -> runtime::Error {
     let diagnostics_are_valid: bool = diagnostics_storage_is_valid(result.diagnostics);
-    let stores_are_valid: bool = type_info::table_storage_is_valid(result.types) && ir::storage_is_valid(result.ir);
+    let stores_are_valid: bool = result.types.storage_is_valid() && ir::storage_is_valid(result.ir);
     if (!diagnostics_are_valid || !stores_are_valid) {
         return runtime::Error.invalid_argument;
     }
-    var error: runtime::Error = type_info::table_release(result.types);
-    error = release_error(error, ir::release(result.ir));
+    var error: runtime::Error = ir::release(result.ir);
     error = release_error(error, bytes::release(result.diagnostics.storage));
     return error;
 }
@@ -301,12 +299,14 @@ fn context_storage_is_valid(context: *Context) -> bool {
     context_storage_require(&validator, context->scope_depth <= Limit.maximum_scope_depth as usize &&
         context->type_depth <= Limit.maximum_type_depth as usize);
     context_storage_require(&validator, diagnostics_storage_is_valid(context->diagnostics));
-    context_storage_require(&validator, type_info::table_storage_is_valid(context->types));
+    context_storage_require(&validator, context->types.storage_is_valid());
     context_storage_require(&validator, ir::storage_is_valid(context->ir));
     return validator.valid;
 }
 
 fn context_init(input: Input) -> Context {
+    var type_table: type_info::TypeTable = type_info::TypeTable();
+    let type_error: runtime::Error = type_table.error();
     return {
         input = input, units = bytes::empty(), unit_count = 0, modules = bytes::empty(), module_count = 0,
         imports = bytes::empty(), import_count = 0, symbols = bytes::empty(), symbol_count = 0,
@@ -323,8 +323,8 @@ fn context_init(input: Input) -> Context {
         array_length_count = 0, labels = bytes::empty(), label_count = 0, label_locals = bytes::empty(),
         pending_gotos = bytes::empty(), pending_goto_count = 0, goto_locals = bytes::empty(),
         loop_labels = bytes::empty(), loop_label_count = 0, pending_loop_label = no_id(), const_call_depth = 0,
-        const_steps = 0, types = type_info::table_empty(), ir = ir::empty(), diagnostics = diagnostics_empty(),
-        error = runtime::Error.none, current_function = no_id(), current_unit = no_id(),
+        const_steps = 0, types = type_table as type_info::TypeTable&&, ir = ir::empty(),
+        diagnostics = diagnostics_empty(), error = type_error, current_function = no_id(), current_unit = no_id(),
         scope_depth = 0, type_depth = 0, break_block = no_id(), continue_block = no_id(),
         break_local_count = 0, continue_local_count = 0,
     };
@@ -607,12 +607,12 @@ fn callable_value_type(
         context->error = runtime::Error.invalid_argument;
         return none;
     }
-    let records: *const type_info::Record = context->types.types.data as
+    let records: *const type_info::Record = context->types.record_data() as
             *const type_info::Record;
-    let fields: *const type_info::Field = context->types.fields.data as
+    let fields: *const type_info::Field = context->types.field_data() as
             *const type_info::Field;
     for (var candidate: usize = type_info::BuiltinType.count as usize;
-        candidate < context->types.type_count;
+        candidate < context->types.size();
         candidate += 1) {
         let record: type_info::Record = records[candidate];
         let identity_matches: bool = record.kind == kind && record.element_type == return_type;
@@ -629,20 +629,16 @@ fn callable_value_type(
             }
         }
     }
-    let type_id: usize = context->types.type_count;
-    let created: type_info::TableResult = kind == type_info::Kind.function_pointer ?
-        type_info::table_add_function_pointer(context->types, return_type) :
-        type_info::table_add_bound_method(context->types, return_type);
-    context->types = created.table;
+    let created: type_info::IdResult = kind == type_info::Kind.function_pointer ?
+        context->types.add_function_pointer(return_type) : context->types.add_bound_method(return_type);
     if (created.error != runtime::Error.none) {
         context->error = created.error;
         return none;
     }
+    let type_id: usize = created.type_id;
     for (var index: usize = 0; index < parameter_count; index += 1) {
-        let added: type_info::TableResult =
-            type_info::table_add_parameter(context->types, type_id, parameter_types[index]);
-        context->types = added.table;
-        if (added.error != runtime::Error.none) {
+        let error: runtime::Error = context->types.add_parameter(type_id, parameter_types[index]);
+        if (error != runtime::Error.none) {
             add_diagnostic(
                 context, DiagnosticKind.invalid_external, context->current_unit, empty_span(), none, empty_span(),
                 parameter_types[index]);
@@ -650,7 +646,7 @@ fn callable_value_type(
         }
     }
     let size_bytes: usize = kind == type_info::Kind.function_pointer ? sizeof(usize) : sizeof(usize) * 2;
-    context->error = type_info::table_set_layout(context->types, type_id, size_bytes, alignof(usize));
+    context->error = context->types.set_layout(type_id, size_bytes, alignof(usize));
     if (context->error != runtime::Error.none) {
         return none;
     }
@@ -688,7 +684,7 @@ fn integer_fits_type(kind: type_info::Kind, magnitude: u64, negative: bool) -> b
 }
 
 fn type_record(context: *Context, type_id: usize) -> type_info::Record {
-    let result: type_info::RecordResult = type_info::table_get(context->types, type_id);
+    let result: type_info::RecordResult = context->types.record(type_id);
     if (result.error != runtime::Error.none) {
         context->error = result.error;
     }
@@ -736,7 +732,7 @@ fn type_declares_special_member(context: *Context, owner_type: usize) -> bool {
 }
 
 fn type_is_trivially_copyable_at(context: *Context, type_id: usize, depth: usize) -> bool {
-    if (type_id >= context->types.type_count || depth >= Limit.maximum_type_depth as usize) {
+    if (type_id >= context->types.size() || depth >= Limit.maximum_type_depth as usize) {
         return false;
     }
     let record: type_info::Record = type_record(context, type_id);
@@ -753,7 +749,7 @@ fn type_is_trivially_copyable_at(context: *Context, type_id: usize, depth: usize
     if (has_base && !type_is_trivially_copyable_at(context, record.base_type, depth + 1)) {
         return false;
     }
-    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    let fields: *const type_info::Field = context->types.field_data() as *const type_info::Field;
     for (var index: usize = 0; index < record.field_count; index += 1) {
         let field_type: usize = fields[record.first_field + index].type_id;
         if (!type_is_trivially_copyable_at(context, field_type, depth + 1)) {
@@ -768,7 +764,7 @@ fn type_is_trivially_copyable(context: *Context, type_id: usize) -> bool {
 }
 
 fn type_is_trivially_relocatable(context: *Context, type_id: usize) -> bool {
-    if (type_id >= context->types.type_count) {
+    if (type_id >= context->types.size()) {
         return false;
     }
     let record: type_info::Record = type_record(context, type_id);

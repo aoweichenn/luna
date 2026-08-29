@@ -1,0 +1,128 @@
+module luna.compiler.types;
+
+enum TypeLimit: usize {
+    maximum_size = 18446744073709551615, target_pointer_bytes = 8, target_pointer_alignment = 8,
+    bound_method_bytes = 16, va_list_bytes = 24, maximum_alignment = 4096,
+}
+
+fn no_id() -> usize {
+    return TypeLimit.maximum_size as usize;
+}
+
+fn invalid_record() -> Record {
+    let none: usize = no_id();
+    return {
+        kind = Kind.invalid, element_type = none, element_count = 0, base_type = none, vptr_offset = none,
+        declaration_unit = none, declaration_node = none, name_token = none, first_field = none, field_count = 0,
+        size_bytes = 0, alignment_bytes = 0, flags = Flag.none as usize,
+    };
+}
+
+fn invalid_field() -> Field {
+    let none: usize = no_id();
+    return {
+        owner_type = none, type_id = none, declaration_unit = none, declaration_node = none, name_token = none,
+        offset_bytes = 0, alignment_bytes = 0,
+    };
+}
+
+impl TypeTable {
+    init(): records = vector::vector<Record>(), fields = vector::vector<Field>() {
+        this->error_code = runtime::Error.none;
+        for (var index: usize = 0; index < BuiltinType.count as usize; index += 1) {
+            let size_bytes: usize = builtin_size(index);
+            let error: runtime::Error = this->records.push_back(
+                builtin_record(builtin_kind(index), size_bytes, builtin_alignment(index)));
+            if (error != runtime::Error.none) {
+                this->fail(error);
+                return;
+            }
+        }
+    }
+
+    init(other: TypeTable&&): records = other.records as vector::vector<Record>&&,
+            fields = other.fields as vector::vector<Field>&& {
+        this->error_code = other.error_code;
+        other.error_code = runtime::Error.none;
+    }
+
+    priv fn ready() const -> bool {
+        return this->error_code == runtime::Error.none && this->storage_is_valid();
+    }
+
+    priv fn fail(error: runtime::Error) -> runtime::Error {
+        if (this->error_code == runtime::Error.none) {
+            this->error_code = error;
+        }
+        return this->error_code;
+    }
+
+    fn storage_is_valid() const -> bool {
+        return this->records.is_valid() && this->fields.is_valid();
+    }
+
+    fn error() const -> runtime::Error {
+        return this->error_code;
+    }
+
+    fn size() const -> usize {
+        return this->records.size();
+    }
+
+    fn field_size() const -> usize {
+        return this->fields.size();
+    }
+
+    fn record_data() -> *Record {
+        return this->records.empty() ? null : &this->records.get(0);
+    }
+
+    fn record_data() const -> *const Record {
+        return this->records.empty() ? null : &this->records.get(0) as *const Record;
+    }
+
+    fn field_data() -> *Field {
+        return this->fields.empty() ? null : &this->fields.get(0);
+    }
+
+    fn field_data() const -> *const Field {
+        return this->fields.empty() ? null : &this->fields.get(0) as *const Field;
+    }
+
+    fn record(type_id: usize) const -> RecordResult {
+        if (!this->storage_is_valid() || type_id >= this->records.size()) {
+            return {record = invalid_record(), error = runtime::Error.invalid_argument};
+        }
+        return {record = this->records.get(type_id), error = runtime::Error.none};
+    }
+
+    fn field(field_id: usize) const -> FieldResult {
+        if (!this->storage_is_valid() || field_id >= this->fields.size()) {
+            return {field = invalid_field(), error = runtime::Error.invalid_argument};
+        }
+        return {field = this->fields.get(field_id), error = runtime::Error.none};
+    }
+
+    priv fn append_record(record: Record) -> IdResult {
+        if (!this->ready() || this->records.size() == TypeLimit.maximum_size as usize) {
+            return {type_id = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        let type_id: usize = this->records.size();
+        let error: runtime::Error = this->records.push_back(record);
+        if (error != runtime::Error.none) {
+            return {type_id = no_id(), error = this->fail(error)};
+        }
+        return {type_id = type_id, error = runtime::Error.none};
+    }
+
+    priv fn append_field(field: Field) -> runtime::Error {
+        if (!this->ready() || this->fields.size() == TypeLimit.maximum_size as usize) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let error: runtime::Error = this->fields.push_back(field);
+        return error == runtime::Error.none ? error : this->fail(error);
+    }
+
+    deinit() {
+    }
+}

@@ -4,12 +4,12 @@ import luna.bootstrap.middleend.ir as ir;
 import luna.bootstrap.middleend.semantic.classes as classes;
 import luna.bootstrap.middleend.semantic.context.builder as builder;
 import luna.bootstrap.middleend.semantic.functions as functions;
-import luna.bootstrap.middleend.type as type_info;
+import luna.compiler.types as type_info;
 import luna.runtime as runtime;
 import luna.std.bytes as bytes;
 
 fn type_requires_destruction(context: *context::Context, type_id: usize, depth: usize) -> bool {
-    if (type_id >= context->types.type_count || depth >= context::Limit.maximum_type_depth as usize) {
+    if (type_id >= context->types.size() || depth >= context::Limit.maximum_type_depth as usize) {
         return false;
     }
     let record: type_info::Record = context::type_record(context, type_id);
@@ -25,7 +25,7 @@ fn type_requires_destruction(context: *context::Context, type_id: usize, depth: 
     if (record.base_type != context::no_id() && type_requires_destruction(context, record.base_type, depth + 1)) {
         return true;
     }
-    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    let fields: *const type_info::Field = context->types.field_data() as *const type_info::Field;
     for (var index: usize = 0; index < record.field_count; index += 1) {
         if (type_requires_destruction(context, fields[record.first_field + index].type_id, depth + 1)) {
             return true;
@@ -40,7 +40,7 @@ fn type_needs_cleanup(context: *context::Context, type_id: usize) -> bool {
 
 fn convert_object_address(
     context: *context::Context, node: syntax::SyntaxNode, address_id: usize, target_type: usize) -> usize {
-    let pointer: type_info::IdResult = type_info::table_pointer(&context->types, target_type, false, false);
+    let pointer: type_info::IdResult = context->types.pointer(target_type, false, false);
     context->error = pointer.error;
     if (pointer.error != runtime::Error.none || address_id == context::no_id()) {
         return context::no_id();
@@ -57,7 +57,7 @@ fn convert_object_address(
 
 fn subobject_address(
     context: *context::Context, node: syntax::SyntaxNode, object_address: usize, field: type_info::Field) -> usize {
-    let pointer: type_info::IdResult = type_info::table_pointer(&context->types, field.type_id, false, false);
+    let pointer: type_info::IdResult = context->types.pointer(field.type_id, false, false);
     context->error = pointer.error;
     if (pointer.error != runtime::Error.none) {
         return context::no_id();
@@ -81,7 +81,7 @@ fn array_element_address(
     instruction.left = element_pointer;
     instruction.right = offset.value_id;
     instruction.auxiliary = context::type_record(context, element_type).size_bytes;
-    let pointer_type: type_info::IdResult = type_info::table_pointer(&context->types, element_type, false, false);
+    let pointer_type: type_info::IdResult = context->types.pointer(element_type, false, false);
     context->error = pointer_type.error;
     return pointer_type.error == runtime::Error.none ?
         builder::emit_value(context, instruction, pointer_type.type_id) : context::no_id();
@@ -116,7 +116,7 @@ fn emit_destructor_call(
 fn emit_destroy_fields(
     context: *context::Context, node: syntax::SyntaxNode,
     record: type_info::Record, address_id: usize, depth: usize) -> bool {
-    let fields: *const type_info::Field = context->types.fields.data as *const type_info::Field;
+    let fields: *const type_info::Field = context->types.field_data() as *const type_info::Field;
     for (var remaining: usize = record.field_count; remaining != 0; remaining -= 1) {
         let field: type_info::Field = fields[record.first_field + remaining - 1];
         if (!type_requires_destruction(context, field.type_id, depth + 1)) {
@@ -198,7 +198,7 @@ fn emit_scope_cleanup(context: *context::Context, local_start: usize, node: synt
 }
 
 fn register_temporary(context: *context::Context, type_id: usize, address_id: usize) -> bool {
-    if (type_id >= context->types.type_count || address_id == context::no_id()) {
+    if (type_id >= context->types.size() || address_id == context::no_id()) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }

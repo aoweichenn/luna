@@ -40,7 +40,7 @@ fn extend_class_layout(
                 context->error = runtime::Error.invalid_argument;
                 return false;
             }
-            context->error = type_info::table_set_vptr(context->types, type_id, base.vptr_offset);
+            context->error = context->types.set_vptr(type_id, base.vptr_offset);
             if (context->error != runtime::Error.none) {
                 return false;
             }
@@ -60,7 +60,7 @@ fn extend_class_layout(
         return false;
     }
     records = context->classes.records.data as *class_model::Record;
-    context->error = type_info::table_set_vptr(context->types, type_id, vptr_offset);
+    context->error = context->types.set_vptr(type_id, vptr_offset);
     if (context->error != runtime::Error.none) {
         return false;
     }
@@ -86,23 +86,21 @@ fn anonymous_record_type(context: *context::Context, unit_index: usize, node_ind
     let node: syntax::SyntaxNode = context::node(context, unit_index, node_index);
     let kind: type_info::Kind = node.kind == syntax::SyntaxKind.structure_declaration ? type_info::Kind.structure :
             type_info::Kind.record_union;
-    let records: *const type_info::Record = context->types.types.data as *const type_info::Record;
+    let records: *const type_info::Record = context->types.record_data() as *const type_info::Record;
     var type_id: usize = type_info::BuiltinType.count as usize;
-    while (type_id < context->types.type_count) {
+    while (type_id < context->types.size()) {
         if (records[type_id].kind == kind && records[type_id].declaration_unit == unit_index &&
             records[type_id].declaration_node == node_index) {
             return type_id;
         }
         type_id += 1;
     }
-    let added: type_info::TableResult =
-        type_info::table_add_named(context->types, kind, unit_index, node_index, node.token_index, false);
-    context->types = added.table;
+    let added: type_info::IdResult = context->types.add_named(kind, unit_index, node_index, node.token_index, false);
     context->error = added.error;
     if (added.error != runtime::Error.none) {
         return none;
     }
-    return context->types.type_count - 1;
+    return added.type_id;
 }
 
 fn find_type_symbol(context: *context::Context, type_id: usize) -> usize {
@@ -142,10 +140,10 @@ fn report_type_declaration(
 }
 
 fn require_complete_type(context: *context::Context, type_id: usize) -> bool {
-    if (type_id >= context->types.type_count) {
+    if (type_id >= context->types.size()) {
         return false;
     }
-    let record: type_info::RecordResult = type_info::table_get(context->types, type_id);
+    let record: type_info::RecordResult = context->types.record(type_id);
     if (record.error != runtime::Error.none) {
         context->error = record.error;
         return false;
@@ -157,7 +155,7 @@ fn require_complete_type(context: *context::Context, type_id: usize) -> bool {
 }
 
 fn field_name_exists(context: *context::Context, owner_type: usize, unit_index: usize, name_token: usize) -> usize {
-    let fields: *const type_info::Field = context->types.fields.data as
+    let fields: *const type_info::Field = context->types.field_data() as
             *const type_info::Field;
     var current: usize = owner_type;
     for (var depth: usize = 0; depth < context::Limit.maximum_type_depth as usize; depth += 1) {
@@ -239,7 +237,7 @@ fn resolve_record_layout(context: *context::Context, type_id: usize, record: typ
         attributes::declaration_has_attribute(
             context, record.declaration_unit, declaration, attributes::Attribute.packed);
     if (packed) {
-        context->error = type_info::table_set_packed(context->types, type_id, true);
+        context->error = context->types.set_packed(type_id, true);
         if (context->error != runtime::Error.none) {
             return false;
         }
@@ -286,7 +284,7 @@ fn resolve_record_layout(context: *context::Context, type_id: usize, record: typ
         let duplicate: usize = anonymous ? context::no_id() :
             field_name_exists(context, type_id, record.declaration_unit, field_declaration.token_index);
         if (duplicate != context::no_id()) {
-            let fields: *const type_info::Field = context->types.fields.data as
+            let fields: *const type_info::Field = context->types.field_data() as
                     *const type_info::Field;
             context::add_diagnostic(
                 context, context::DiagnosticKind.duplicate_field, record.declaration_unit,
@@ -308,7 +306,7 @@ fn resolve_record_layout(context: *context::Context, type_id: usize, record: typ
             field_node = field_declaration.next_sibling;
             continue;
         }
-        let field_record: type_info::RecordResult = type_info::table_get(context->types, field_type);
+        let field_record: type_info::RecordResult = context->types.record(field_type);
         if (field_record.error != runtime::Error.none) {
             context->error = field_record.error;
             return false;
@@ -372,15 +370,11 @@ fn resolve_record_layout(context: *context::Context, type_id: usize, record: typ
         if (field_alignment > alignment_bytes) {
             alignment_bytes = field_alignment;
         }
-        let added: type_info::TableResult =
-            type_info::table_add_field(
-                context->types, {
-                    owner_type = type_id, type_id = field_type, declaration_unit = record.declaration_unit,
-                    declaration_node = field_node, name_token = field_declaration.token_index,
-                    offset_bytes = field_offset, alignment_bytes = field_override,
-                });
-        context->types = added.table;
-        context->error = added.error;
+        context->error = context->types.add_field({
+            owner_type = type_id, type_id = field_type, declaration_unit = record.declaration_unit,
+            declaration_node = field_node, name_token = field_declaration.token_index,
+            offset_bytes = field_offset, alignment_bytes = field_override,
+        });
         field_node = field_declaration.next_sibling;
     }
     let type_override: usize = builder::alignment_override(context, record.declaration_unit, record.declaration_node);
@@ -393,7 +387,7 @@ fn resolve_record_layout(context: *context::Context, type_id: usize, record: typ
         size_bytes = 1;
     }
     if (has_flexible && record.kind == type_info::Kind.structure) {
-        context->error = type_info::table_set_header(context->types, type_id, true);
+        context->error = context->types.set_header(type_id, true);
         if (context->error != runtime::Error.none) {
             return false;
         }
@@ -404,7 +398,7 @@ fn resolve_record_layout(context: *context::Context, type_id: usize, record: typ
         report_type_declaration(context, context::DiagnosticKind.object_too_large, type_id, size_bytes);
         return false;
     }
-    context->error = type_info::table_set_layout(context->types, type_id, aligned_size, alignment_bytes);
+    context->error = context->types.set_layout(type_id, aligned_size, alignment_bytes);
     return context->error == runtime::Error.none;
 }
 
@@ -463,7 +457,7 @@ fn resolve_enum_layout(context: *context::Context, type_id: usize, record: type_
     if (underlying_type == context::no_id()) {
         return false;
     }
-    let underlying: type_info::RecordResult = type_info::table_get(context->types, underlying_type);
+    let underlying: type_info::RecordResult = context->types.record(underlying_type);
     if (underlying.error != runtime::Error.none) {
         context->error = underlying.error;
         return false;
@@ -475,7 +469,7 @@ fn resolve_enum_layout(context: *context::Context, type_id: usize, record: type_
             context::no_id(), context::empty_span(), underlying_type);
         return false;
     }
-    context->error = type_info::table_set_enum_underlying(context->types, type_id, underlying_type);
+    context->error = context->types.set_enum_underlying(type_id, underlying_type);
     var member_id: usize = context::node(context, record.declaration_unit, declaration.first_child).next_sibling;
     var next_value: u64 = 0;
     var next_value_valid: bool = true;
@@ -528,8 +522,8 @@ fn resolve_enum_layout(context: *context::Context, type_id: usize, record: type_
         }
         member_id = member.next_sibling;
     }
-    context->error = type_info::table_set_layout(
-        context->types, type_id, underlying.record.size_bytes, underlying.record.alignment_bytes);
+    context->error = context->types.set_layout(type_id, underlying.record.size_bytes,
+        underlying.record.alignment_bytes);
     return context->error == runtime::Error.none;
 }
 
@@ -563,12 +557,12 @@ fn resolve_alias(context: *context::Context, type_id: usize, record: type_info::
             none, context::empty_span(), target_type);
         return false;
     }
-    context->error = type_info::table_set_alias_target(context->types, type_id, target_type);
+    context->error = context->types.set_alias_target(type_id, target_type);
     return context->error == runtime::Error.none;
 }
 
 fn resolve_layout_active(context: *context::Context, type_id: usize) -> bool {
-    let result: type_info::RecordResult = type_info::table_get(context->types, type_id);
+    let result: type_info::RecordResult = context->types.record(type_id);
     if (result.error != runtime::Error.none) {
         context->error = result.error;
         return false;
@@ -586,7 +580,7 @@ fn resolve_layout_active(context: *context::Context, type_id: usize) -> bool {
         return false;
     }
     context->type_depth += 1;
-    context->error = type_info::table_set_resolving(context->types, type_id, true);
+    context->error = context->types.set_resolving(type_id, true);
     if (context->error != runtime::Error.none) {
         context->type_depth -= 1;
         return false;
@@ -627,7 +621,7 @@ fn resolve_layout(context: *context::Context, type_id: usize) -> bool {
 
 fn resolve_all_types(context: *context::Context) -> bool {
     var type_id: usize = type_info::BuiltinType.count as usize;
-    while (type_id < context->types.type_count && context->error == runtime::Error.none) {
+    while (type_id < context->types.size() && context->error == runtime::Error.none) {
         resolve_layout(context, type_id);
         type_id += 1;
     }
