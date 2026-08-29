@@ -1,10 +1,8 @@
 module luna.bootstrap.middleend.semantic.types;
 
-import luna.bootstrap.middleend.semantic.classes.model as class_model;
-
 fn class_record_id(context: *context::Context, type_id: usize) -> usize {
-    let records: *const class_model::Record = context->classes.records.data as *const class_model::Record;
-    for (var record_id: usize = 0; record_id < context->classes.record_count; record_id += 1) {
+    let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
+    for (var record_id: usize = 0; record_id < context->classes.record_count(); record_id += 1) {
         if (records[record_id].type_id == type_id) {
             return record_id;
         }
@@ -21,9 +19,9 @@ fn extend_class_layout(
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    var records: *class_model::Record = context->classes.records.data as *class_model::Record;
-    let record: class_model::Record = records[record_id];
-    let polymorphic: bool = (record.flags & (class_model::Flag.polymorphic as usize)) != 0;
+    var records: *domain::ClassRecord = context->classes.record_data() as *domain::ClassRecord;
+    let record: domain::ClassRecord = records[record_id];
+    let polymorphic: bool = (record.flags & (domain::ClassFlag.polymorphic as usize)) != 0;
     if (!polymorphic) {
         if (record.vptr_offset != context::no_id()) {
             context->error = runtime::Error.invalid_argument;
@@ -33,8 +31,8 @@ fn extend_class_layout(
     }
     let base_record_id: usize = class_record_id(context, record.base_type);
     if (base_record_id != context::no_id()) {
-        let base: class_model::Record = records[base_record_id];
-        let base_is_polymorphic: bool = (base.flags & (class_model::Flag.polymorphic as usize)) != 0;
+        let base: domain::ClassRecord = records[base_record_id];
+        let base_is_polymorphic: bool = (base.flags & (domain::ClassFlag.polymorphic as usize)) != 0;
         if (base_is_polymorphic) {
             if (base.vptr_offset == context::no_id()) {
                 context->error = runtime::Error.invalid_argument;
@@ -49,25 +47,25 @@ fn extend_class_layout(
         }
     }
     var vptr_offset: usize = 0;
-    if (!context::align_up(*size_bytes, class_model::Layout.vptr_alignment_bytes as usize, &vptr_offset)) {
+    if (!context::align_up(*size_bytes, domain::ClassLayout.vptr_alignment_bytes as usize, &vptr_offset)) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
     let maximum_object_size: usize = context::Limit.target_maximum_object_size as usize;
-    let pointer_size: usize = class_model::Layout.vptr_size_bytes as usize;
+    let pointer_size: usize = domain::ClassLayout.vptr_size_bytes as usize;
     if (vptr_offset > maximum_object_size || pointer_size > maximum_object_size - vptr_offset) {
         report_type_declaration(context, context::DiagnosticKind.object_too_large, type_id, vptr_offset);
         return false;
     }
-    records = context->classes.records.data as *class_model::Record;
+    records = context->classes.record_data() as *domain::ClassRecord;
     context->error = context->types.set_vptr(type_id, vptr_offset);
     if (context->error != runtime::Error.none) {
         return false;
     }
     records[record_id].vptr_offset = vptr_offset;
     *size_bytes = vptr_offset + pointer_size;
-    if (*alignment_bytes < class_model::Layout.vptr_alignment_bytes as usize) {
-        *alignment_bytes = class_model::Layout.vptr_alignment_bytes as usize;
+    if (*alignment_bytes < domain::ClassLayout.vptr_alignment_bytes as usize) {
+        *alignment_bytes = domain::ClassLayout.vptr_alignment_bytes as usize;
     }
     return true;
 }
@@ -598,7 +596,7 @@ fn resolve_layout_active(context: *context::Context, type_id: usize) -> bool {
 }
 
 fn resolve_layout(context: *context::Context, type_id: usize) -> bool {
-    let instance_id: usize = generic_model::instance_for_type(context->generics, type_id);
+    let instance_id: usize = context->generics.instance_for_type(type_id);
     if (instance_id == context::no_id()) {
         return resolve_layout_active(context, type_id);
     }
@@ -607,10 +605,10 @@ fn resolve_layout(context: *context::Context, type_id: usize) -> bool {
         return false;
     }
     let success: bool = resolve_layout_active(context, type_id);
-    let state: generic_model::InstanceState = success ?
-        generic_model::InstanceState.complete : generic_model::InstanceState.failed;
-    let state_error: runtime::Error = generic_model::set_instance_result(
-        &context->generics, instance_id, type_id, context::no_id(), state);
+    let state: domain::GenericInstanceState = success ?
+        domain::GenericInstanceState.complete : domain::GenericInstanceState.failed;
+    let state_error: runtime::Error = context->generics.set_instance_result(
+        instance_id, type_id, context::no_id(), state);
     let restored: bool = generics::restore_active_bindings(context, mark);
     if (context->error == runtime::Error.none) {
         context->error = state_error;

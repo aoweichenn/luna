@@ -178,10 +178,11 @@ result release function. The driver also exclusively owns move-only semantic
 Input storage; Context and CodeGenerator receive only a borrowed InputView.
 See [the semantic pipeline contract](sema.md).
 
-Callable identity and expression value-category records now live in the
-acyclic `luna.compiler.sema.domain` foundation. The former callable/value
-modules are removed; resource-owning class and generic Stores remain separate
-until their own RAII migrations establish a valid ownership split.
+Callable identity, expression value categories and stable passive class/generic
+metadata now live in the acyclic `luna.compiler.sema.domain` foundation. The
+former callable/value modules are removed. Move-only `ClassTable` and
+`GenericTable` remain separate construction owners imported only by Context;
+higher passes consume their records through domain.
 
 Compilation is split into global and local phases:
 
@@ -232,19 +233,21 @@ in a lazily allocated syntax-node table. The emitting lowerer then consumes the
 selected function and evaluates each argument exactly once. Single-candidate
 calls retain the established lowering path.
 
-Value-category semantics live in the dependency-root `semantic.value` module,
-below semantic context. Emitting expressions and non-emitting probe results
-carry the same closed one-word category enum. Central constructors and
-predicates derive pointer qualification, project member/index storage and
-decide addressability or assignability; bitfields are represented as
-non-addressable storage rather than special-casing boolean triples at every
-consumer.
+Value-category semantics share the dependency-root
+`luna.compiler.sema.domain` module with callable identity, below semantic
+context. Emitting expressions and non-emitting probe results carry the same
+closed one-word category enum. Central constructors and predicates derive
+pointer qualification, project member/index storage and decide addressability
+or assignability; bitfields are represented as non-addressable storage rather
+than special-casing boolean triples at every consumer.
 
-Class metadata uses the same dependency-root pattern. The
-`semantic.classes.model` module defines class, field-access and method records
-and groups their buffers into one lazily empty store. Semantic context owns that
-store as one validated lifecycle unit; collection, layout and access passes sit
-above context rather than leaking policy into the record model.
+Class metadata uses the same dependency-root pattern. The domain module defines
+class, field-access and method records; `semantic.classes.model` is now only the
+move-only `ClassTable` construction owner over four typed vectors. Semantic
+context owns the table as one validated lifecycle unit; automatic destruction
+replaces manual release, and bound append methods preserve contiguous field,
+method and friend slices while retaining the first failure. Collection, layout
+and access passes sit above context rather than importing the owner directly.
 The class pass records nominal identities after named-type collection, lets the
 shared record-layout pass resolve complete non-polymorphic storage, then builds
 contiguous per-class field and method slices. Field slices follow layout order;
@@ -253,10 +256,14 @@ time, so class-record order and global function order are never accidentally
 coupled. The validator checks those slices, explicit access, dispatch policy,
 the single-base relation, absence of vptrs and class-value composition.
 
-M4 generic metadata follows the same split. The dependency-root
-`semantic.generics.model` module owns declaration parameters, concrete
-argument slices, instance states, direct TypeId/FunctionId maps and an
-open-addressed instance index whose full key remains the equality authority.
+M4 generic metadata follows the same split. Domain defines declarations,
+parameters, active bindings and instance states; `semantic.generics.model` is
+now only the move-only `GenericTable` owner for those values, concrete argument
+slices, direct TypeId/FunctionId maps and an open-addressed instance index whose
+full key remains the equality authority. Typed vectors provide deterministic
+lifetime; instance append and index rebuild publish only complete state, while
+consumers receive const projections rather than mutable storage or importing
+the owner module directly.
 `semantic.generics` validates declarations and manages immutable active
 substitution views below type resolution. Type layout and callable inference
 consume those views; only the uniquely selected callable is materialized into

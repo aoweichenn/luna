@@ -215,10 +215,10 @@ fn extend_binding(context: *context::Context, binding_id: usize) -> bool {
 }
 
 fn generic_declarations_share_binding(context: *context::Context, left_id: usize, right_id: usize) -> bool {
-    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
-            *const generic_model::Declaration;
-    let left: generic_model::Declaration = declarations[left_id];
-    let right: generic_model::Declaration = declarations[right_id];
+    let declarations: *const domain::GenericDeclaration = context->generics.declaration_data() as
+            *const domain::GenericDeclaration;
+    let left: domain::GenericDeclaration = declarations[left_id];
+    let right: domain::GenericDeclaration = declarations[right_id];
     let modules_match: bool = left.module_id == right.module_id;
     let names_match: bool = context::tokens_equal(
         context, left.unit_index, left.name_token, right.unit_index, right.name_token);
@@ -226,10 +226,10 @@ fn generic_declarations_share_binding(context: *context::Context, left_id: usize
 }
 
 fn generic_declaration_is_before(context: *context::Context, left_id: usize, right_id: usize) -> bool {
-    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
-            *const generic_model::Declaration;
-    let left: generic_model::Declaration = declarations[left_id];
-    let right: generic_model::Declaration = declarations[right_id];
+    let declarations: *const domain::GenericDeclaration = context->generics.declaration_data() as
+            *const domain::GenericDeclaration;
+    let left: domain::GenericDeclaration = declarations[left_id];
+    let right: domain::GenericDeclaration = declarations[right_id];
     if (left.module_id != right.module_id) {
         return module_name_is_before(context, left.module_id, right.module_id);
     }
@@ -271,11 +271,11 @@ fn generic_order_sift_down(context: *context::Context, ordered: *usize, start: u
 fn generic_function_order(context: *context::Context) -> bytes::Buffer {
     var order: bytes::Buffer = bytes::empty();
     for (var declaration_id: usize = 0;
-        declaration_id < context->generics.declaration_count && context->error == runtime::Error.none;
+        declaration_id < context->generics.declaration_count() && context->error == runtime::Error.none;
         declaration_id += 1) {
-        let declarations: *const generic_model::Declaration = context->generics.declarations.data as
-                *const generic_model::Declaration;
-        if (declarations[declaration_id].kind != generic_model::DeclarationKind.function_declaration) {
+        let declarations: *const domain::GenericDeclaration = context->generics.declaration_data() as
+                *const domain::GenericDeclaration;
+        if (declarations[declaration_id].kind != domain::GenericDeclarationKind.function_declaration) {
             continue;
         }
         let appended: bytes::BufferResult = bytes::append(
@@ -303,7 +303,7 @@ fn generic_function_order(context: *context::Context) -> bytes::Buffer {
 }
 
 fn binding_matches_generic(
-    context: *context::Context, binding: context::Binding, declaration: generic_model::Declaration) -> bool {
+    context: *context::Context, binding: context::Binding, declaration: domain::GenericDeclaration) -> bool {
     let scope_matches: bool = binding.module_id == declaration.module_id && binding.owner_type == domain::no_owner();
     let name_matches: bool = context::tokens_equal(
         context, binding.declaration_unit, binding.name_token, declaration.unit_index, declaration.name_token);
@@ -311,7 +311,7 @@ fn binding_matches_generic(
 }
 
 fn binding_is_before_generic(
-    context: *context::Context, binding: context::Binding, declaration: generic_model::Declaration) -> bool {
+    context: *context::Context, binding: context::Binding, declaration: domain::GenericDeclaration) -> bool {
     if (binding.module_id != declaration.module_id) {
         return module_name_is_before(context, binding.module_id, declaration.module_id);
     }
@@ -327,7 +327,7 @@ fn binding_is_before_generic(
 }
 
 fn find_generic_binding(
-    context: *context::Context, declaration: generic_model::Declaration,
+    context: *context::Context, declaration: domain::GenericDeclaration,
     binding_limit: usize, cursor: *usize) -> usize {
     if (cursor == null || *cursor > binding_limit) {
         context->error = runtime::Error.invalid_argument;
@@ -346,7 +346,7 @@ fn find_generic_binding(
     return context::no_id();
 }
 
-fn begin_generic_binding(context: *context::Context, declaration: generic_model::Declaration) -> usize {
+fn begin_generic_binding(context: *context::Context, declaration: domain::GenericDeclaration) -> usize {
     return append_binding(
         context, {
             kind = context::BindingKind.callable_set, module_id = declaration.module_id,
@@ -366,13 +366,14 @@ fn append_generic_candidate(context: *context::Context, binding_id: usize, decla
         return false;
     }
     let bindings: *context::Binding = context->bindings.data as *context::Binding;
-    let declarations: *generic_model::Declaration = context->generics.declarations.data as
-            *generic_model::Declaration;
+    context->error = context->generics.set_declaration_binding(declaration_id, binding_id);
+    if (context->error != runtime::Error.none) {
+        return false;
+    }
     if (bindings[binding_id].generic_candidate_count == 0) {
         bindings[binding_id].first_generic_candidate = context->generic_callable_candidate_count;
     }
     bindings[binding_id].generic_candidate_count += 1;
-    declarations[declaration_id].binding_id = binding_id;
     context->generic_callable_candidate_count += 1;
     return true;
 }
@@ -386,9 +387,9 @@ fn build_generic_bindings(context: *context::Context) -> bool {
     var active_binding: usize = context::no_id();
     for (var index: usize = 0; index < count && context->error == runtime::Error.none; index += 1) {
         let declaration_id: usize = ordered[index];
-        let declarations: *const generic_model::Declaration = context->generics.declarations.data as
-                *const generic_model::Declaration;
-        let declaration: generic_model::Declaration = declarations[declaration_id];
+        let declarations: *const domain::GenericDeclaration = context->generics.declaration_data() as
+                *const domain::GenericDeclaration;
+        let declaration: domain::GenericDeclaration = declarations[declaration_id];
         let starts_binding: bool = index == 0 ||
             !generic_declarations_share_binding(context, ordered[index - 1], declaration_id);
         if (starts_binding) {
@@ -557,19 +558,19 @@ fn generic_candidate_slices_are_valid(context: *context::Context) -> bool {
     }
     let bindings: *const context::Binding = context->bindings.data as *const context::Binding;
     let candidates: *const usize = context->generic_callable_candidates.data as *const usize;
-    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
-            *const generic_model::Declaration;
+    let declarations: *const domain::GenericDeclaration = context->generics.declaration_data() as
+            *const domain::GenericDeclaration;
     var valid: bool = true;
     for (var binding_id: usize = 0; binding_id < context->binding_count && valid; binding_id += 1) {
         let binding: context::Binding = bindings[binding_id];
         for (var index: usize = 0; index < binding.generic_candidate_count; index += 1) {
             let position: usize = binding.first_generic_candidate + index;
             let declaration_id: usize = candidates[position];
-            if (seen.data[position] != 0 || declaration_id >= context->generics.declaration_count) {
+            if (seen.data[position] != 0 || declaration_id >= context->generics.declaration_count()) {
                 valid = false;
                 break;
             }
-            let declaration: generic_model::Declaration = declarations[declaration_id];
+            let declaration: domain::GenericDeclaration = declarations[declaration_id];
             let identity_matches: bool = declaration.binding_id == binding_id &&
                 binding_matches_generic(context, binding, declaration);
             if (!identity_matches) {
@@ -664,7 +665,7 @@ fn function_is_visible(context: *context::Context, function_id: usize, unit_inde
     }
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
-    if (generic_model::instance_for_function(context->generics, function_id) != context::no_id()) {
+    if (context->generics.instance_for_function(function_id) != context::no_id()) {
         return true;
     }
     let binding_id: usize = functions[function_id].binding_id;
@@ -691,16 +692,16 @@ fn binding_has_visible_candidate(context: *context::Context, binding: context::B
         }
     }
     let generic_candidates: *const usize = context->generic_callable_candidates.data as *const usize;
-    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
-            *const generic_model::Declaration;
+    let declarations: *const domain::GenericDeclaration = context->generics.declaration_data() as
+            *const domain::GenericDeclaration;
     let owner_module: usize = names::unit_module(context, unit_index);
     for (var index: usize = 0; index < binding.generic_candidate_count; index += 1) {
         let generic_id: usize = generic_candidates[binding.first_generic_candidate + index];
-        if (generic_id >= context->generics.declaration_count) {
+        if (generic_id >= context->generics.declaration_count()) {
             context->error = runtime::Error.invalid_argument;
             return false;
         }
-        let declaration: generic_model::Declaration = declarations[generic_id];
+        let declaration: domain::GenericDeclaration = declarations[generic_id];
         let same_module: bool = owner_module == binding.module_id;
         let exported: bool = (declaration.flags & (syntax::SyntaxFlag.exported as usize)) != 0;
         if (same_module || exported) {
@@ -906,7 +907,7 @@ fn generic_binding_candidate(context: *context::Context, binding_id: usize, cand
     }
     let candidates: *const usize = context->generic_callable_candidates.data as *const usize;
     let generic_id: usize = candidates[binding.first_generic_candidate + candidate_index];
-    if (generic_id >= context->generics.declaration_count) {
+    if (generic_id >= context->generics.declaration_count()) {
         context->error = runtime::Error.invalid_argument;
         return context::no_id();
     }

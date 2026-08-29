@@ -4,7 +4,7 @@
 
 The semantic pipeline validates the parsed source-module graph, constructs the
 canonical type model and lowers checked functions into `luna.compiler.ir`.
-This document records the first three ownership/domain batches of its modernization.
+This document records the first six ownership/domain batches of its modernization.
 
 The root module is still named `luna.bootstrap.middleend.sema` while the
 downstream semantic dependency graph is contracted incrementally. The current
@@ -14,8 +14,9 @@ has already become private.
 ## Domain foundation
 
 `luna.compiler.sema.domain` is the first modern semantic dependency boundary.
-It replaces the historical callable and value-category modules with one
-51-line interface and two same-module implementation units.
+It replaces the historical callable and value-category modules and now owns
+the stable passive class/generic metadata in one 161-line interface with two
+same-module behavior implementation units.
 
 The module contains only closed, passive compiler-domain values:
 
@@ -23,6 +24,10 @@ The module contains only closed, passive compiler-domain values:
   functions, methods and receiver qualification;
 - `ValueCategory` and `ReferenceRank` describe expression storage and
   reference-binding rank;
+- `ClassAccess`, dispatch/flag enums, `DispatchPlan` and the `Class*` records
+  describe class policy and contiguous metadata slices;
+- `GenericDeclarationKind`, `GenericInstanceState` and the `Generic*` records
+  describe generic declarations, substitutions and concrete instances;
 - stateless predicates validate identities, compare ownership, project value
   categories and compute reference compatibility.
 
@@ -32,12 +37,74 @@ Closed-kind behavior uses `switch`; the module owns no allocation or mutable
 session state and therefore needs no class hierarchy, virtual dispatch or
 runtime RTTI.
 
-Both historical modules depended only on `luna.compiler.types`. The combined
-module preserves that downward dependency, removes one interface and one
-linked object, and lets consumers that previously imported both concepts use
-one `domain::` dependency. Class and generic model Stores are deliberately not
-included: they still own raw buffers, indexes and hash buckets and must become
-RAII abstractions before their passive records can move into this boundary.
+The domain module depends only on `luna.compiler.types`. ClassTable and
+GenericTable now depend downward on domain records, Context alone owns both
+tables, and every higher pass consumes records through its existing `domain::`
+dependency. Direct compiler imports of class/generic owner modules contract
+from 5/8 to 1/1 without adding a module or object. The resulting order is
+strictly acyclic: types, domain, table owners, Context, then semantic passes.
+
+## Class metadata ownership
+
+`ClassTable` replaces the transparent class-model Store and its four raw byte
+buffers. It is a move-only RAII class that privately composes vectors of the
+domain `ClassRecord`, `ClassField`, `ClassMethod` and `ClassFriend` values plus
+a sticky runtime error. Context owns one table; normal Context destruction
+destroys its vectors, so semantic cleanup has no class-model release call.
+
+The four append methods are the only storage-growth boundary. A class record
+starts with an absent first index and a zero count. The first field, method or
+friend captures the current typed-vector end; every later append must continue
+exactly at that end. This preserves the existing contiguous per-class slices
+without exposing byte sizes, casts or synchronized storage counts to callers.
+An allocation or invariant failure records the first error and blocks later
+mutation.
+
+The move constructor transfers all four vectors and the sticky error. Each
+moved-from vector returns to a valid empty state and the source error resets to
+`none`, making destruction and explicit storage inspection well-defined. The
+relocation contract verifies this state as well as all three slice families
+and sticky failure behavior.
+
+Typed mutable and const `*_data()` overloads remain a transitional pass
+boundary. Current hierarchy, layout, vtable and descriptor passes still update
+completed class records in place. They no longer know the storage mechanism,
+but those mutations should become focused `ClassTable` methods when the class
+passes move behind the future private semantic-session boundary.
+
+## Generic metadata ownership
+
+`GenericTable` replaces the transparent generic Store, eight raw byte buffers
+and eight manually synchronized counts. It is a move-only RAII owner of domain
+generic declarations, parameters, instances and active bindings plus private
+index entries. Context destruction releases the table automatically; the
+common semantic cleanup path has no generic-model release call.
+
+The table owns four related invariants:
+
+- declarations accept parameters only while they are the latest open
+  declaration, preserving one contiguous parameter slice;
+- instance argument slices are appended transactionally and an existing full
+  identity returns the canonical instance instead of duplicating it;
+- the open-addressed instance index is rebuilt completely in a replacement
+  vector and moved into place only after every existing instance is indexed;
+- type/function reverse maps reject conflicting entries and prepare both maps
+  before publishing either result mapping.
+
+All consumers receive const typed record/argument pointers and counts. The one
+former external mutation, generic declaration `binding_id`, is now a bound
+method with conflict validation. A sticky first error blocks later mutation;
+active-binding truncation remains available to complete an in-flight rollback
+without clearing that error.
+
+The current compiler emits strong generic method symbols per concrete type.
+`vector<usize>` already exists in the initializer module, so the table uses one
+module-specific `IndexEntry` value for arguments, buckets and reverse maps.
+The exported-class ABI currently requires that private generic argument type
+to be visible; `IndexEntry` is therefore exported but is not returned by the
+public operation surface. An exact-size assertion protects the read-only
+argument projection. This is a bounded toolchain adaptation, not a public raw
+storage contract.
 
 ## Session lifecycle
 
@@ -174,12 +241,18 @@ sets the IR entry through `ir::Builder` before graph reachability validation.
 | --- | --- |
 | `semantic/domain/callable.la` | callable identity construction and validation |
 | `semantic/domain/category.la` | value-category projection and reference binding |
+| `semantic/classes/model.la` | ClassTable typed ownership, contiguous-slice construction and sticky failure |
+| `semantic/generics/storage.la` | GenericTable lifetime, declarations, bindings and read-only projections |
+| `semantic/generics/instances.la` | canonical instance insertion, hash rebuilding and reverse maps |
+| `semantic/generics/validation.la` | declarations, slices, indexes, maps and final-state validation |
 | `middleend/sema.la` | private SemanticSession, phase orchestration, entry selection and result transfer |
 | `semantic/context.la` | transitional Context storage and shared low-level services |
 | `semantic/context/input.la` | Input owner, InputView validation and Context unit/path access |
 | `semantic/context/diagnostics.la` | DiagnosticView, DiagnosticBuffer and final success predicate |
 
 The two domain files implement one real `luna.compiler.sema.domain` module.
+Class/generic records need no artificial implementation file because they are
+passive declarations with no behavior.
 `context/input.la` and `context/diagnostics.la` are additional implementations
 of the existing context module, not new submodules; no consumer imports them
 independently.
@@ -188,17 +261,17 @@ independently.
 
 | feature | disposition |
 | --- | --- |
-| Classes | SemanticSession owns phase/lifetime; Input and DiagnosticBuffer own resources; their views protect borrowing |
-| Generics | input units and diagnostics use typed vectors instead of byte arithmetic |
-| Composition | Input composes vector/byte_buffer; Context composes TypeTable, IR Builder and DiagnosticBuffer |
-| Access control | session phase and state are private; diagnostic vector storage is private |
+| Classes | SemanticSession owns phases; Input, DiagnosticBuffer, ClassTable and GenericTable own resource lifetimes |
+| Generics | semantic records and private index entries use typed vectors instead of exposed byte arithmetic |
+| Composition | Input composes vector/byte_buffer; Context composes the semantic owners |
+| Access control | session phase, metadata vectors, diagnostic storage and sticky errors are private |
 | Constructors/destructors | constructors establish ready/empty states; destructors close each resource path once |
-| Copy/move | Input and DiagnosticBuffer are move-only; views are copied borrows; SemanticResult transfers through RAII fields |
-| Overloads/defaults | no operation has one semantic family needing overloads or optional arguments in this batch |
+| Copy/move | Input, DiagnosticBuffer, ClassTable and GenericTable are move-only; views are copied borrows |
+| Overloads/defaults | ClassTable has mutable/const data overloads; no useful GenericTable default applies |
 | Operators | no natural value operator exists for a semantic session or diagnostic stream |
-| Bound methods | run, finish, entry selection and diagnostic mutation are bound to their owning state |
+| Bound methods | pipeline, diagnostics, metadata construction and index mutation are bound to their owners |
 | Friends | unnecessary because the public methods preserve the required boundaries |
-| Virtual dispatch/RTTI | rejected: pass order and diagnostics are closed compile-time domains without runtime substitution |
+| Virtual dispatch/RTTI | rejected: these are closed compile-time domains without runtime substitution |
 
 The domain module adopts enums, structs and switch-based free predicates
 because its values are passive and stateless. Adding a class merely to group
@@ -208,15 +281,11 @@ those functions would introduce pattern-shaped indirection without an owner.
 
 The next semantic batches should remain independently green:
 
-1. make class and generic model Stores move-only RAII owners, separating their
-   passive records from mutable indexes;
-2. extend `luna.compiler.sema.domain` only with the passive class/generic
-   records whose ownership has been separated;
-3. contract context/lookup/builder into a coherent session module after its
+1. contract context/lookup/builder into a coherent session module after its
    interface can remain narrow;
-4. migrate pass families to bound methods or focused strategy objects where
+2. migrate pass families to bound methods or focused strategy objects where
    they own real state;
-5. rename the remaining `luna.bootstrap.middleend.semantic.*` graph only when
+3. rename the remaining `luna.bootstrap.middleend.semantic.*` graph only when
    the new dependency boundary is acyclic and independently useful.
 
 ## Validation gates
@@ -230,8 +299,9 @@ python3 tools/selfhost.py verify --fresh
 python3 tools/selfhost.py test
 ```
 
-The relocation-data contract exercises Input move/moved-from storage, borrowed
-InputView use, successful result transfer, IR ownership transfer and moved-from
-IR storage. The ordinary negative corpus exercises DiagnosticBuffer capacity,
-DiagnosticView lookup and stable leading diagnostic kinds through the command
-driver.
+The relocation-data contract exercises Input, ClassTable and GenericTable
+move/moved-from storage; class-member and generic-parameter slices; generic
+rehash, deduplication, reverse maps and rollback; sticky owner failures;
+borrowed InputView use; and IR ownership transfer. The ordinary negative corpus
+exercises DiagnosticBuffer capacity, DiagnosticView lookup and stable leading
+diagnostic kinds through the command driver.

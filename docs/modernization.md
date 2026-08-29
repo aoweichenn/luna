@@ -264,8 +264,15 @@ instead of shallow-copying ownership; see `docs/sema.md`.
 
 The third batch contracts the two passive callable/value modules into
 `luna.compiler.sema.domain`, with explicit CallableKind/CallableIdentity and
-ValueCategory names. Resource-owning class/generic Stores remain outside the
-domain until their own invariants are modernized.
+ValueCategory names. The fourth batch replaces the raw class Store with a
+move-only `ClassTable` over typed vectors; its bound append operations own the
+contiguous class-slice invariant and sticky failure state. The fifth batch
+replaces the generic Store with a move-only `GenericTable`; declarations,
+instances, open-addressed lookup, reverse maps and rollback now share one typed
+owner and strong publication boundaries. The sixth batch moves stable passive
+class/generic metadata into `luna.compiler.sema.domain` after proving the
+acyclic types-to-domain-to-owner-to-Context order; only Context retains direct
+owner imports, preparing both tables for later session absorption.
 
 `ir::Module` owns the completed typed CFG, `ir::Builder` owns its append-only
 construction phase, and the private `Verifier` owns whole-module validation

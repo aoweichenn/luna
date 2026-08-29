@@ -478,12 +478,12 @@ ClassRecord {
     flags: exported, final, abstract, polymorphic
 }
 
-ClassFieldRecord {
+ClassField {
     field_id
     access
 }
 
-MethodRecord {
+ClassMethod {
     function_id
     access
     dispatch: static, direct, virtual, abstract
@@ -492,13 +492,14 @@ MethodRecord {
 ```
 
 `Function` owns the shared callable identity: kind, owner type and receiver
-kind. `MethodRecord` contains only class-specific policy and dispatch metadata,
+kind. `ClassMethod` contains only class-specific policy and dispatch metadata,
 so declaration matching, mangling and overload selection cannot disagree with
 a duplicated method identity. Class and method names enter owner-scoped
 bindings backed by the M2 candidate slices and canonical-signature services.
-The dependency-root `semantic.classes.model` module owns these records in one
-`Store`; semantic context carries that store as a single lifecycle unit instead
-of exposing unrelated class buffers throughout the compiler.
+The dependency-root `luna.compiler.sema.domain` module defines these stable
+passive records. Semantic context alone owns the move-only `ClassTable` that
+stores them, so higher passes share one domain vocabulary without importing
+the construction owner or exposing unrelated class buffers.
 
 The ordinary type record mirrors `vptr_offset` as layout metadata. The generic
 type-table validator therefore recomputes hidden-pointer placement together

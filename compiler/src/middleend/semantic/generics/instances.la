@@ -1,0 +1,341 @@
+module luna.bootstrap.middleend.semantic.generics.model;
+
+fn hash_word(hash: usize, value: usize) -> usize {
+    return (hash ^ value) * (GenericLimit.hash_prime as usize);
+}
+
+fn instance_hash(declaration_id: usize, owner_type: usize, arguments: *const usize, argument_count: usize) -> usize {
+    var hash: usize = hash_word(GenericLimit.hash_offset as usize, declaration_id);
+    hash = hash_word(hash, owner_type);
+    for (var index: usize = 0; index < argument_count; index += 1) {
+        hash = hash_word(hash, arguments[index]);
+    }
+    return hash;
+}
+
+fn argument_storage_is_valid(arguments: *const usize, argument_count: usize) -> bool {
+    return argument_count == 0 || arguments != null;
+}
+
+fn instance_result_state_is_valid(state: domain::GenericInstanceState, has_result: bool) -> bool {
+    switch (state) {
+    case domain::GenericInstanceState.requested {
+        return !has_result;
+    }
+    case domain::GenericInstanceState.resolving, domain::GenericInstanceState.complete {
+        return has_result;
+    }
+    case domain::GenericInstanceState.failed {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+impl GenericTable {
+    priv fn instance_matches(
+        instance: domain::GenericInstance, declaration_id: usize, owner_type: usize,
+        arguments: *const usize, argument_count: usize) const -> bool {
+        let identity_matches: bool = instance.declaration_id == declaration_id && instance.owner_type == owner_type;
+        if (!identity_matches || instance.argument_count != argument_count) {
+            return false;
+        }
+        for (var index: usize = 0; index < argument_count; index += 1) {
+            if (this->arguments.get(instance.first_argument + index).value != arguments[index]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn find_instance(
+        declaration_id: usize, owner_type: usize, arguments: *const usize, argument_count: usize) const -> usize {
+        if (!this->storage_is_valid() || this->buckets.empty()) {
+            return no_id();
+        }
+        if (!argument_storage_is_valid(arguments, argument_count)) {
+            return no_id();
+        }
+        let mask: usize = this->buckets.size() - 1;
+        var bucket: usize = instance_hash(declaration_id, owner_type, arguments, argument_count) & mask;
+        for (var visited: usize = 0; visited < this->buckets.size(); visited += 1) {
+            let instance_id: usize = this->buckets.get(bucket).value;
+            if (instance_id == no_id()) {
+                return no_id();
+            }
+            if (instance_id >= this->instances.size()) {
+                return no_id();
+            }
+            if (this->instance_matches(
+                    this->instances.get(instance_id), declaration_id, owner_type, arguments, argument_count)) {
+                return instance_id;
+            }
+            bucket = (bucket + 1) & mask;
+        }
+        return no_id();
+    }
+
+    priv fn insert_instance_bucket(storage: *vector::vector<IndexEntry>, instance_id: usize) const -> runtime::Error {
+        if (storage == null || instance_id >= this->instances.size()) {
+            return runtime::Error.invalid_argument;
+        }
+        if (storage->empty()) {
+            return runtime::Error.invalid_argument;
+        }
+        let instance: domain::GenericInstance = this->instances.get(instance_id);
+        let values: *const usize = instance.argument_count == 0 ?
+            null : &this->arguments.get(instance.first_argument).value as *const usize;
+        let mask: usize = storage->size() - 1;
+        var bucket: usize = instance_hash(
+            instance.declaration_id, instance.owner_type, values, instance.argument_count) & mask;
+        for (var visited: usize = 0; visited < storage->size(); visited += 1) {
+            if (storage->get(bucket).value == no_id()) {
+                storage->get(bucket).value = instance_id;
+                return runtime::Error.none;
+            }
+            bucket = (bucket + 1) & mask;
+        }
+        return runtime::Error.invalid_argument;
+    }
+
+    priv fn rebuild_buckets(bucket_count: usize) -> runtime::Error {
+        let count_is_power_of_two: bool = bucket_count != 0 && (bucket_count & (bucket_count - 1)) == 0;
+        if (!count_is_power_of_two) {
+            return runtime::Error.invalid_argument;
+        }
+        var replacement: vector::vector<IndexEntry> = vector::vector<IndexEntry>();
+        let reserve_error: runtime::Error = replacement.reserve(bucket_count);
+        if (reserve_error != runtime::Error.none) {
+            return reserve_error;
+        }
+        for (var index: usize = 0; index < bucket_count; index += 1) {
+            let append_error: runtime::Error = replacement.push_back({value = no_id()});
+            if (append_error != runtime::Error.none) {
+                return append_error;
+            }
+        }
+        for (var instance_id: usize = 0; instance_id < this->instances.size(); instance_id += 1) {
+            let insert_error: runtime::Error = this->insert_instance_bucket(&replacement, instance_id);
+            if (insert_error != runtime::Error.none) {
+                return insert_error;
+            }
+        }
+        this->buckets = replacement as vector::vector<IndexEntry>&&;
+        return runtime::Error.none;
+    }
+
+    priv fn ensure_instance_capacity() -> runtime::Error {
+        if (this->instances.size() >= GenericLimit.maximum_instances as usize) {
+            return runtime::Error.out_of_memory;
+        }
+        if (this->buckets.empty()) {
+            return this->rebuild_buckets(GenericLimit.initial_bucket_count as usize);
+        }
+        let growth_boundary: usize = this->buckets.size() - this->buckets.size() / 4;
+        if (this->instances.size() + 1 < growth_boundary) {
+            return runtime::Error.none;
+        }
+        if (this->buckets.size() > (GenericLimit.maximum_size as usize) / 2) {
+            return runtime::Error.out_of_memory;
+        }
+        return this->rebuild_buckets(this->buckets.size() * 2);
+    }
+
+    priv fn reserve_instance_storage(argument_count: usize) -> runtime::Error {
+        var next_argument_count: usize = 0;
+        if (@add_overflow(this->arguments.size(), argument_count, &next_argument_count)) {
+            return runtime::Error.out_of_memory;
+        }
+        let argument_error: runtime::Error = this->arguments.reserve(next_argument_count);
+        if (argument_error != runtime::Error.none) {
+            return argument_error;
+        }
+        return this->instances.reserve(this->instances.size() + 1);
+    }
+
+    priv fn append_arguments(values: *const usize, count: usize) -> runtime::Error {
+        let mark: usize = this->arguments.size();
+        for (var index: usize = 0; index < count; index += 1) {
+            let error: runtime::Error = this->arguments.push_back({value = values[index]});
+            if (error != runtime::Error.none) {
+                this->arguments.truncate(mark);
+                return error;
+            }
+        }
+        return runtime::Error.none;
+    }
+
+    priv fn instance_request_is_valid(
+        declaration_id: usize, arguments: *const usize, argument_count: usize, expansion_depth: usize) const -> bool {
+        if (!this->ready() || declaration_id >= this->declarations.size()) {
+            return false;
+        }
+        let declaration: domain::GenericDeclaration = this->declarations.get(declaration_id);
+        let arity_is_valid: bool = argument_count == declaration.parameter_count;
+        let depth_is_valid: bool = expansion_depth < GenericLimit.maximum_expansion_depth as usize;
+        let request_shape_is_valid: bool = arity_is_valid && depth_is_valid;
+        return request_shape_is_valid && argument_storage_is_valid(arguments, argument_count);
+    }
+
+    priv fn prepare_instance_append(argument_count: usize) -> runtime::Error {
+        let capacity_error: runtime::Error = this->ensure_instance_capacity();
+        if (capacity_error != runtime::Error.none) {
+            return capacity_error;
+        }
+        return this->reserve_instance_storage(argument_count);
+    }
+
+    priv fn commit_instance(
+        declaration_id: usize, owner_type: usize, arguments: *const usize,
+        argument_count: usize, expansion_depth: usize) -> InstanceResult {
+        let first_argument: usize = this->arguments.size();
+        let argument_error: runtime::Error = this->append_arguments(arguments, argument_count);
+        if (argument_error != runtime::Error.none) {
+            return {instance_id = no_id(), error = this->fail(argument_error)};
+        }
+        let instance: domain::GenericInstance = {
+            declaration_id = declaration_id, owner_type = owner_type,
+            first_argument = first_argument, argument_count = argument_count,
+            type_id = no_id(), function_id = no_id(), expansion_depth = expansion_depth,
+            state = domain::GenericInstanceState.requested,
+        };
+        let instance_id: usize = this->instances.size();
+        let instance_error: runtime::Error = this->instances.push_back(instance);
+        if (instance_error != runtime::Error.none) {
+            this->arguments.truncate(first_argument);
+            return {instance_id = no_id(), error = this->fail(instance_error)};
+        }
+        let insert_error: runtime::Error = this->insert_instance_bucket(&this->buckets, instance_id);
+        if (insert_error != runtime::Error.none) {
+            this->instances.truncate(instance_id);
+            this->arguments.truncate(first_argument);
+            return {instance_id = no_id(), error = this->fail(insert_error)};
+        }
+        return {instance_id = instance_id, error = runtime::Error.none};
+    }
+
+    fn append_instance(
+        declaration_id: usize, owner_type: usize, arguments: *const usize,
+        argument_count: usize, expansion_depth: usize) -> InstanceResult {
+        if (!this->instance_request_is_valid(
+                declaration_id, arguments, argument_count, expansion_depth)) {
+            return {instance_id = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        let existing: usize = this->find_instance(declaration_id, owner_type, arguments, argument_count);
+        if (existing != no_id()) {
+            return {instance_id = existing, error = runtime::Error.none};
+        }
+        let preparation_error: runtime::Error = this->prepare_instance_append(argument_count);
+        if (preparation_error != runtime::Error.none) {
+            return {instance_id = no_id(), error = this->fail(preparation_error)};
+        }
+        return this->commit_instance(declaration_id, owner_type, arguments, argument_count, expansion_depth);
+    }
+
+    priv fn instance_map_accepts(map: vector::vector<IndexEntry> const&, key: usize, instance_id: usize) const -> bool {
+        if (key == no_id() || instance_id == no_id()) {
+            return false;
+        }
+        if (key >= map.size()) {
+            return true;
+        }
+        return map.get(key).value == no_id() || map.get(key).value == instance_id;
+    }
+
+    priv fn extend_instance_map(map: *vector::vector<IndexEntry>, key: usize) -> runtime::Error {
+        if (map == null || key == no_id()) {
+            return runtime::Error.invalid_argument;
+        }
+        let reserve_error: runtime::Error = map->reserve(key + 1);
+        if (reserve_error != runtime::Error.none) {
+            return reserve_error;
+        }
+        for (var index: usize = map->size(); index <= key; index += 1) {
+            let append_error: runtime::Error = map->push_back({value = no_id()});
+            if (append_error != runtime::Error.none) {
+                return append_error;
+            }
+        }
+        return runtime::Error.none;
+    }
+
+    priv fn can_set_instance_result(
+        instance_id: usize, type_id: usize, function_id: usize, state: domain::GenericInstanceState) -> bool {
+        if (!this->ready() || instance_id >= this->instances.size()) {
+            return false;
+        }
+        let results_are_distinct: bool = type_id == no_id() || function_id == no_id();
+        let has_result: bool = type_id != no_id() || function_id != no_id();
+        let state_is_valid: bool = instance_result_state_is_valid(state, has_result);
+        let type_map_accepts: bool = type_id == no_id() ||
+            this->instance_map_accepts(this->type_instances, type_id, instance_id);
+        let function_map_accepts: bool = function_id == no_id() ||
+            this->instance_map_accepts(this->function_instances, function_id, instance_id);
+        let result_is_valid: bool = results_are_distinct && state_is_valid;
+        let maps_accept_result: bool = type_map_accepts && function_map_accepts;
+        return result_is_valid && maps_accept_result;
+    }
+
+    priv fn prepare_result_maps(type_id: usize, function_id: usize) -> runtime::Error {
+        let type_map_error: runtime::Error = type_id == no_id() ? runtime::Error.none :
+            this->extend_instance_map(&this->type_instances, type_id);
+        if (type_map_error != runtime::Error.none) {
+            return type_map_error;
+        }
+        return function_id == no_id() ? runtime::Error.none :
+            this->extend_instance_map(&this->function_instances, function_id);
+    }
+
+    fn set_instance_result(
+        instance_id: usize, type_id: usize, function_id: usize, state: domain::GenericInstanceState) -> runtime::Error {
+        if (!this->can_set_instance_result(instance_id, type_id, function_id, state)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let preparation_error: runtime::Error = this->prepare_result_maps(type_id, function_id);
+        if (preparation_error != runtime::Error.none) {
+            return this->fail(preparation_error);
+        }
+        if (type_id != no_id()) {
+            this->type_instances.get(type_id).value = instance_id;
+        }
+        if (function_id != no_id()) {
+            this->function_instances.get(function_id).value = instance_id;
+        }
+        this->instances.get(instance_id).type_id = type_id;
+        this->instances.get(instance_id).function_id = function_id;
+        this->instances.get(instance_id).state = state;
+        return runtime::Error.none;
+    }
+
+    priv fn instance_from_map(map: vector::vector<IndexEntry> const&, key: usize) const -> usize {
+        if (!map.is_valid() || key >= map.size()) {
+            return no_id();
+        }
+        return map.get(key).value;
+    }
+
+    fn instance_for_type(type_id: usize) const -> usize {
+        return this->instance_from_map(this->type_instances, type_id);
+    }
+
+    fn instance_for_function(function_id: usize) const -> usize {
+        return this->instance_from_map(this->function_instances, function_id);
+    }
+
+    fn map_function_instance(function_id: usize, instance_id: usize) -> runtime::Error {
+        if (!this->ready() || instance_id >= this->instances.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!this->instance_map_accepts(this->function_instances, function_id, instance_id)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let extend_error: runtime::Error = this->extend_instance_map(&this->function_instances, function_id);
+        if (extend_error != runtime::Error.none) {
+            return this->fail(extend_error);
+        }
+        this->function_instances.get(function_id).value = instance_id;
+        return runtime::Error.none;
+    }
+}

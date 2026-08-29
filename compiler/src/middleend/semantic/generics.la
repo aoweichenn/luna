@@ -27,11 +27,11 @@ fn report_declaration(
         context, kind, unit_index, declaration.span, has_related ? unit_index : context::no_id(), related_span, detail);
 }
 
-fn declaration_mount_is_valid(kind: model::DeclarationKind, declaration: syntax::SyntaxNode) -> bool {
-    if (kind == model::DeclarationKind.type_declaration) {
+fn declaration_mount_is_valid(kind: domain::GenericDeclarationKind, declaration: syntax::SyntaxNode) -> bool {
+    if (kind == domain::GenericDeclarationKind.type_declaration) {
         return declaration.kind != syntax::SyntaxKind.enum_declaration;
     }
-    if (kind != model::DeclarationKind.function_declaration) {
+    if (kind != domain::GenericDeclarationKind.function_declaration) {
         return false;
     }
     let forbidden_flags: usize = (syntax::SyntaxFlag.external as usize) |
@@ -97,8 +97,8 @@ fn register_parameters(
     for (var child: usize = parameters.first_child; child != context::no_id();
         child = context::node(context, unit_index, child).next_sibling) {
         let parameter: syntax::SyntaxNode = context::node(context, unit_index, child);
-        context->error = model::append_parameter(
-            &context->generics, declaration_id, {
+        context->error = context->generics.append_parameter(
+            declaration_id, {
                 declaration_id = declaration_id, unit_index = unit_index, node_index = child,
                 name_token = parameter.token_index, position = position,
             });
@@ -111,7 +111,7 @@ fn register_parameters(
 }
 
 fn register_declaration(
-    context: *context::Context, kind: model::DeclarationKind, module_id: usize,
+    context: *context::Context, kind: domain::GenericDeclarationKind, module_id: usize,
     unit_index: usize, node_index: usize, binding_id: usize) -> usize {
     let declaration: syntax::SyntaxNode = context::node(context, unit_index, node_index);
     let generic_parameters: usize = parameters_node(context, unit_index, declaration);
@@ -124,9 +124,8 @@ fn register_declaration(
     if (!validate_parameters(context, unit_index, declaration, generic_parameters)) {
         return context::no_id();
     }
-    let declaration_id: usize = context->generics.declaration_count;
-    context->error = model::append_declaration(
-        &context->generics, {
+    let declaration_id: usize = context->generics.declaration_count();
+    context->error = context->generics.append_declaration({
             kind = kind, module_id = module_id, unit_index = unit_index, node_index = node_index,
             name_token = declaration.token_index, first_parameter = context::no_id(), parameter_count = 0,
             binding_id = binding_id, flags = declaration.flags,
@@ -141,10 +140,10 @@ fn register_declaration(
 }
 
 fn active_type(context: *context::Context, unit_index: usize, name_token: usize) -> usize {
-    let bindings: *const model::ActiveBinding = context->generics.active_bindings.data as
-            *const model::ActiveBinding;
-    for (var remaining: usize = context->generics.active_binding_count; remaining != 0; remaining -= 1) {
-        let binding: model::ActiveBinding = bindings[remaining - 1];
+    let bindings: *const domain::GenericActiveBinding = context->generics.active_binding_data() as
+            *const domain::GenericActiveBinding;
+    for (var remaining: usize = context->generics.active_binding_count(); remaining != 0; remaining -= 1) {
+        let binding: domain::GenericActiveBinding = bindings[remaining - 1];
         if (context::tokens_equal(context, binding.unit_index, binding.name_token, unit_index, name_token)) {
             return binding.type_id;
         }
@@ -154,35 +153,35 @@ fn active_type(context: *context::Context, unit_index: usize, name_token: usize)
 
 fn activate_instance(context: *context::Context, instance_id: usize) -> usize {
     let none: usize = context::no_id();
-    if (instance_id >= context->generics.instance_count) {
+    if (instance_id >= context->generics.instance_count()) {
         context->error = runtime::Error.invalid_argument;
         return none;
     }
-    let mark: usize = context->generics.active_binding_count;
-    let instances: *const model::Instance = context->generics.instances.data as *const model::Instance;
-    let declarations: *const model::Declaration = context->generics.declarations.data as
-            *const model::Declaration;
-    let parameters: *const model::Parameter = context->generics.parameters.data as *const model::Parameter;
-    let arguments: *const usize = context->generics.arguments.data as *const usize;
-    let instance: model::Instance = instances[instance_id];
-    if (instance.declaration_id >= context->generics.declaration_count) {
+    let mark: usize = context->generics.active_binding_count();
+    let instances: *const domain::GenericInstance = context->generics.instance_data() as *const domain::GenericInstance;
+    let declarations: *const domain::GenericDeclaration = context->generics.declaration_data() as
+            *const domain::GenericDeclaration;
+    let parameters: *const domain::GenericParameter = context->generics.parameter_data() as *const
+        domain::GenericParameter;
+    let arguments: *const usize = context->generics.argument_data() as *const usize;
+    let instance: domain::GenericInstance = instances[instance_id];
+    if (instance.declaration_id >= context->generics.declaration_count()) {
         context->error = runtime::Error.invalid_argument;
         return none;
     }
-    let declaration: model::Declaration = declarations[instance.declaration_id];
+    let declaration: domain::GenericDeclaration = declarations[instance.declaration_id];
     if (declaration.parameter_count != instance.argument_count) {
         context->error = runtime::Error.invalid_argument;
         return none;
     }
     for (var index: usize = 0; index < declaration.parameter_count; index += 1) {
-        let parameter: model::Parameter = parameters[declaration.first_parameter + index];
-        context->error = model::append_active_binding(
-            &context->generics, {
+        let parameter: domain::GenericParameter = parameters[declaration.first_parameter + index];
+        context->error = context->generics.append_active_binding({
                 unit_index = parameter.unit_index, name_token = parameter.name_token,
                 type_id = arguments[instance.first_argument + index],
             });
         if (context->error != runtime::Error.none) {
-            model::truncate_active_bindings(&context->generics, mark);
+            context->generics.truncate_active_bindings(mark);
             return none;
         }
     }
@@ -190,7 +189,7 @@ fn activate_instance(context: *context::Context, instance_id: usize) -> usize {
 }
 
 fn restore_active_bindings(context: *context::Context, count: usize) -> bool {
-    let restore_error: runtime::Error = model::truncate_active_bindings(&context->generics, count);
+    let restore_error: runtime::Error = context->generics.truncate_active_bindings(count);
     if (context->error == runtime::Error.none) {
         context->error = restore_error;
     }

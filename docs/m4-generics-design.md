@@ -483,10 +483,10 @@ value layout.
 M4 extends the existing pass graph rather than placing parsing, inference,
 instance state and lowering in one generic manager:
 
-- a dependency-root `semantic.generics.model` module owns passive pattern,
-  substitution, request and instance-state records;
-- the semantic `Context` owns their checked contiguous stores and canonical
-  key storage;
+- the dependency-root `luna.compiler.sema.domain` module defines passive
+  pattern, substitution, request and instance-state records;
+- one move-only `GenericTable`, composed by semantic `Context`, owns their
+  checked contiguous storage, canonical hash index and reverse maps;
 - the lower `semantic.generics` service owns declaration validation and active
   substitution views;
 - the existing `types` implementation owns concrete type specialization and

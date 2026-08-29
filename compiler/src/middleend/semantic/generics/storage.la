@@ -1,0 +1,214 @@
+module luna.bootstrap.middleend.semantic.generics.model;
+
+enum GenericLimit: usize {
+    maximum_size = 18446744073709551615, initial_bucket_count = 16, hash_offset = 14695981039346656037,
+    hash_prime = 1099511628211, maximum_instances = 4096, maximum_expansion_depth = 64,
+}
+
+fn no_id() -> usize {
+    return GenericLimit.maximum_size as usize;
+}
+
+fn declaration_identity_is_valid(declaration: domain::GenericDeclaration) -> bool {
+    let kind_is_valid: bool = declaration.kind == domain::GenericDeclarationKind.type_declaration ||
+        declaration.kind == domain::GenericDeclarationKind.function_declaration;
+    let source_is_valid: bool = declaration.unit_index != no_id() && declaration.node_index != no_id();
+    let identity_is_valid: bool = declaration.module_id != no_id() && declaration.name_token != no_id();
+    let source_identity_is_valid: bool = source_is_valid && identity_is_valid;
+    return kind_is_valid && source_identity_is_valid;
+}
+
+fn declaration_record_is_initial(declaration: domain::GenericDeclaration) -> bool {
+    let slice_is_empty: bool = declaration.first_parameter == no_id() && declaration.parameter_count == 0;
+    return declaration_identity_is_valid(declaration) && slice_is_empty;
+}
+
+fn parameter_identity_is_valid(parameter: domain::GenericParameter) -> bool {
+    let source_is_valid: bool = parameter.unit_index != no_id() && parameter.node_index != no_id();
+    return source_is_valid && parameter.name_token != no_id();
+}
+
+fn active_binding_is_valid(binding: domain::GenericActiveBinding) -> bool {
+    let source_is_valid: bool = binding.unit_index != no_id() && binding.name_token != no_id();
+    return source_is_valid && binding.type_id != no_id();
+}
+
+impl GenericTable {
+    init(): declarations = vector::vector<domain::GenericDeclaration>(),
+        parameters = vector::vector<domain::GenericParameter>(),
+            instances = vector::vector<domain::GenericInstance>(), arguments = vector::vector<IndexEntry>(),
+            buckets = vector::vector<IndexEntry>(), type_instances = vector::vector<IndexEntry>(),
+            function_instances = vector::vector<IndexEntry>(),
+                active_bindings = vector::vector<domain::GenericActiveBinding>() {
+        assert(sizeof(IndexEntry) == sizeof(usize));
+        this->error_code = runtime::Error.none;
+    }
+
+    init(other: GenericTable&&): declarations = other.declarations as vector::vector<domain::GenericDeclaration>&&,
+            parameters = other.parameters as vector::vector<domain::GenericParameter>&&,
+            instances = other.instances as vector::vector<domain::GenericInstance>&&,
+            arguments = other.arguments as vector::vector<IndexEntry>&&,
+            buckets = other.buckets as vector::vector<IndexEntry>&&,
+            type_instances = other.type_instances as vector::vector<IndexEntry>&&,
+            function_instances = other.function_instances as vector::vector<IndexEntry>&&,
+            active_bindings = other.active_bindings as vector::vector<domain::GenericActiveBinding>&& {
+        this->error_code = other.error_code;
+        other.error_code = runtime::Error.none;
+    }
+
+    priv fn ready() const -> bool {
+        return this->error_code == runtime::Error.none && this->storage_is_valid();
+    }
+
+    priv fn fail(error: runtime::Error) -> runtime::Error {
+        if (this->error_code == runtime::Error.none) {
+            this->error_code = error;
+        }
+        return this->error_code;
+    }
+
+    fn storage_is_valid() const -> bool {
+        let declarations_are_valid: bool = this->declarations.is_valid() && this->parameters.is_valid();
+        let instances_are_valid: bool = this->instances.is_valid() && this->arguments.is_valid();
+        let indexes_are_valid: bool = this->buckets.is_valid() && this->type_instances.is_valid();
+        let maps_are_valid: bool = indexes_are_valid && this->function_instances.is_valid();
+        let persistent_storage_is_valid: bool = declarations_are_valid && instances_are_valid;
+        let indexed_storage_is_valid: bool = persistent_storage_is_valid && maps_are_valid;
+        return indexed_storage_is_valid && this->active_bindings.is_valid();
+    }
+
+    fn error() const -> runtime::Error {
+        return this->error_code;
+    }
+
+    fn declaration_count() const -> usize {
+        return this->declarations.size();
+    }
+
+    fn parameter_count() const -> usize {
+        return this->parameters.size();
+    }
+
+    fn instance_count() const -> usize {
+        return this->instances.size();
+    }
+
+    fn argument_count() const -> usize {
+        return this->arguments.size();
+    }
+
+    fn active_binding_count() const -> usize {
+        return this->active_bindings.size();
+    }
+
+    fn declaration_data() const -> *const domain::GenericDeclaration {
+        return this->declarations.empty() ? null : &this->declarations.get(0) as *const domain::GenericDeclaration;
+    }
+
+    fn parameter_data() const -> *const domain::GenericParameter {
+        return this->parameters.empty() ? null : &this->parameters.get(0) as *const domain::GenericParameter;
+    }
+
+    fn instance_data() const -> *const domain::GenericInstance {
+        return this->instances.empty() ? null : &this->instances.get(0) as *const domain::GenericInstance;
+    }
+
+    fn argument_data() const -> *const usize {
+        return this->arguments.empty() ? null : &this->arguments.get(0).value as *const usize;
+    }
+
+    fn active_binding_data() const -> *const domain::GenericActiveBinding {
+        return this->active_bindings.empty() ? null : &this->active_bindings.get(0) as *const
+            domain::GenericActiveBinding;
+    }
+
+    priv fn can_append_declaration(declaration: domain::GenericDeclaration) const -> bool {
+        let capacity_is_available: bool = this->declarations.size() != GenericLimit.maximum_size as usize;
+        let storage_is_ready: bool = this->ready() && capacity_is_available;
+        if (!storage_is_ready || !declaration_record_is_initial(declaration)) {
+            return false;
+        }
+        if (this->declarations.empty()) {
+            return true;
+        }
+        return this->declarations.get(this->declarations.size() - 1).parameter_count != 0;
+    }
+
+    fn append_declaration(declaration: domain::GenericDeclaration) -> runtime::Error {
+        if (!this->can_append_declaration(declaration)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let error: runtime::Error = this->declarations.push_back(declaration);
+        return error == runtime::Error.none ? error : this->fail(error);
+    }
+
+    priv fn declaration_parameter_slice_is_open(declaration: domain::GenericDeclaration) const -> bool {
+        if (declaration.parameter_count == 0) {
+            return declaration.first_parameter == no_id();
+        }
+        if (declaration.first_parameter > this->parameters.size()) {
+            return false;
+        }
+        return declaration.parameter_count == this->parameters.size() - declaration.first_parameter;
+    }
+
+    priv fn can_append_parameter(declaration_id: usize, parameter: domain::GenericParameter) const -> bool {
+        if (!this->ready() || declaration_id >= this->declarations.size()) {
+            return false;
+        }
+        let declaration: domain::GenericDeclaration = this->declarations.get(declaration_id);
+        let declaration_is_latest: bool = declaration_id + 1 == this->declarations.size();
+        let owner_is_valid: bool = parameter.declaration_id == declaration_id &&
+            parameter.position == declaration.parameter_count;
+        let target_is_valid: bool = declaration_is_latest && this->declaration_parameter_slice_is_open(declaration);
+        let parameter_is_valid: bool = owner_is_valid && parameter_identity_is_valid(parameter);
+        return target_is_valid && parameter_is_valid;
+    }
+
+    fn append_parameter(declaration_id: usize, parameter: domain::GenericParameter) -> runtime::Error {
+        if (!this->can_append_parameter(declaration_id, parameter)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let parameter_id: usize = this->parameters.size();
+        let error: runtime::Error = this->parameters.push_back(parameter);
+        if (error != runtime::Error.none) {
+            return this->fail(error);
+        }
+        if (this->declarations.get(declaration_id).parameter_count == 0) {
+            this->declarations.get(declaration_id).first_parameter = parameter_id;
+        }
+        this->declarations.get(declaration_id).parameter_count += 1;
+        return runtime::Error.none;
+    }
+
+    fn set_declaration_binding(declaration_id: usize, binding_id: usize) -> runtime::Error {
+        if (!this->ready() || declaration_id >= this->declarations.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let current: usize = this->declarations.get(declaration_id).binding_id;
+        let binding_is_compatible: bool = current == no_id() || current == binding_id;
+        if (binding_id == no_id() || !binding_is_compatible) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->declarations.get(declaration_id).binding_id = binding_id;
+        return runtime::Error.none;
+    }
+
+    fn append_active_binding(binding: domain::GenericActiveBinding) -> runtime::Error {
+        if (!this->ready() || !active_binding_is_valid(binding)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let error: runtime::Error = this->active_bindings.push_back(binding);
+        return error == runtime::Error.none ? error : this->fail(error);
+    }
+
+    fn truncate_active_bindings(count: usize) -> runtime::Error {
+        if (!this->storage_is_valid() || count > this->active_bindings.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        return this->active_bindings.truncate(count);
+    }
+
+    deinit() {
+    }
+}

@@ -32,15 +32,17 @@ or when several Luna sessions are present.
 ## Repository state
 
 - Branch: `main`
-- Base commit: `520fbb6e63cae396c276eba30b9e96e3afe55fe0`
-  (`refactor: make semantic ownership RAII`)
+- Base commit: `3b782cb6b42aea1079687e1af0b7b5de0a4133be`
+  (`refactor: contract semantic domain modules`)
 - `origin/main` matched that commit when this snapshot was written.
 - The IR modernization and its anchor promotion are committed and pushed.
 - The semantic ownership batches and their anchor promotion are committed and
   pushed.
-- The semantic domain batch and its anchor promotion belong to the same commit
-  containing this handoff. Compare HEAD with `origin/main` to determine whether
-  the requested push completed.
+- The semantic domain batch and its anchor promotion are committed and pushed.
+- The ClassTable, GenericTable and passive-metadata domain batches plus anchor
+  promotion belong to the requested combined commit containing this handoff.
+  Compare HEAD with `origin/main` after recovery to determine whether the push
+  completed.
 - `advice.md` is an untracked user-owned file and has not been modified as part
   of the IR or semantic work.
 - Anchor before this work:
@@ -57,6 +59,10 @@ or when several Luna sessions are present.
 - Promoted semantic domain anchor:
   `da919a6f4f0e7e278e0561714df6f11fcb80c2efe4d0cd07fd061d6f4ff04db9`,
   5,113,683 bytes. It is the byte-identical domain stage-fixed artifact.
+- Promoted typed semantic metadata anchor:
+  `7dcc139c0b50ad7361faa5581fd25ae90b0c4d6f3a87243b5c1f13f6553eccb5`,
+  5,179,219 bytes. It is the byte-identical caw stage-fixed artifact from the
+  combined ClassTable, GenericTable and passive-record extraction stack.
 
 ## Engineering direction established in this conversation
 
@@ -85,7 +91,7 @@ use LLVM/Clang-style compiler-domain names, prefer `for` and `switch`, keep at
 most two logical clauses in every condition, split implementation units along
 real responsibilities, and perform all builds/tests on the isolated caw host.
 
-## Active task: IR modernization
+## Completed task: IR modernization
 
 The goal is to replace the historical bootstrap IR store and separate verifier
 submodule with one cohesive `luna.compiler.ir` module built around explicit
@@ -175,7 +181,7 @@ fixed point, test suite, benchmark and anchor promotion are complete. The
 promotion belongs to the same pushed change as the source. If `git status` is
 clean and the branch contains that change, no IR task remains.
 
-## Active task: semantic ownership foundation
+## Completed task: semantic ownership foundation
 
 The first two semantic modernization batches are complete in the working tree.
 They do not rename or blindly merge the 23,000-line semantic dependency graph.
@@ -234,7 +240,7 @@ The ownership batches and anchor promotion are committed and pushed;
 `advice.md` remains excluded. Their planned callable/value domain extraction
 is recorded in the active batch below.
 
-## Active task: semantic domain foundation
+## Completed task: semantic domain foundation
 
 The first semantic module-contraction batch is complete in the working tree:
 
@@ -247,8 +253,8 @@ The first semantic module-contraction batch is complete in the working tree:
 - all 16 consumers use one `domain::` qualifier; four former double-import
   sites now have one edge;
 - old module names, qualifiers, interfaces and registered objects are absent;
-- class/generic model Stores remain separate because they still own mutable
-  buffers, indexes and hash buckets and require dedicated RAII migrations.
+- class/generic model Stores remained separate in that batch; their completed
+  RAII migrations are recorded in the local tasks below.
 
 The graph contracts from 67 to 66 modules, 33 to 32 interfaces in the driver
 closure and 57 to 56 library objects. The domain interface is 51 lines;
@@ -271,19 +277,185 @@ bytes. The final domain module compiled in 0.052045, 0.051286 and 0.051717
 seconds; median 0.051717 seconds and 115,658 bytes, SHA-256
 `ed3b1abc40726a8d335d0f426714fc522a553372035d3f12bca612245f3327cc`.
 
-The batch and anchor promotion are complete. If the working tree is clean and
-`origin/main` contains this change, no domain task remains; `advice.md` stays
-excluded. The next implementation work should make class and generic model
-Stores move-only RAII owners before considering their passive records for the
-domain module.
+The batch and anchor promotion are complete. `origin/main` contains the change
+and `advice.md` stays excluded.
+
+## Completed local task: ClassTable RAII ownership
+
+The class-model storage migration is implemented locally on top of
+`3b782cb6b42aea1079687e1af0b7b5de0a4133be`:
+
+- `class_model::Store` and its four raw `bytes::Buffer` fields are replaced by
+  a move-only `ClassTable` owning `vector<Record>`, `vector<Field>`,
+  `vector<Method>` and `vector<Friend>`;
+- bound append methods own contiguous per-class field, method and friend slice
+  construction and retain the first runtime error;
+- moved-from tables are valid and empty, and automatic vector destruction
+  removes the manual class-model release path from Context cleanup;
+- all semantic consumers use typed count/data methods instead of accessing raw
+  buffers and synchronized counts;
+- mutable typed data remains a documented transitional pass boundary until
+  hierarchy/layout/vtable/descriptor mutation moves behind focused methods;
+- `tests/relocation_data/ir_codegen.la` now verifies all four typed sequences,
+  the three slice families, move/moved-from state and sticky failure without
+  adding another per-case toolchain launch;
+- `docs/sema.md`, `docs/architecture.md`, `docs/modernization.md`,
+  `docs/roadmap.md`, `docs/test-architecture.md` and
+  `docs/bootstrap-middleend.md` record the new ownership contract.
+
+Current isolated caw workspace:
+`/home/aoweichen/codex-workspaces/luna-class-table-final-pJLiT7`
+
+Final evidence on caw (`x86_64`, WSL2 Linux 6.6.87.2, Python 3.13.9):
+
+- anchor hash, 66-module/one-driver graph, 32-interface/56-object closure and
+  formatter/token-drift gates pass;
+- the interface is 99 lines and the implementation is 184 lines; the new
+  owner/test logic has no `while` and no condition above two logical clauses;
+- an incremental build recompiling only `sem_class_model` completes in 1.39
+  seconds and the suite passes `450 passed, 0 failed, 0 skipped`;
+- cold `verify --fresh` completes the trusted transition, stage-next in 14.59
+  seconds and stage-fixed in 14.58 seconds; every assembly, object and final
+  executable is byte-identical;
+- the post-fixed-point suite again passes `450 passed, 0 failed, 0 skipped`,
+  including the new ClassTable relocation contract;
+- direct uncached class-model compilation takes 0.249059, 0.244997 and 0.244889
+  seconds (median 0.244997), emitting 911,011 assembly bytes with SHA-256
+  `070e58de972ee41c4b62811e4effb85bd6060e848fe5eb94e11f869e454ca592`;
+- the old raw Store baseline was 0.033601 seconds and 107,727 assembly bytes.
+  The increase is current generic-vector monomorphization cost; it is visible
+  but adds only about 0.24 seconds to this cold graph and is not hidden behind
+  a weakly typed storage fallback;
+- the verified intermediate ClassTable stage-fixed `luna` is 5,142,355 bytes with SHA-256
+  `1a1e38fc3e96097885391c1d7d3f65d7ac46902630a04d8ba2abb4e51a704ba6`.
+
+Implementation, documentation, structural review, cold fixed point, tests and
+benchmark are complete. The work is included in the requested combined change.
+
+## Completed local task: GenericTable RAII ownership
+
+The generic-model storage migration is implemented locally on top of the
+ClassTable batch:
+
+- `generic_model::Store`, eight raw buffers, eight synchronized counts and the
+  manual release path are replaced by one move-only `GenericTable`;
+- typed vectors own Declaration, Parameter, Instance, IndexEntry and
+  ActiveBinding values; consumers receive const typed projections only;
+- declaration parameters remain one append-only contiguous slice, and the
+  former external `binding_id` mutation is a validated bound method;
+- instance append reserves both sequences, rolls back partial appends, returns
+  canonical duplicates and rebuilds open-addressed buckets in a replacement
+  vector before move-publication;
+- type/function reverse maps validate conflicts and prepare both maps before
+  publishing result entries;
+- active-binding truncation can finish rollback without clearing a sticky
+  construction error;
+- `compiler/src/middleend/semantic/generics/model.la` is replaced by the
+  same-module `storage.la`, `instances.la` and `validation.la` units registered
+  together under `sem_generic_model`;
+- all semantic consumers use bound methods and count/const-data accessors;
+- the relocation-data large contract covers parameter slices, duplicate
+  instances, a 16-to-32 bucket rebuild, reverse maps, active-binding rollback,
+  deep validation, move/moved-from state and sticky failure.
+
+The current compiler emits strong generic method symbols per concrete type.
+`vector<usize>` already exists in `sem_expr_initializer`, so using it in a
+second module failed final linking. GenericTable instead uses one
+module-specific `IndexEntry` vector specialization. Current exported-class ABI
+rules require that private generic argument type to be exported; a Chinese
+interface comment records that it is not part of the operation surface, and
+the constructor asserts its exact `usize` representation.
+
+Current isolated caw workspace:
+`/home/aoweichen/codex-workspaces/luna-generic-table-ljcZQ1`
+
+Final evidence on caw (`x86_64`, WSL2 Linux 6.6.87.2, Python 3.13.9):
+
+- pre-change Store compilation: 0.140794, 0.140943 and 0.141449 seconds
+  (median 0.140943), 391,518 assembly bytes, SHA-256
+  `910a159daeb66cb335b0a889a9b337c493d75bd3eb18309f4dca3325b8f9e65e`;
+- anchor hash, 66-module/one-driver graph, 32-interface/56-object closure and
+  formatter/token-drift gates pass;
+- the interface is 105 lines and the storage/instances/validation units are
+  211/341/127 lines; new owner/test logic has no `while` and no condition above
+  two logical clauses;
+- the current anchor builds and links the complete changed graph, and the
+  expanded suite passes `450 passed, 0 failed, 0 skipped`;
+- final direct module compilation takes 0.531638, 0.532183 and 0.527502
+  seconds (median 0.531638), emitting 1,500,862 assembly bytes with SHA-256
+  `33380b0d46729fe05aaec0a0813093d49c7a4d05d014eee2c5ec42676ebd8255`;
+- cold transition/next/fixed complete in 15.03/15.20/15.04 seconds, and every
+  assembly, object and final executable is byte-identical;
+- the post-fixed-point suite again passes `450 passed, 0 failed, 0 skipped`;
+- the verified intermediate GenericTable stage-fixed `luna` is 5,179,219 bytes with SHA-256
+  `7dcc139c0b50ad7361faa5581fd25ae90b0c4d6f3a87243b5c1f13f6553eccb5`.
+
+Implementation, documentation, structural review, benchmark, cold fixed point
+and tests are complete. The work is included in the requested combined change.
+The next semantic step is to contract Context/lookup/builder into a cohesive
+session boundary.
+
+## Completed local task: passive semantic metadata extraction
+
+The import-graph proof and atomic type migration are implemented locally:
+
+- stable class enums/records now use explicit domain names such as
+  `ClassAccess`, `MethodDispatch`, `ClassRecord`, `ClassField`, `ClassMethod`
+  and `ClassFriend`;
+- stable generic enums/records now use `GenericDeclarationKind`,
+  `GenericInstanceState`, `GenericDeclaration`, `GenericParameter`,
+  `GenericInstance` and `GenericActiveBinding`;
+- owner-specific `InstanceResult` and the exported-class ABI adaptation
+  `IndexEntry` remain with GenericTable rather than polluting domain;
+- ClassTable/GenericTable depend downward on domain values, Context alone
+  imports the two owner modules, and all higher passes consume `domain::`
+  values through Context;
+- compiler direct class/generic owner imports contract from 5/8 to 1/1 while
+  direct domain imports grow from 15 to 20;
+- the dependency order is acyclic: types, domain, table owners, Context, then
+  semantic passes;
+- the domain interface grows from 51 to 161 lines while class/generic owner
+  interfaces contract from 99/105 to 35/61 lines;
+- no empty classes/generics domain implementation files were created because
+  the migrated values are passive declarations with no behavior.
+
+Current isolated caw workspace:
+`/home/aoweichen/codex-workspaces/luna-sema-metadata-uYxaUt`
+
+Final evidence on caw (`x86_64`, WSL2 Linux 6.6.87.2, Python 3.13.9):
+
+- anchor hashes, 66-module/one-driver graph, 32-interface/56-object closure and
+  formatter/token-drift gates pass;
+- the reviewed owners/contracts have no `while` and no condition above two
+  logical clauses;
+- the current anchor builds and links the complete graph in 14.84 seconds, and
+  the full suite passes `450 passed, 0 failed, 0 skipped`;
+- final domain/class/generic module medians are 0.056784/0.277308/0.578233
+  seconds, 0.912325 combined versus the 0.828352 pre-extraction sum;
+- their assembly total contracts from 2,527,531 to 2,363,419 bytes. Final
+  individual SHA-256 values are
+  `ed3b1abc40726a8d335d0f426714fc522a553372035d3f12bca612245f3327cc`,
+  `146f8d7269a2296bf0fef25ca5060513371a23bfece44f4dca9bb5c69d2a2b5e`
+  and `5e77759da419aab8fcbb7e128734c3f44d6ab3fdce1aa75109dd431a55ea03d8`;
+- cold transition/next/fixed complete in 14.89/14.89/14.86 seconds, and every
+  next/fixed assembly, object and executable artifact is byte-identical;
+- the post-fixed-point suite again passes `450 passed, 0 failed, 0 skipped`;
+- the promoted stage-fixed `luna` remains byte-identical to the
+  pre-extraction GenericTable result: 5,179,219 bytes and SHA-256
+  `7dcc139c0b50ad7361faa5581fd25ae90b0c4d6f3a87243b5c1f13f6553eccb5`.
+
+Implementation, documentation, graph proof, benchmark, cold fixed point and
+tests are complete. The byte-identical fixed artifact has been promoted and
+belongs to the requested combined commit/push. The next batch should contract
+Context/lookup/builder into the planned `luna.compiler.sema.session` boundary.
 
 ## Recovery checklist
 
 1. Confirm the session UUID and working directory shown above.
 2. Read `AGENTS.md`, this file and the global engineering skill completely.
-3. Run `git status --short`, `git diff --stat` and inspect the semantic domain diff.
+3. Run `git status --short`, `git diff --stat` and inspect the table/domain stack.
 4. Preserve `advice.md` and all existing comments/changes.
-5. Do not redo the completed IR, semantic ownership or domain work or rerun cold
-   validation unless the source changes.
-6. If the semantic domain commit/push is absent, resume only that interrupted
-   operation; do not redo implementation or validation.
+5. Do not redo the completed IR, semantic ownership or domain work.
+6. Compare HEAD with `origin/main`. If the requested combined commit or push is
+   absent, resume only that interrupted operation; do not redo implementation,
+   promotion or cold validation. Preserve `advice.md`.

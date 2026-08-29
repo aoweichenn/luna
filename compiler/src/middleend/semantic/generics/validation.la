@@ -1,0 +1,127 @@
+module luna.bootstrap.middleend.semantic.generics.model;
+
+impl GenericTable {
+    priv fn declaration_records_are_valid() const -> bool {
+        var expected_parameter: usize = 0;
+        for (var declaration_id: usize = 0;
+            declaration_id < this->declarations.size();
+            declaration_id += 1) {
+            let declaration: domain::GenericDeclaration = this->declarations.get(declaration_id);
+            if (!declaration_identity_is_valid(declaration) || declaration.parameter_count == 0) {
+                return false;
+            }
+            if (declaration.first_parameter != expected_parameter) {
+                return false;
+            }
+            let remaining_parameters: usize = this->parameters.size() - expected_parameter;
+            if (declaration.parameter_count > remaining_parameters) {
+                return false;
+            }
+            for (var index: usize = 0; index < declaration.parameter_count; index += 1) {
+                let parameter: domain::GenericParameter = this->parameters.get(declaration.first_parameter + index);
+                let owner_is_valid: bool = parameter.declaration_id == declaration_id && parameter.position == index;
+                if (!owner_is_valid || !parameter_identity_is_valid(parameter)) {
+                    return false;
+                }
+            }
+            expected_parameter += declaration.parameter_count;
+        }
+        return expected_parameter == this->parameters.size();
+    }
+
+    priv fn instance_record_is_valid(instance: domain::GenericInstance) const -> bool {
+        if (instance.declaration_id >= this->declarations.size()) {
+            return false;
+        }
+        let declaration: domain::GenericDeclaration = this->declarations.get(instance.declaration_id);
+        if (instance.argument_count != declaration.parameter_count) {
+            return false;
+        }
+        if (instance.first_argument > this->arguments.size()) {
+            return false;
+        }
+        let remaining_arguments: usize = this->arguments.size() - instance.first_argument;
+        let range_is_valid: bool = instance.argument_count <= remaining_arguments;
+        let depth_is_valid: bool = instance.expansion_depth < GenericLimit.maximum_expansion_depth as usize;
+        if (!range_is_valid || !depth_is_valid) {
+            return false;
+        }
+        let results_are_distinct: bool = instance.type_id == no_id() || instance.function_id == no_id();
+        let has_result: bool = instance.type_id != no_id() || instance.function_id != no_id();
+        return results_are_distinct && instance_result_state_is_valid(instance.state, has_result);
+    }
+
+    priv fn instance_records_are_valid() const -> bool {
+        var expected_argument: usize = 0;
+        for (var instance_id: usize = 0; instance_id < this->instances.size(); instance_id += 1) {
+            let instance: domain::GenericInstance = this->instances.get(instance_id);
+            if (!this->instance_record_is_valid(instance) || instance.first_argument != expected_argument) {
+                return false;
+            }
+            expected_argument += instance.argument_count;
+        }
+        return expected_argument == this->arguments.size();
+    }
+
+    priv fn instance_map_is_valid(map: vector::vector<IndexEntry> const&) const -> bool {
+        if (!map.is_valid()) {
+            return false;
+        }
+        for (var index: usize = 0; index < map.size(); index += 1) {
+            let instance_id: usize = map.get(index).value;
+            if (instance_id != no_id() && instance_id >= this->instances.size()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    priv fn bucket_records_are_valid() const -> bool {
+        if (this->buckets.empty()) {
+            return this->instances.empty();
+        }
+        let bucket_count_is_power_of_two: bool = (this->buckets.size() & (this->buckets.size() - 1)) == 0;
+        if (!bucket_count_is_power_of_two) {
+            return false;
+        }
+        var occupied: usize = 0;
+        for (var index: usize = 0; index < this->buckets.size(); index += 1) {
+            let instance_id: usize = this->buckets.get(index).value;
+            if (instance_id == no_id()) {
+                continue;
+            }
+            if (instance_id >= this->instances.size()) {
+                return false;
+            }
+            occupied += 1;
+        }
+        if (occupied != this->instances.size()) {
+            return false;
+        }
+        for (var instance_id: usize = 0; instance_id < this->instances.size(); instance_id += 1) {
+            let instance: domain::GenericInstance = this->instances.get(instance_id);
+            let values: *const usize = instance.argument_count == 0 ?
+                null : &this->arguments.get(instance.first_argument).value as *const usize;
+            let found: usize = this->find_instance(
+                instance.declaration_id, instance.owner_type, values, instance.argument_count);
+            if (found != instance_id) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn is_valid() const -> bool {
+        if (!this->storage_is_valid()) {
+            return false;
+        }
+        let declarations_are_valid: bool = this->declaration_records_are_valid();
+        let instances_are_valid: bool = this->instance_records_are_valid() && this->bucket_records_are_valid();
+        let type_map_is_valid: bool = this->instance_map_is_valid(this->type_instances);
+        let function_map_is_valid: bool = this->instance_map_is_valid(this->function_instances);
+        let maps_are_valid: bool = type_map_is_valid && function_map_is_valid;
+        let persistent_state_is_valid: bool = declarations_are_valid && instances_are_valid;
+        let indexed_state_is_valid: bool = persistent_state_is_valid && maps_are_valid;
+        return indexed_state_is_valid && this->active_bindings.empty();
+    }
+}

@@ -3,8 +3,8 @@ module luna.bootstrap.middleend.semantic.types;
 import luna.bootstrap.middleend.semantic.attributes as attributes;
 import luna.bootstrap.middleend.semantic.context.builder as builder;
 import luna.bootstrap.middleend.semantic.context.lookup as names;
-import luna.bootstrap.middleend.semantic.generics.model as generic_model;
 import luna.bootstrap.middleend.semantic.generics;
+import luna.compiler.sema.domain as domain;
 import luna.runtime as runtime;
 import luna.std.bytes as bytes;
 
@@ -168,7 +168,7 @@ fn append_generic_type(
         return;
     }
     let generic_id: usize = generics::register_declaration(
-        context, generic_model::DeclarationKind.type_declaration,
+        context, domain::GenericDeclarationKind.type_declaration,
         module_id, unit_index, declaration_id, context::no_id());
     if (generic_id == context::no_id()) {
         return;
@@ -361,14 +361,14 @@ fn resolve_generic_arguments(context: *context::Context, unit_index: usize, argu
 
 fn report_generic_type(
     context: *context::Context, kind: context::DiagnosticKind, unit_index: usize,
-    node: syntax::SyntaxNode, declaration: generic_model::Declaration, detail: usize) {
+    node: syntax::SyntaxNode, declaration: domain::GenericDeclaration, detail: usize) {
     context::add_diagnostic(
         context, kind, unit_index, node.span, declaration.unit_index,
         context::node(context, declaration.unit_index, declaration.node_index).span, detail);
 }
 
 fn generic_class_contract_is_valid(
-    context: *context::Context, declaration: generic_model::Declaration,
+    context: *context::Context, declaration: domain::GenericDeclaration,
     source: syntax::SyntaxNode, use_unit: usize, use_node: syntax::SyntaxNode) -> bool {
     let valid: bool = generic_class_features_are_supported(context, declaration.unit_index, source);
     if (!valid) {
@@ -381,15 +381,14 @@ fn generic_class_contract_is_valid(
 
 fn append_generic_class_record(context: *context::Context, type_id: usize, source: syntax::SyntaxNode) -> bool {
     let none: usize = context::no_id();
-    var flags: usize = class_model::Flag.none as usize;
+    var flags: usize = domain::ClassFlag.none as usize;
     if ((source.flags & (syntax::SyntaxFlag.exported as usize)) != 0) {
-        flags |= class_model::Flag.exported as usize;
+        flags |= domain::ClassFlag.exported as usize;
     }
     if ((source.flags & (syntax::SyntaxFlag.final_class as usize)) != 0) {
-        flags |= class_model::Flag.final_class as usize;
+        flags |= domain::ClassFlag.final_class as usize;
     }
-    context->error = class_model::append_record(
-        &context->classes, {
+    context->error = context->classes.append_record({
             type_id = type_id, base_type = none, first_field = none, field_count = 0,
             first_method = none, method_count = 0, first_friend = none, friend_count = 0,
             vptr_offset = none, descriptor_global = none, vtable_global = none, flags = flags,
@@ -400,31 +399,31 @@ fn append_generic_class_record(context: *context::Context, type_id: usize, sourc
 fn instantiate_generic_type(
     context: *context::Context, generic_id: usize, unit_index: usize,
     node: syntax::SyntaxNode, arguments: GenericArguments) -> usize {
-    if (generic_id >= context->generics.declaration_count) {
+    if (generic_id >= context->generics.declaration_count()) {
         context->error = runtime::Error.invalid_argument;
         return context::no_id();
     }
-    let declarations: *const generic_model::Declaration = context->generics.declarations.data as
-            *const generic_model::Declaration;
-    let declaration: generic_model::Declaration = declarations[generic_id];
+    let declarations: *const domain::GenericDeclaration = context->generics.declaration_data() as
+            *const domain::GenericDeclaration;
+    let declaration: domain::GenericDeclaration = declarations[generic_id];
     if (declaration.parameter_count != arguments.count) {
         report_generic_type(
             context, context::DiagnosticKind.generic_argument_count, unit_index, node, declaration, arguments.count);
         return context::no_id();
     }
     let argument_types: *const usize = arguments.values.data as *const usize;
-    let existing: usize = generic_model::find_instance(
-        context->generics, generic_id, context::no_id(), argument_types, arguments.count);
+    let existing: usize = context->generics.find_instance(
+        generic_id, context::no_id(), argument_types, arguments.count);
     if (existing != context::no_id()) {
-        let instances: *const generic_model::Instance = context->generics.instances.data as
-                *const generic_model::Instance;
-        return instances[existing].state == generic_model::InstanceState.failed ?
+        let instances: *const domain::GenericInstance = context->generics.instance_data() as
+                *const domain::GenericInstance;
+        return instances[existing].state == domain::GenericInstanceState.failed ?
             context::no_id() : instances[existing].type_id;
     }
-    if (context->generics.instance_count >= context::Limit.maximum_generic_instances as usize) {
+    if (context->generics.instance_count() >= context::Limit.maximum_generic_instances as usize) {
         report_generic_type(
             context, context::DiagnosticKind.generic_resource_limit,
-            unit_index, node, declaration, context->generics.instance_count);
+            unit_index, node, declaration, context->generics.instance_count());
         return context::no_id();
     }
     let source: syntax::SyntaxNode = context::node(context, declaration.unit_index, declaration.node_index);
@@ -445,8 +444,8 @@ fn instantiate_generic_type(
             unit_index, node, declaration, context->type_depth);
         return context::no_id();
     }
-    let instance_result: generic_model::InstanceResult = generic_model::append_instance(
-        &context->generics, generic_id, context::no_id(), argument_types, arguments.count, context->type_depth);
+    let instance_result = context->generics.append_instance(
+        generic_id, context::no_id(), argument_types, arguments.count, context->type_depth);
     context->error = instance_result.error;
     if (instance_result.error != runtime::Error.none) {
         return context::no_id();
@@ -459,9 +458,8 @@ fn instantiate_generic_type(
         return context::no_id();
     }
     let type_id: usize = added.type_id;
-    context->error = generic_model::set_instance_result(
-        &context->generics, instance_result.instance_id, type_id, context::no_id(),
-        generic_model::InstanceState.resolving);
+    context->error = context->generics.set_instance_result(
+        instance_result.instance_id, type_id, context::no_id(), domain::GenericInstanceState.resolving);
     if (context->error == runtime::Error.none && type_kind == type_info::Kind.class_type) {
         append_generic_class_record(context, type_id, source);
     }

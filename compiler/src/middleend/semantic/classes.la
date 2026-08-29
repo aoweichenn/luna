@@ -5,7 +5,6 @@ import luna.bootstrap.middleend.semantic.context.lookup as names;
 import luna.bootstrap.middleend.semantic.types as types;
 import luna.compiler.ir as ir;
 import luna.compiler.lexer as lexer;
-import luna.compiler.sema.domain as domain;
 import luna.compiler.syntax as syntax;
 import luna.compiler.types as type_info;
 import luna.runtime as runtime;
@@ -24,44 +23,44 @@ fn require(validator: *RecordValidator, condition: bool) {
     validator->valid = validator->valid && condition;
 }
 
-fn access_from_flags(flags: usize) -> model::Access {
+fn access_from_flags(flags: usize) -> domain::ClassAccess {
     let restricted: usize = (syntax::SyntaxFlag.protected_access as usize) |
         (syntax::SyntaxFlag.private_access as usize);
     let access_flags: usize = flags & ((syntax::SyntaxFlag.public_access as usize) | restricted);
     switch (access_flags as AccessFlagEncoding) {
     case AccessFlagEncoding.public_access {
-        return model::Access.public_access;
+        return domain::ClassAccess.public_access;
     }
     case AccessFlagEncoding.protected_access {
-        return model::Access.protected_access;
+        return domain::ClassAccess.protected_access;
     }
     case AccessFlagEncoding.private_access {
-        return model::Access.private_access;
+        return domain::ClassAccess.private_access;
     }
     default {
-        return model::Access.invalid;
+        return domain::ClassAccess.invalid;
     }
     }
 }
 
 fn class_flags(context: *context::Context, record: type_info::Record) -> usize {
     var flags: usize = (record.flags & (type_info::Flag.exported as usize)) != 0 ?
-        model::Flag.exported as usize : model::Flag.none as usize;
+        domain::ClassFlag.exported as usize : domain::ClassFlag.none as usize;
     let declaration: syntax::SyntaxNode = context::node(context, record.declaration_unit, record.declaration_node);
     if ((declaration.flags & (syntax::SyntaxFlag.final_class as usize)) != 0) {
-        flags |= model::Flag.final_class as usize;
+        flags |= domain::ClassFlag.final_class as usize;
     }
     return flags;
 }
 
 fn append_class(context: *context::Context, type_id: usize, record: type_info::Record) -> bool {
     let none: usize = context::no_id();
-    let class_record: model::Record = {
+    let class_record: domain::ClassRecord = {
         type_id = type_id, base_type = none, first_field = none, field_count = 0,
         first_method = none, method_count = 0, first_friend = none, friend_count = 0,
         vptr_offset = none, descriptor_global = none, vtable_global = none, flags = class_flags(context, record),
     };
-    context->error = model::append_record(&context->classes, class_record);
+    context->error = context->classes.append_record(class_record);
     return context->error == runtime::Error.none;
 }
 
@@ -72,7 +71,8 @@ fn report_class_member(context: *context::Context, record: type_info::Record, me
 }
 
 fn field_declaration_is_valid(context: *context::Context, unit_index: usize, field: syntax::SyntaxNode) -> bool {
-    if (field.kind != syntax::SyntaxKind.field_declaration || access_from_flags(field.flags) == model::Access.invalid) {
+    if (field.kind != syntax::SyntaxKind.field_declaration ||
+        access_from_flags(field.flags) == domain::ClassAccess.invalid) {
         return false;
     }
     let unsupported_flags: usize = (syntax::SyntaxFlag.anonymous as usize) | (syntax::SyntaxFlag.flexible as usize);
@@ -114,9 +114,9 @@ fn class_members_are_valid(context: *context::Context, record: type_info::Record
 }
 
 fn find_record(context: *context::Context, type_id: usize) -> usize {
-    let records: *const model::Record = context->classes.records.data as
-            *const model::Record;
-    for (var record_id: usize = 0; record_id < context->classes.record_count; record_id += 1) {
+    let records: *const domain::ClassRecord = context->classes.record_data() as
+            *const domain::ClassRecord;
+    for (var record_id: usize = 0; record_id < context->classes.record_count(); record_id += 1) {
         if (records[record_id].type_id == type_id) {
             return record_id;
         }
@@ -146,16 +146,16 @@ fn set_base_relation(
         report_base_error(context, context::DiagnosticKind.invalid_base_class, derived, base_node, base_type);
         return;
     }
-    let records: *const model::Record = context->classes.records.data as
-            *const model::Record;
-    let base_is_final: bool = (records[base_record].flags & (model::Flag.final_class as usize)) != 0;
+    let records: *const domain::ClassRecord = context->classes.record_data() as
+            *const domain::ClassRecord;
+    let base_is_final: bool = (records[base_record].flags & (domain::ClassFlag.final_class as usize)) != 0;
     if (base_is_final) {
         report_base_error(context, context::DiagnosticKind.invalid_base_class, derived, base_node, base_type);
         return;
     }
     context->error = context->types.set_base(records[record_id].type_id, base_type);
     if (context->error == runtime::Error.none) {
-        let writable: *model::Record = context->classes.records.data as *model::Record;
+        let writable: *domain::ClassRecord = context->classes.record_data() as *domain::ClassRecord;
         writable[record_id].base_type = base_type;
     }
 }
@@ -172,7 +172,7 @@ fn collect_class_base(context: *context::Context, record_id: usize, record: type
     }
 }
 
-fn validate_base_chain(context: *context::Context, record: model::Record) {
+fn validate_base_chain(context: *context::Context, record: domain::ClassRecord) {
     var current: usize = record.base_type;
     for (var depth: usize = 0; current != context::no_id(); depth += 1) {
         if (depth >= context::Limit.maximum_type_depth as usize || current == record.type_id) {
@@ -187,23 +187,23 @@ fn validate_base_chain(context: *context::Context, record: model::Record) {
         if (base_record == context::no_id()) {
             return;
         }
-        let records: *const model::Record = context->classes.records.data as
-                *const model::Record;
+        let records: *const domain::ClassRecord = context->classes.record_data() as
+                *const domain::ClassRecord;
         current = records[base_record].base_type;
     }
 }
 
 fn collect_bases(context: *context::Context) -> bool {
-    var records: *const model::Record = context->classes.records.data as
-            *const model::Record;
+    var records: *const domain::ClassRecord = context->classes.record_data() as
+            *const domain::ClassRecord;
     for (var record_id: usize = 0;
-        record_id < context->classes.record_count && context->error == runtime::Error.none;
+        record_id < context->classes.record_count() && context->error == runtime::Error.none;
         record_id += 1) {
         let type_record: type_info::Record = context::type_record(context, records[record_id].type_id);
         collect_class_base(context, record_id, type_record);
     }
-    records = context->classes.records.data as *const model::Record;
-    for (var record_id: usize = 0; record_id < context->classes.record_count; record_id += 1) {
+    records = context->classes.record_data() as *const domain::ClassRecord;
+    for (var record_id: usize = 0; record_id < context->classes.record_count(); record_id += 1) {
         validate_base_chain(context, records[record_id]);
     }
     return context->error == runtime::Error.none;
@@ -214,8 +214,8 @@ fn base_type(context: *context::Context, type_id: usize) -> usize {
     if (record_id == context::no_id()) {
         return context::no_id();
     }
-    let records: *const model::Record = context->classes.records.data as
-            *const model::Record;
+    let records: *const domain::ClassRecord = context->classes.record_data() as
+            *const domain::ClassRecord;
     return records[record_id].base_type;
 }
 
@@ -234,8 +234,8 @@ fn is_base_of(context: *context::Context, candidate_base: usize, derived_type: u
 }
 
 fn collect_classes(context: *context::Context) -> bool {
-    let store_is_empty: bool = context->classes.record_count == 0 && context->classes.field_count == 0;
-    if (!store_is_empty || context->classes.method_count != 0) {
+    let store_is_empty: bool = context->classes.record_count() == 0 && context->classes.field_count() == 0;
+    if (!store_is_empty || context->classes.method_count() != 0) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
@@ -269,18 +269,18 @@ fn type_contains_class_value(context: *context::Context, type_id: usize) -> bool
 }
 
 fn collect_fields(context: *context::Context) -> bool {
-    if (context->classes.field_count != 0) {
+    if (context->classes.field_count() != 0) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    let class_records: *const model::Record = context->classes.records.data as
-            *const model::Record;
+    let class_records: *const domain::ClassRecord = context->classes.record_data() as
+            *const domain::ClassRecord;
     let type_records: *const type_info::Record = context->types.record_data() as
             *const type_info::Record;
     let type_fields: *const type_info::Field = context->types.field_data() as
             *const type_info::Field;
     for (var record_id: usize = 0;
-        record_id < context->classes.record_count && context->error == runtime::Error.none;
+        record_id < context->classes.record_count() && context->error == runtime::Error.none;
         record_id += 1) {
         let owner: type_info::Record = type_records[class_records[record_id].type_id];
         for (var index: usize = 0; index < owner.field_count; index += 1) {
@@ -288,8 +288,8 @@ fn collect_fields(context: *context::Context) -> bool {
             let field: type_info::Field = type_fields[field_id];
             let declaration: syntax::SyntaxNode =
                 context::node(context, field.declaration_unit, field.declaration_node);
-            let access: model::Access = access_from_flags(declaration.flags);
-            context->error = model::append_field(&context->classes, record_id, {field_id = field_id, access = access});
+            let access: domain::ClassAccess = access_from_flags(declaration.flags);
+            context->error = context->classes.append_field(record_id, {field_id = field_id, access = access});
         }
     }
     return context->error == runtime::Error.none;
@@ -304,7 +304,7 @@ fn prepare_generic_class(context: *context::Context, type_id: usize) -> bool {
         return false;
     }
     let type_record: type_info::Record = context::type_record(context, type_id);
-    let records: *const model::Record = context->classes.records.data as *const model::Record;
+    let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
     if (records[record_id].field_count == type_record.field_count) {
         return true;
     }
@@ -317,8 +317,10 @@ fn prepare_generic_class(context: *context::Context, type_id: usize) -> bool {
         let field_id: usize = type_record.first_field + index;
         let field: type_info::Field = fields[field_id];
         let declaration: syntax::SyntaxNode = context::node(context, field.declaration_unit, field.declaration_node);
-        context->error = model::append_field(
-            &context->classes, record_id, {field_id = field_id, access = access_from_flags(declaration.flags)});
+        let class_field: domain::ClassField = {
+            field_id = field_id, access = access_from_flags(declaration.flags),
+        };
+        context->error = context->classes.append_field(record_id, class_field);
         if (context->error != runtime::Error.none) {
             return false;
         }
@@ -333,8 +335,8 @@ fn report_friend(
         context::no_id(), context::empty_span(), detail);
 }
 
-fn friend_is_duplicate(context: *context::Context, record: model::Record, friend_type: usize) -> bool {
-    let friends: *const model::Friend = context->classes.friends.data as *const model::Friend;
+fn friend_is_duplicate(context: *context::Context, record: domain::ClassRecord, friend_type: usize) -> bool {
+    let friends: *const domain::ClassFriend = context->classes.friend_data() as *const domain::ClassFriend;
     for (var index: usize = 0; index < record.friend_count; index += 1) {
         if (friends[record.first_friend + index].friend_type == friend_type) {
             return true;
@@ -343,7 +345,7 @@ fn friend_is_duplicate(context: *context::Context, record: model::Record, friend
     return false;
 }
 
-fn collect_class_friends(context: *context::Context, record_id: usize, record: model::Record) {
+fn collect_class_friends(context: *context::Context, record_id: usize, record: domain::ClassRecord) {
     let owner: type_info::Record = context::type_record(context, record.type_id);
     let declaration: syntax::SyntaxNode = context::node(context, owner.declaration_unit, owner.declaration_node);
     for (var child: usize = declaration.first_child;
@@ -369,26 +371,28 @@ fn collect_class_friends(context: *context::Context, record_id: usize, record: m
         let classes_are_distinct: bool = friend_type != record.type_id && target.kind == type_info::Kind.class_type;
         let modules_match: bool = names::unit_module(context, owner.declaration_unit) ==
             names::unit_module(context, target.declaration_unit);
-        let current: *const model::Record = context->classes.records.data as *const model::Record;
+        let current: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
         let duplicate: bool = friend_is_duplicate(context, current[record_id], friend_type);
         let relationship_is_valid: bool = classes_are_distinct && modules_match;
         if (!relationship_is_valid || duplicate) {
             report_friend(context, owner, friend_declaration, friend_type);
             continue;
         }
-        context->error = model::append_friend(
-            &context->classes, record_id, {owner_type = record.type_id, friend_type = friend_type});
+        let friend_record: domain::ClassFriend = {
+            owner_type = record.type_id, friend_type = friend_type,
+        };
+        context->error = context->classes.append_friend(record_id, friend_record);
     }
 }
 
 fn collect_friends(context: *context::Context) -> bool {
-    if (context->classes.friend_count != 0) {
+    if (context->classes.friend_count() != 0) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    var records: *const model::Record = context->classes.records.data as *const model::Record;
+    var records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
     for (var record_id: usize = 0;
-        record_id < context->classes.record_count && context->error == runtime::Error.none;
+        record_id < context->classes.record_count() && context->error == runtime::Error.none;
         record_id += 1) {
         collect_class_friends(context, record_id, records[record_id]);
     }
@@ -399,38 +403,39 @@ fn empty_slice_is_valid(first: usize, count: usize) -> bool {
     return first == context::no_id() && count == 0;
 }
 
-fn field_slice_is_valid(context: *context::Context, record: model::Record, type_record: type_info::Record) -> bool {
+fn field_slice_is_valid(context: *context::Context, record: domain::ClassRecord,
+    type_record: type_info::Record) -> bool {
     if (record.field_count != type_record.field_count) {
         return false;
     }
     if (record.field_count == 0) {
         return empty_slice_is_valid(record.first_field, record.field_count);
     }
-    if (record.first_field >= context->classes.field_count) {
+    if (record.first_field >= context->classes.field_count()) {
         return false;
     }
-    let fields: *const model::Field = context->classes.fields.data as
-            *const model::Field;
+    let fields: *const domain::ClassField = context->classes.field_data() as
+            *const domain::ClassField;
     for (var index: usize = 0; index < record.field_count; index += 1) {
-        let field: model::Field = fields[record.first_field + index];
+        let field: domain::ClassField = fields[record.first_field + index];
         let expected: usize = type_record.first_field + index;
-        if (field.field_id != expected || field.access == model::Access.invalid) {
+        if (field.field_id != expected || field.access == domain::ClassAccess.invalid) {
             return false;
         }
     }
     return true;
 }
 
-fn friend_slice_is_valid(context: *context::Context, record: model::Record, expected_first: usize) -> bool {
+fn friend_slice_is_valid(context: *context::Context, record: domain::ClassRecord, expected_first: usize) -> bool {
     if (record.friend_count == 0) {
         return record.first_friend == context::no_id();
     }
-    if (record.first_friend != expected_first || record.first_friend >= context->classes.friend_count) {
+    if (record.first_friend != expected_first || record.first_friend >= context->classes.friend_count()) {
         return false;
     }
-    let friends: *const model::Friend = context->classes.friends.data as *const model::Friend;
+    let friends: *const domain::ClassFriend = context->classes.friend_data() as *const domain::ClassFriend;
     for (var index: usize = 0; index < record.friend_count; index += 1) {
-        let friend_record: model::Friend = friends[record.first_friend + index];
+        let friend_record: domain::ClassFriend = friends[record.first_friend + index];
         if (friend_record.owner_type != record.type_id || friend_record.friend_type == record.type_id) {
             return false;
         }
@@ -438,16 +443,17 @@ fn friend_slice_is_valid(context: *context::Context, record: model::Record, expe
     return true;
 }
 
-fn class_layout_is_valid(context: *context::Context, record: model::Record, type_record: type_info::Record) -> bool {
-    let polymorphic: bool = (record.flags & (model::Flag.polymorphic as usize)) != 0;
+fn class_layout_is_valid(context: *context::Context, record: domain::ClassRecord,
+    type_record: type_info::Record) -> bool {
+    let polymorphic: bool = (record.flags & (domain::ClassFlag.polymorphic as usize)) != 0;
     if (!polymorphic) {
         return record.vptr_offset == context::no_id() && type_record.vptr_offset == context::no_id();
     }
     if (record.vptr_offset == context::no_id() || record.vptr_offset != type_record.vptr_offset) {
         return false;
     }
-    let pointer_size: usize = model::Layout.vptr_size_bytes as usize;
-    let pointer_alignment: usize = model::Layout.vptr_alignment_bytes as usize;
+    let pointer_size: usize = domain::ClassLayout.vptr_size_bytes as usize;
+    let pointer_alignment: usize = domain::ClassLayout.vptr_alignment_bytes as usize;
     let pointer_range_is_valid: bool = record.vptr_offset <= type_record.size_bytes &&
         pointer_size <= type_record.size_bytes - record.vptr_offset;
     let pointer_alignment_is_valid: bool = type_record.alignment_bytes >= pointer_alignment &&
@@ -457,9 +463,9 @@ fn class_layout_is_valid(context: *context::Context, record: model::Record, type
     }
     let base_record_id: usize = find_record(context, record.base_type);
     if (base_record_id != context::no_id()) {
-        let records: *const model::Record = context->classes.records.data as *const model::Record;
-        let base: model::Record = records[base_record_id];
-        let base_is_polymorphic: bool = (base.flags & (model::Flag.polymorphic as usize)) != 0;
+        let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
+        let base: domain::ClassRecord = records[base_record_id];
+        let base_is_polymorphic: bool = (base.flags & (domain::ClassFlag.polymorphic as usize)) != 0;
         if (base_is_polymorphic) {
             return record.vptr_offset == base.vptr_offset;
         }
@@ -471,7 +477,7 @@ fn class_layout_is_valid(context: *context::Context, record: model::Record, type
 }
 
 fn record_is_valid(
-    context: *context::Context, record: model::Record, type_id: usize,
+    context: *context::Context, record: domain::ClassRecord, type_id: usize,
     type_record: type_info::Record, expected_friend: usize) -> bool {
     var validator: RecordValidator = {valid = true};
     require(&validator, record.type_id == type_id);
@@ -484,8 +490,8 @@ fn record_is_valid(
     require(&validator, field_slice_is_valid(context, record, type_record));
     require(&validator, empty_slice_is_valid(record.first_method, record.method_count));
     require(&validator, friend_slice_is_valid(context, record, expected_friend));
-    let layout_flags: usize = record.vptr_offset == context::no_id() ? model::Flag.none as usize :
-        model::Flag.polymorphic as usize;
+    let layout_flags: usize = record.vptr_offset == context::no_id() ? domain::ClassFlag.none as usize :
+        domain::ClassFlag.polymorphic as usize;
     require(&validator, record.flags == (class_flags(context, type_record) | layout_flags));
     return validator.valid;
 }
@@ -493,8 +499,8 @@ fn record_is_valid(
 fn validate_classes(context: *context::Context) -> bool {
     let types: *const type_info::Record = context->types.record_data() as
             *const type_info::Record;
-    let classes: *const model::Record = context->classes.records.data as
-            *const model::Record;
+    let classes: *const domain::ClassRecord = context->classes.record_data() as
+            *const domain::ClassRecord;
     var class_index: usize = 0;
     var expected_friend: usize = 0;
     for (var type_id: usize = type_info::BuiltinType.count as usize; type_id < context->types.size();
@@ -503,7 +509,7 @@ fn validate_classes(context: *context::Context) -> bool {
         if (type_record.kind != type_info::Kind.class_type) {
             continue;
         }
-        if (class_index >= context->classes.record_count) {
+        if (class_index >= context->classes.record_count()) {
             context->error = runtime::Error.invalid_argument;
             return false;
         }
@@ -515,8 +521,8 @@ fn validate_classes(context: *context::Context) -> bool {
         expected_friend += classes[class_index].friend_count;
         class_index += 1;
     }
-    let all_classes_are_valid: bool = class_index == context->classes.record_count;
-    let all_friends_are_owned: bool = expected_friend == context->classes.friend_count;
+    let all_classes_are_valid: bool = class_index == context->classes.record_count();
+    let all_friends_are_owned: bool = expected_friend == context->classes.friend_count();
     if (!all_classes_are_valid || !all_friends_are_owned) {
         context->error = runtime::Error.invalid_argument;
         return false;
@@ -524,15 +530,15 @@ fn validate_classes(context: *context::Context) -> bool {
     return true;
 }
 
-fn field_access(context: *context::Context, field_id: usize) -> model::Access {
-    let fields: *const model::Field = context->classes.fields.data as
-            *const model::Field;
-    for (var index: usize = 0; index < context->classes.field_count; index += 1) {
+fn field_access(context: *context::Context, field_id: usize) -> domain::ClassAccess {
+    let fields: *const domain::ClassField = context->classes.field_data() as
+            *const domain::ClassField;
+    for (var index: usize = 0; index < context->classes.field_count(); index += 1) {
         if (fields[index].field_id == field_id) {
             return fields[index].access;
         }
     }
-    return model::Access.invalid;
+    return domain::ClassAccess.invalid;
 }
 
 fn current_owner_type(context: *context::Context) -> usize {
@@ -544,15 +550,15 @@ fn current_owner_type(context: *context::Context) -> usize {
     return functions[context->current_function].identity.owner_type;
 }
 
-fn access_is_available(context: *context::Context, access: model::Access, declaring_type: usize) -> bool {
-    if (access == model::Access.public_access) {
+fn access_is_available(context: *context::Context, access: domain::ClassAccess, declaring_type: usize) -> bool {
+    if (access == domain::ClassAccess.public_access) {
         return true;
     }
-    if (access == model::Access.invalid) {
+    if (access == domain::ClassAccess.invalid) {
         return false;
     }
     let current: usize = current_owner_type(context);
-    if (access == model::Access.private_access) {
+    if (access == domain::ClassAccess.private_access) {
         if (current == declaring_type) {
             return true;
         }
@@ -560,9 +566,9 @@ fn access_is_available(context: *context::Context, access: model::Access, declar
         if (record_id == context::no_id()) {
             return false;
         }
-        let records: *const model::Record = context->classes.records.data as *const model::Record;
-        let friends: *const model::Friend = context->classes.friends.data as *const model::Friend;
-        let record: model::Record = records[record_id];
+        let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
+        let friends: *const domain::ClassFriend = context->classes.friend_data() as *const domain::ClassFriend;
+        let record: domain::ClassRecord = records[record_id];
         for (var index: usize = 0; index < record.friend_count; index += 1) {
             if (friends[record.first_friend + index].friend_type == current) {
                 return true;
@@ -595,27 +601,28 @@ fn method_declaration(context: *context::Context, function: context::Function) -
     return context::node(context, method_declaration_unit(function), node_index);
 }
 
-fn method_access_from_function(context: *context::Context, function: context::Function) -> model::Access {
+fn method_access_from_function(context: *context::Context, function: context::Function) -> domain::ClassAccess {
     return access_from_flags(method_declaration(context, function).flags);
 }
 
-fn method_dispatch(context: *context::Context, function: context::Function) -> model::Dispatch {
+fn method_dispatch(context: *context::Context, function: context::Function) -> domain::MethodDispatch {
     if (function.identity.kind == domain::CallableKind.static_method) {
-        return model::Dispatch.static_method;
+        return domain::MethodDispatch.static_method;
     }
     let declaration: syntax::SyntaxNode = method_declaration(context, function);
     if ((declaration.flags & (syntax::SyntaxFlag.abstract_method as usize)) != 0) {
-        return model::Dispatch.abstract_method;
+        return domain::MethodDispatch.abstract_method;
     }
     let virtual_flags: usize = (syntax::SyntaxFlag.virtual_method as usize) |
         (syntax::SyntaxFlag.override_method as usize);
-    return (declaration.flags & virtual_flags) != 0 ? model::Dispatch.virtual_method : model::Dispatch.direct;
+    return (declaration.flags & virtual_flags) != 0 ? domain::MethodDispatch.virtual_method :
+        domain::MethodDispatch.direct;
 }
 
 fn method_flags(context: *context::Context, function: context::Function) -> usize {
     let declaration: syntax::SyntaxNode = method_declaration(context, function);
     return (declaration.flags & (syntax::SyntaxFlag.final_method as usize)) != 0 ?
-        model::MethodFlag.final_method as usize : model::MethodFlag.none as usize;
+        domain::MethodFlag.final_method as usize : domain::MethodFlag.none as usize;
 }
 
 fn method_field_collision(context: *context::Context, function: context::Function) -> usize {
@@ -655,7 +662,7 @@ fn report_method_field_collision(context: *context::Context, function: context::
 }
 
 fn append_record_methods(
-    context: *context::Context, record_id: usize, record: model::Record,
+    context: *context::Context, record_id: usize, record: domain::ClassRecord,
     functions: *const context::Function, ordered: *const usize) {
     for (var order_index: usize = 0;
         order_index < context->callable_candidate_count && context->error == runtime::Error.none;
@@ -670,8 +677,7 @@ fn append_record_methods(
             report_method_field_collision(context, function, collision);
             continue;
         }
-        context->error = model::append_method(
-            &context->classes, record_id, {
+        context->error = context->classes.append_method(record_id, {
                 function_id = function_id, access = method_access_from_function(context, function),
                 dispatch = method_dispatch(context, function), virtual_slot = context::no_id(),
                 flags = method_flags(context, function),
@@ -680,7 +686,7 @@ fn append_record_methods(
 }
 
 fn collect_methods(context: *context::Context) -> bool {
-    if (context->classes.method_count != 0) {
+    if (context->classes.method_count() != 0) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
@@ -688,10 +694,10 @@ fn collect_methods(context: *context::Context) -> bool {
             *const context::Function;
     let ordered: *const usize = context->callable_candidates.data as
             *const usize;
-    let records: *const model::Record = context->classes.records.data as
-            *const model::Record;
+    let records: *const domain::ClassRecord = context->classes.record_data() as
+            *const domain::ClassRecord;
     for (var record_id: usize = 0;
-        record_id < context->classes.record_count && context->error == runtime::Error.none;
+        record_id < context->classes.record_count() && context->error == runtime::Error.none;
         record_id += 1) {
         append_record_methods(context, record_id, records[record_id], functions, ordered);
     }
@@ -703,7 +709,7 @@ fn collect_generic_methods(context: *context::Context, type_id: usize) -> bool {
     if (record_id == context::no_id()) {
         return false;
     }
-    let records: *const model::Record = context->classes.records.data as *const model::Record;
+    let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
     if (records[record_id].method_count != 0) {
         return true;
     }
@@ -717,7 +723,7 @@ enum HierarchyState: u8 {
     unvisited, visiting, complete,
 }
 
-fn class_declares_virtual_contract(context: *context::Context, record: model::Record) -> bool {
+fn class_declares_virtual_contract(context: *context::Context, record: domain::ClassRecord) -> bool {
     let type_record: type_info::Record = context::type_record(context, record.type_id);
     let declaration: syntax::SyntaxNode = context::node(
         context, type_record.declaration_unit, type_record.declaration_node);
@@ -748,34 +754,34 @@ fn prepare_class_layout(context: *context::Context, record_id: usize, states: *u
         return;
     }
     states[record_id] = HierarchyState.visiting as u8;
-    var records: *const model::Record = context->classes.records.data as *const model::Record;
-    let record: model::Record = records[record_id];
+    var records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
+    let record: domain::ClassRecord = records[record_id];
     let base_record_id: usize = find_record(context, record.base_type);
     if (base_record_id != context::no_id()) {
         prepare_class_layout(context, base_record_id, states, depth + 1);
     }
-    let updated_records: *const model::Record = context->classes.records.data as *const model::Record;
+    let updated_records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
     let inherits_polymorphism: bool = base_record_id != context::no_id() &&
-        (updated_records[base_record_id].flags & (model::Flag.polymorphic as usize)) != 0;
+        (updated_records[base_record_id].flags & (domain::ClassFlag.polymorphic as usize)) != 0;
     let introduces_polymorphism: bool = class_declares_virtual_contract(context, record);
     if (inherits_polymorphism || introduces_polymorphism) {
-        let writable: *model::Record = context->classes.records.data as *model::Record;
-        writable[record_id].flags |= model::Flag.polymorphic as usize;
+        let writable: *domain::ClassRecord = context->classes.record_data() as *domain::ClassRecord;
+        writable[record_id].flags |= domain::ClassFlag.polymorphic as usize;
     }
     states[record_id] = HierarchyState.complete as u8;
 }
 
 fn prepare_layouts(context: *context::Context) -> bool {
-    let created: bytes::BufferResult = bytes::with_capacity(context->classes.record_count);
+    let created: bytes::BufferResult = bytes::with_capacity(context->classes.record_count());
     var states: bytes::Buffer = created.buffer;
     context->error = created.error;
     if (created.error != runtime::Error.none) {
         return false;
     }
-    states.length = context->classes.record_count;
+    states.length = context->classes.record_count();
     context->error = memory::fill(states.data, HierarchyState.unvisited as u8, states.length);
     for (var record_id: usize = 0;
-        record_id < context->classes.record_count && context->error == runtime::Error.none;
+        record_id < context->classes.record_count() && context->error == runtime::Error.none;
         record_id += 1) {
         prepare_class_layout(context, record_id, states.data, 0);
     }
@@ -831,11 +837,11 @@ fn method_is_shadowed(context: *context::Context, lookup_type: usize, function_i
         if (record_id == context::no_id()) {
             return false;
         }
-        let records: *const model::Record = context->classes.records.data as
-                *const model::Record;
-        let methods: *const model::Method = context->classes.methods.data as
-                *const model::Method;
-        let record: model::Record = records[record_id];
+        let records: *const domain::ClassRecord = context->classes.record_data() as
+                *const domain::ClassRecord;
+        let methods: *const domain::ClassMethod = context->classes.method_data() as
+                *const domain::ClassMethod;
+        let record: domain::ClassRecord = records[record_id];
         for (var index: usize = 0; index < record.method_count; index += 1) {
             let derived_function: usize = methods[record.first_method + index].function_id;
             if (method_key_matches(context, derived_function, function_id)) {
@@ -848,11 +854,11 @@ fn method_is_shadowed(context: *context::Context, lookup_type: usize, function_i
 }
 
 fn method_is_abstract(context: *context::Context, function_id: usize) -> bool {
-    let methods: *const model::Method = context->classes.methods.data as
-            *const model::Method;
-    for (var index: usize = 0; index < context->classes.method_count; index += 1) {
+    let methods: *const domain::ClassMethod = context->classes.method_data() as
+            *const domain::ClassMethod;
+    for (var index: usize = 0; index < context->classes.method_count(); index += 1) {
         if (methods[index].function_id == function_id) {
-            return methods[index].dispatch == model::Dispatch.abstract_method;
+            return methods[index].dispatch == domain::MethodDispatch.abstract_method;
         }
     }
     return false;
@@ -863,9 +869,9 @@ fn class_is_abstract(context: *context::Context, type_id: usize) -> bool {
     if (record_id == context::no_id()) {
         return false;
     }
-    let records: *const model::Record = context->classes.records.data as
-            *const model::Record;
-    return (records[record_id].flags & (model::Flag.abstract_class as usize)) != 0;
+    let records: *const domain::ClassRecord = context->classes.record_data() as
+            *const domain::ClassRecord;
+    return (records[record_id].flags & (domain::ClassFlag.abstract_class as usize)) != 0;
 }
 
 fn inherited_method_named_like_field(context: *context::Context, owner_type: usize, field: type_info::Field) -> usize {
@@ -875,15 +881,15 @@ fn inherited_method_named_like_field(context: *context::Context, owner_type: usi
         if (record_id == context::no_id()) {
             return context::no_id();
         }
-        let records: *const model::Record = context->classes.records.data as
-                *const model::Record;
-        let methods: *const model::Method = context->classes.methods.data as
-                *const model::Method;
+        let records: *const domain::ClassRecord = context->classes.record_data() as
+                *const domain::ClassRecord;
+        let methods: *const domain::ClassMethod = context->classes.method_data() as
+                *const domain::ClassMethod;
         let functions: *const context::Function = context->functions.data as
                 *const context::Function;
         let symbols: *const context::Symbol = context->symbols.data as
                 *const context::Symbol;
-        let record: model::Record = records[record_id];
+        let record: domain::ClassRecord = records[record_id];
         for (var index: usize = 0; index < record.method_count; index += 1) {
             let method_index: usize = record.first_method + index;
             let symbol: context::Symbol = symbols[functions[methods[method_index].function_id].symbol_id];
@@ -897,7 +903,7 @@ fn inherited_method_named_like_field(context: *context::Context, owner_type: usi
     return context::no_id();
 }
 
-fn validate_inherited_field_names(context: *context::Context, record: model::Record) {
+fn validate_inherited_field_names(context: *context::Context, record: domain::ClassRecord) {
     let type_record: type_info::Record = context::type_record(context, record.type_id);
     let fields: *const type_info::Field = context->types.field_data() as
             *const type_info::Field;
@@ -927,11 +933,11 @@ fn inherited_method(context: *context::Context, owner_type: usize, function_id: 
         if (record_id == context::no_id()) {
             return context::no_id();
         }
-        let records: *const model::Record = context->classes.records.data as
-                *const model::Record;
-        let methods: *const model::Method = context->classes.methods.data as
-                *const model::Method;
-        let record: model::Record = records[record_id];
+        let records: *const domain::ClassRecord = context->classes.record_data() as
+                *const domain::ClassRecord;
+        let methods: *const domain::ClassMethod = context->classes.method_data() as
+                *const domain::ClassMethod;
+        let record: domain::ClassRecord = records[record_id];
         for (var index: usize = 0; index < record.method_count; index += 1) {
             let method_index: usize = record.first_method + index;
             if (method_key_matches(context, function_id, methods[method_index].function_id)) {
@@ -948,8 +954,8 @@ fn method_requests_override(context: *context::Context, function: context::Funct
     return (declaration.flags & (syntax::SyntaxFlag.override_method as usize)) != 0;
 }
 
-fn dispatch_is_virtual(dispatch: model::Dispatch) -> bool {
-    return dispatch == model::Dispatch.virtual_method || dispatch == model::Dispatch.abstract_method;
+fn dispatch_is_virtual(dispatch: domain::MethodDispatch) -> bool {
+    return dispatch == domain::MethodDispatch.virtual_method || dispatch == domain::MethodDispatch.abstract_method;
 }
 
 fn hierarchy_slot_count(context: *context::Context, type_id: usize) -> usize {
@@ -960,13 +966,13 @@ fn hierarchy_slot_count(context: *context::Context, type_id: usize) -> usize {
         if (record_id == context::no_id()) {
             return count;
         }
-        let records: *const model::Record = context->classes.records.data as
-                *const model::Record;
-        let methods: *const model::Method = context->classes.methods.data as
-                *const model::Method;
-        let record: model::Record = records[record_id];
+        let records: *const domain::ClassRecord = context->classes.record_data() as
+                *const domain::ClassRecord;
+        let methods: *const domain::ClassMethod = context->classes.method_data() as
+                *const domain::ClassMethod;
+        let record: domain::ClassRecord = records[record_id];
         for (var index: usize = 0; index < record.method_count; index += 1) {
-            let method_record: model::Method = methods[record.first_method + index];
+            let method_record: domain::ClassMethod = methods[record.first_method + index];
             if (method_record.virtual_slot != context::no_id() && method_record.virtual_slot >= count) {
                 count = method_record.virtual_slot + 1;
             }
@@ -982,8 +988,8 @@ fn report_override(
     var related_unit: usize = context::no_id();
     var related_span: lexer::SourceSpan = context::empty_span();
     if (inherited_index != context::no_id()) {
-        let methods: *const model::Method = context->classes.methods.data as
-                *const model::Method;
+        let methods: *const domain::ClassMethod = context->classes.method_data() as
+                *const domain::ClassMethod;
         let functions: *const context::Function = context->functions.data as
                 *const context::Function;
         let inherited: context::Function = functions[methods[inherited_index].function_id];
@@ -1003,11 +1009,11 @@ fn override_is_valid(
         }
         return false;
     }
-    let methods: *const model::Method = context->classes.methods.data as
-            *const model::Method;
+    let methods: *const domain::ClassMethod = context->classes.method_data() as
+            *const domain::ClassMethod;
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
-    let inherited: model::Method = methods[inherited_index];
+    let inherited: domain::ClassMethod = methods[inherited_index];
     let virtual_base: bool = dispatch_is_virtual(inherited.dispatch);
     let returns_match: bool = function.return_type == functions[inherited.function_id].return_type;
     let override_relation_is_valid: bool = requested && virtual_base;
@@ -1016,7 +1022,7 @@ fn override_is_valid(
         report_override(context, context::DiagnosticKind.invalid_override, function, inherited_index);
         return false;
     }
-    if ((inherited.flags & (model::MethodFlag.final_method as usize)) != 0) {
+    if ((inherited.flags & (domain::MethodFlag.final_method as usize)) != 0) {
         report_override(context, context::DiagnosticKind.final_override, function, inherited_index);
         return false;
     }
@@ -1024,10 +1030,10 @@ fn override_is_valid(
 }
 
 fn analyze_method(context: *context::Context, method_index: usize, next_slot: *usize) {
-    var methods: *model::Method = context->classes.methods.data as *model::Method;
+    var methods: *domain::ClassMethod = context->classes.method_data() as *domain::ClassMethod;
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
-    let method_record: model::Method = methods[method_index];
+    let method_record: domain::ClassMethod = methods[method_index];
     let function: context::Function = functions[method_record.function_id];
     let inherited_index: usize = inherited_method(context, function.identity.owner_type, method_record.function_id);
     let requested: bool = method_requests_override(context, function);
@@ -1036,7 +1042,7 @@ fn analyze_method(context: *context::Context, method_index: usize, next_slot: *u
     if (has_override_relation) {
         valid_override = override_is_valid(context, function, inherited_index, requested);
     }
-    methods = context->classes.methods.data as *model::Method;
+    methods = context->classes.method_data() as *domain::ClassMethod;
     if (valid_override) {
         methods[method_index].virtual_slot = methods[inherited_index].virtual_slot;
         return;
@@ -1054,11 +1060,11 @@ fn effective_method_for_slot(context: *context::Context, type_id: usize, slot: u
         if (record_id == context::no_id()) {
             return context::no_id();
         }
-        let records: *const model::Record = context->classes.records.data as
-                *const model::Record;
-        let methods: *const model::Method = context->classes.methods.data as
-                *const model::Method;
-        let record: model::Record = records[record_id];
+        let records: *const domain::ClassRecord = context->classes.record_data() as
+                *const domain::ClassRecord;
+        let methods: *const domain::ClassMethod = context->classes.method_data() as
+                *const domain::ClassMethod;
+        let record: domain::ClassRecord = records[record_id];
         for (var index: usize = 0; index < record.method_count; index += 1) {
             let method_index: usize = record.first_method + index;
             if (methods[method_index].virtual_slot == slot) {
@@ -1071,30 +1077,30 @@ fn effective_method_for_slot(context: *context::Context, type_id: usize, slot: u
 }
 
 fn update_hierarchy_flags(context: *context::Context, record_id: usize) {
-    var records: *model::Record = context->classes.records.data as *model::Record;
+    var records: *domain::ClassRecord = context->classes.record_data() as *domain::ClassRecord;
     let type_id: usize = records[record_id].type_id;
     let slot_count: usize = hierarchy_slot_count(context, type_id);
     if (slot_count != 0) {
-        records[record_id].flags |= model::Flag.polymorphic as usize;
+        records[record_id].flags |= domain::ClassFlag.polymorphic as usize;
     }
     for (var slot: usize = 0; slot < slot_count; slot += 1) {
         let method_index: usize = effective_method_for_slot(context, type_id, slot);
         if (method_index == context::no_id()) {
             continue;
         }
-        let methods: *const model::Method = context->classes.methods.data as
-                *const model::Method;
-        if (methods[method_index].dispatch == model::Dispatch.abstract_method) {
-            records = context->classes.records.data as *model::Record;
-            records[record_id].flags |= model::Flag.abstract_class as usize;
+        let methods: *const domain::ClassMethod = context->classes.method_data() as
+                *const domain::ClassMethod;
+        if (methods[method_index].dispatch == domain::MethodDispatch.abstract_method) {
+            records = context->classes.record_data() as *domain::ClassRecord;
+            records[record_id].flags |= domain::ClassFlag.abstract_class as usize;
             return;
         }
     }
 }
 
 fn update_rtti_flag(context: *context::Context, record_id: usize) {
-    var records: *model::Record = context->classes.records.data as *model::Record;
-    let record: model::Record = records[record_id];
+    var records: *domain::ClassRecord = context->classes.record_data() as *domain::ClassRecord;
+    let record: domain::ClassRecord = records[record_id];
     let type_record: type_info::Record = context::type_record(context, record.type_id);
     let declaration: syntax::SyntaxNode = context::node(
         context, type_record.declaration_unit, type_record.declaration_node);
@@ -1103,14 +1109,14 @@ fn update_rtti_flag(context: *context::Context, record_id: usize) {
     let base_record_id: usize = find_record(context, record.base_type);
     var inherited: bool = false;
     if (base_record_id != context::no_id()) {
-        records = context->classes.records.data as *model::Record;
-        inherited = (records[base_record_id].flags & (model::Flag.rtti as usize)) != 0;
+        records = context->classes.record_data() as *domain::ClassRecord;
+        inherited = (records[base_record_id].flags & (domain::ClassFlag.rtti as usize)) != 0;
     }
     let non_root_annotation: bool = explicitly_enabled && base_record_id != context::no_id();
     let invalid_non_root: bool = non_root_annotation && !inherited;
     let enabled: bool = explicitly_enabled || inherited;
-    records = context->classes.records.data as *model::Record;
-    let polymorphic: bool = (records[record_id].flags & (model::Flag.polymorphic as usize)) != 0;
+    records = context->classes.record_data() as *domain::ClassRecord;
+    let polymorphic: bool = (records[record_id].flags & (domain::ClassFlag.polymorphic as usize)) != 0;
     let invalid_shape: bool = enabled && !polymorphic;
     if (invalid_non_root || invalid_shape) {
         context::add_diagnostic(
@@ -1119,7 +1125,7 @@ fn update_rtti_flag(context: *context::Context, record_id: usize) {
         return;
     }
     if (enabled) {
-        records[record_id].flags |= model::Flag.rtti as usize;
+        records[record_id].flags |= domain::ClassFlag.rtti as usize;
     }
 }
 
@@ -1135,9 +1141,9 @@ fn analyze_class_hierarchy(context: *context::Context, record_id: usize, states:
         return;
     }
     states[record_id] = HierarchyState.visiting as u8;
-    let records: *const model::Record = context->classes.records.data as
-            *const model::Record;
-    let record: model::Record = records[record_id];
+    let records: *const domain::ClassRecord = context->classes.record_data() as
+            *const domain::ClassRecord;
+    let record: domain::ClassRecord = records[record_id];
     validate_inherited_field_names(context, record);
     let base_record: usize = find_record(context, record.base_type);
     if (base_record != context::no_id()) {
@@ -1153,17 +1159,17 @@ fn analyze_class_hierarchy(context: *context::Context, record_id: usize, states:
 }
 
 fn analyze_method_hierarchy(context: *context::Context) -> bool {
-    let created: bytes::BufferResult = bytes::with_capacity(context->classes.record_count);
+    let created: bytes::BufferResult = bytes::with_capacity(context->classes.record_count());
     var states: bytes::Buffer = created.buffer;
     context->error = created.error;
     if (created.error != runtime::Error.none) {
         return false;
     }
-    states.length = context->classes.record_count;
+    states.length = context->classes.record_count();
     context->error = memory::fill(states.data, HierarchyState.unvisited as u8, states.length);
     let state_data: *u8 = states.data;
     for (var record_id: usize = 0;
-        record_id < context->classes.record_count && context->error == runtime::Error.none;
+        record_id < context->classes.record_count() && context->error == runtime::Error.none;
         record_id += 1) {
         analyze_class_hierarchy(context, record_id, state_data, 0);
     }
@@ -1174,8 +1180,8 @@ fn analyze_method_hierarchy(context: *context::Context) -> bool {
     return context->error == runtime::Error.none;
 }
 
-fn method_record_is_valid(context: *context::Context, owner_type: usize, method_record: model::Method) -> bool {
-    if (method_record.function_id >= context->function_count || method_record.access == model::Access.invalid) {
+fn method_record_is_valid(context: *context::Context, owner_type: usize, method_record: domain::ClassMethod) -> bool {
+    if (method_record.function_id >= context->function_count || method_record.access == domain::ClassAccess.invalid) {
         return false;
     }
     let functions: *const context::Function = context->functions.data as
@@ -1187,7 +1193,7 @@ fn method_record_is_valid(context: *context::Context, owner_type: usize, method_
     let virtual_dispatch: bool = dispatch_is_virtual(method_record.dispatch);
     let slot_is_valid: bool = virtual_dispatch ? method_record.virtual_slot != context::no_id() :
         method_record.virtual_slot == context::no_id();
-    let flags_are_valid: bool = method_record.flags <= model::MethodFlag.final_method as usize;
+    let flags_are_valid: bool = method_record.flags <= domain::MethodFlag.final_method as usize;
     let method_shape_is_valid: bool = direct_shape_is_valid && slot_is_valid;
     return method_shape_is_valid && flags_are_valid;
 }
@@ -1237,10 +1243,10 @@ fn class_storage_is_abstract(context: *context::Context, type_id: usize) -> bool
 }
 
 fn validate_abstract_class_fields(context: *context::Context) {
-    let records: *const model::Record = context->classes.records.data as *const model::Record;
+    let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
     let type_records: *const type_info::Record = context->types.record_data() as *const type_info::Record;
     let fields: *const type_info::Field = context->types.field_data() as *const type_info::Field;
-    for (var record_id: usize = 0; record_id < context->classes.record_count; record_id += 1) {
+    for (var record_id: usize = 0; record_id < context->classes.record_count(); record_id += 1) {
         let owner: type_info::Record = type_records[records[record_id].type_id];
         for (var index: usize = 0; index < owner.field_count; index += 1) {
             let field: type_info::Field = fields[owner.first_field + index];
@@ -1260,13 +1266,13 @@ fn validate_methods(context: *context::Context) -> bool {
     if (!analyze_method_hierarchy(context)) {
         return false;
     }
-    let records: *const model::Record = context->classes.records.data as
-            *const model::Record;
-    let methods: *const model::Method = context->classes.methods.data as
-            *const model::Method;
+    let records: *const domain::ClassRecord = context->classes.record_data() as
+            *const domain::ClassRecord;
+    let methods: *const domain::ClassMethod = context->classes.method_data() as
+            *const domain::ClassMethod;
     var expected_method: usize = 0;
-    for (var record_id: usize = 0; record_id < context->classes.record_count; record_id += 1) {
-        let record: model::Record = records[record_id];
+    for (var record_id: usize = 0; record_id < context->classes.record_count(); record_id += 1) {
+        let record: domain::ClassRecord = records[record_id];
         if (record.method_count == 0) {
             if (record.first_method != context::no_id()) {
                 context->error = runtime::Error.invalid_argument;
@@ -1286,7 +1292,7 @@ fn validate_methods(context: *context::Context) -> bool {
         }
         expected_method += record.method_count;
     }
-    if (expected_method != context->classes.method_count) {
+    if (expected_method != context->classes.method_count()) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
@@ -1308,9 +1314,9 @@ fn create_descriptor(context: *context::Context, record_id: usize, states: *u8, 
         return false;
     }
     states[record_id] = HierarchyState.visiting as u8;
-    var records: *const model::Record = context->classes.records.data as *const model::Record;
-    let record: model::Record = records[record_id];
-    let enabled: bool = (record.flags & (model::Flag.rtti as usize)) != 0;
+    var records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
+    let record: domain::ClassRecord = records[record_id];
+    let enabled: bool = (record.flags & (domain::ClassFlag.rtti as usize)) != 0;
     if (!enabled) {
         states[record_id] = HierarchyState.complete as u8;
         return record.descriptor_global == context::no_id();
@@ -1327,7 +1333,7 @@ fn create_descriptor(context: *context::Context, record_id: usize, states: *u8, 
         return false;
     }
     if (base_record_id != context::no_id()) {
-        records = context->classes.records.data as *const model::Record;
+        records = context->classes.record_data() as *const domain::ClassRecord;
         let base_descriptor: usize = records[base_record_id].descriptor_global;
         if (base_descriptor == context::no_id() || !context->ir.add_global_reference(global_id, 0, base_descriptor)) {
             context->error = base_descriptor == context::no_id() ? runtime::Error.invalid_argument :
@@ -1335,26 +1341,26 @@ fn create_descriptor(context: *context::Context, record_id: usize, states: *u8, 
             return false;
         }
     }
-    let writable: *model::Record = context->classes.records.data as *model::Record;
+    let writable: *domain::ClassRecord = context->classes.record_data() as *domain::ClassRecord;
     writable[record_id].descriptor_global = global_id;
     states[record_id] = HierarchyState.complete as u8;
     return true;
 }
 
 fn create_descriptors(context: *context::Context) -> bool {
-    if (context->classes.record_count == 0) {
+    if (context->classes.record_count() == 0) {
         return true;
     }
-    let created: bytes::BufferResult = bytes::with_capacity(context->classes.record_count);
+    let created: bytes::BufferResult = bytes::with_capacity(context->classes.record_count());
     var states: bytes::Buffer = created.buffer;
     context->error = created.error;
     if (created.error != runtime::Error.none) {
         return false;
     }
-    states.length = context->classes.record_count;
+    states.length = context->classes.record_count();
     context->error = memory::fill(states.data, HierarchyState.unvisited as u8, states.length);
     for (var record_id: usize = 0;
-        record_id < context->classes.record_count && context->error == runtime::Error.none;
+        record_id < context->classes.record_count() && context->error == runtime::Error.none;
         record_id += 1) {
         create_descriptor(context, record_id, states.data, 0);
     }
@@ -1366,10 +1372,10 @@ fn create_descriptors(context: *context::Context) -> bool {
 }
 
 fn create_vtable(context: *context::Context, record_id: usize) -> bool {
-    let records: *const model::Record = context->classes.records.data as *const model::Record;
-    let record: model::Record = records[record_id];
-    let polymorphic: bool = (record.flags & (model::Flag.polymorphic as usize)) != 0;
-    let abstract_class: bool = (record.flags & (model::Flag.abstract_class as usize)) != 0;
+    let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
+    let record: domain::ClassRecord = records[record_id];
+    let polymorphic: bool = (record.flags & (domain::ClassFlag.polymorphic as usize)) != 0;
+    let abstract_class: bool = (record.flags & (domain::ClassFlag.abstract_class as usize)) != 0;
     if (!polymorphic || abstract_class) {
         if (record.vtable_global != context::no_id()) {
             context->error = runtime::Error.invalid_argument;
@@ -1388,7 +1394,7 @@ fn create_vtable(context: *context::Context, record_id: usize) -> bool {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    let has_descriptor: bool = (record.flags & (model::Flag.rtti as usize)) != 0;
+    let has_descriptor: bool = (record.flags & (domain::ClassFlag.rtti as usize)) != 0;
     let prefix_bytes: usize = has_descriptor ? address_bytes : 0;
     var byte_count: usize = 0;
     if (@add_overflow(prefix_bytes, slot_bytes, &byte_count)) {
@@ -1419,7 +1425,7 @@ fn create_vtable(context: *context::Context, record_id: usize) -> bool {
         context->error = context->ir.error();
         return false;
     }
-    let methods: *const model::Method = context->classes.methods.data as *const model::Method;
+    let methods: *const domain::ClassMethod = context->classes.method_data() as *const domain::ClassMethod;
     let functions: *const context::Function = context->functions.data as *const context::Function;
     for (var slot: usize = 0; slot < slot_count && context->error == runtime::Error.none; slot += 1) {
         let method_index: usize = effective_method_for_slot(context, record.type_id, slot);
@@ -1427,9 +1433,9 @@ fn create_vtable(context: *context::Context, record_id: usize) -> bool {
             context->error = runtime::Error.invalid_argument;
             break;
         }
-        let method_record: model::Method = methods[method_index];
+        let method_record: domain::ClassMethod = methods[method_index];
         let function: context::Function = functions[method_record.function_id];
-        let target_is_valid: bool = method_record.dispatch != model::Dispatch.abstract_method &&
+        let target_is_valid: bool = method_record.dispatch != domain::MethodDispatch.abstract_method &&
             function.ir_function != context::no_id();
         let slot_offset: usize = prefix_bytes + slot * address_bytes;
         if (!target_is_valid || !context->ir.add_global_function_reference(global_id, slot_offset,
@@ -1440,7 +1446,7 @@ fn create_vtable(context: *context::Context, record_id: usize) -> bool {
     if (context->error != runtime::Error.none) {
         return false;
     }
-    let writable: *model::Record = context->classes.records.data as *model::Record;
+    let writable: *domain::ClassRecord = context->classes.record_data() as *domain::ClassRecord;
     writable[record_id].vtable_global = global_id;
     return true;
 }
@@ -1450,7 +1456,7 @@ fn create_vtables(context: *context::Context) -> bool {
         return false;
     }
     for (var record_id: usize = 0;
-        record_id < context->classes.record_count && context->error == runtime::Error.none;
+        record_id < context->classes.record_count() && context->error == runtime::Error.none;
         record_id += 1) {
         create_vtable(context, record_id);
     }
@@ -1462,8 +1468,8 @@ fn rtti_is_enabled(context: *context::Context, type_id: usize) -> bool {
     if (record_id == context::no_id()) {
         return false;
     }
-    let records: *const model::Record = context->classes.records.data as *const model::Record;
-    return (records[record_id].flags & (model::Flag.rtti as usize)) != 0;
+    let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
+    return (records[record_id].flags & (domain::ClassFlag.rtti as usize)) != 0;
 }
 
 fn descriptor_global(context: *context::Context, type_id: usize) -> usize {
@@ -1471,7 +1477,7 @@ fn descriptor_global(context: *context::Context, type_id: usize) -> usize {
     if (record_id == context::no_id()) {
         return context::no_id();
     }
-    let records: *const model::Record = context->classes.records.data as *const model::Record;
+    let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
     return records[record_id].descriptor_global;
 }
 
@@ -1484,7 +1490,7 @@ fn vtable_global(context: *context::Context, type_id: usize) -> usize {
     if (record_id == context::no_id()) {
         return context::no_id();
     }
-    let records: *const model::Record = context->classes.records.data as *const model::Record;
+    let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
     return records[record_id].vtable_global;
 }
 
@@ -1493,32 +1499,32 @@ fn vptr_offset(context: *context::Context, type_id: usize) -> usize {
     if (record_id == context::no_id()) {
         return context::no_id();
     }
-    let records: *const model::Record = context->classes.records.data as *const model::Record;
+    let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
     return records[record_id].vptr_offset;
 }
 
-fn method_record(context: *context::Context, function_id: usize) -> model::Method {
-    let methods: *const model::Method = context->classes.methods.data as *const model::Method;
-    for (var index: usize = 0; index < context->classes.method_count; index += 1) {
+fn method_record(context: *context::Context, function_id: usize) -> domain::ClassMethod {
+    let methods: *const domain::ClassMethod = context->classes.method_data() as *const domain::ClassMethod;
+    for (var index: usize = 0; index < context->classes.method_count(); index += 1) {
         if (methods[index].function_id == function_id) {
             return methods[index];
         }
     }
     return {
-        function_id = context::no_id(), access = model::Access.invalid, dispatch = model::Dispatch.invalid,
-        virtual_slot = context::no_id(), flags = model::MethodFlag.none as usize,
+        function_id = context::no_id(), access = domain::ClassAccess.invalid, dispatch = domain::MethodDispatch.invalid,
+        virtual_slot = context::no_id(), flags = domain::MethodFlag.none as usize,
     };
 }
 
-fn direct_dispatch_plan() -> model::DispatchPlan {
+fn direct_dispatch_plan() -> domain::DispatchPlan {
     return {
-        kind = model::CallDispatch.direct, vptr_offset = context::no_id(), virtual_slot = context::no_id(),
+        kind = domain::CallDispatch.direct, vptr_offset = context::no_id(), virtual_slot = context::no_id(),
     };
 }
 
 fn dispatch_plan(
     context: *context::Context, static_type: usize, function_id: usize,
-    exact_dynamic_type: bool) -> model::DispatchPlan {
+    exact_dynamic_type: bool) -> domain::DispatchPlan {
     if (exact_dynamic_type) {
         return direct_dispatch_plan();
     }
@@ -1526,11 +1532,11 @@ fn dispatch_plan(
     if (record_id == context::no_id()) {
         return direct_dispatch_plan();
     }
-    let records: *const model::Record = context->classes.records.data as *const model::Record;
-    let record: model::Record = records[record_id];
-    let selected_method: model::Method = method_record(context, function_id);
-    let class_is_final: bool = (record.flags & (model::Flag.final_class as usize)) != 0;
-    let method_is_final: bool = (selected_method.flags & (model::MethodFlag.final_method as usize)) != 0;
+    let records: *const domain::ClassRecord = context->classes.record_data() as *const domain::ClassRecord;
+    let record: domain::ClassRecord = records[record_id];
+    let selected_method: domain::ClassMethod = method_record(context, function_id);
+    let class_is_final: bool = (record.flags & (domain::ClassFlag.final_class as usize)) != 0;
+    let method_is_final: bool = (selected_method.flags & (domain::MethodFlag.final_method as usize)) != 0;
     if (class_is_final || method_is_final) {
         return direct_dispatch_plan();
     }
@@ -1541,19 +1547,19 @@ fn dispatch_plan(
         return direct_dispatch_plan();
     }
     return {
-        kind = model::CallDispatch.virtual_call, vptr_offset = record.vptr_offset,
+        kind = domain::CallDispatch.virtual_call, vptr_offset = record.vptr_offset,
         virtual_slot = selected_method.virtual_slot,
     };
 }
 
 fn method_is_accessible(context: *context::Context, function_id: usize) -> bool {
-    let methods: *const model::Method = context->classes.methods.data as
-            *const model::Method;
-    for (var index: usize = 0; index < context->classes.method_count; index += 1) {
+    let methods: *const domain::ClassMethod = context->classes.method_data() as
+            *const domain::ClassMethod;
+    for (var index: usize = 0; index < context->classes.method_count(); index += 1) {
         if (methods[index].function_id != function_id) {
             continue;
         }
-        if (methods[index].access == model::Access.public_access) {
+        if (methods[index].access == domain::ClassAccess.public_access) {
             return true;
         }
         let functions: *const context::Function = context->functions.data as

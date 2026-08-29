@@ -4,141 +4,182 @@ enum Limit: usize {
     maximum_size = 18446744073709551615,
 }
 
-fn empty() -> Store {
-    return {
-        records = bytes::empty(), record_count = 0, fields = bytes::empty(), field_count = 0,
-        methods = bytes::empty(), method_count = 0, friends = bytes::empty(), friend_count = 0,
-    };
-}
-
-fn buffer_matches(buffer: bytes::Buffer, count: usize, record_size: usize) -> bool {
-    let storage_is_valid: bool = bytes::is_valid(buffer) && record_size != 0;
-    if (!storage_is_valid) {
-        return false;
-    }
-    let shape_is_valid: bool = buffer.length % record_size == 0;
-    return shape_is_valid && count == buffer.length / record_size;
-}
-
-fn storage_is_valid(store: Store) -> bool {
-    let records_are_valid: bool = buffer_matches(store.records, store.record_count, sizeof(Record));
-    let fields_are_valid: bool = buffer_matches(store.fields, store.field_count, sizeof(Field));
-    let methods_are_valid: bool = buffer_matches(store.methods, store.method_count, sizeof(Method));
-    let friends_are_valid: bool = buffer_matches(store.friends, store.friend_count, sizeof(Friend));
-    let members_are_valid: bool = fields_are_valid && methods_are_valid;
-    let policies_are_valid: bool = members_are_valid && friends_are_valid;
-    return records_are_valid && policies_are_valid;
-}
-
-fn append_record(store: *Store, record: Record) -> runtime::Error {
-    if (store == null || !storage_is_valid(*store)) {
-        return runtime::Error.invalid_argument;
-    }
-    let appended: bytes::BufferResult = bytes::append(
-        store->records, (&record) as *const Record as *const u8, sizeof(Record));
-    store->records = appended.buffer;
-    if (appended.error == runtime::Error.none) {
-        store->record_count += 1;
-    }
-    return appended.error;
+fn class_slice_is_empty(first: usize, count: usize) -> bool {
+    return first == Limit.maximum_size as usize && count == 0;
 }
 
 fn class_slice_is_appendable(first: usize, count: usize, next: usize) -> bool {
     if (count == 0) {
-        return first == Limit.maximum_size as usize;
+        return class_slice_is_empty(first, count);
     }
     return first <= next && count == next - first;
 }
 
-fn append_field(store: *Store, record_id: usize, field: Field) -> runtime::Error {
-    if (store == null || !storage_is_valid(*store)) {
-        return runtime::Error.invalid_argument;
+fn record_slices_are_empty(record: domain::ClassRecord) -> bool {
+    let fields_are_empty: bool = class_slice_is_empty(record.first_field, record.field_count);
+    let methods_are_empty: bool = class_slice_is_empty(record.first_method, record.method_count);
+    let friends_are_empty: bool = class_slice_is_empty(record.first_friend, record.friend_count);
+    let members_are_empty: bool = fields_are_empty && methods_are_empty;
+    return members_are_empty && friends_are_empty;
+}
+
+impl ClassTable {
+    init(): records = vector::vector<domain::ClassRecord>(), fields = vector::vector<domain::ClassField>(),
+            methods = vector::vector<domain::ClassMethod>(), friends = vector::vector<domain::ClassFriend>() {
+        this->error_code = runtime::Error.none;
     }
-    if (record_id >= store->record_count) {
-        return runtime::Error.invalid_argument;
+
+    init(other: ClassTable&&): records = other.records as vector::vector<domain::ClassRecord>&&,
+            fields = other.fields as vector::vector<domain::ClassField>&&,
+                methods = other.methods as vector::vector<domain::ClassMethod>&&,
+            friends = other.friends as vector::vector<domain::ClassFriend>&& {
+        this->error_code = other.error_code;
+        other.error_code = runtime::Error.none;
     }
-    var records: *Record = store->records.data as *Record;
-    if (!class_slice_is_appendable(records[record_id].first_field, records[record_id].field_count,
-        store->field_count)) {
-        return runtime::Error.invalid_argument;
+
+    priv fn ready() const -> bool {
+        return this->error_code == runtime::Error.none && this->storage_is_valid();
     }
-    let appended: bytes::BufferResult = bytes::append(
-        store->fields, (&field) as *const Field as *const u8, sizeof(Field));
-    store->fields = appended.buffer;
-    if (appended.error == runtime::Error.none) {
-        records = store->records.data as *Record;
-        if (records[record_id].field_count == 0) {
-            records[record_id].first_field = store->field_count;
+
+    priv fn can_append_record(record: domain::ClassRecord) const -> bool {
+        let capacity_is_available: bool = this->records.size() != Limit.maximum_size as usize;
+        let storage_is_ready: bool = this->ready() && capacity_is_available;
+        return storage_is_ready && record_slices_are_empty(record);
+    }
+
+    priv fn fail(error: runtime::Error) -> runtime::Error {
+        if (this->error_code == runtime::Error.none) {
+            this->error_code = error;
         }
-        records[record_id].field_count += 1;
-        store->field_count += 1;
+        return this->error_code;
     }
-    return appended.error;
-}
 
-fn append_method(store: *Store, record_id: usize, method_record: Method) -> runtime::Error {
-    if (store == null || !storage_is_valid(*store)) {
-        return runtime::Error.invalid_argument;
+    fn storage_is_valid() const -> bool {
+        let declarations_are_valid: bool = this->records.is_valid() && this->fields.is_valid();
+        let policies_are_valid: bool = this->methods.is_valid() && this->friends.is_valid();
+        return declarations_are_valid && policies_are_valid;
     }
-    if (record_id >= store->record_count) {
-        return runtime::Error.invalid_argument;
+
+    fn error() const -> runtime::Error {
+        return this->error_code;
     }
-    var records: *Record = store->records.data as *Record;
-    if (!class_slice_is_appendable(
-            records[record_id].first_method, records[record_id].method_count, store->method_count)) {
-        return runtime::Error.invalid_argument;
+
+    fn record_count() const -> usize {
+        return this->records.size();
     }
-    let appended: bytes::BufferResult = bytes::append(
-        store->methods, (&method_record) as *const Method as *const u8, sizeof(Method));
-    store->methods = appended.buffer;
-    if (appended.error == runtime::Error.none) {
-        records = store->records.data as *Record;
-        if (records[record_id].method_count == 0) {
-            records[record_id].first_method = store->method_count;
+
+    fn field_count() const -> usize {
+        return this->fields.size();
+    }
+
+    fn method_count() const -> usize {
+        return this->methods.size();
+    }
+
+    fn friend_count() const -> usize {
+        return this->friends.size();
+    }
+
+    fn record_data() -> *domain::ClassRecord {
+        return this->records.empty() ? null : &this->records.get(0);
+    }
+
+    fn record_data() const -> *const domain::ClassRecord {
+        return this->records.empty() ? null : &this->records.get(0) as *const domain::ClassRecord;
+    }
+
+    fn field_data() -> *domain::ClassField {
+        return this->fields.empty() ? null : &this->fields.get(0);
+    }
+
+    fn field_data() const -> *const domain::ClassField {
+        return this->fields.empty() ? null : &this->fields.get(0) as *const domain::ClassField;
+    }
+
+    fn method_data() -> *domain::ClassMethod {
+        return this->methods.empty() ? null : &this->methods.get(0);
+    }
+
+    fn method_data() const -> *const domain::ClassMethod {
+        return this->methods.empty() ? null : &this->methods.get(0) as *const domain::ClassMethod;
+    }
+
+    fn friend_data() -> *domain::ClassFriend {
+        return this->friends.empty() ? null : &this->friends.get(0);
+    }
+
+    fn friend_data() const -> *const domain::ClassFriend {
+        return this->friends.empty() ? null : &this->friends.get(0) as *const domain::ClassFriend;
+    }
+
+    fn append_record(record: domain::ClassRecord) -> runtime::Error {
+        if (!this->can_append_record(record)) {
+            return this->fail(runtime::Error.invalid_argument);
         }
-        records[record_id].method_count += 1;
-        store->method_count += 1;
+        let error: runtime::Error = this->records.push_back(record);
+        return error == runtime::Error.none ? error : this->fail(error);
     }
-    return appended.error;
-}
 
-fn append_friend(store: *Store, record_id: usize, friend_record: Friend) -> runtime::Error {
-    if (store == null || !storage_is_valid(*store)) {
-        return runtime::Error.invalid_argument;
-    }
-    if (record_id >= store->record_count) {
-        return runtime::Error.invalid_argument;
-    }
-    var records: *Record = store->records.data as *Record;
-    if (!class_slice_is_appendable(
-            records[record_id].first_friend, records[record_id].friend_count, store->friend_count)) {
-        return runtime::Error.invalid_argument;
-    }
-    let appended: bytes::BufferResult = bytes::append(
-        store->friends, (&friend_record) as *const Friend as *const u8, sizeof(Friend));
-    store->friends = appended.buffer;
-    if (appended.error == runtime::Error.none) {
-        records = store->records.data as *Record;
-        if (records[record_id].friend_count == 0) {
-            records[record_id].first_friend = store->friend_count;
+    fn append_field(record_id: usize, field: domain::ClassField) -> runtime::Error {
+        if (!this->ready() || record_id >= this->records.size()) {
+            return this->fail(runtime::Error.invalid_argument);
         }
-        records[record_id].friend_count += 1;
-        store->friend_count += 1;
+        let record: domain::ClassRecord = this->records.get(record_id);
+        let field_id: usize = this->fields.size();
+        if (!class_slice_is_appendable(record.first_field, record.field_count, field_id)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let error: runtime::Error = this->fields.push_back(field);
+        if (error != runtime::Error.none) {
+            return this->fail(error);
+        }
+        if (record.field_count == 0) {
+            this->records.get(record_id).first_field = field_id;
+        }
+        this->records.get(record_id).field_count += 1;
+        return runtime::Error.none;
     }
-    return appended.error;
-}
 
-fn first_error(current: runtime::Error, next: runtime::Error) -> runtime::Error {
-    return current != runtime::Error.none ? current : next;
-}
-
-fn release(store: Store) -> runtime::Error {
-    if (!storage_is_valid(store)) {
-        return runtime::Error.invalid_argument;
+    fn append_method(record_id: usize, method_record: domain::ClassMethod) -> runtime::Error {
+        if (!this->ready() || record_id >= this->records.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let record: domain::ClassRecord = this->records.get(record_id);
+        let method_id: usize = this->methods.size();
+        if (!class_slice_is_appendable(record.first_method, record.method_count, method_id)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let error: runtime::Error = this->methods.push_back(method_record);
+        if (error != runtime::Error.none) {
+            return this->fail(error);
+        }
+        if (record.method_count == 0) {
+            this->records.get(record_id).first_method = method_id;
+        }
+        this->records.get(record_id).method_count += 1;
+        return runtime::Error.none;
     }
-    var error: runtime::Error = bytes::release(store.records);
-    error = first_error(error, bytes::release(store.fields));
-    error = first_error(error, bytes::release(store.methods));
-    error = first_error(error, bytes::release(store.friends));
-    return error;
+
+    fn append_friend(record_id: usize, friend_record: domain::ClassFriend) -> runtime::Error {
+        if (!this->ready() || record_id >= this->records.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let record: domain::ClassRecord = this->records.get(record_id);
+        let friend_id: usize = this->friends.size();
+        if (!class_slice_is_appendable(record.first_friend, record.friend_count, friend_id)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let error: runtime::Error = this->friends.push_back(friend_record);
+        if (error != runtime::Error.none) {
+            return this->fail(error);
+        }
+        if (record.friend_count == 0) {
+            this->records.get(record_id).first_friend = friend_id;
+        }
+        this->records.get(record_id).friend_count += 1;
+        return runtime::Error.none;
+    }
+
+    deinit() {
+    }
 }

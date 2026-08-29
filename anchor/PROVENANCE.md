@@ -993,3 +993,58 @@ its 59,678-byte object has SHA-256
 `7ea996199025b102e9e7c76ec2cc9a5fb4ab0a416697cfd652d2be8f1d3a48ee`.
 The promoted 5,113,683-byte executable has SHA-256
 `da919a6f4f0e7e278e0561714df6f11fcb80c2efe4d0cd07fd061d6f4ff04db9`.
+
+## 2026-08-29: promotion to the typed semantic metadata toolchain
+
+The anchor now contains the stage-fixed `luna` executable from the three
+semantic metadata batches accompanying this note. The former transparent class
+Store is replaced by a move-only `ClassTable` over typed record, field, method
+and friend vectors. Bound append methods own contiguous slice construction,
+reject non-empty incoming slices, retain the first error and leave moved-from
+tables valid and empty. Context no longer manually releases class storage.
+
+The former generic Store, eight raw buffers and eight synchronized counts are
+replaced by a move-only `GenericTable`. Declaration parameters remain one
+append-only slice. Instance creation reserves and rolls back typed sequences,
+deduplicates complete identities and rebuilds open-addressed buckets in a
+replacement vector before publishing them. Reverse maps validate both targets
+before publishing either result, active-binding rollback remains available
+after a sticky failure, and consumers receive only const typed projections.
+
+Stable class/generic enums and passive records now live in the acyclic
+`luna.compiler.sema.domain` foundation. The owner import order is types,
+domain, tables, Context, then higher semantic passes. Direct compiler imports
+of class/generic owners contract from 5/8 to 1/1; Context is their sole direct
+consumer. The domain interface grows from 51 to 161 lines while the two owner
+interfaces contract from 99/105 to 35/61 lines. No empty domain implementation
+files, forwarding modules or compatibility aliases were added.
+
+The current compiler emits strong generic symbols per concrete type, and
+`vector<usize>` already exists in the initializer module. GenericTable
+therefore uses one module-specific `IndexEntry` vector specialization. Current
+exported-class ABI rules require that private generic argument type to remain
+visible; an interface comment and exact-size assertion record and constrain
+that temporary adaptation.
+
+Remote x86-64 verification in the isolated caw workspace
+`/home/aoweichen/codex-workspaces/luna-sema-metadata-uYxaUt` built the complete
+66-module, 56-library-object graph through transition, next and fixed stages.
+The cold stage times were 14.89, 14.89 and 14.86 seconds; every next/fixed
+assembly, object and executable artifact was byte-identical. Audit and
+formatting gates were green, the reviewed owner/contract code had no `while`
+or condition above two logical clauses, and the post-fixed-point suite passed
+450/450 with no failures or skips.
+
+After passive-record extraction, the domain, class-owner and generic-owner
+modules compile in medians 0.056784, 0.277308 and 0.578233 seconds. Their
+combined assembly contracts from the pre-extraction 2,527,531 bytes to
+2,363,419 bytes. The final assemblies have SHA-256
+`ed3b1abc40726a8d335d0f426714fc522a553372035d3f12bca612245f3327cc`,
+`146f8d7269a2296bf0fef25ca5060513371a23bfece44f4dca9bb5c69d2a2b5e`
+and `5e77759da419aab8fcbb7e128734c3f44d6ab3fdce1aa75109dd431a55ea03d8`.
+Their 59,678-, 251,976- and 418,393-byte objects have SHA-256
+`7ea996199025b102e9e7c76ec2cc9a5fb4ab0a416697cfd652d2be8f1d3a48ee`,
+`315d39de9d6d904f33c6ff5f8e922ab649ec87b82e181121d80d3007893801ca`
+and `d675e195f1dc9362e46ba71f69ee96cc1cc1e9025765a1b6b73b2042406444c9`.
+The promoted 5,179,219-byte executable has SHA-256
+`7dcc139c0b50ad7361faa5581fd25ae90b0c4d6f3a87243b5c1f13f6553eccb5`.

@@ -4,14 +4,27 @@ import luna.compiler.x86.codegen as codegen;
 import luna.compiler.parser as parser;
 import luna.compiler.ir as ir;
 import luna.bootstrap.middleend.sema as sema;
+import luna.bootstrap.middleend.semantic.classes.model as class_model;
 import luna.bootstrap.middleend.semantic.context as context;
+import luna.bootstrap.middleend.semantic.generics.model as generic_model;
 import luna.runtime;
+import luna.compiler.sema.domain as domain;
 import luna.std.bytes as bytes;
 import luna.std.string_view as string_views;
 import luna.std.utility as utility;
 
 enum ProbeLayout: usize {
     address_bytes = 8, second_address_offset = 16, byte_count = 24,
+}
+
+enum ClassProbe: usize {
+    type_id = 1, friend_type = 2, field_id = 7, function_id = 11,
+}
+
+enum GenericProbe: usize {
+    module_id = 3, unit_index = 4, node_index = 5, name_token = 6,
+    binding_id = 9, type_argument = 17, type_result = 23, function_id = 29,
+    additional_instances = 13, argument_base = 100,
 }
 
 fn pattern_count(data: *const u8, length: usize, pattern: *const u8, pattern_length: usize) -> usize {
@@ -38,7 +51,243 @@ fn first_error(current: runtime::Error, next: runtime::Error) -> runtime::Error 
     return current == runtime::Error.none ? next : current;
 }
 
+fn class_table_failure_is_sticky(record: domain::ClassRecord) -> bool {
+    var rejected: class_model::ClassTable = class_model::ClassTable();
+    var malformed: domain::ClassRecord = record;
+    malformed.first_field = 0;
+    let rejected_error: runtime::Error = rejected.append_record(malformed);
+    let rejection_is_visible: bool = rejected_error == runtime::Error.invalid_argument &&
+        rejected.error() == runtime::Error.invalid_argument;
+    if (!rejection_is_visible || rejected.record_count() != 0) {
+        return false;
+    }
+    let next_error: runtime::Error = rejected.append_record(record);
+    return next_error == runtime::Error.invalid_argument && rejected.record_count() == 0;
+}
+
+fn class_table_move_is_valid() -> bool {
+    let none: usize = context::no_id();
+    let record: domain::ClassRecord = {
+        type_id = ClassProbe.type_id as usize, base_type = none, first_field = none, field_count = 0,
+        first_method = none, method_count = 0, first_friend = none, friend_count = 0,
+        vptr_offset = none, descriptor_global = none, vtable_global = none,
+        flags = domain::ClassFlag.none as usize,
+    };
+    var original: class_model::ClassTable = class_model::ClassTable();
+    if (original.append_record(record) != runtime::Error.none) {
+        return false;
+    }
+    let field: domain::ClassField = {
+        field_id = ClassProbe.field_id as usize, access = domain::ClassAccess.public_access,
+    };
+    if (original.append_field(0, field) != runtime::Error.none) {
+        return false;
+    }
+    let method_record: domain::ClassMethod = {
+        function_id = ClassProbe.function_id as usize, access = domain::ClassAccess.protected_access,
+        dispatch = domain::MethodDispatch.direct, virtual_slot = none,
+        flags = domain::MethodFlag.none as usize,
+    };
+    if (original.append_method(0, method_record) != runtime::Error.none) {
+        return false;
+    }
+    let friend_record: domain::ClassFriend = {
+        owner_type = ClassProbe.type_id as usize, friend_type = ClassProbe.friend_type as usize,
+    };
+    if (original.append_friend(0, friend_record) != runtime::Error.none) {
+        return false;
+    }
+
+    var moved: class_model::ClassTable = utility::move(original);
+    let moved_counts_are_valid: bool = moved.record_count() == 1 && moved.field_count() == 1;
+    let moved_members_are_valid: bool = moved.method_count() == 1 && moved.friend_count() == 1;
+    if (!moved_counts_are_valid || !moved_members_are_valid) {
+        return false;
+    }
+    let source_counts_are_empty: bool = original.record_count() == 0 && original.field_count() == 0;
+    let source_members_are_empty: bool = original.method_count() == 0 && original.friend_count() == 0;
+    if (!source_counts_are_empty || !source_members_are_empty) {
+        return false;
+    }
+    let storage_is_valid: bool = moved.storage_is_valid() && original.storage_is_valid();
+    let errors_are_empty: bool = moved.error() == runtime::Error.none && original.error() == runtime::Error.none;
+    if (!storage_is_valid || !errors_are_empty) {
+        return false;
+    }
+    let moved_record: domain::ClassRecord = moved.record_data()[0];
+    let field_slice_is_valid: bool = moved_record.first_field == 0 && moved_record.field_count == 1;
+    let method_slice_is_valid: bool = moved_record.first_method == 0 && moved_record.method_count == 1;
+    let friend_slice_is_valid: bool = moved_record.first_friend == 0 && moved_record.friend_count == 1;
+    let member_slices_are_valid: bool = field_slice_is_valid && method_slice_is_valid;
+    if (!member_slices_are_valid || !friend_slice_is_valid) {
+        return false;
+    }
+    let field_value_is_valid: bool = moved.field_data()[0].field_id == ClassProbe.field_id as usize;
+    let method_value_is_valid: bool = moved.method_data()[0].function_id == ClassProbe.function_id as usize;
+    let friend_value_is_valid: bool = moved.friend_data()[0].friend_type == ClassProbe.friend_type as usize;
+    let member_values_are_valid: bool = field_value_is_valid && method_value_is_valid;
+    if (!member_values_are_valid || !friend_value_is_valid) {
+        return false;
+    }
+    return class_table_failure_is_sticky(record);
+}
+
+fn generic_probe_declaration() -> domain::GenericDeclaration {
+    let none: usize = generic_model::no_id();
+    return {
+        kind = domain::GenericDeclarationKind.function_declaration,
+        module_id = GenericProbe.module_id as usize,
+        unit_index = GenericProbe.unit_index as usize,
+        node_index = GenericProbe.node_index as usize,
+        name_token = GenericProbe.name_token as usize,
+        first_parameter = none, parameter_count = 0,
+        binding_id = none, flags = 0,
+    };
+}
+
+fn generic_table_failure_is_sticky(declaration: domain::GenericDeclaration) -> bool {
+    var rejected: generic_model::GenericTable = generic_model::GenericTable();
+    var malformed: domain::GenericDeclaration = declaration;
+    malformed.first_parameter = 0;
+    let rejected_error: runtime::Error = rejected.append_declaration(malformed);
+    let rejection_is_visible: bool = rejected_error == runtime::Error.invalid_argument &&
+        rejected.error() == runtime::Error.invalid_argument;
+    if (!rejection_is_visible || rejected.declaration_count() != 0) {
+        return false;
+    }
+    let next_error: runtime::Error = rejected.append_declaration(declaration);
+    return next_error == runtime::Error.invalid_argument && rejected.declaration_count() == 0;
+}
+
+fn generic_table_indexes_are_valid(table: *generic_model::GenericTable) -> bool {
+    if (table == null) {
+        return false;
+    }
+    for (var index: usize = 0; index < GenericProbe.additional_instances as usize; index += 1) {
+        let argument: usize = GenericProbe.argument_base as usize + index;
+        let created =
+            table->append_instance(0, generic_model::no_id(), &argument, 1, 0);
+        if (created.error != runtime::Error.none) {
+            return false;
+        }
+        let found: usize = table->find_instance(0, generic_model::no_id(), &argument, 1);
+        if (found != created.instance_id) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn generic_table_move_is_valid() -> bool {
+    let none: usize = generic_model::no_id();
+    let declaration: domain::GenericDeclaration = generic_probe_declaration();
+    var original: generic_model::GenericTable = generic_model::GenericTable();
+    if (original.append_declaration(declaration) != runtime::Error.none) {
+        return false;
+    }
+    if (original.is_valid()) {
+        return false;
+    }
+    let parameter: domain::GenericParameter = {
+        declaration_id = 0,
+        unit_index = GenericProbe.unit_index as usize,
+        node_index = GenericProbe.node_index as usize,
+        name_token = GenericProbe.name_token as usize,
+        position = 0,
+    };
+    if (original.append_parameter(0, parameter) != runtime::Error.none) {
+        return false;
+    }
+    if (original.set_declaration_binding(0, GenericProbe.binding_id as usize) != runtime::Error.none) {
+        return false;
+    }
+
+    let argument: usize = GenericProbe.type_argument as usize;
+    let created = original.append_instance(0, none, &argument, 1, 0);
+    if (created.error != runtime::Error.none || created.instance_id != 0) {
+        return false;
+    }
+    let duplicate = original.append_instance(0, none, &argument, 1, 0);
+    if (duplicate.error != runtime::Error.none || duplicate.instance_id != created.instance_id) {
+        return false;
+    }
+    if (!generic_table_indexes_are_valid(&original)) {
+        return false;
+    }
+    let expected_instance_count: usize = 1 + GenericProbe.additional_instances as usize;
+    if (original.instance_count() != expected_instance_count) {
+        return false;
+    }
+    if (original.set_instance_result(
+            created.instance_id, GenericProbe.type_result as usize,
+            none, domain::GenericInstanceState.resolving) != runtime::Error.none) {
+        return false;
+    }
+    if (original.instance_for_type(GenericProbe.type_result as usize) != created.instance_id) {
+        return false;
+    }
+    if (original.map_function_instance(GenericProbe.function_id as usize, created.instance_id) !=
+        runtime::Error.none) {
+        return false;
+    }
+    if (original.instance_for_function(GenericProbe.function_id as usize) != created.instance_id) {
+        return false;
+    }
+
+    let active: domain::GenericActiveBinding = {
+        unit_index = GenericProbe.unit_index as usize,
+        name_token = GenericProbe.name_token as usize,
+        type_id = GenericProbe.type_argument as usize,
+    };
+    if (original.append_active_binding(active) != runtime::Error.none) {
+        return false;
+    }
+    if (original.is_valid() || original.active_binding_count() != 1) {
+        return false;
+    }
+    if (original.truncate_active_bindings(0) != runtime::Error.none) {
+        return false;
+    }
+    if (!original.is_valid()) {
+        return false;
+    }
+
+    var moved: generic_model::GenericTable = utility::move(original);
+    let source_is_empty: bool = original.declaration_count() == 0 && original.instance_count() == 0;
+    let source_is_valid: bool = original.storage_is_valid() && original.is_valid();
+    if (!source_is_empty || !source_is_valid) {
+        return false;
+    }
+    let counts_are_valid: bool = moved.declaration_count() == 1 && moved.parameter_count() == 1;
+    let instances_are_valid: bool = moved.instance_count() == expected_instance_count &&
+        moved.argument_count() == expected_instance_count;
+    if (!counts_are_valid || !instances_are_valid) {
+        return false;
+    }
+    let declaration_is_valid: bool =
+        moved.declaration_data()[0].binding_id == GenericProbe.binding_id as usize;
+    let parameter_is_valid: bool = moved.parameter_data()[0].declaration_id == 0;
+    let argument_is_valid: bool = moved.argument_data()[0] == GenericProbe.type_argument as usize;
+    let records_are_valid: bool = declaration_is_valid && parameter_is_valid;
+    if (!records_are_valid || !argument_is_valid) {
+        return false;
+    }
+    let maps_are_valid: bool = moved.instance_for_type(GenericProbe.type_result as usize) == created.instance_id &&
+        moved.instance_for_function(GenericProbe.function_id as usize) == created.instance_id;
+    let moved_state_is_valid: bool = moved.is_valid() && moved.error() == runtime::Error.none;
+    if (!maps_are_valid || !moved_state_is_valid) {
+        return false;
+    }
+    return generic_table_failure_is_sticky(declaration);
+}
+
 fn main() -> i32 {
+    if (!class_table_move_is_valid()) {
+        return 32;
+    }
+    if (!generic_table_move_is_valid()) {
+        return 33;
+    }
     let source: string_views::string_view_result = string_views::from_c_string(
         "module tests.relocation_probe;\nextern fn dispatch_target() -> i32;\n", 96);
     let path: string_views::string_view_result = string_views::from_c_string("relocation-probe.la", 32);

@@ -13,8 +13,12 @@
 > The current root semantic lifecycle is owned by a private SemanticSession,
 > move-only Input and typed RAII diagnostics; its incremental contract is
 > recorded in `sema.md`.
-> Callable identity and value-category rules now share the modern
-> `luna.compiler.sema.domain` foundation.
+> Callable identity, value-category rules and stable passive class/generic
+> records now share the modern `luna.compiler.sema.domain` foundation.
+> Class metadata is owned by the move-only typed `ClassTable`; its contiguous
+> slice and failure contract is also recorded in `sema.md`.
+> Generic metadata is owned by the move-only typed `GenericTable`; its
+> transactional index and rollback contract is recorded in `sema.md`.
 
 M4 now contains a separately compiled Luna implementation of name resolution,
 strong type checking, target layout and verified Typed IR construction. It
