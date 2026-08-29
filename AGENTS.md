@@ -63,6 +63,20 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
    promotion is automatic and belongs in the same pushed change; do not wait
    for a separate reminder.
 
+## Session recovery
+
+- `SESSION.md` is the durable handoff for substantial unfinished work. Read it
+  immediately after this file when resuming a Luna task, then reconcile it
+  against `git status`, `git diff` and the current source; the working tree is
+  authoritative when the snapshot and files differ.
+- Refresh `SESSION.md` before handing off unfinished work, after a material
+  implementation or validation milestone, and whenever the user asks to save
+  the conversation state. Record concrete files, decisions, evidence, open
+  work and the exact next action rather than a conversational summary alone.
+- The raw Codex transcript stays in Codex's protected session storage. Record
+  its session UUID and local path in `SESSION.md`; never commit a raw transcript
+  or authentication material into the repository.
+
 ## Style
 
 - `docs/modernization.md` is the mandatory architecture contract for every

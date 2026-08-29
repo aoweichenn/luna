@@ -1,0 +1,93 @@
+module luna.compiler.ir;
+
+fn opcode_is_terminator(opcode: Opcode) -> bool {
+    switch (opcode) {
+    case Opcode.jump, Opcode.branch, Opcode.return_value, Opcode.return_void, Opcode.unreachable {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+impl Builder {
+    fn add_block(function_id: usize) -> usize {
+        let none: usize = no_id();
+        if (!this->ready() || function_id >= this->storage.functions.size()) {
+            this->fail(runtime::Error.invalid_argument);
+            return none;
+        }
+        let function: Function = this->storage.functions.get(function_id);
+        let range_is_extendable: bool = function_can_extend_range(
+            function.first_block, function.block_count, this->storage.blocks.size());
+        if (!function.has_body || !range_is_extendable) {
+            this->fail(runtime::Error.invalid_argument);
+            return none;
+        }
+        let block: Block = {
+            function_id = function_id, first_instruction = none, last_instruction = none, instruction_count = 0,
+            predecessor_count = 0, terminated = false,
+        };
+        let block_id: usize = this->storage.blocks.size();
+        let error: runtime::Error = this->storage.blocks.push_back(block);
+        if (error != runtime::Error.none) {
+            this->fail(error);
+            return none;
+        }
+        if (this->storage.functions.get(function_id).block_count == 0) {
+            this->storage.functions.get(function_id).first_block = block_id;
+        }
+        this->storage.functions.get(function_id).block_count += 1;
+        return block_id;
+    }
+
+    fn add_value(function_id: usize, block_id: usize, type_id: usize) -> usize {
+        let none: usize = no_id();
+        let owner_is_valid: bool = function_id < this->storage.functions.size() &&
+            block_id < this->storage.blocks.size();
+        if (!this->ready() || !owner_is_valid) {
+            this->fail(runtime::Error.invalid_argument);
+            return none;
+        }
+        if (type_id == none || this->storage.blocks.get(block_id).function_id != function_id) {
+            this->fail(runtime::Error.invalid_argument);
+            return none;
+        }
+        let function: Function = this->storage.functions.get(function_id);
+        let range_is_extendable: bool = function_can_extend_range(
+            function.first_value, function.value_count, this->storage.values.size());
+        if (!range_is_extendable) {
+            this->fail(runtime::Error.invalid_argument);
+            return none;
+        }
+        let value: Value = {
+            function_id = function_id, block_id = block_id, type_id = type_id, definition = none,
+        };
+        let value_id: usize = this->storage.values.size();
+        let error: runtime::Error = this->storage.values.push_back(value);
+        if (error != runtime::Error.none) {
+            this->fail(error);
+            return none;
+        }
+        if (this->storage.functions.get(function_id).value_count == 0) {
+            this->storage.functions.get(function_id).first_value = value_id;
+        }
+        this->storage.functions.get(function_id).value_count += 1;
+        return value_id;
+    }
+
+    fn set_entry(function_id: usize) -> bool {
+        let entry_is_empty: bool = this->storage.entry_function == no_id();
+        if (!this->ready() || function_id >= this->storage.functions.size()) {
+            this->fail(runtime::Error.invalid_argument);
+            return false;
+        }
+        if (!entry_is_empty || !this->storage.functions.get(function_id).has_body) {
+            this->fail(runtime::Error.invalid_argument);
+            return false;
+        }
+        this->storage.entry_function = function_id;
+        return true;
+    }
+}

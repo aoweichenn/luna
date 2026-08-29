@@ -846,3 +846,50 @@ its 425,966-byte object has SHA-256
 `c7f2ba9e3495e6bf51624399b17095219d0428b3d963bb67451e63f297e2aaed`.
 The promoted executable is 4,994,899 bytes with SHA-256
 `c8e6dbac2dac2b97c146efb761943fbd2da70634731daa59f3e1817afc0e4f5a`.
+
+## 2026-08-29: promotion to the RAII IR toolchain
+
+The anchor now contains the stage-fixed `luna` executable from the IR
+modernization snapshot accompanying this provenance note. The historical
+`luna.bootstrap.middleend.ir` store and separately imported `ir.verify`
+module are replaced atomically by one `luna.compiler.ir` module, one narrow
+interface and seven same-module implementation units. No forwarding module or
+compatibility API remains.
+
+`ir::Module` is the move-only RAII owner of typed vectors for globals,
+functions, parameters, slots, values, blocks, instructions and arguments, plus
+owned global and callable-signature bytes. `ir::Builder` is the exclusive
+append-only mutation boundary with sticky failure and a one-shot
+`take_module` phase transition. `ir::View` is a read-only typed pointer/count
+projection borrowed by semantic analysis and `CodeGenerator`.
+
+The private `Verifier` owns whole-module validation state and checks storage,
+global references, function ownership, entry shape, slots, CFG chains,
+predecessors, instruction types and call arguments in dependency order.
+Stateless opcode rules use `switch` predicates. The rewritten IR interface and
+implementations contain no indexed `while` traversal and no condition above
+two logical clauses. Semantic lowering now uses bound Builder methods, while
+the backend accepts only a const Module that passes independent validation.
+
+Remote x86-64 verification in the isolated caw workspace
+`/home/aoweichen/codex-workspaces/luna-ir-final-eGYdtKbg` built the complete
+67-module, 57-library-object graph through transition, next and fixed stages.
+The cold stage times were 18.75, 14.13 and 14.03 seconds; every next/fixed
+assembly, object and executable artifact was byte-identical. Audit and
+formatting gates were green, and the post-fixed-point suite passed 450/450
+with no failures or skips.
+
+With the preceding anchor compiling both source shapes, the historical IR and
+verifier compiled sequentially in a median 0.884206 seconds and produced
+1,087,410 total assembly bytes. The final typed RAII module compiled in a
+median 3.24 seconds and produced 2,545,821 assembly bytes. Most structural
+cost comes from current per-record generic-vector monomorphization; it is
+recorded without reverting typed ownership or mixing generic code-generation
+deduplication into this correctness refactor.
+
+The final IR assembly has SHA-256
+`14bf0b90897a6623a182c46fd8b9a8192b4b0458eb93e064183b8d255dcbc2b2`;
+its 839,840-byte object has SHA-256
+`d3f6f321922baea2b6ae6faada43dcbb382e674d9a8110b3a41236cea2a9f8ad`.
+The promoted 5,085,011-byte executable has SHA-256
+`282845d879d1b67169604ebc08481c3a4c286b2a737dd7db84fb3c520c609d94`.

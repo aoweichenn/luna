@@ -60,6 +60,11 @@ TypeTable 契约使用显式 `UNITS` 一次编译真实的六个 `luna.compiler.
 builtins、canonicalization、callable 参数、布局、move/moved-from 和独立破坏性验证，不把每项规则拆成
 单独工具链启动。
 
+IR 契约由 relocation-data 专用协议覆盖：语义结果把 move-only `ir::Module` 转移给 `ir::Builder` 继续构造，
+再以一次性 transfer 取回完成模块交给验证器和代码生成器，并确认原 Builder 已关闭。用例同时破坏全局引用目标
+与零占位字节，确认独立验证拒绝损坏状态，恢复后重新接受，并继续覆盖函数地址从 typed IR 到对象重定位和最终
+链接的完整路径。
+
 这些任务仍使用独立工作目录，并与 suite 一起进入有界并行 worker pool。
 
 Lexer、Syntax 与 Parser 契约属于 frontend 专用协议：消费端只携带相应接口独立编译，再链接 stage 中单独

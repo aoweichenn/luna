@@ -1,0 +1,122 @@
+module luna.compiler.ir;
+
+fn empty_function_shape_is_valid(function: Function) -> bool {
+    let none: usize = no_id();
+    let declaration_exists: bool = function.declaration_unit != none && function.declaration_node != none;
+    let identity_exists: bool = function.name_token != none && function.return_type != none;
+    let parameters_are_empty: bool = function.parameter_count == 0 && function.slot_count == 0;
+    let body_is_empty: bool = function.block_count == 0 && function.value_count == 0;
+    let signature_is_empty: bool = function.signature_offset == none && function.signature_length == 0;
+    let source_is_valid: bool = declaration_exists && identity_exists;
+    let ranges_are_empty: bool = parameters_are_empty && body_is_empty;
+    let shape_is_empty: bool = ranges_are_empty && signature_is_empty;
+    return source_is_valid && shape_is_empty;
+}
+
+fn function_can_extend_range(first: usize, count: usize, next: usize) -> bool {
+    return count == 0 ? first == no_id() : first + count == next;
+}
+
+impl Builder {
+    priv fn function_add_request_is_valid(
+        function: Function, signature: *const u8, signature_length: usize) const -> bool {
+        let signature_exists: bool = signature != null && signature_length != 0;
+        let shape_is_valid: bool = empty_function_shape_is_valid(function) && signature_exists;
+        return this->ready() && shape_is_valid;
+    }
+
+    fn add_function(function: Function, signature: *const u8, signature_length: usize) -> usize {
+        let none: usize = no_id();
+        if (!this->function_add_request_is_valid(function, signature, signature_length)) {
+            this->fail(runtime::Error.invalid_argument);
+            return none;
+        }
+        var record: Function = function;
+        record.first_parameter = none;
+        record.first_slot = none;
+        record.first_block = none;
+        record.first_value = none;
+        record.signature_offset = this->storage.callable_signatures.size();
+        record.signature_length = signature_length;
+        let signature_error: runtime::Error = this->storage.callable_signatures.append(signature, signature_length);
+        if (signature_error != runtime::Error.none) {
+            this->fail(signature_error);
+            return none;
+        }
+        let function_id: usize = this->storage.functions.size();
+        let function_error: runtime::Error = this->storage.functions.push_back(record);
+        if (function_error != runtime::Error.none) {
+            this->storage.callable_signatures.truncate(record.signature_offset);
+            this->fail(function_error);
+            return none;
+        }
+        return function_id;
+    }
+
+    fn add_slot(
+        function_id: usize, type_id: usize, mutable_binding: bool,
+        volatile_binding: bool, alignment_bytes: usize) -> usize {
+        let none: usize = no_id();
+        let identity_is_valid: bool = function_id < this->storage.functions.size() && type_id != none;
+        let alignment_is_bounded: bool = alignment_bytes <= Limit.maximum_slot_alignment as usize;
+        let alignment_is_power: bool = (alignment_bytes & (alignment_bytes - 1)) == 0;
+        let alignment_is_valid: bool = alignment_is_bounded && alignment_is_power;
+        if (!this->ready() || !identity_is_valid) {
+            this->fail(runtime::Error.invalid_argument);
+            return none;
+        }
+        if (!alignment_is_valid) {
+            this->fail(runtime::Error.invalid_argument);
+            return none;
+        }
+        let slot: Slot = {
+            function_id = function_id, type_id = type_id, alignment_bytes = alignment_bytes,
+            mutable_binding = mutable_binding, volatile_binding = volatile_binding,
+        };
+        let slot_id: usize = this->storage.slots.size();
+        let error: runtime::Error = this->storage.slots.push_back(slot);
+        if (error != runtime::Error.none) {
+            this->fail(error);
+            return none;
+        }
+        if (this->storage.functions.get(function_id).slot_count == 0) {
+            this->storage.functions.get(function_id).first_slot = slot_id;
+        }
+        this->storage.functions.get(function_id).slot_count += 1;
+        return slot_id;
+    }
+
+    fn add_parameter(function_id: usize, type_id: usize, name_token: usize) -> usize {
+        let none: usize = no_id();
+        let identity_is_valid: bool = function_id < this->storage.functions.size() && type_id != none;
+        if (!this->ready() || !identity_is_valid) {
+            this->fail(runtime::Error.invalid_argument);
+            return none;
+        }
+        let function: Function = this->storage.functions.get(function_id);
+        let range_is_extendable: bool = function_can_extend_range(
+            function.first_parameter, function.parameter_count, this->storage.parameters.size());
+        if (!range_is_extendable) {
+            this->fail(runtime::Error.invalid_argument);
+            return none;
+        }
+        let slot_id: usize = this->add_slot(function_id, type_id, false, false, 0);
+        if (slot_id == none) {
+            return none;
+        }
+        let parameter: Parameter = {
+            function_id = function_id, type_id = type_id, slot_id = slot_id, name_token = name_token,
+        };
+        let parameter_id: usize = this->storage.parameters.size();
+        let error: runtime::Error = this->storage.parameters.push_back(parameter);
+        if (error != runtime::Error.none) {
+            this->fail(error);
+            return none;
+        }
+        if (this->storage.functions.get(function_id).parameter_count == 0) {
+            this->storage.functions.get(function_id).first_parameter = parameter_id;
+        }
+        this->storage.functions.get(function_id).parameter_count += 1;
+        return parameter_id;
+    }
+}

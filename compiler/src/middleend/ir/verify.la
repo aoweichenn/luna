@@ -1,750 +1,654 @@
-module luna.bootstrap.middleend.ir.verify;
+module luna.compiler.ir;
 
-import luna.compiler.lexer as lexer;
-import luna.runtime as runtime;
-import luna.std.checked as checked;
+class Verifier {
+    priv source: View;
+    priv types: *const type_info::TypeTable;
+    priv type_records: *const type_info::Record;
+    priv type_fields: *const type_info::Field;
+    priv globals: *const Global;
+    priv global_references: *const GlobalReference;
+    priv functions: *const Function;
+    priv parameters: *const Parameter;
+    priv slots: *const Slot;
+    priv values: *const Value;
+    priv blocks: *const Block;
+    priv instructions: *const Instruction;
+    priv arguments: *const Argument;
+    priv counted_parameters: usize;
+    priv counted_slots: usize;
+    priv counted_blocks: usize;
+    priv counted_values: usize;
 
-fn range_is_valid(first: usize, count: usize, total: usize) -> bool {
-    if (count == 0) {
-        return first == model::no_id();
+    pub init(source: View, types: type_info::TypeTable const&);
+    pub fn run() -> bool;
+}
+
+impl Verifier {
+    init(source: View, types: type_info::TypeTable const&) {
+        this->source = source;
+        this->types = &types;
+        this->type_records = types.record_data() as *const type_info::Record;
+        this->type_fields = types.field_data() as *const type_info::Field;
+        this->globals = source.globals;
+        this->global_references = source.global_references;
+        this->functions = source.functions;
+        this->parameters = source.parameters;
+        this->slots = source.slots;
+        this->values = source.values;
+        this->blocks = source.blocks;
+        this->instructions = source.instructions;
+        this->arguments = source.arguments;
+        this->counted_parameters = 0;
+        this->counted_slots = 0;
+        this->counted_blocks = 0;
+        this->counted_values = 0;
     }
-    return first < total && count <= total - first;
-}
 
-fn global_shape_is_valid(
-    global: model::Global, expected_byte_offset: usize, byte_count: usize,
-    expected_reference: usize, reference_count: usize) -> bool {
-    let byte_position_is_valid: bool = global.byte_count != 0 && global.byte_offset == expected_byte_offset;
-    let byte_range_is_valid: bool = checked::range_is_valid(global.byte_offset, global.byte_count, byte_count);
-    let alignment_is_bounded: bool = global.alignment_bytes != 0 && global.alignment_bytes <= 8;
-    let alignment_is_valid: bool = alignment_is_bounded && (global.alignment_bytes & (global.alignment_bytes - 1)) == 0;
-    let reference_range_is_valid: bool = range_is_valid(
-        global.first_reference, global.reference_count, reference_count);
-    let reference_position_is_valid: bool = global.reference_count == 0 ?
-            global.first_reference == model::no_id() : global.first_reference == expected_reference;
-    let byte_shape_is_valid: bool = byte_position_is_valid && byte_range_is_valid;
-    let reference_shape_is_valid: bool = reference_range_is_valid && reference_position_is_valid;
-    let storage_shape_is_valid: bool = byte_shape_is_valid && alignment_is_valid;
-    return storage_shape_is_valid && reference_shape_is_valid;
-}
+    priv fn storage_is_valid() const -> bool {
+        let global_records_exist: bool = this->globals != null || this->source.global_count == 0;
+        let global_bytes_exist: bool = this->source.global_bytes != null || this->source.global_byte_count == 0;
+        let global_storage_is_valid: bool = global_records_exist && global_bytes_exist;
+        let references_exist: bool = this->global_references != null || this->source.global_reference_count == 0;
+        let functions_exist: bool = this->functions != null || this->source.function_count == 0;
+        let callable_records_are_valid: bool = references_exist && functions_exist;
+        let signatures_exist: bool = this->source.callable_signatures != null ||
+            this->source.callable_signature_count == 0;
+        let parameters_exist: bool = this->parameters != null || this->source.parameter_count == 0;
+        let signature_storage_is_valid: bool = signatures_exist && parameters_exist;
+        let slots_exist: bool = this->slots != null || this->source.slot_count == 0;
+        let values_exist: bool = this->values != null || this->source.value_count == 0;
+        let local_storage_is_valid: bool = slots_exist && values_exist;
+        let blocks_exist: bool = this->blocks != null || this->source.block_count == 0;
+        let instructions_exist: bool = this->instructions != null || this->source.instruction_count == 0;
+        let control_storage_is_valid: bool = blocks_exist && instructions_exist;
+        let arguments_exist: bool = this->arguments != null || this->source.argument_count == 0;
+        let global_and_callable_are_valid: bool = global_storage_is_valid && callable_records_are_valid;
+        let signature_and_local_are_valid: bool = signature_storage_is_valid && local_storage_is_valid;
+        let records_are_valid: bool = global_and_callable_are_valid && signature_and_local_are_valid;
+        let control_is_valid: bool = control_storage_is_valid && arguments_exist;
+        return records_are_valid && control_is_valid;
+    }
 
-fn global_reference_bytes_are_zero(ir: model::Store, global: model::Global, reference: model::GlobalReference) -> bool {
-    let address_bytes: usize = model::Limit.function_address_bytes as usize;
-    let storage_offset: usize = global.byte_offset + reference.byte_offset;
-    for (var index: usize = 0; index < address_bytes; index += 1) {
-        if (ir.global_bytes.data[storage_offset + index] != 0) {
+    priv fn signature_is_valid(function: Function, expected_offset: usize) const -> bool {
+        if (expected_offset > this->source.callable_signature_count) {
             return false;
         }
-    }
-    return true;
-}
-
-fn global_reference_target_is_valid(ir: model::Store, reference: model::GlobalReference) -> bool {
-    switch (reference.kind) {
-    case model::GlobalReferenceKind.function {
-        return reference.target_id < ir.function_count;
-    }
-    case model::GlobalReferenceKind.global {
-        return reference.target_id < ir.global_count;
-    }
-    default {
-        return false;
-    }
-    }
-}
-
-fn global_references_are_valid(
-    ir: model::Store, global: model::Global, global_id: usize, references: *const model::GlobalReference) -> bool {
-    var previous_end: usize = 0;
-    let address_bytes: usize = model::Limit.function_address_bytes as usize;
-    let reference_end: usize = global.first_reference + global.reference_count;
-    for (var index: usize = global.first_reference; index < reference_end; index += 1) {
-        let reference: model::GlobalReference = references[index];
-        let owner_is_valid: bool = reference.global_id == global_id;
-        let owner_and_target_are_valid: bool = owner_is_valid && global_reference_target_is_valid(ir, reference);
-        let range_is_valid: bool = checked::range_is_valid(reference.byte_offset, address_bytes, global.byte_count);
-        let alignment_is_valid: bool = global.alignment_bytes == address_bytes &&
-            (reference.byte_offset & (address_bytes - 1)) == 0;
-        let position_is_valid: bool = reference.byte_offset >= previous_end;
-        if (!owner_and_target_are_valid || !range_is_valid) {
-            return false;
-        }
-        if (!alignment_is_valid || !position_is_valid) {
-            return false;
-        }
-        if (!global_reference_bytes_are_zero(ir, global, reference)) {
-            return false;
-        }
-        previous_end = reference.byte_offset + address_bytes;
-    }
-    return true;
-}
-
-fn value_operand_is_valid(
-    values: *const model::Value, value_count: usize, value_id: usize, function_id: usize,
-        instruction_id: usize) -> bool {
-    return value_id < value_count && values[value_id].function_id == function_id &&
-        values[value_id].definition != model::no_id() && values[value_id].definition < instruction_id;
-}
-
-fn instruction_operands_are_valid(
-    instruction: model::Instruction, instruction_id: usize, function_id: usize, ir: model::Store,
-        values: *const model::Value) -> bool {
-    let none: usize = model::no_id();
-    let unary: bool = instruction.opcode == model::Opcode.store ||
-        instruction.opcode == model::Opcode.load_indirect || instruction.opcode == model::Opcode.null_check ||
-        instruction.opcode == model::Opcode.unary_integer || instruction.opcode == model::Opcode.unary_float ||
-        instruction.opcode == model::Opcode.boolean_not || instruction.opcode == model::Opcode.convert ||
-        instruction.opcode == model::Opcode.return_value || instruction.opcode == model::Opcode.call_indirect ||
-        instruction.opcode == model::Opcode.branch || instruction.opcode == model::Opcode.float_sqrt ||
-        instruction.opcode == model::Opcode.va_list_start || instruction.opcode == model::Opcode.va_list_arg;
-    let binary: bool = instruction.opcode == model::Opcode.memory_copy ||
-        instruction.opcode == model::Opcode.store_indirect ||
-        instruction.opcode == model::Opcode.bounds_check || instruction.opcode == model::Opcode.pointer_offset ||
-        instruction.opcode == model::Opcode.binary_integer ||
-        instruction.opcode == model::Opcode.binary_float || instruction.opcode == model::Opcode.compare ||
-        instruction.opcode == model::Opcode.float_min || instruction.opcode == model::Opcode.float_max;
-    if ((unary || binary) &&
-        !value_operand_is_valid(
-            values, ir.value_count, instruction.left, function_id, instruction_id)) {
-        return false;
-    }
-    if (binary &&
-        !value_operand_is_valid(
-            values, ir.value_count, instruction.right, function_id, instruction_id)) {
-        return false;
-    }
-    let call_with_destination: bool = instruction.opcode == model::Opcode.call ||
-        instruction.opcode == model::Opcode.call_indirect;
-    let has_call_destination: bool = call_with_destination && instruction.right != none;
-    if (has_call_destination &&
-        !value_operand_is_valid(values, ir.value_count, instruction.right, function_id, instruction_id)) {
-        return false;
-    }
-    if (instruction.opcode == model::Opcode.call) {
-        return instruction.auxiliary < ir.function_count;
-    }
-    if (instruction.opcode == model::Opcode.address_of_slot || instruction.opcode == model::Opcode.zero_slot ||
-        instruction.opcode == model::Opcode.load || instruction.opcode == model::Opcode.store) {
-        return instruction.auxiliary < ir.slot_count;
-    }
-    if (instruction.opcode == model::Opcode.global_address) {
-        return instruction.auxiliary < ir.global_count;
-    }
-    if (instruction.opcode == model::Opcode.jump) {
-        return instruction.auxiliary < ir.block_count && (ir.blocks.data as *const model::Block)[
-                instruction.auxiliary].function_id == function_id;
-    }
-    if (instruction.opcode == model::Opcode.branch) {
-        return instruction.auxiliary < ir.block_count && instruction.third < ir.block_count &&
-            (ir.blocks.data as *const model::Block)[ instruction.auxiliary].function_id == function_id &&
-            (ir.blocks.data as *const model::Block)[ instruction.third].function_id == function_id;
-    }
-    if (instruction.opcode == model::Opcode.return_void) {
-        return instruction.left == none;
-    }
-    return true;
-}
-
-fn carrier_matches_type(types: type_info::TypeTable const&, carrier_type: usize, source_type: usize) -> bool {
-    if (carrier_type == source_type) {
-        return true;
-    }
-    if (carrier_type >= types.size() || source_type >= types.size()) {
-        return false;
-    }
-    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
-    return type_info::is_memory(records[source_type].kind) && records[carrier_type].kind ==
-            type_info::Kind.pointer && records[carrier_type].element_type == source_type;
-}
-
-fn type_can_be_value(types: type_info::TypeTable const&, type_id: usize) -> bool {
-    if (type_id >= types.size()) {
-        return false;
-    }
-    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
-    return records[type_id].kind != type_info::Kind.invalid && records[type_id].kind != type_info::Kind.type_void;
-}
-
-fn instruction_expects_result(instruction: model::Instruction, functions: *const model::Function,
-    types: type_info::TypeTable const&) -> bool {
-    if (instruction.opcode == model::Opcode.call) {
-        let records: *const type_info::Record = types.record_data() as *const type_info::Record;
-        return records[ functions[instruction.auxiliary].return_type].kind != type_info::Kind.type_void;
-    }
-    if (instruction.opcode == model::Opcode.call_indirect) {
-        let records: *const type_info::Record = types.record_data() as *const type_info::Record;
-        return records[instruction.type_id].kind != type_info::Kind.type_void;
-    }
-    if (instruction.opcode == model::Opcode.function_address) {
-        return true;
-    }
-    return instruction.opcode == model::Opcode.constant_integer || instruction.opcode == model::Opcode.constant_float ||
-        instruction.opcode == model::Opcode.constant_boolean || instruction.opcode == model::Opcode.constant_null ||
-        instruction.opcode == model::Opcode.address_of_slot || instruction.opcode == model::Opcode.member_address ||
-        instruction.opcode == model::Opcode.global_address || instruction.opcode == model::Opcode.load ||
-        instruction.opcode == model::Opcode.load_indirect || instruction.opcode == model::Opcode.pointer_offset ||
-        instruction.opcode == model::Opcode.unary_integer || instruction.opcode == model::Opcode.unary_float ||
-        instruction.opcode == model::Opcode.boolean_not || instruction.opcode == model::Opcode.convert ||
-        instruction.opcode == model::Opcode.binary_integer ||
-        instruction.opcode == model::Opcode.binary_float || instruction.opcode == model::Opcode.compare ||
-        instruction.opcode == model::Opcode.float_sqrt || instruction.opcode == model::Opcode.float_min ||
-        instruction.opcode == model::Opcode.float_max || instruction.opcode == model::Opcode.overflow_flag ||
-        instruction.opcode == model::Opcode.va_list_arg;
-}
-
-fn member_address_offset_is_valid(
-    types: type_info::TypeTable const&, owner_type: usize, offset: usize, element_type: usize, depth: usize) -> bool {
-    if (depth > (model::Limit.maximum_type_depth as usize)) {
-        return false;
-    }
-    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
-    let fields: *const type_info::Field = types.field_data() as *const type_info::Field;
-    let owner: type_info::Record = records[owner_type];
-    var index: usize = 0;
-    while (index < owner.field_count) {
-        let field: type_info::Field = fields[owner.first_field + index];
-        if (field.offset_bytes == offset && field.type_id == element_type) {
-            return true;
-        }
-        let field_record: type_info::Record = records[field.type_id];
-        // A flexible array member is addressed as a pointer to its element
-        // type at the member offset.
-        if ((field_record.flags & (type_info::Flag.flexible as usize)) != 0 && field.offset_bytes == offset &&
-            field_record.element_type == element_type) {
-            return true;
-        }
-        // A promoted member of an anonymous record field is addressed through
-        // the enclosing record at the accumulated offset.
-        if ((field_record.kind == type_info::Kind.structure || field_record.kind == type_info::Kind.record_union) &&
-            offset >= field.offset_bytes && offset - field.offset_bytes < field_record.size_bytes &&
-            member_address_offset_is_valid(
-                types, field.type_id, offset - field.offset_bytes, element_type, depth + 1)) {
-            return true;
-        }
-        index += 1;
-    }
-    let inherited_address: bool = owner.kind == type_info::Kind.class_type && owner.base_type != model::no_id();
-    if (inherited_address && offset < records[owner.base_type].size_bytes) {
-        return member_address_offset_is_valid(types, owner.base_type, offset, element_type, depth + 1);
-    }
-    return false;
-}
-
-fn member_address_is_valid(instruction: model::Instruction, types: type_info::TypeTable const&,
-    values: *const model::Value) -> bool {
-    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
-    let source_pointer: type_info::Record = records[values[instruction.left].type_id];
-    let result_pointer: type_info::Record = records[instruction.type_id];
-    if (result_pointer.kind != type_info::Kind.pointer) {
-        return false;
-    }
-    var owner_type: usize = values[instruction.left].type_id;
-    var source_read_only: bool = true;
-    if (source_pointer.kind == type_info::Kind.pointer) {
-        owner_type = source_pointer.element_type;
-        source_read_only = (source_pointer.flags & (type_info::Flag.read_only as usize)) != 0;
-    } else if (!type_info::is_memory(
-            source_pointer.kind)) {
-        return false;
-    }
-    let owner: type_info::Record = records[owner_type];
-    if (!type_info::is_memory(owner.kind)) {
-        return false;
-    }
-    if (!member_address_offset_is_valid(
-            types, owner_type, instruction.auxiliary, result_pointer.element_type, 0)) {
-        return false;
-    }
-    let result_read_only: bool = (result_pointer.flags & (type_info::Flag.read_only as usize)) != 0;
-    return !source_read_only || result_read_only;
-}
-
-fn instruction_types_are_valid(
-    instruction: model::Instruction, function_id: usize, types: type_info::TypeTable const&,
-        values: *const model::Value, functions: *const model::Function, slots: *const model::Slot) -> bool {
-    let none: usize = model::no_id();
-    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
-    let expects_result: bool = instruction_expects_result(instruction, functions, types);
-    let requires_type: bool = expects_result || instruction.opcode == model::Opcode.zero_slot ||
-        instruction.opcode == model::Opcode.memory_copy || instruction.opcode == model::Opcode.store ||
-        instruction.opcode == model::Opcode.store_indirect || instruction.opcode == model::Opcode.call ||
-        instruction.opcode == model::Opcode.call_indirect || instruction.opcode == model::Opcode.return_value ||
-        instruction.opcode == model::Opcode.return_void;
-    if (expects_result != (instruction.result != none) || (requires_type && instruction.type_id == none) ||
-        (expects_result &&
-            !type_can_be_value(
-                types, instruction.type_id))) {
-        return false;
+        let position_is_valid: bool = function.signature_length != 0 && function.signature_offset == expected_offset;
+        let remaining: usize = this->source.callable_signature_count - expected_offset;
+        return position_is_valid && function.signature_length <= remaining;
     }
 
-    if (instruction.opcode == model::Opcode.constant_integer) {
-        return type_info::is_integer(records[instruction.type_id].kind) ||
-            records[instruction.type_id].kind == type_info::Kind.enumeration;
-    }
-    if (instruction.opcode == model::Opcode.constant_float) {
-        return type_info::is_float(records[instruction.type_id].kind);
-    }
-    if (instruction.opcode == model::Opcode.constant_boolean) {
-        return instruction.type_id == type_info::BuiltinType.boolean as usize && instruction.immediate <= 1;
-    }
-    if (instruction.opcode == model::Opcode.constant_null) {
-        return records[instruction.type_id].kind == type_info::Kind.pointer || records[instruction.type_id].kind ==
-                type_info::Kind.function_pointer;
-    }
-    if (instruction.opcode == model::Opcode.address_of_slot) {
-        return slots[instruction.auxiliary].function_id == function_id && records[instruction.type_id].kind ==
-                type_info::Kind.pointer && records[instruction.type_id].element_type ==
-                slots[instruction.auxiliary].type_id;
-    }
-    if (instruction.opcode == model::Opcode.member_address) {
-        return member_address_is_valid(instruction, types, values);
-    }
-    if (instruction.opcode == model::Opcode.global_address) {
-        let result_pointer: type_info::Record = records[instruction.type_id];
-        if (result_pointer.kind != type_info::Kind.pointer ||
-            (result_pointer.flags & (type_info::Flag.read_only as usize)) == 0) {
-            return false;
-        }
-        var element_type: usize = result_pointer.element_type;
-        if (records[element_type].kind == type_info::Kind.array) {
-            // @embed addresses a whole byte-array global rather than a scalar string element.
-            element_type = records[element_type].element_type;
-        }
-        return element_type == type_info::BuiltinType.unsigned_8 as usize ||
-            element_type == type_info::BuiltinType.unsigned_16 as usize ||
-            element_type == type_info::BuiltinType.unsigned_32 as usize;
-    }
-    if (instruction.opcode == model::Opcode.zero_slot) {
-        return slots[instruction.auxiliary].function_id == function_id && slots[instruction.auxiliary].type_id ==
-                instruction.type_id && type_info::is_memory(records[instruction.type_id].kind);
-    }
-    if (instruction.opcode == model::Opcode.load) {
-        return slots[instruction.auxiliary].function_id == function_id && slots[instruction.auxiliary].type_id ==
-                instruction.type_id && type_info::is_scalar(records[instruction.type_id].kind);
-    }
-    if (instruction.opcode == model::Opcode.store) {
-        return slots[instruction.auxiliary].function_id == function_id && slots[instruction.auxiliary].type_id ==
-                values[instruction.left].type_id && instruction.type_id == values[instruction.left].type_id &&
-            type_info::is_scalar(records[instruction.type_id].kind);
-    }
-    if (instruction.opcode == model::Opcode.load_indirect) {
-        let pointer: type_info::Record = records[values[instruction.left].type_id];
-        return pointer.kind == type_info::Kind.pointer && pointer.element_type == instruction.type_id &&
-            type_info::is_scalar(records[instruction.type_id].kind);
-    }
-    if (instruction.opcode == model::Opcode.store_indirect || instruction.opcode == model::Opcode.memory_copy) {
-        let destination: type_info::Record = records[values[instruction.left].type_id];
-        if (destination.kind != type_info::Kind.pointer || destination.element_type != instruction.type_id ||
-            (destination.flags & (type_info::Flag.read_only as usize)) != 0 ||
-            !carrier_matches_type(types, values[instruction.right].type_id, instruction.type_id) ||
-            instruction.auxiliary != records[instruction.type_id].size_bytes) {
-            return false;
-        }
-        return instruction.opcode == model::Opcode.memory_copy ? type_info::is_memory(records[instruction.type_id].kind)
-            : type_info::is_scalar(records[instruction.type_id].kind);
-    }
-    if (instruction.opcode == model::Opcode.null_check) {
-        let checked: type_info::Kind = records[values[instruction.left].type_id].kind;
-        return checked == type_info::Kind.pointer || checked == type_info::Kind.function_pointer;
-    }
-    if (instruction.opcode == model::Opcode.bounds_check) {
-        return values[instruction.left].type_id == type_info::BuiltinType.unsigned_size as usize &&
-            values[instruction.right].type_id == type_info::BuiltinType.unsigned_size as usize;
-    }
-    if (instruction.opcode == model::Opcode.pointer_offset) {
-        let source: type_info::Record = records[values[instruction.left].type_id];
-        let result: type_info::Record = records[instruction.type_id];
-        let temporary_array: bool = source.kind == type_info::Kind.array;
-        var element_matches: bool = source.element_type == result.element_type;
-        if (source.kind == type_info::Kind.pointer && records[source.element_type].kind == type_info::Kind.array) {
-            element_matches = records[source.element_type].element_type == result.element_type;
-        }
-        let qualifier_matches: bool = temporary_array ? (result.flags & (type_info::Flag.read_only as usize)) != 0 :
-                source.flags == result.flags;
-        return (source.kind == type_info::Kind.pointer || temporary_array) &&
-            result.kind == type_info::Kind.pointer && element_matches && qualifier_matches &&
-            values[instruction.right].type_id == type_info::BuiltinType.unsigned_size as usize &&
-                instruction.auxiliary == records[result.element_type].size_bytes;
-    }
-    if (instruction.opcode == model::Opcode.unary_integer) {
-        return values[instruction.left].type_id == instruction.type_id &&
-            type_info::is_integer(records[instruction.type_id].kind);
-    }
-    if (instruction.opcode == model::Opcode.unary_float) {
-        return values[instruction.left].type_id == instruction.type_id &&
-            type_info::is_float(records[instruction.type_id].kind);
-    }
-    if (instruction.opcode == model::Opcode.float_sqrt) {
-        return values[instruction.left].type_id == instruction.type_id &&
-            type_info::is_float(records[instruction.type_id].kind);
-    }
-    if (instruction.opcode == model::Opcode.boolean_not) {
-        return values[instruction.left].type_id == type_info::BuiltinType.boolean as usize && instruction.type_id ==
-                type_info::BuiltinType.boolean as usize;
-    }
-    if (instruction.opcode == model::Opcode.convert) {
-        return instruction.auxiliary < types.size() && values[instruction.left].type_id == instruction.auxiliary &&
-            type_info::is_scalar(records[instruction.auxiliary].kind) &&
-            type_info::is_scalar(records[instruction.type_id].kind);
-    }
-    if (instruction.opcode == model::Opcode.binary_integer || instruction.opcode == model::Opcode.binary_float) {
-        let integer_operation: bool = instruction.opcode == model::Opcode.binary_integer;
-        return values[instruction.left].type_id == instruction.type_id && values[instruction.right].type_id ==
-                instruction.type_id && (integer_operation ? type_info::is_integer(records[instruction.type_id].kind) :
-                type_info::is_float(
-                    records[instruction.type_id].kind));
-    }
-    if (instruction.opcode == model::Opcode.float_min || instruction.opcode == model::Opcode.float_max) {
-        return values[instruction.left].type_id == instruction.type_id && values[instruction.right].type_id ==
-                instruction.type_id && type_info::is_float(records[instruction.type_id].kind);
-    }
-    if (instruction.opcode == model::Opcode.overflow_flag) {
-        return instruction.type_id == type_info::BuiltinType.boolean as usize;
-    }
-    if (instruction.opcode == model::Opcode.compare) {
-        return instruction.type_id == type_info::BuiltinType.boolean as usize && values[instruction.left].type_id ==
-                values[instruction.right].type_id &&
-            type_info::is_scalar(records[ values[instruction.left].type_id].kind);
-    }
-    let call_destination_is_valid: bool = instruction.right == none ||
-        carrier_matches_type(types, values[instruction.right].type_id, instruction.type_id);
-    if (instruction.opcode == model::Opcode.call) {
-        return instruction.type_id == functions[instruction.auxiliary].return_type && call_destination_is_valid;
-    }
-    if (instruction.opcode == model::Opcode.call_indirect) {
-        if (instruction.left >= model::no_id()) {
-            return false;
-        }
-        let callee: type_info::Record = records[values[instruction.left].type_id];
-        let callee_is_valid: bool = callee.kind == type_info::Kind.function_pointer &&
-            callee.element_type == instruction.type_id;
-        return callee_is_valid && call_destination_is_valid;
-    }
-    if (instruction.opcode == model::Opcode.function_address) {
-        return records[instruction.type_id].kind == type_info::Kind.function_pointer;
-    }
-    if (instruction.opcode == model::Opcode.va_list_start || instruction.opcode == model::Opcode.va_list_arg) {
-        // Both walk a caller-owned va_list through a mutable pointer to it;
-        // va_arg additionally yields a scalar at the requested width.
-        let pointer: type_info::Record = records[values[instruction.left].type_id];
-        if (pointer.kind != type_info::Kind.pointer || pointer.element_type >= types.size() ||
-            records[pointer.element_type].kind != type_info::Kind.va_list_type ||
-            (pointer.flags & (type_info::Flag.read_only as usize)) != 0) {
-            return false;
-        }
-        return instruction.opcode == model::Opcode.va_list_start ? instruction.type_id == none :
-            type_info::is_scalar(records[instruction.type_id].kind);
-    }
-    if (instruction.opcode == model::Opcode.branch) {
-        return instruction.type_id == none && values[instruction.left].type_id ==
-            type_info::BuiltinType.boolean as usize;
-    }
-    if (instruction.opcode == model::Opcode.jump) {
-        return instruction.type_id == none;
-    }
-    if (instruction.opcode == model::Opcode.return_value) {
-        return instruction.type_id == functions[function_id].return_type &&
-            carrier_matches_type(types, values[instruction.left].type_id, instruction.type_id);
-    }
-    if (instruction.opcode == model::Opcode.return_void) {
-        return instruction.type_id == functions[function_id].return_type && records[instruction.type_id].kind ==
-                type_info::Kind.type_void;
-    }
-    return instruction.type_id == none;
-}
-
-fn is_valid(ir: model::Store, types: type_info::TypeTable const&) -> bool {
-    let none: usize = model::no_id();
-    let storage_is_valid: bool = ir.error == runtime::Error.none && model::storage_is_valid(ir);
-    let model_is_valid: bool = model::function_signatures_are_valid(ir) && types.is_valid(true);
-    let input_is_valid: bool = storage_is_valid && model_is_valid;
-    let entry_is_valid: bool = ir.entry_function == none || ir.entry_function < ir.function_count;
-    if (!input_is_valid || !entry_is_valid) {
-        return false;
-    }
-    let globals: *const model::Global = ir.globals.data as *const model::Global;
-    let global_references: *const model::GlobalReference = ir.global_references.data as
-            *const model::GlobalReference;
-    let functions: *const model::Function = ir.functions.data as *const model::Function;
-    let parameters: *const model::Parameter = ir.parameters.data as *const model::Parameter;
-    let slots: *const model::Slot = ir.slots.data as *const model::Slot;
-    let values: *const model::Value = ir.values.data as *const model::Value;
-    let blocks: *const model::Block = ir.blocks.data as *const model::Block;
-    let instructions: *const model::Instruction = ir.instructions.data as *const model::Instruction;
-    let arguments: *const model::Argument = ir.arguments.data as *const model::Argument;
-    let type_records: *const type_info::Record = types.record_data() as *const type_info::Record;
-
-    var expected_global_offset: usize = 0;
-    var expected_global_reference: usize = 0;
-    for (var index: usize = 0; index < ir.global_count; index += 1) {
-        let global: model::Global = globals[index];
-        if (!global_shape_is_valid(
-                global, expected_global_offset, ir.global_bytes.length,
-                expected_global_reference, ir.global_reference_count)) {
-            return false;
-        }
-        if (global.reference_count != 0 && !global.read_only) {
-            return false;
-        }
-        if (global.reference_count != 0 && !global_references_are_valid(
-                ir, global, index, global_references)) {
-            return false;
-        }
-        expected_global_offset += global.byte_count;
-        expected_global_reference += global.reference_count;
-    }
-    let all_global_bytes_are_owned: bool = expected_global_offset == ir.global_bytes.length;
-    let all_global_references_are_owned: bool = expected_global_reference == ir.global_reference_count;
-    if (!all_global_bytes_are_owned || !all_global_references_are_owned) {
-        return false;
-    }
-
-    var counted_parameters: usize = 0;
-    var counted_slots: usize = 0;
-    var counted_blocks: usize = 0;
-    var counted_values: usize = 0;
-    var index: usize = 0;
-    while (index < ir.function_count) {
-        let function: model::Function = functions[index];
-        if (function.declaration_unit == none || function.declaration_node == none || function.name_token == none ||
-            (function.linkage as usize) > (model::Linkage.external_c as usize) ||
-            function.return_type >= types.size() || type_records[function.return_type].kind ==
-                type_info::Kind.invalid ||
-            !range_is_valid(function.first_parameter, function.parameter_count, ir.parameter_count) ||
-            !range_is_valid(function.first_block, function.block_count, ir.block_count) ||
-            !range_is_valid(function.first_value, function.value_count, ir.value_count) ||
-            (function.has_body && function.block_count == 0 && function.asm_body_node == none) ||
-            (!function.has_body && (function.block_count != 0 ||
-                    function.value_count != 0 || function.slot_count != function.parameter_count))) {
-            return false;
-        }
-        counted_parameters += function.parameter_count;
-        counted_slots += function.slot_count;
-        counted_blocks += function.block_count;
-        counted_values += function.value_count;
-        var item: usize = 0;
-        while (item < function.parameter_count) {
-            let parameter: model::Parameter = parameters[function.first_parameter + item];
-            if (parameter.function_id != index || parameter.type_id >= types.size() ||
-                !type_can_be_value(types, parameter.type_id) ||
-                parameter.slot_id >= ir.slot_count || slots[parameter.slot_id].function_id != index ||
-                slots[parameter.slot_id].type_id != parameter.type_id) {
+    priv fn signatures_are_valid() const -> bool {
+        var expected_offset: usize = 0;
+        for (var index: usize = 0; index < this->source.function_count; index += 1) {
+            let function: Function = this->functions[index];
+            if (!this->signature_is_valid(function, expected_offset)) {
                 return false;
             }
-            item += 1;
+            expected_offset += function.signature_length;
         }
+        return expected_offset == this->source.callable_signature_count;
+    }
+
+    priv fn input_is_valid() const -> bool {
+        let storage_is_valid: bool = this->storage_is_valid();
+        let type_model_is_valid: bool = this->types->is_valid(true);
+        if (!storage_is_valid || !type_model_is_valid) {
+            return false;
+        }
+        let signatures_are_valid: bool = this->signatures_are_valid();
+        let entry_is_in_range: bool = this->source.entry_function == no_id() ||
+            this->source.entry_function < this->source.function_count;
+        return signatures_are_valid && entry_is_in_range;
+    }
+
+    priv fn global_shape_is_valid(
+        global: Global, expected_byte_offset: usize, expected_reference: usize) const -> bool {
+        let byte_position_is_valid: bool = global.byte_count != 0 && global.byte_offset == expected_byte_offset;
+        let byte_range_is_valid: bool = checked::range_is_valid(
+            global.byte_offset, global.byte_count, this->source.global_byte_count);
+        let alignment_is_bounded: bool = global.alignment_bytes != 0 &&
+            global.alignment_bytes <= Limit.maximum_alignment as usize;
+        let alignment_is_power: bool = alignment_is_bounded ?
+                (global.alignment_bytes & (global.alignment_bytes - 1)) == 0 : false;
+        let alignment_is_valid: bool = alignment_is_bounded && alignment_is_power;
+        let reference_range_is_valid: bool = range_is_valid(
+            global.first_reference, global.reference_count, this->source.global_reference_count);
+        let reference_position_is_valid: bool = global.reference_count == 0 ?
+                global.first_reference == no_id() : global.first_reference == expected_reference;
+        let byte_shape_is_valid: bool = byte_position_is_valid && byte_range_is_valid;
+        let reference_shape_is_valid: bool = reference_range_is_valid && reference_position_is_valid;
+        let storage_shape_is_valid: bool = byte_shape_is_valid && alignment_is_valid;
+        return storage_shape_is_valid && reference_shape_is_valid;
+    }
+
+    priv fn global_reference_target_is_valid(reference: GlobalReference) const -> bool {
+        switch (reference.kind) {
+        case GlobalReferenceKind.function {
+            return reference.target_id < this->source.function_count;
+        }
+        case GlobalReferenceKind.global {
+            return reference.target_id < this->source.global_count;
+        }
+        default {
+            return false;
+        }
+        }
+    }
+
+    priv fn global_reference_bytes_are_zero(global: Global, reference: GlobalReference) const -> bool {
+        let address_bytes: usize = Limit.function_address_bytes as usize;
+        let storage_offset: usize = global.byte_offset + reference.byte_offset;
+        for (var index: usize = 0; index < address_bytes; index += 1) {
+            if (this->source.global_bytes[storage_offset + index] != 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    priv fn global_references_are_valid(global: Global, global_id: usize) const -> bool {
+        var previous_end: usize = 0;
+        let address_bytes: usize = Limit.function_address_bytes as usize;
+        let reference_end: usize = global.first_reference + global.reference_count;
+        for (var index: usize = global.first_reference; index < reference_end; index += 1) {
+            let reference: GlobalReference = this->global_references[index];
+            let owner_is_valid: bool = reference.global_id == global_id;
+            let target_is_valid: bool = this->global_reference_target_is_valid(reference);
+            let range_is_valid: bool = checked::range_is_valid(reference.byte_offset, address_bytes, global.byte_count);
+            let alignment_matches: bool = global.alignment_bytes == address_bytes;
+            let offset_is_aligned: bool = (reference.byte_offset & (address_bytes - 1)) == 0;
+            let alignment_is_valid: bool = alignment_matches && offset_is_aligned;
+            let position_is_valid: bool = reference.byte_offset >= previous_end;
+            let identity_is_valid: bool = owner_is_valid && target_is_valid;
+            let placement_is_valid: bool = range_is_valid && alignment_is_valid;
+            if (!identity_is_valid || !placement_is_valid) {
+                return false;
+            }
+            if (!position_is_valid || !this->global_reference_bytes_are_zero(global, reference)) {
+                return false;
+            }
+            previous_end = reference.byte_offset + address_bytes;
+        }
+        return true;
+    }
+
+    priv fn globals_are_valid() const -> bool {
+        var expected_byte_offset: usize = 0;
+        var expected_reference: usize = 0;
+        for (var index: usize = 0; index < this->source.global_count; index += 1) {
+            let global: Global = this->globals[index];
+            if (!this->global_shape_is_valid(global, expected_byte_offset, expected_reference)) {
+                return false;
+            }
+            let has_references: bool = global.reference_count != 0;
+            if (has_references && !global.read_only) {
+                return false;
+            }
+            if (has_references && !this->global_references_are_valid(global, index)) {
+                return false;
+            }
+            expected_byte_offset += global.byte_count;
+            expected_reference += global.reference_count;
+        }
+        let all_bytes_are_owned: bool = expected_byte_offset == this->source.global_byte_count;
+        let all_references_are_owned: bool = expected_reference == this->source.global_reference_count;
+        return all_bytes_are_owned && all_references_are_owned;
+    }
+
+    priv fn function_shape_is_valid(function: Function) const -> bool {
+        let declaration_exists: bool = function.declaration_unit != no_id() && function.declaration_node != no_id();
+        let name_exists: bool = function.name_token != no_id();
+        let linkage_is_valid: bool = (function.linkage as usize) <= (Linkage.external_c as usize);
+        let return_type_exists: bool = function.return_type < this->types->size();
+        let return_type_is_valid: bool = return_type_exists &&
+            this->type_records[function.return_type].kind != type_info::Kind.invalid;
+        let source_is_valid: bool = declaration_exists && name_exists;
+        let identity_is_valid: bool = source_is_valid && linkage_is_valid;
+        if (!identity_is_valid || !return_type_is_valid) {
+            return false;
+        }
+        let parameters_are_valid: bool = range_is_valid(
+            function.first_parameter, function.parameter_count, this->source.parameter_count);
+        let blocks_are_valid: bool = range_is_valid(
+            function.first_block, function.block_count, this->source.block_count);
+        let values_are_valid: bool = range_is_valid(
+            function.first_value, function.value_count, this->source.value_count);
+        let control_ranges_are_valid: bool = blocks_are_valid && values_are_valid;
+        if (!parameters_are_valid || !control_ranges_are_valid) {
+            return false;
+        }
+        if (function.has_body) {
+            let has_lowered_body: bool = function.block_count != 0;
+            let has_assembly_body: bool = function.asm_body_node != no_id();
+            return has_lowered_body || has_assembly_body;
+        }
+        let control_is_empty: bool = function.block_count == 0 && function.value_count == 0;
+        let locals_are_parameters: bool = function.slot_count == function.parameter_count;
+        return control_is_empty && locals_are_parameters;
+    }
+
+    priv fn parameter_is_valid(parameter: Parameter, function_id: usize) const -> bool {
+        let owner_matches: bool = parameter.function_id == function_id;
+        let type_exists: bool = parameter.type_id < this->types->size();
+        if (!owner_matches || !type_exists) {
+            return false;
+        }
+        let value_type_is_valid: bool = type_can_be_value(*this->types, parameter.type_id);
+        let slot_exists: bool = parameter.slot_id < this->source.slot_count;
+        if (!value_type_is_valid || !slot_exists) {
+            return false;
+        }
+        let slot: Slot = this->slots[parameter.slot_id];
+        return slot.function_id == function_id && slot.type_id == parameter.type_id;
+    }
+
+    priv fn parameters_are_valid(function: Function, function_id: usize) const -> bool {
+        for (var index: usize = 0; index < function.parameter_count; index += 1) {
+            let parameter: Parameter = this->parameters[function.first_parameter + index];
+            if (!this->parameter_is_valid(parameter, function_id)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    priv fn function_slots_are_valid(function: Function, function_id: usize) const -> bool {
         var owned_slot_count: usize = 0;
-        var first_owned_slot: usize = none;
-        item = 0;
-        while (item < ir.slot_count) {
-            if (slots[item].function_id == index) {
+        var first_owned_slot: usize = no_id();
+        for (var index: usize = 0; index < this->source.slot_count; index += 1) {
+            if (this->slots[index].function_id == function_id) {
                 if (owned_slot_count == 0) {
-                    first_owned_slot = item;
+                    first_owned_slot = index;
                 }
                 owned_slot_count += 1;
             }
-            item += 1;
         }
-        if (owned_slot_count != function.slot_count || first_owned_slot != function.first_slot) {
+        return owned_slot_count == function.slot_count && first_owned_slot == function.first_slot;
+    }
+
+    priv fn value_is_valid(value: Value, function_id: usize) const -> bool {
+        let owner_matches: bool = value.function_id == function_id;
+        let block_exists: bool = value.block_id < this->source.block_count;
+        let identity_is_valid: bool = owner_matches && block_exists;
+        let type_is_valid: bool = type_can_be_value(*this->types, value.type_id);
+        let definition_exists: bool = value.definition < this->source.instruction_count;
+        let content_is_valid: bool = type_is_valid && definition_exists;
+        return identity_is_valid && content_is_valid;
+    }
+
+    priv fn values_are_valid(function: Function, function_id: usize) const -> bool {
+        for (var index: usize = 0; index < function.value_count; index += 1) {
+            let value: Value = this->values[function.first_value + index];
+            if (!this->value_is_valid(value, function_id)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    priv fn function_is_valid(function: Function, function_id: usize) const -> bool {
+        if (!this->function_shape_is_valid(function)) {
             return false;
         }
-        item = 0;
-        while (item < function.value_count) {
-            let value: model::Value = values[function.first_value + item];
-            if (value.function_id != index || value.block_id >= ir.block_count ||
-                !type_can_be_value(types, value.type_id) || value.definition >= ir.instruction_count) {
-                return false;
-            }
-            item += 1;
-        }
-        index += 1;
-    }
-    if (counted_parameters != ir.parameter_count || counted_slots != ir.slot_count ||
-        counted_blocks != ir.block_count || counted_values != ir.value_count) {
-        return false;
-    }
-    if (ir.entry_function != none) {
-        let entry: model::Function = functions[ir.entry_function];
-        if (!entry.has_body || entry.linkage != model::Linkage.internal ||
-                entry.return_type != type_info::BuiltinType.signed_32 as usize ||
-                (entry.parameter_count != 0 && entry.parameter_count != 2)) {
+        let parameters_are_valid: bool = this->parameters_are_valid(function, function_id);
+        let slots_are_valid: bool = this->function_slots_are_valid(function, function_id);
+        if (!parameters_are_valid || !slots_are_valid) {
             return false;
         }
-        if (entry.parameter_count == 2) {
-            let argument_count: model::Parameter = parameters[entry.first_parameter];
-            let argument_vector: model::Parameter = parameters[entry.first_parameter + 1];
-            let outer: type_info::Record = type_records[argument_vector.type_id];
-            if (argument_count.type_id != type_info::BuiltinType.unsigned_size as usize ||
-                outer.kind != type_info::Kind.pointer || (outer.flags & (type_info::Flag.read_only as usize)) != 0) {
+        return this->values_are_valid(function, function_id);
+    }
+
+    priv fn functions_are_valid() -> bool {
+        for (var index: usize = 0; index < this->source.function_count; index += 1) {
+            let function: Function = this->functions[index];
+            if (!this->function_is_valid(function, index)) {
                 return false;
             }
-            let inner: type_info::Record = type_records[outer.element_type];
-            if (inner.kind != type_info::Kind.pointer || (inner.flags &
-                    (type_info::Flag.read_only as usize)) == 0 || inner.element_type !=
-                    type_info::BuiltinType.unsigned_8 as usize) {
-                return false;
-            }
+            this->counted_parameters += function.parameter_count;
+            this->counted_slots += function.slot_count;
+            this->counted_blocks += function.block_count;
+            this->counted_values += function.value_count;
+        }
+        return true;
+    }
+
+    priv fn function_totals_are_valid() const -> bool {
+        let parameters_match: bool = this->counted_parameters == this->source.parameter_count;
+        let slots_match: bool = this->counted_slots == this->source.slot_count;
+        let blocks_match: bool = this->counted_blocks == this->source.block_count;
+        let values_match: bool = this->counted_values == this->source.value_count;
+        let callable_totals_match: bool = parameters_match && slots_match;
+        let control_totals_match: bool = blocks_match && values_match;
+        return callable_totals_match && control_totals_match;
+    }
+
+    priv fn entry_parameters_are_valid(entry: Function) const -> bool {
+        let argument_count: Parameter = this->parameters[entry.first_parameter];
+        let argument_vector: Parameter = this->parameters[entry.first_parameter + 1];
+        let count_type_is_valid: bool = argument_count.type_id == type_info::BuiltinType.unsigned_size as usize;
+        let outer: type_info::Record = this->type_records[argument_vector.type_id];
+        let outer_is_pointer: bool = outer.kind == type_info::Kind.pointer;
+        let outer_is_mutable: bool = (outer.flags & (type_info::Flag.read_only as usize)) == 0;
+        let outer_is_valid: bool = outer_is_pointer && outer_is_mutable;
+        if (!count_type_is_valid || !outer_is_valid) {
+            return false;
+        }
+        let inner: type_info::Record = this->type_records[outer.element_type];
+        let inner_is_pointer: bool = inner.kind == type_info::Kind.pointer;
+        let inner_is_read_only: bool = (inner.flags & (type_info::Flag.read_only as usize)) != 0;
+        let character_type_is_valid: bool = inner.element_type == type_info::BuiltinType.unsigned_8 as usize;
+        let inner_is_valid: bool = inner_is_pointer && inner_is_read_only;
+        return inner_is_valid && character_type_is_valid;
+    }
+
+    priv fn entry_is_valid() const -> bool {
+        if (this->source.entry_function == no_id()) {
+            return true;
+        }
+        let entry: Function = this->functions[this->source.entry_function];
+        let body_is_internal: bool = entry.has_body && entry.linkage == Linkage.internal;
+        let return_type_is_valid: bool = entry.return_type == type_info::BuiltinType.signed_32 as usize;
+        if (!body_is_internal || !return_type_is_valid) {
+            return false;
+        }
+        switch (entry.parameter_count) {
+        case 0 {
+            return true;
+        }
+        case 2 {
+            return this->entry_parameters_are_valid(entry);
+        }
+        default {
+            return false;
+        }
         }
     }
 
-    index = 0;
-    while (index < ir.slot_count) {
-        if (slots[index].function_id >= ir.function_count || !type_can_be_value(types, slots[index].type_id) ||
-            slots[index].alignment_bytes > (model::Limit.maximum_slot_alignment as usize) ||
-            (slots[index].alignment_bytes & (slots[index].alignment_bytes - 1)) != 0) {
-            return false;
-        }
-        index += 1;
+    priv fn slot_is_valid(slot: Slot) const -> bool {
+        let owner_exists: bool = slot.function_id < this->source.function_count;
+        let type_is_valid: bool = type_can_be_value(*this->types, slot.type_id);
+        let alignment_is_bounded: bool = slot.alignment_bytes <= Limit.maximum_slot_alignment as usize;
+        let alignment_is_power: bool = slot.alignment_bytes == 0 ||
+            (slot.alignment_bytes & (slot.alignment_bytes - 1)) == 0;
+        let identity_is_valid: bool = owner_exists && type_is_valid;
+        let alignment_is_valid: bool = alignment_is_bounded && alignment_is_power;
+        return identity_is_valid && alignment_is_valid;
     }
 
-    index = 0;
-    var counted_instructions: usize = 0;
-    while (index < ir.block_count) {
-        let block: model::Block = blocks[index];
-        if (block.function_id >= ir.function_count || (block.instruction_count == 0 &&
-                (block.first_instruction != none || block.last_instruction != none || block.terminated)) ||
-            (block.instruction_count != 0 && (block.first_instruction >= ir.instruction_count ||
-                    block.last_instruction >= ir.instruction_count || !block.terminated))) {
+    priv fn slots_are_valid() const -> bool {
+        for (var index: usize = 0; index < this->source.slot_count; index += 1) {
+            if (!this->slot_is_valid(this->slots[index])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    priv fn block_shape_is_valid(block: Block) const -> bool {
+        if (block.function_id >= this->source.function_count) {
             return false;
         }
-        counted_instructions += block.instruction_count;
+        if (block.instruction_count == 0) {
+            let endpoints_are_empty: bool = block.first_instruction == no_id() && block.last_instruction == no_id();
+            return endpoints_are_empty && !block.terminated;
+        }
+        let first_exists: bool = block.first_instruction < this->source.instruction_count;
+        let last_exists: bool = block.last_instruction < this->source.instruction_count;
+        let endpoints_exist: bool = first_exists && last_exists;
+        return endpoints_exist && block.terminated;
+    }
+
+    priv fn block_chain_is_valid(block: Block, block_id: usize) const -> bool {
         var instruction_id: usize = block.first_instruction;
-        var visited: usize = 0;
-        var previous: usize = none;
-        while (visited < block.instruction_count) {
-            if (instruction_id >= ir.instruction_count || instructions[instruction_id].block_id != index) {
+        var previous: usize = no_id();
+        for (var visited: usize = 0; visited < block.instruction_count; visited += 1) {
+            if (instruction_id >= this->source.instruction_count ||
+                this->instructions[instruction_id].block_id != block_id) {
                 return false;
             }
-            if (model::opcode_is_terminator(
-                    instructions[instruction_id].opcode) && visited + 1 != block.instruction_count) {
+            let terminates_early: bool = opcode_is_terminator(this->instructions[instruction_id].opcode) &&
+                visited + 1 != block.instruction_count;
+            if (terminates_early) {
                 return false;
             }
             previous = instruction_id;
-            instruction_id = instructions[instruction_id].next_instruction;
-            visited += 1;
+            instruction_id = this->instructions[instruction_id].next_instruction;
         }
-        if (block.instruction_count != 0 && (previous != block.last_instruction || instruction_id != none ||
-                !model::opcode_is_terminator(
-                    instructions[block.last_instruction].opcode))) {
-            return false;
+        if (block.instruction_count == 0) {
+            return true;
         }
-        index += 1;
-    }
-    if (counted_instructions != ir.instruction_count) {
-        return false;
+        let tail_matches: bool = previous == block.last_instruction && instruction_id == no_id();
+        let tail_terminates: bool = opcode_is_terminator(this->instructions[block.last_instruction].opcode);
+        return tail_matches && tail_terminates;
     }
 
-    index = 0;
-    while (index < ir.block_count) {
-        var expected_predecessors: usize = 0;
-        var instruction_index: usize = 0;
-        while (instruction_index < ir.instruction_count) {
-            let candidate: model::Instruction = instructions[instruction_index];
-            if (candidate.opcode == model::Opcode.jump && candidate.auxiliary == index) {
-                expected_predecessors += 1;
+    priv fn blocks_are_valid() const -> bool {
+        var counted_instructions: usize = 0;
+        for (var index: usize = 0; index < this->source.block_count; index += 1) {
+            let block: Block = this->blocks[index];
+            if (!this->block_shape_is_valid(block) || !this->block_chain_is_valid(block, index)) {
+                return false;
             }
-            if (candidate.opcode == model::Opcode.branch && candidate.auxiliary == index) {
-                expected_predecessors += 1;
-            }
-            if (candidate.opcode == model::Opcode.branch && candidate.third == index) {
-                expected_predecessors += 1;
-            }
-            instruction_index += 1;
+            counted_instructions += block.instruction_count;
         }
-        if (blocks[index].predecessor_count != expected_predecessors) {
-            return false;
-        }
-        index += 1;
+        return counted_instructions == this->source.instruction_count;
     }
 
-    index = 0;
-    while (index < ir.instruction_count) {
-        let instruction: model::Instruction = instructions[index];
-        if ((instruction.opcode as usize) > (model::Opcode.va_list_arg as usize) ||
-            instruction.opcode == model::Opcode.invalid || instruction.block_id >= ir.block_count ||
-            instruction.span.line == 0 || instruction.span.column == 0 || (instruction.type_id != none &&
-                instruction.type_id >= types.size()) || (instruction.result != none &&
-                (instruction.result >= ir.value_count || values[instruction.result].definition != index ||
-                    values[instruction.result].block_id != instruction.block_id || values[instruction.result].type_id !=
-                        instruction.type_id)) ||
-            !instruction_operands_are_valid(instruction, index, blocks[instruction.block_id].function_id, ir, values) ||
-            !instruction_types_are_valid(
-                instruction, blocks[instruction.block_id].function_id, types, values, functions, slots)) {
-            return false;
-        }
-        if (instruction.opcode == model::Opcode.call || instruction.opcode == model::Opcode.call_indirect) {
-            var call_parameter_count: usize = 0;
-            var call_variadic: bool = false;
-            if (instruction.opcode == model::Opcode.call) {
-                call_parameter_count = functions[instruction.auxiliary].parameter_count;
-                call_variadic = functions[instruction.auxiliary].variadic;
-            } else {
-                let callee_records: *const
-                    type_info::Record = types.record_data() as
-                        *const type_info::Record;
-                let callee: type_info::Record = callee_records[ values[instruction.left].type_id];
-                call_parameter_count = callee.field_count;
-            }
-            var call_argument_count: usize = 0;
-            var argument_index: usize = 0;
-            while (argument_index < ir.argument_count) {
-                let argument: model::Argument = arguments[argument_index];
-                if (argument.instruction_id == index) {
-                    if (argument.value_id >= ir.value_count ||
-                        values[argument.value_id].function_id != blocks[ instruction.block_id].function_id ||
-                        values[argument.value_id].definition >= index) {
-                        return false;
-                    }
-                    // Variadic extras carry no declared parameter type; the
-                    // call site classifies them at their own width instead.
-                    if (call_argument_count >= call_parameter_count) {
-                        if (!call_variadic) {
-                            return false;
-                        }
-                    } else {
-                        var parameter_type: usize = model::no_id();
-                        if (instruction.opcode == model::Opcode.call) {
-                            let parameters: *const
-                                model::Parameter = ir.parameters.data as
-                                    *const model::Parameter;
-                            parameter_type = parameters[ functions[instruction.auxiliary].first_parameter +
-                                        call_argument_count].type_id;
-                        } else {
-                            let fields: *const type_info::Field = types.field_data() as
-                                    *const type_info::Field;
-                            let records: *const
-                                type_info::Record = types.record_data() as
-                                    *const type_info::Record;
-                            let callee: type_info::Record = records[ values[instruction.left].type_id];
-                            parameter_type = fields[ callee.first_field + call_argument_count].type_id;
-                        }
-                        if (!carrier_matches_type(
-                                types, values[argument.value_id].type_id, parameter_type)) {
-                            return false;
-                        }
-                    }
-                    call_argument_count += 1;
+    priv fn predecessor_count(block_id: usize) const -> usize {
+        var count: usize = 0;
+        for (var index: usize = 0; index < this->source.instruction_count; index += 1) {
+            let instruction: Instruction = this->instructions[index];
+            switch (instruction.opcode) {
+            case Opcode.jump {
+                if (instruction.auxiliary == block_id) {
+                    count += 1;
                 }
-                argument_index += 1;
             }
-            if (call_variadic ? call_argument_count < call_parameter_count : call_argument_count !=
-                    call_parameter_count) {
+            case Opcode.branch {
+                if (instruction.auxiliary == block_id) {
+                    count += 1;
+                }
+                if (instruction.third == block_id) {
+                    count += 1;
+                }
+            }
+            default {}
+            }
+        }
+        return count;
+    }
+
+    priv fn predecessors_are_valid() const -> bool {
+        for (var index: usize = 0; index < this->source.block_count; index += 1) {
+            if (this->blocks[index].predecessor_count != this->predecessor_count(index)) {
                 return false;
             }
         }
-        index += 1;
+        return true;
     }
 
-    index = 0;
-    while (index < ir.argument_count) {
-        let argument: model::Argument = arguments[index];
-        if (argument.instruction_id >= ir.instruction_count || argument.value_id >= ir.value_count ||
-            (instructions[argument.instruction_id].opcode != model::Opcode.call &&
-                instructions[argument.instruction_id].opcode != model::Opcode.call_indirect)) {
+    priv fn instruction_result_is_valid(instruction: Instruction, instruction_id: usize) const -> bool {
+        if (instruction.result == no_id()) {
+            return true;
+        }
+        if (instruction.result >= this->source.value_count) {
             return false;
         }
-        index += 1;
+        let value: Value = this->values[instruction.result];
+        let definition_matches: bool = value.definition == instruction_id;
+        let block_matches: bool = value.block_id == instruction.block_id;
+        let type_matches: bool = value.type_id == instruction.type_id;
+        let ownership_matches: bool = definition_matches && block_matches;
+        return ownership_matches && type_matches;
     }
-    return true;
+
+    priv fn instruction_is_valid(instruction: Instruction, instruction_id: usize) const -> bool {
+        let opcode_is_in_range: bool = (instruction.opcode as usize) <= (Opcode.va_list_arg as usize);
+        let opcode_is_valid: bool = opcode_is_in_range && instruction.opcode != Opcode.invalid;
+        let block_exists: bool = instruction.block_id < this->source.block_count;
+        let span_is_valid: bool = instruction.span.line != 0 && instruction.span.column != 0;
+        let location_is_valid: bool = block_exists && span_is_valid;
+        let type_is_valid: bool = instruction.type_id == no_id() || instruction.type_id < this->types->size();
+        let identity_is_valid: bool = opcode_is_valid && location_is_valid;
+        if (!identity_is_valid || !type_is_valid) {
+            return false;
+        }
+        if (!this->instruction_result_is_valid(instruction, instruction_id)) {
+            return false;
+        }
+        let function_id: usize = this->blocks[instruction.block_id].function_id;
+        if (!instruction_operands_are_valid(
+                instruction, instruction_id, function_id, this->source, this->values)) {
+            return false;
+        }
+        return instruction_types_are_valid(
+            instruction, function_id, *this->types, this->values, this->functions, this->slots);
+    }
+
+    priv fn call_parameter_count(instruction: Instruction) const -> usize {
+        switch (instruction.opcode) {
+        case Opcode.call {
+            return this->functions[instruction.auxiliary].parameter_count;
+        }
+        case Opcode.call_indirect {
+            let callee: type_info::Record = this->type_records[this->values[instruction.left].type_id];
+            return callee.field_count;
+        }
+        default {
+            return 0;
+        }
+        }
+    }
+
+    priv fn call_is_variadic(instruction: Instruction) const -> bool {
+        switch (instruction.opcode) {
+        case Opcode.call {
+            return this->functions[instruction.auxiliary].variadic;
+        }
+        default {
+            return false;
+        }
+        }
+    }
+
+    priv fn call_parameter_type(instruction: Instruction, parameter_index: usize) const -> usize {
+        switch (instruction.opcode) {
+        case Opcode.call {
+            let function: Function = this->functions[instruction.auxiliary];
+            return this->parameters[function.first_parameter + parameter_index].type_id;
+        }
+        case Opcode.call_indirect {
+            let callee: type_info::Record = this->type_records[this->values[instruction.left].type_id];
+            return this->type_fields[callee.first_field + parameter_index].type_id;
+        }
+        default {
+            return no_id();
+        }
+        }
+    }
+
+    priv fn call_argument_value_is_valid(
+        argument: Argument, instruction: Instruction, instruction_id: usize) const -> bool {
+        if (argument.value_id >= this->source.value_count) {
+            return false;
+        }
+        let value: Value = this->values[argument.value_id];
+        let function_id: usize = this->blocks[instruction.block_id].function_id;
+        let owner_matches: bool = value.function_id == function_id;
+        let definition_precedes_call: bool = value.definition < instruction_id;
+        return owner_matches && definition_precedes_call;
+    }
+
+    priv fn call_argument_is_valid(
+        argument: Argument, instruction: Instruction, instruction_id: usize,
+        parameter_index: usize, parameter_count: usize, variadic: bool) const -> bool {
+        if (!this->call_argument_value_is_valid(argument, instruction, instruction_id)) {
+            return false;
+        }
+        // 额外可变实参没有声明参数类型，调用点按其自身位宽分类。
+        if (parameter_index >= parameter_count) {
+            return variadic;
+        }
+        let parameter_type: usize = this->call_parameter_type(instruction, parameter_index);
+        return carrier_matches_type(*this->types, this->values[argument.value_id].type_id, parameter_type);
+    }
+
+    priv fn call_arguments_are_valid(instruction: Instruction, instruction_id: usize) const -> bool {
+        let parameter_count: usize = this->call_parameter_count(instruction);
+        let variadic: bool = this->call_is_variadic(instruction);
+        var argument_count: usize = 0;
+        for (var index: usize = 0; index < this->source.argument_count; index += 1) {
+            let argument: Argument = this->arguments[index];
+            if (argument.instruction_id != instruction_id) {
+                continue;
+            }
+            if (!this->call_argument_is_valid(
+                    argument, instruction, instruction_id, argument_count, parameter_count, variadic)) {
+                return false;
+            }
+            argument_count += 1;
+        }
+        return variadic ? argument_count >= parameter_count : argument_count == parameter_count;
+    }
+
+    priv fn instructions_are_valid() const -> bool {
+        for (var index: usize = 0; index < this->source.instruction_count; index += 1) {
+            let instruction: Instruction = this->instructions[index];
+            if (!this->instruction_is_valid(instruction, index)) {
+                return false;
+            }
+            if (instruction_is_call(instruction.opcode) && !this->call_arguments_are_valid(instruction, index)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    priv fn argument_is_valid(argument: Argument) const -> bool {
+        let instruction_exists: bool = argument.instruction_id < this->source.instruction_count;
+        let value_exists: bool = argument.value_id < this->source.value_count;
+        if (!instruction_exists || !value_exists) {
+            return false;
+        }
+        return instruction_is_call(this->instructions[argument.instruction_id].opcode);
+    }
+
+    priv fn arguments_are_valid() const -> bool {
+        for (var index: usize = 0; index < this->source.argument_count; index += 1) {
+            if (!this->argument_is_valid(this->arguments[index])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn run() -> bool {
+        if (!this->input_is_valid()) {
+            return false;
+        }
+        if (!this->globals_are_valid() || !this->functions_are_valid()) {
+            return false;
+        }
+        if (!this->function_totals_are_valid() || !this->entry_is_valid()) {
+            return false;
+        }
+        if (!this->slots_are_valid() || !this->blocks_are_valid()) {
+            return false;
+        }
+        if (!this->predecessors_are_valid() || !this->instructions_are_valid()) {
+            return false;
+        }
+        return this->arguments_are_valid();
+    }
+}
+
+impl Module {
+    fn is_valid(types: type_info::TypeTable const&) const -> bool {
+        if (!this->storage_is_valid()) {
+            return false;
+        }
+        var verifier: Verifier = Verifier(this->view(), types);
+        return verifier.run();
+    }
 }

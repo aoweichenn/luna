@@ -143,7 +143,7 @@ contain files or child module/family directories at one level, never both.
 | `bootstrap.frontend.syntax` | `luna.compiler.syntax` | tree, builder, verify |
 | `bootstrap.frontend.parser.*` | `luna.compiler.parser` | facade, session, rules, literals, types, expression, statements, classes, declarations |
 | `bootstrap.middleend.type` | `luna.compiler.types` | storage, traits, construction, mutation, validation, layout |
-| `bootstrap.middleend.ir` + `ir.verify` | `luna.compiler.ir` | model, builder, validation |
+| `bootstrap.middleend.ir` + `ir.verify` | `luna.compiler.ir` | storage, globals, functions, control, instructions, validation, verify |
 | semantic foundational records | `luna.compiler.sema.domain` | callable, value, classes, generics |
 | semantic `context.*` | `luna.compiler.sema.session` | session, names, builder |
 | semantic `types.*` | `luna.compiler.sema.types` | resolution, lookup, visibility, layout |
@@ -254,6 +254,12 @@ plain structures; resolution and lowering behavior belongs to focused classes
 or strategy objects. Builders own append/rollback invariants. Expression and
 statement recursion is expressed through methods or a narrow strategy object,
 not parent-facade imports.
+
+`ir::Module` owns the completed typed CFG, `ir::Builder` owns its append-only
+construction phase, and the private `Verifier` owns whole-module validation
+state. IR enums and records remain passive structs. Stateless opcode/type
+rules use `switch` predicates rather than another object layer. The detailed
+boundary is `docs/ir.md`.
 
 ### Backend and binary tools
 

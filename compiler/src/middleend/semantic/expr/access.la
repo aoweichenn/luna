@@ -6,7 +6,6 @@ import luna.bootstrap.middleend.semantic.context.builder as builder;
 
 import luna.bootstrap.middleend.semantic.context.lookup as names;
 
-import luna.bootstrap.middleend.ir as ir;
 import luna.bootstrap.middleend.semantic.callable as callable;
 import luna.bootstrap.middleend.semantic.classes as classes;
 import luna.bootstrap.middleend.semantic.classes.model as class_model;
@@ -15,6 +14,7 @@ import luna.bootstrap.middleend.semantic.functions as functions;
 import luna.bootstrap.middleend.semantic.lifetime as lifetime;
 import luna.bootstrap.middleend.semantic.types as types;
 import luna.bootstrap.middleend.semantic.value as category;
+import luna.compiler.ir as ir;
 import luna.compiler.lexer as lexer;
 import luna.compiler.types as type_info;
 import luna.runtime as runtime;
@@ -242,10 +242,10 @@ fn lower_this(context: *context::Context, node: syntax::SyntaxNode) -> context::
         return base::invalid_expression();
     }
     let receiver_type: usize = functions::function_receiver_type(context, function);
-    let ir_functions: *const ir::Function = context->ir.functions.data as
+    let ir_functions: *const ir::Function = context->ir.view().functions as
             *const ir::Function;
     let ir_function: ir::Function = ir_functions[function.ir_function];
-    let ir_parameters: *const ir::Parameter = context->ir.parameters.data as
+    let ir_parameters: *const ir::Parameter = context->ir.view().parameters as
             *const ir::Parameter;
     let receiver: ir::Parameter = ir_parameters[ir_function.first_parameter];
     let address_id: usize = builder::address_of_slot(context, node, receiver.slot_id, receiver_type, true, false);
@@ -503,8 +503,7 @@ fn lower_bound_method(
             none, context::empty_span(), resolution.function_id);
         return base::invalid_expression();
     }
-    let slot_id: usize = ir::add_slot(
-        &context->ir, builder::current_ir_function(context), expected_type, true, false, 0);
+    let slot_id: usize = context->ir.add_slot(builder::current_ir_function(context), expected_type, true, false, 0);
     let bound_address: usize = builder::address_of_slot(context, node, slot_id, expected_type, false, false);
     let word_bytes: usize = sizeof(usize);
     let receiver_is_stored: bool = store_bound_word(context, node, bound_address, 0, receiver_address);
@@ -736,8 +735,8 @@ fn call_argument_value(context: *context::Context, node: syntax::SyntaxNode, arg
     if (!type_info::is_memory(argument_type.kind)) {
         return argument.value_id;
     }
-    let snapshot_slot: usize = ir::add_slot(
-        &context->ir, builder::current_ir_function(context), argument.type_id, true, false, 0);
+    let snapshot_slot: usize = context->ir.add_slot(builder::current_ir_function(context), argument.type_id, true,
+        false, 0);
     let snapshot_address: usize = builder::address_of_slot(
         context, node, snapshot_slot, argument.type_id, false, false);
     let snapshot_is_valid: bool = snapshot_slot != context::no_id() && snapshot_address != context::no_id();
@@ -872,7 +871,7 @@ fn convert_value(context: *context::Context, node: syntax::SyntaxNode, value_id:
     if (value_id == context::no_id()) {
         return context::no_id();
     }
-    let values: *const ir::Value = context->ir.values.data as *const ir::Value;
+    let values: *const ir::Value = context->ir.view().values as *const ir::Value;
     let source_type: usize = values[value_id].type_id;
     if (source_type == target_type) {
         return value_id;
@@ -1072,7 +1071,7 @@ fn call_has_exact_dynamic_type(context: *context::Context, target: probe::CallTa
 
 fn constructor_receiver(
     context: *context::Context, node: syntax::SyntaxNode, owner_type: usize, values: *bytes::Buffer) -> usize {
-    let slot_id: usize = ir::add_slot(&context->ir, builder::current_ir_function(context), owner_type, true, false, 0);
+    let slot_id: usize = context->ir.add_slot(builder::current_ir_function(context), owner_type, true, false, 0);
     let address_id: usize = builder::address_of_slot(context, node, slot_id, owner_type, false, false);
     let storage_is_valid: bool = slot_id != context::no_id() && address_id != context::no_id();
     if (!storage_is_valid || !builder::zero_slot(context, node, slot_id, owner_type)) {
@@ -1092,7 +1091,7 @@ fn receiver_storage_address(
     if (receiver.address_id == context::no_id()) {
         return context::no_id();
     }
-    let values: *const ir::Value = context->ir.values.data as
+    let values: *const ir::Value = context->ir.view().values as
             *const ir::Value;
     let storage_type: usize = values[receiver.address_id].type_id;
     if (context::type_record(context, storage_type).kind == type_info::Kind.pointer) {
@@ -1101,8 +1100,7 @@ fn receiver_storage_address(
     if (storage_type != receiver.type_id) {
         return context::no_id();
     }
-    let slot_id: usize = ir::add_slot(
-        &context->ir, builder::current_ir_function(context), receiver.type_id, true, false, 0);
+    let slot_id: usize = context->ir.add_slot(builder::current_ir_function(context), receiver.type_id, true, false, 0);
     let address_id: usize = builder::address_of_slot(context, node, slot_id, receiver.type_id, false, false);
     let storage_is_valid: bool = slot_id != context::no_id() && address_id != context::no_id();
     if (!storage_is_valid) {
@@ -1134,7 +1132,7 @@ fn instance_receiver_address(
     if (address_id == context::no_id()) {
         return address_id;
     }
-    let ir_values: *const ir::Value = context->ir.values.data as
+    let ir_values: *const ir::Value = context->ir.view().values as
             *const ir::Value;
     let source_type: usize = ir_values[address_id].type_id;
     if (source_type != receiver_type) {
@@ -1163,7 +1161,7 @@ fn current_receiver(
         return context::no_id();
     }
     var address_id: usize = receiver.value_id;
-    let ir_values: *const ir::Value = context->ir.values.data as
+    let ir_values: *const ir::Value = context->ir.view().values as
             *const ir::Value;
     let source_type: usize = ir_values[address_id].type_id;
     if (source_type != receiver_type) {
@@ -1390,7 +1388,7 @@ fn lower_target_call_with_receiver(
     if (has_result) {
         result_value = builder::emit_value(context, instruction, return_type);
         if (result_value != none) {
-            let values: *const ir::Value = context->ir.values.data as
+            let values: *const ir::Value = context->ir.view().values as
                     *const ir::Value;
             instruction_id = values[result_value].definition;
         }
@@ -1400,7 +1398,7 @@ fn lower_target_call_with_receiver(
     }
     let arguments: *const usize = argument_values.data as *const usize;
     for (var index: usize = 0; index < argument_values.length / sizeof(usize); index += 1) {
-        ir::add_argument(&context->ir, instruction_id, arguments[index]);
+        context->ir.add_argument(instruction_id, arguments[index]);
     }
     let release_error: runtime::Error = bytes::release(argument_values);
     if (context->error == runtime::Error.none) {
@@ -1520,7 +1518,7 @@ fn lower_special_construction(
     let instruction_id: usize = context->error == runtime::Error.none ? builder::emit_void(context, call) : none;
     let values: *const usize = arguments.data as *const usize;
     for (var index: usize = 0; index < arguments.length / sizeof(usize); index += 1) {
-        ir::add_argument(&context->ir, instruction_id, values[index]);
+        context->ir.add_argument(instruction_id, values[index]);
     }
     let release_error: runtime::Error = bytes::release(arguments);
     if (context->error == runtime::Error.none) {

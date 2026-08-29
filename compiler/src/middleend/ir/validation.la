@@ -1,0 +1,545 @@
+module luna.compiler.ir;
+
+fn range_is_valid(first: usize, count: usize, total: usize) -> bool {
+    if (count == 0) {
+        return first == no_id();
+    }
+    return first < total && count <= total - first;
+}
+
+fn value_operand_is_valid(
+    values: *const Value, value_count: usize, value_id: usize, function_id: usize, instruction_id: usize) -> bool {
+    if (value_id >= value_count) {
+        return false;
+    }
+    let identity_is_valid: bool = values[value_id].function_id == function_id;
+    let definition_is_valid: bool = values[value_id].definition != no_id() &&
+        values[value_id].definition < instruction_id;
+    return identity_is_valid && definition_is_valid;
+}
+
+fn instruction_has_unary_operand(opcode: Opcode) -> bool {
+    switch (opcode) {
+    case Opcode.store, Opcode.load_indirect, Opcode.null_check, Opcode.unary_integer, Opcode.unary_float,
+            Opcode.boolean_not, Opcode.convert, Opcode.return_value, Opcode.call_indirect, Opcode.branch,
+            Opcode.float_sqrt, Opcode.va_list_start, Opcode.va_list_arg {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn instruction_has_binary_operands(opcode: Opcode) -> bool {
+    switch (opcode) {
+    case Opcode.memory_copy, Opcode.store_indirect, Opcode.bounds_check, Opcode.pointer_offset,
+            Opcode.binary_integer, Opcode.binary_float, Opcode.compare, Opcode.float_min, Opcode.float_max {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn instruction_is_call(opcode: Opcode) -> bool {
+    switch (opcode) {
+    case Opcode.call, Opcode.call_indirect {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn block_target_is_valid(ir: View, block_id: usize, function_id: usize) -> bool {
+    if (block_id >= ir.block_count) {
+        return false;
+    }
+    return ir.blocks[block_id].function_id == function_id;
+}
+
+fn instruction_operands_are_valid(
+    instruction: Instruction, instruction_id: usize, function_id: usize, ir: View, values: *const Value) -> bool {
+    let none: usize = no_id();
+    let has_left: bool = instruction_has_unary_operand(instruction.opcode) ||
+        instruction_has_binary_operands(instruction.opcode);
+    if (has_left && !value_operand_is_valid(values, ir.value_count, instruction.left, function_id, instruction_id)) {
+        return false;
+    }
+    let has_right: bool = instruction_has_binary_operands(instruction.opcode);
+    if (has_right && !value_operand_is_valid(values, ir.value_count, instruction.right, function_id, instruction_id)) {
+        return false;
+    }
+    let call_has_destination: bool = instruction_is_call(instruction.opcode) && instruction.right != none;
+    if (call_has_destination &&
+        !value_operand_is_valid(values, ir.value_count, instruction.right, function_id, instruction_id)) {
+        return false;
+    }
+
+    switch (instruction.opcode) {
+    case Opcode.call {
+        return instruction.auxiliary < ir.function_count;
+    }
+    case Opcode.address_of_slot, Opcode.zero_slot, Opcode.load, Opcode.store {
+        return instruction.auxiliary < ir.slot_count;
+    }
+    case Opcode.global_address {
+        return instruction.auxiliary < ir.global_count;
+    }
+    case Opcode.jump {
+        return block_target_is_valid(ir, instruction.auxiliary, function_id);
+    }
+    case Opcode.branch {
+        let true_target_is_valid: bool = block_target_is_valid(ir, instruction.auxiliary, function_id);
+        let false_target_is_valid: bool = block_target_is_valid(ir, instruction.third, function_id);
+        return true_target_is_valid && false_target_is_valid;
+    }
+    case Opcode.return_void {
+        return instruction.left == none;
+    }
+    default {
+        return true;
+    }
+    }
+}
+
+fn carrier_matches_type(types: type_info::TypeTable const&, carrier_type: usize, source_type: usize) -> bool {
+    if (carrier_type == source_type) {
+        return true;
+    }
+    if (carrier_type >= types.size() || source_type >= types.size()) {
+        return false;
+    }
+    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
+    let carrier_is_pointer: bool = records[carrier_type].kind == type_info::Kind.pointer;
+    let carrier_points_to_source: bool = records[carrier_type].element_type == source_type;
+    let pointer_matches: bool = carrier_is_pointer && carrier_points_to_source;
+    return type_info::is_memory(records[source_type].kind) && pointer_matches;
+}
+
+fn type_can_be_value(types: type_info::TypeTable const&, type_id: usize) -> bool {
+    if (type_id >= types.size()) {
+        return false;
+    }
+    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
+    return records[type_id].kind != type_info::Kind.invalid && records[type_id].kind != type_info::Kind.type_void;
+}
+
+fn instruction_requires_type(opcode: Opcode) -> bool {
+    switch (opcode) {
+    case Opcode.constant_integer, Opcode.constant_float, Opcode.constant_boolean, Opcode.constant_null,
+            Opcode.address_of_slot, Opcode.member_address, Opcode.global_address, Opcode.zero_slot,
+            Opcode.memory_copy, Opcode.load, Opcode.store, Opcode.load_indirect, Opcode.store_indirect,
+            Opcode.pointer_offset, Opcode.unary_integer, Opcode.unary_float, Opcode.boolean_not, Opcode.convert,
+            Opcode.binary_integer, Opcode.binary_float, Opcode.compare, Opcode.call, Opcode.call_indirect,
+            Opcode.function_address, Opcode.return_value, Opcode.return_void, Opcode.float_sqrt, Opcode.float_min,
+            Opcode.float_max, Opcode.overflow_flag, Opcode.va_list_arg {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn instruction_expects_result(
+    instruction: Instruction, functions: *const Function, types: type_info::TypeTable const&) -> bool {
+    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
+    switch (instruction.opcode) {
+    case Opcode.call {
+        return records[functions[instruction.auxiliary].return_type].kind != type_info::Kind.type_void;
+    }
+    case Opcode.call_indirect {
+        return records[instruction.type_id].kind != type_info::Kind.type_void;
+    }
+    case Opcode.constant_integer, Opcode.constant_float, Opcode.constant_boolean, Opcode.constant_null,
+            Opcode.address_of_slot, Opcode.member_address, Opcode.global_address, Opcode.load,
+            Opcode.load_indirect, Opcode.pointer_offset, Opcode.unary_integer, Opcode.unary_float,
+            Opcode.boolean_not, Opcode.convert, Opcode.binary_integer, Opcode.binary_float, Opcode.compare,
+            Opcode.function_address, Opcode.float_sqrt, Opcode.float_min, Opcode.float_max, Opcode.overflow_flag,
+            Opcode.va_list_arg {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn member_address_offset_is_valid(
+    types: type_info::TypeTable const&, owner_type: usize, offset: usize, element_type: usize, depth: usize) -> bool {
+    if (depth > (Limit.maximum_type_depth as usize)) {
+        return false;
+    }
+    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
+    let fields: *const type_info::Field = types.field_data() as *const type_info::Field;
+    let owner: type_info::Record = records[owner_type];
+    for (var index: usize = 0; index < owner.field_count; index += 1) {
+        let field: type_info::Field = fields[owner.first_field + index];
+        if (field.offset_bytes == offset && field.type_id == element_type) {
+            return true;
+        }
+        let field_record: type_info::Record = records[field.type_id];
+        // 柔性数组成员在字段偏移处表现为指向元素类型的指针。
+        let flexible_at_offset: bool = (field_record.flags & (type_info::Flag.flexible as usize)) != 0 &&
+            field.offset_bytes == offset;
+        if (flexible_at_offset && field_record.element_type == element_type) {
+            return true;
+        }
+        // 匿名记录提升字段通过外层记录和累计偏移寻址。
+        let anonymous_record: bool = field_record.kind == type_info::Kind.structure ||
+            field_record.kind == type_info::Kind.record_union;
+        let offset_is_inside: bool = offset >= field.offset_bytes &&
+            offset - field.offset_bytes < field_record.size_bytes;
+        if (anonymous_record && offset_is_inside) {
+            let nested_offset: usize = offset - field.offset_bytes;
+            if (member_address_offset_is_valid(types, field.type_id, nested_offset, element_type, depth + 1)) {
+                return true;
+            }
+        }
+    }
+    let inherited_address: bool = owner.kind == type_info::Kind.class_type && owner.base_type != no_id();
+    if (inherited_address && offset < records[owner.base_type].size_bytes) {
+        return member_address_offset_is_valid(types, owner.base_type, offset, element_type, depth + 1);
+    }
+    return false;
+}
+
+fn member_address_is_valid(instruction: Instruction, types: type_info::TypeTable const&, values: *const Value) -> bool {
+    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
+    let source_pointer: type_info::Record = records[values[instruction.left].type_id];
+    let result_pointer: type_info::Record = records[instruction.type_id];
+    if (result_pointer.kind != type_info::Kind.pointer) {
+        return false;
+    }
+    var owner_type: usize = values[instruction.left].type_id;
+    var source_read_only: bool = true;
+    if (source_pointer.kind == type_info::Kind.pointer) {
+        owner_type = source_pointer.element_type;
+        source_read_only = (source_pointer.flags & (type_info::Flag.read_only as usize)) != 0;
+    } else if (!type_info::is_memory(source_pointer.kind)) {
+        return false;
+    }
+    let owner: type_info::Record = records[owner_type];
+    if (!type_info::is_memory(owner.kind)) {
+        return false;
+    }
+    if (!member_address_offset_is_valid(
+            types, owner_type, instruction.auxiliary, result_pointer.element_type, 0)) {
+        return false;
+    }
+    let result_read_only: bool = (result_pointer.flags & (type_info::Flag.read_only as usize)) != 0;
+    return !source_read_only || result_read_only;
+}
+
+fn global_address_type_is_valid(instruction: Instruction, records: *const type_info::Record) -> bool {
+    let result_pointer: type_info::Record = records[instruction.type_id];
+    let points_to_global: bool = result_pointer.kind == type_info::Kind.pointer;
+    let pointer_is_read_only: bool = (result_pointer.flags & (type_info::Flag.read_only as usize)) != 0;
+    if (!points_to_global || !pointer_is_read_only) {
+        return false;
+    }
+    var element_type: usize = result_pointer.element_type;
+    if (records[element_type].kind == type_info::Kind.array) {
+        // @embed 指向完整字节数组全局，而不是单个字符串元素。
+        element_type = records[element_type].element_type;
+    }
+    switch (element_type as type_info::BuiltinType) {
+    case type_info::BuiltinType.unsigned_8, type_info::BuiltinType.unsigned_16, type_info::BuiltinType.unsigned_32 {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn slot_instruction_type_is_valid(
+    instruction: Instruction, function_id: usize, values: *const Value,
+        records: *const type_info::Record, slots: *const Slot) -> bool {
+    let slot: Slot = slots[instruction.auxiliary];
+    let slot_is_owned: bool = slot.function_id == function_id;
+    switch (instruction.opcode) {
+    case Opcode.address_of_slot {
+        let result: type_info::Record = records[instruction.type_id];
+        let pointer_matches: bool = result.kind == type_info::Kind.pointer && result.element_type == slot.type_id;
+        return slot_is_owned && pointer_matches;
+    }
+    case Opcode.zero_slot {
+        let type_matches: bool = slot.type_id == instruction.type_id;
+        let storage_is_memory: bool = type_info::is_memory(records[instruction.type_id].kind);
+        return slot_is_owned && type_matches && storage_is_memory;
+    }
+    case Opcode.load {
+        let type_matches: bool = slot.type_id == instruction.type_id;
+        let storage_is_scalar: bool = type_info::is_scalar(records[instruction.type_id].kind);
+        return slot_is_owned && type_matches && storage_is_scalar;
+    }
+    case Opcode.store {
+        let value_type: usize = values[instruction.left].type_id;
+        let slot_matches: bool = slot.type_id == value_type;
+        let instruction_matches: bool = instruction.type_id == value_type;
+        let storage_matches: bool = slot_is_owned && slot_matches;
+        let value_is_scalar: bool = type_info::is_scalar(records[instruction.type_id].kind);
+        return storage_matches && instruction_matches && value_is_scalar;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn indirect_memory_type_is_valid(
+    instruction: Instruction, types: type_info::TypeTable const&,
+        values: *const Value, records: *const type_info::Record) -> bool {
+    let destination: type_info::Record = records[values[instruction.left].type_id];
+    let destination_matches: bool = destination.kind == type_info::Kind.pointer &&
+        destination.element_type == instruction.type_id;
+    let destination_is_mutable: bool = (destination.flags & (type_info::Flag.read_only as usize)) == 0;
+    if (!destination_matches || !destination_is_mutable) {
+        return false;
+    }
+    let carrier_matches: bool = carrier_matches_type(types, values[instruction.right].type_id, instruction.type_id);
+    let size_matches: bool = instruction.auxiliary == records[instruction.type_id].size_bytes;
+    if (!carrier_matches || !size_matches) {
+        return false;
+    }
+    switch (instruction.opcode) {
+    case Opcode.memory_copy {
+        return type_info::is_memory(records[instruction.type_id].kind);
+    }
+    case Opcode.store_indirect {
+        return type_info::is_scalar(records[instruction.type_id].kind);
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn pointer_offset_type_is_valid(
+    instruction: Instruction, values: *const Value, records: *const type_info::Record) -> bool {
+    let source: type_info::Record = records[values[instruction.left].type_id];
+    let result: type_info::Record = records[instruction.type_id];
+    let temporary_array: bool = source.kind == type_info::Kind.array;
+    var element_matches: bool = source.element_type == result.element_type;
+    if (source.kind == type_info::Kind.pointer && records[source.element_type].kind == type_info::Kind.array) {
+        element_matches = records[source.element_type].element_type == result.element_type;
+    }
+    let source_is_pointer: bool = source.kind == type_info::Kind.pointer || temporary_array;
+    if (!source_is_pointer || result.kind != type_info::Kind.pointer) {
+        return false;
+    }
+    let result_is_read_only: bool = (result.flags & (type_info::Flag.read_only as usize)) != 0;
+    let qualifier_matches: bool = temporary_array ? result_is_read_only : source.flags == result.flags;
+    let pointer_type_matches: bool = element_matches && qualifier_matches;
+    let index_matches: bool = values[instruction.right].type_id == type_info::BuiltinType.unsigned_size as usize;
+    let stride_matches: bool = instruction.auxiliary == records[result.element_type].size_bytes;
+    let operation_matches: bool = index_matches && stride_matches;
+    return pointer_type_matches && operation_matches;
+}
+
+fn binary_numeric_type_is_valid(
+    instruction: Instruction, values: *const Value, records: *const type_info::Record) -> bool {
+    let left_matches: bool = values[instruction.left].type_id == instruction.type_id;
+    let right_matches: bool = values[instruction.right].type_id == instruction.type_id;
+    if (!left_matches || !right_matches) {
+        return false;
+    }
+    switch (instruction.opcode) {
+    case Opcode.binary_integer {
+        return type_info::is_integer(records[instruction.type_id].kind);
+    }
+    case Opcode.binary_float, Opcode.float_min, Opcode.float_max {
+        return type_info::is_float(records[instruction.type_id].kind);
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn call_type_is_valid(
+    instruction: Instruction, types: type_info::TypeTable const&, values: *const Value,
+        functions: *const Function, records: *const type_info::Record) -> bool {
+    let none: usize = no_id();
+    let destination_is_valid: bool = instruction.right == none ||
+        carrier_matches_type(types, values[instruction.right].type_id, instruction.type_id);
+    switch (instruction.opcode) {
+    case Opcode.call {
+        let return_type_matches: bool = instruction.type_id == functions[instruction.auxiliary].return_type;
+        return return_type_matches && destination_is_valid;
+    }
+    case Opcode.call_indirect {
+        if (instruction.left == none) {
+            return false;
+        }
+        let callee: type_info::Record = records[values[instruction.left].type_id];
+        let callee_is_valid: bool = callee.kind == type_info::Kind.function_pointer &&
+            callee.element_type == instruction.type_id;
+        return callee_is_valid && destination_is_valid;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn va_list_type_is_valid(
+    instruction: Instruction, types: type_info::TypeTable const&,
+        values: *const Value, records: *const type_info::Record) -> bool {
+    // 两条指令都通过可变指针推进调用方的 va_list；va_arg 还生成请求位宽的标量。
+    let pointer: type_info::Record = records[values[instruction.left].type_id];
+    if (pointer.kind != type_info::Kind.pointer || pointer.element_type >= types.size()) {
+        return false;
+    }
+    let points_to_va_list: bool = records[pointer.element_type].kind == type_info::Kind.va_list_type;
+    let pointer_is_mutable: bool = (pointer.flags & (type_info::Flag.read_only as usize)) == 0;
+    if (!points_to_va_list || !pointer_is_mutable) {
+        return false;
+    }
+    switch (instruction.opcode) {
+    case Opcode.va_list_start {
+        return instruction.type_id == no_id();
+    }
+    case Opcode.va_list_arg {
+        return type_info::is_scalar(records[instruction.type_id].kind);
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+fn instruction_types_are_valid(
+    instruction: Instruction, function_id: usize, types: type_info::TypeTable const&,
+        values: *const Value, functions: *const Function, slots: *const Slot) -> bool {
+    let none: usize = no_id();
+    if (instruction_requires_type(instruction.opcode) && instruction.type_id == none) {
+        return false;
+    }
+    let records: *const type_info::Record = types.record_data() as *const type_info::Record;
+    let expects_result: bool = instruction_expects_result(instruction, functions, types);
+    let result_presence_matches: bool = expects_result == (instruction.result != none);
+    if (!result_presence_matches) {
+        return false;
+    }
+    if (expects_result && !type_can_be_value(types, instruction.type_id)) {
+        return false;
+    }
+
+    switch (instruction.opcode) {
+    case Opcode.constant_integer {
+        let kind: type_info::Kind = records[instruction.type_id].kind;
+        return type_info::is_integer(kind) || kind == type_info::Kind.enumeration;
+    }
+    case Opcode.constant_float {
+        return type_info::is_float(records[instruction.type_id].kind);
+    }
+    case Opcode.constant_boolean {
+        return instruction.type_id == type_info::BuiltinType.boolean as usize && instruction.immediate <= 1;
+    }
+    case Opcode.constant_null {
+        let kind: type_info::Kind = records[instruction.type_id].kind;
+        return kind == type_info::Kind.pointer || kind == type_info::Kind.function_pointer;
+    }
+    case Opcode.address_of_slot, Opcode.zero_slot, Opcode.load, Opcode.store {
+        return slot_instruction_type_is_valid(instruction, function_id, values, records, slots);
+    }
+    case Opcode.member_address {
+        return member_address_is_valid(instruction, types, values);
+    }
+    case Opcode.global_address {
+        return global_address_type_is_valid(instruction, records);
+    }
+    case Opcode.load_indirect {
+        let pointer: type_info::Record = records[values[instruction.left].type_id];
+        let pointee_matches: bool = pointer.kind == type_info::Kind.pointer &&
+            pointer.element_type == instruction.type_id;
+        return pointee_matches && type_info::is_scalar(records[instruction.type_id].kind);
+    }
+    case Opcode.store_indirect, Opcode.memory_copy {
+        return indirect_memory_type_is_valid(instruction, types, values, records);
+    }
+    case Opcode.null_check {
+        let checked_kind: type_info::Kind = records[values[instruction.left].type_id].kind;
+        return checked_kind == type_info::Kind.pointer || checked_kind == type_info::Kind.function_pointer;
+    }
+    case Opcode.bounds_check {
+        let left_matches: bool = values[instruction.left].type_id == type_info::BuiltinType.unsigned_size as usize;
+        let right_matches: bool = values[instruction.right].type_id == type_info::BuiltinType.unsigned_size as usize;
+        return left_matches && right_matches;
+    }
+    case Opcode.pointer_offset {
+        return pointer_offset_type_is_valid(instruction, values, records);
+    }
+    case Opcode.unary_integer {
+        let operand_matches: bool = values[instruction.left].type_id == instruction.type_id;
+        return operand_matches && type_info::is_integer(records[instruction.type_id].kind);
+    }
+    case Opcode.unary_float, Opcode.float_sqrt {
+        let operand_matches: bool = values[instruction.left].type_id == instruction.type_id;
+        return operand_matches && type_info::is_float(records[instruction.type_id].kind);
+    }
+    case Opcode.boolean_not {
+        let operand_is_boolean: bool = values[instruction.left].type_id == type_info::BuiltinType.boolean as usize;
+        let result_is_boolean: bool = instruction.type_id == type_info::BuiltinType.boolean as usize;
+        return operand_is_boolean && result_is_boolean;
+    }
+    case Opcode.convert {
+        let source_exists: bool = instruction.auxiliary < types.size();
+        let source_matches: bool = values[instruction.left].type_id == instruction.auxiliary;
+        if (!source_exists || !source_matches) {
+            return false;
+        }
+        let source_is_scalar: bool = type_info::is_scalar(records[instruction.auxiliary].kind);
+        let result_is_scalar: bool = type_info::is_scalar(records[instruction.type_id].kind);
+        return source_is_scalar && result_is_scalar;
+    }
+    case Opcode.binary_integer, Opcode.binary_float, Opcode.float_min, Opcode.float_max {
+        return binary_numeric_type_is_valid(instruction, values, records);
+    }
+    case Opcode.overflow_flag {
+        return instruction.type_id == type_info::BuiltinType.boolean as usize;
+    }
+    case Opcode.compare {
+        let result_is_boolean: bool = instruction.type_id == type_info::BuiltinType.boolean as usize;
+        let operands_match: bool = values[instruction.left].type_id == values[instruction.right].type_id;
+        let operand_is_scalar: bool = type_info::is_scalar(records[values[instruction.left].type_id].kind);
+        let comparison_matches: bool = result_is_boolean && operands_match;
+        return comparison_matches && operand_is_scalar;
+    }
+    case Opcode.call, Opcode.call_indirect {
+        return call_type_is_valid(instruction, types, values, functions, records);
+    }
+    case Opcode.function_address {
+        return records[instruction.type_id].kind == type_info::Kind.function_pointer;
+    }
+    case Opcode.va_list_start, Opcode.va_list_arg {
+        return va_list_type_is_valid(instruction, types, values, records);
+    }
+    case Opcode.branch {
+        let condition_is_boolean: bool = values[instruction.left].type_id == type_info::BuiltinType.boolean as usize;
+        return instruction.type_id == none && condition_is_boolean;
+    }
+    case Opcode.jump {
+        return instruction.type_id == none;
+    }
+    case Opcode.return_value {
+        let return_type_matches: bool = instruction.type_id == functions[function_id].return_type;
+        let carrier_matches: bool = carrier_matches_type(types, values[instruction.left].type_id, instruction.type_id);
+        return return_type_matches && carrier_matches;
+    }
+    case Opcode.return_void {
+        let return_type_matches: bool = instruction.type_id == functions[function_id].return_type;
+        let return_is_void: bool = records[instruction.type_id].kind == type_info::Kind.type_void;
+        return return_type_matches && return_is_void;
+    }
+    default {
+        return instruction.type_id == none;
+    }
+    }
+}

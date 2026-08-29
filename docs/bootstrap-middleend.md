@@ -7,6 +7,9 @@
 >
 > The current pure-Luna type store is the move-only RAII
 > `luna.compiler.types::TypeTable`; its contract is recorded in `types.md`.
+> The current typed IR is the move-only RAII `luna.compiler.ir::Module`, built
+> through `ir::Builder` and verified by a private phase object; its contract is
+> recorded in `ir.md`.
 
 M4 now contains a separately compiled Luna implementation of name resolution,
 strong type checking, target layout and verified Typed IR construction. It
@@ -15,7 +18,8 @@ does not call the hosted C23 semantic analyzer.
 
 ## Module boundary
 
-The implementation is split into three independently compiled modules:
+The archived implementation was split into three independently compiled
+modules:
 
 | module | responsibility |
 | --- | --- |
@@ -246,3 +250,7 @@ This completes the Luna type-checking and Typed IR item in M4. The verified
 [Luna bootstrap x86-64 backend](bootstrap-x86-64-backend.md) and the complete
 source-module graph participates in the
 [stage reproducibility gate](bootstrap-reproducibility.md).
+
+The current pure-Luna branch no longer exports `BootstrapTypedIr` or an
+independent verifier module. See [Luna typed IR](ir.md) for the replacement
+ownership, construction and verification boundary.

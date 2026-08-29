@@ -1,0 +1,146 @@
+module luna.compiler.ir;
+
+fn alignment_is_valid(alignment_bytes: usize) -> bool {
+    let alignment_is_bounded: bool = alignment_bytes != 0 && alignment_bytes <= Limit.maximum_alignment as usize;
+    return alignment_is_bounded && (alignment_bytes & (alignment_bytes - 1)) == 0;
+}
+
+fn global_reference_range_is_valid(global: Global, byte_offset: usize) -> bool {
+    let address_bytes: usize = Limit.function_address_bytes as usize;
+    let placeholder_fits: bool = checked::range_is_valid(byte_offset, address_bytes, global.byte_count);
+    let placeholder_is_aligned: bool = global.alignment_bytes == address_bytes &&
+        (byte_offset & (address_bytes - 1)) == 0;
+    return placeholder_fits && placeholder_is_aligned;
+}
+
+impl Builder {
+    priv fn global_add_request_is_valid(data: *const u8, byte_count: usize, alignment_bytes: usize) const -> bool {
+        let storage_is_ready: bool = this->ready() && data != null;
+        let shape_is_valid: bool = byte_count != 0 && alignment_is_valid(alignment_bytes);
+        return storage_is_ready && shape_is_valid;
+    }
+
+    fn add_global(data: *const u8, byte_count: usize, alignment_bytes: usize, read_only: bool) -> usize {
+        let none: usize = no_id();
+        if (!this->global_add_request_is_valid(data, byte_count, alignment_bytes)) {
+            this->fail(runtime::Error.invalid_argument);
+            return none;
+        }
+        let byte_offset: usize = this->storage.global_bytes.size();
+        let byte_error: runtime::Error = this->storage.global_bytes.append(data, byte_count);
+        if (byte_error != runtime::Error.none) {
+            this->fail(byte_error);
+            return none;
+        }
+        let global: Global = {
+            byte_offset = byte_offset, byte_count = byte_count, alignment_bytes = alignment_bytes,
+            first_reference = none, reference_count = 0, read_only = read_only,
+        };
+        let global_id: usize = this->storage.globals.size();
+        let global_error: runtime::Error = this->storage.globals.push_back(global);
+        if (global_error != runtime::Error.none) {
+            this->storage.global_bytes.truncate(byte_offset);
+            this->fail(global_error);
+            return none;
+        }
+        return global_id;
+    }
+
+    priv fn global_reference_bytes_are_zero(global: Global, byte_offset: usize) const -> bool {
+        var storage_offset: usize = 0;
+        let address_bytes: usize = Limit.function_address_bytes as usize;
+        let offset_is_valid: bool = checked::add(global.byte_offset, byte_offset, &storage_offset);
+        let range_is_valid: bool = offset_is_valid && checked::range_is_valid(
+            storage_offset, address_bytes, this->storage.global_bytes.size());
+        if (!range_is_valid) {
+            return false;
+        }
+        let bytes: *const u8 = this->storage.global_bytes.data();
+        for (var index: usize = 0; index < address_bytes; index += 1) {
+            if (bytes[storage_offset + index] != 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    priv fn global_reference_extends_slice(global: Global, global_id: usize, byte_offset: usize) const -> bool {
+        if (global.reference_count == 0) {
+            return global.first_reference == no_id();
+        }
+        var expected_next: usize = 0;
+        if (!checked::add(global.first_reference, global.reference_count, &expected_next)) {
+            return false;
+        }
+        if (expected_next != this->storage.global_references.size()) {
+            return false;
+        }
+        let previous: GlobalReference = this->storage.global_references.get(expected_next - 1);
+        var previous_end: usize = 0;
+        if (!checked::add(previous.byte_offset, Limit.function_address_bytes as usize, &previous_end)) {
+            return false;
+        }
+        let same_global: bool = previous.global_id == global_id;
+        let follows_previous: bool = previous_end <= byte_offset;
+        return same_global && follows_previous;
+    }
+
+    priv fn global_reference_target_is_valid(kind: GlobalReferenceKind, target_id: usize) const -> bool {
+        switch (kind) {
+        case GlobalReferenceKind.function {
+            return target_id < this->storage.functions.size();
+        }
+        case GlobalReferenceKind.global {
+            return target_id < this->storage.globals.size();
+        }
+        default {
+            return false;
+        }
+        }
+    }
+
+    priv fn global_reference_request_is_valid(
+        global_id: usize, byte_offset: usize, kind: GlobalReferenceKind, target_id: usize) const -> bool {
+        let identity_is_valid: bool = global_id < this->storage.globals.size() &&
+            this->global_reference_target_is_valid(kind, target_id);
+        if (!this->ready() || !identity_is_valid) {
+            return false;
+        }
+        let global: Global = this->storage.globals.get(global_id);
+        let placeholder_is_valid: bool = global.read_only && global_reference_range_is_valid(global, byte_offset);
+        if (!placeholder_is_valid || !this->global_reference_bytes_are_zero(global, byte_offset)) {
+            return false;
+        }
+        return this->global_reference_extends_slice(global, global_id, byte_offset);
+    }
+
+    priv fn add_global_reference_kind(
+        global_id: usize, byte_offset: usize, kind: GlobalReferenceKind, target_id: usize) -> bool {
+        if (!this->global_reference_request_is_valid(global_id, byte_offset, kind, target_id)) {
+            this->fail(runtime::Error.invalid_argument);
+            return false;
+        }
+        let reference: GlobalReference = {
+            global_id = global_id, byte_offset = byte_offset, kind = kind, target_id = target_id,
+        };
+        let reference_id: usize = this->storage.global_references.size();
+        let error: runtime::Error = this->storage.global_references.push_back(reference);
+        if (error != runtime::Error.none) {
+            this->fail(error);
+            return false;
+        }
+        if (this->storage.globals.get(global_id).reference_count == 0) {
+            this->storage.globals.get(global_id).first_reference = reference_id;
+        }
+        this->storage.globals.get(global_id).reference_count += 1;
+        return true;
+    }
+
+    fn add_global_reference(global_id: usize, byte_offset: usize, target_global_id: usize) -> bool {
+        return this->add_global_reference_kind(global_id, byte_offset, GlobalReferenceKind.global, target_global_id);
+    }
+
+    fn add_global_function_reference(global_id: usize, byte_offset: usize, function_id: usize) -> bool {
+        return this->add_global_reference_kind(global_id, byte_offset, GlobalReferenceKind.function, function_id);
+    }
+}

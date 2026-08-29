@@ -1,9 +1,11 @@
-export module luna.bootstrap.middleend.ir;
+export module luna.compiler.ir;
 
 import luna.compiler.lexer as lexer;
 import luna.compiler.types as type_info;
 import luna.runtime;
-import luna.std.bytes as bytes;
+import luna.std.buffer as buffer;
+import luna.std.checked as checked;
+import luna.std.vector as vector;
 
 export enum Limit: usize {
     maximum_size = 18446744073709551615, maximum_alignment = 8, function_address_bytes = 8,
@@ -60,20 +62,11 @@ export struct Function {
     first_value: usize;
     value_count: usize;
     has_body: bool;
-    // Variadic (`...`) callees accept call-site arguments beyond the named
-    // parameters; the call site classifies and passes them per the ABI. A
-    // variadic function with a body saves the argument registers in its
-    // prologue so va_start/va_arg can walk the extras.
+    // 可变参数函数由 ABI 阶段负责额外实参和寄存器保存区。
     variadic: bool;
-    // @export_name override: token of the validated string literal in
-    // export_name_unit, both no-id when absent. The symbol is emitted
-    // verbatim, bypassing the module/function _L mangling by design.
+    // export_name 与 asm body 均用 no-id 表示不存在。
     export_name_unit: usize;
     export_name_token: usize;
-    // asm fn: the body string_expression syntax node in asm_body_unit,
-    // both no-id for ordinary functions. The backend splices the decoded
-    // string literals after the label and emits no prologue, epilogue or
-    // ret; such a function has has_body set but no blocks or values.
     asm_body_unit: usize;
     asm_body_node: usize;
 }
@@ -89,11 +82,10 @@ export struct Parameter {
 export struct Slot {
     function_id: usize;
     type_id: usize;
-    // Raised slot alignment from @align, zero means natural alignment.
+    // 显式 slot 对齐；零表示使用类型的自然对齐。
     alignment_bytes: usize;
     mutable_binding: bool;
-    // A volatile slot's loads and stores are observable memory accesses: a
-    // future optimizer must never elide, coalesce or reorder them.
+    // volatile slot 的每次读写都是不可消除、合并或重排的可观察访问。
     volatile_binding: bool;
 }
 
@@ -134,29 +126,30 @@ export struct Argument {
     value_id: usize;
 }
 
-export struct Store {
-    globals: bytes::Buffer;
+export struct View {
+    globals: *const Global;
     global_count: usize;
-    global_bytes: bytes::Buffer;
-    global_references: bytes::Buffer;
+    global_bytes: *const u8;
+    global_byte_count: usize;
+    global_references: *const GlobalReference;
     global_reference_count: usize;
-    functions: bytes::Buffer;
+    functions: *const Function;
     function_count: usize;
-    callable_signatures: bytes::Buffer;
-    parameters: bytes::Buffer;
+    callable_signatures: *const u8;
+    callable_signature_count: usize;
+    parameters: *const Parameter;
     parameter_count: usize;
-    slots: bytes::Buffer;
+    slots: *const Slot;
     slot_count: usize;
-    values: bytes::Buffer;
+    values: *const Value;
     value_count: usize;
-    blocks: bytes::Buffer;
+    blocks: *const Block;
     block_count: usize;
-    instructions: bytes::Buffer;
+    instructions: *const Instruction;
     instruction_count: usize;
-    arguments: bytes::Buffer;
+    arguments: *const Argument;
     argument_count: usize;
     entry_function: usize;
-    error: runtime::Error;
 }
 
 export struct FunctionResult {
@@ -174,25 +167,64 @@ export struct InstructionResult {
     error: runtime::Error;
 }
 
+export class Module {
+    priv globals: vector::vector<Global>;
+    priv global_bytes: buffer::byte_buffer;
+    priv global_references: vector::vector<GlobalReference>;
+    priv functions: vector::vector<Function>;
+    priv callable_signatures: buffer::byte_buffer;
+    priv parameters: vector::vector<Parameter>;
+    priv slots: vector::vector<Slot>;
+    priv values: vector::vector<Value>;
+    priv blocks: vector::vector<Block>;
+    priv instructions: vector::vector<Instruction>;
+    priv arguments: vector::vector<Argument>;
+    priv entry_function: usize;
+
+    friend class Builder;
+
+    pub init();
+    pub init(other: Module&&);
+    pub operator =(other: Module&&);
+    pub fn storage_is_valid() const -> bool;
+    pub fn is_valid(types: type_info::TypeTable const&) const -> bool;
+    pub fn view() const -> View;
+    pub fn function(function_id: usize) const -> FunctionResult;
+    pub fn block(block_id: usize) const -> BlockResult;
+    pub fn instruction(instruction_id: usize) const -> InstructionResult;
+    pub fn global_bytes_data() -> *u8;
+    pub fn global_reference_data() -> *GlobalReference;
+    pub deinit();
+}
+
+export class Builder {
+    priv storage: Module;
+    priv error_code: runtime::Error;
+    priv active: bool;
+
+    pub init();
+    pub init(source: Module&&);
+    pub fn storage_is_valid() const -> bool;
+    pub fn is_valid() const -> bool;
+    pub fn error() const -> runtime::Error;
+    pub fn view() const -> View;
+    pub fn block(block_id: usize) const -> BlockResult;
+    pub fn add_global(data: *const u8, byte_count: usize, alignment_bytes: usize, read_only: bool) -> usize;
+    pub fn add_global_reference(global_id: usize, byte_offset: usize, target_global_id: usize) -> bool;
+    pub fn add_global_function_reference(global_id: usize, byte_offset: usize, function_id: usize) -> bool;
+    pub fn add_function(function: Function, signature: *const u8, signature_length: usize) -> usize;
+    pub fn add_parameter(function_id: usize, type_id: usize, name_token: usize) -> usize;
+    pub fn add_slot(
+        function_id: usize, type_id: usize, mutable_binding: bool,
+        volatile_binding: bool, alignment_bytes: usize) -> usize;
+    pub fn add_block(function_id: usize) -> usize;
+    pub fn add_value(function_id: usize, block_id: usize, type_id: usize) -> usize;
+    pub fn emit(instruction: Instruction) -> usize;
+    pub fn add_argument(instruction_id: usize, value_id: usize) -> bool;
+    pub fn set_entry(function_id: usize) -> bool;
+    pub fn take_module() -> Module;
+    pub deinit();
+}
+
 export fn no_id() -> usize;
-export fn empty() -> Store;
-export fn storage_is_valid(ir: Store) -> bool;
-export fn function_signatures_are_valid(ir: Store) -> bool;
 export fn opcode_is_terminator(opcode: Opcode) -> bool;
-export fn get_function(ir: Store, function_id: usize) -> FunctionResult;
-export fn get_block(ir: Store, block_id: usize) -> BlockResult;
-export fn get_instruction(ir: Store, instruction_id: usize) -> InstructionResult;
-export fn add_global(ir: *Store, bytes: *const u8, byte_count: usize, alignment_bytes: usize, read_only: bool) -> usize;
-export fn add_global_reference(ir: *Store, global_id: usize, byte_offset: usize, target_global_id: usize) -> bool;
-export fn add_global_function_reference(ir: *Store, global_id: usize, byte_offset: usize, function_id: usize) -> bool;
-export fn add_function(ir: *Store, function: Function, signature: *const u8, signature_length: usize) -> usize;
-export fn add_parameter(ir: *Store, function_id: usize, type_id: usize, name_token: usize) -> usize;
-export fn add_slot(
-    ir: *Store, function_id: usize, type_id: usize, mutable_binding: bool,
-    volatile_binding: bool, alignment_bytes: usize) -> usize;
-export fn add_block(ir: *Store, function_id: usize) -> usize;
-export fn add_value(ir: *Store, function_id: usize, block_id: usize, type_id: usize) -> usize;
-export fn emit(ir: *Store, instruction: Instruction) -> usize;
-export fn add_argument(ir: *Store, instruction_id: usize, value_id: usize) -> bool;
-export fn set_entry(ir: *Store, function_id: usize) -> bool;
-export fn release(ir: Store) -> runtime::Error;

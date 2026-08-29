@@ -1,0 +1,120 @@
+module luna.compiler.ir;
+
+impl Builder {
+    priv fn increment_predecessor(source_block: usize, target_block: usize) -> bool {
+        if (target_block >= this->storage.blocks.size()) {
+            this->fail(runtime::Error.invalid_argument);
+            return false;
+        }
+        let same_function: bool = this->storage.blocks.get(source_block).function_id ==
+            this->storage.blocks.get(target_block).function_id;
+        let count_is_bounded: bool = this->storage.blocks.get(target_block).predecessor_count !=
+            Limit.maximum_size as usize;
+        if (!same_function || !count_is_bounded) {
+            this->fail(runtime::Error.invalid_argument);
+            return false;
+        }
+        this->storage.blocks.get(target_block).predecessor_count += 1;
+        return true;
+    }
+
+    priv fn instruction_request_is_valid(instruction: Instruction) const -> bool {
+        let identity_is_valid: bool = instruction.opcode != Opcode.invalid &&
+            instruction.block_id < this->storage.blocks.size();
+        let linkage_is_empty: bool = instruction.next_instruction == no_id();
+        let position_is_valid: bool = instruction.span.line != 0 && instruction.span.column != 0;
+        let source_is_valid: bool = linkage_is_empty && position_is_valid;
+        let instruction_is_valid: bool = identity_is_valid && source_is_valid;
+        return this->ready() && instruction_is_valid;
+    }
+
+    priv fn instruction_result_is_valid(instruction: Instruction) const -> bool {
+        if (instruction.result == no_id()) {
+            return true;
+        }
+        if (instruction.result >= this->storage.values.size()) {
+            return false;
+        }
+        let value: Value = this->storage.values.get(instruction.result);
+        let identity_matches: bool = value.block_id == instruction.block_id && value.type_id == instruction.type_id;
+        return identity_matches && value.definition == no_id();
+    }
+
+    fn emit(instruction: Instruction) -> usize {
+        let none: usize = no_id();
+        if (!this->instruction_request_is_valid(instruction)) {
+            this->fail(runtime::Error.invalid_argument);
+            return none;
+        }
+        if (this->storage.blocks.get(instruction.block_id).terminated ||
+            !this->instruction_result_is_valid(instruction)) {
+            this->fail(runtime::Error.invalid_argument);
+            return none;
+        }
+        let instruction_id: usize = this->storage.instructions.size();
+        let error: runtime::Error = this->storage.instructions.push_back(instruction);
+        if (error != runtime::Error.none) {
+            this->fail(error);
+            return none;
+        }
+        if (this->storage.blocks.get(instruction.block_id).instruction_count == 0) {
+            this->storage.blocks.get(instruction.block_id).first_instruction = instruction_id;
+        } else {
+            let previous: usize = this->storage.blocks.get(instruction.block_id).last_instruction;
+            this->storage.instructions.get(previous).next_instruction = instruction_id;
+        }
+        this->storage.blocks.get(instruction.block_id).last_instruction = instruction_id;
+        this->storage.blocks.get(instruction.block_id).instruction_count += 1;
+        if (instruction.result != none) {
+            this->storage.values.get(instruction.result).definition = instruction_id;
+        }
+
+        switch (instruction.opcode) {
+        case Opcode.jump {
+            if (!this->increment_predecessor(instruction.block_id, instruction.auxiliary)) {
+                return none;
+            }
+        }
+        case Opcode.branch {
+            if (!this->increment_predecessor(instruction.block_id, instruction.auxiliary)) {
+                return none;
+            }
+            if (!this->increment_predecessor(instruction.block_id, instruction.third)) {
+                return none;
+            }
+        }
+        default {}
+        }
+        if (opcode_is_terminator(instruction.opcode)) {
+            this->storage.blocks.get(instruction.block_id).terminated = true;
+        }
+        return instruction_id;
+    }
+
+    fn add_argument(instruction_id: usize, value_id: usize) -> bool {
+        let instruction_exists: bool = instruction_id < this->storage.instructions.size();
+        let value_exists: bool = value_id < this->storage.values.size();
+        if (!this->ready() || !instruction_exists) {
+            this->fail(runtime::Error.invalid_argument);
+            return false;
+        }
+        if (!value_exists) {
+            this->fail(runtime::Error.invalid_argument);
+            return false;
+        }
+        let instruction: Instruction = this->storage.instructions.get(instruction_id);
+        let callable: bool = instruction.opcode == Opcode.call || instruction.opcode == Opcode.call_indirect;
+        let owner: usize = this->storage.blocks.get(instruction.block_id).function_id;
+        if (!callable || this->storage.values.get(value_id).function_id != owner) {
+            this->fail(runtime::Error.invalid_argument);
+            return false;
+        }
+        let argument: Argument = {instruction_id = instruction_id, value_id = value_id};
+        let error: runtime::Error = this->storage.arguments.push_back(argument);
+        if (error != runtime::Error.none) {
+            this->fail(error);
+            return false;
+        }
+        return true;
+    }
+}

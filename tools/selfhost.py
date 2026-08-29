@@ -179,8 +179,16 @@ LIBRARIES = {
         "middleend/types/validation",
         "middleend/types/layout",
     ),
-    "ir": compiler_module("luna.bootstrap.middleend.ir", "middleend/ir"),
-    "ir_verify": compiler_module("luna.bootstrap.middleend.ir.verify", "middleend/ir/verify"),
+    "ir": compiler_module(
+        "luna.compiler.ir",
+        "middleend/ir/storage",
+        "middleend/ir/globals",
+        "middleend/ir/functions",
+        "middleend/ir/control",
+        "middleend/ir/instructions",
+        "middleend/ir/validation",
+        "middleend/ir/verify",
+    ),
     "sem_callable": compiler_module("luna.bootstrap.middleend.semantic.callable", "middleend/semantic/callable"),
     "sem_value": compiler_module("luna.bootstrap.middleend.semantic.value", "middleend/semantic/value"),
     "sem_class_model": compiler_module(

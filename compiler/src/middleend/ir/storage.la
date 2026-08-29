@@ -1,0 +1,199 @@
+module luna.compiler.ir;
+
+fn no_id() -> usize {
+    return Limit.maximum_size as usize;
+}
+
+fn empty_span() -> lexer::SourceSpan {
+    return {offset = 0, length = 0, line = 0, column = 0};
+}
+
+fn invalid_function() -> Function {
+    let none: usize = no_id();
+    return {
+        declaration_unit = none, declaration_node = none, name_token = none, linkage = Linkage.internal,
+        return_type = none, first_parameter = none, parameter_count = 0, signature_offset = 0, signature_length = 0,
+        first_slot = none, slot_count = 0, first_block = none, block_count = 0, first_value = none, value_count = 0,
+        has_body = false, variadic = false, export_name_unit = none, export_name_token = none,
+        asm_body_unit = none, asm_body_node = none,
+    };
+}
+
+fn invalid_block() -> Block {
+    let none: usize = no_id();
+    return {
+        function_id = none, first_instruction = none, last_instruction = none,
+        instruction_count = 0, predecessor_count = 0, terminated = false,
+    };
+}
+
+fn invalid_instruction() -> Instruction {
+    let none: usize = no_id();
+    return {
+        opcode = Opcode.invalid, operation = lexer::TokenKind.invalid, type_id = none, result = none,
+        left = none, right = none, third = none, auxiliary = none, immediate = 0, floating = 0.0,
+        block_id = none, next_instruction = none, span = empty_span(),
+    };
+}
+
+impl Module {
+    init(): globals = vector::vector<Global>(), global_bytes = buffer::byte_buffer(),
+            global_references = vector::vector<GlobalReference>(), functions = vector::vector<Function>(),
+            callable_signatures = buffer::byte_buffer(), parameters = vector::vector<Parameter>(),
+            slots = vector::vector<Slot>(), values = vector::vector<Value>(), blocks = vector::vector<Block>(),
+            instructions = vector::vector<Instruction>(), arguments = vector::vector<Argument>() {
+        this->entry_function = no_id();
+    }
+
+    init(other: Module&&): globals = other.globals as vector::vector<Global>&&,
+            global_bytes = other.global_bytes as buffer::byte_buffer&&,
+            global_references = other.global_references as vector::vector<GlobalReference>&&,
+            functions = other.functions as vector::vector<Function>&&,
+            callable_signatures = other.callable_signatures as buffer::byte_buffer&&,
+            parameters = other.parameters as vector::vector<Parameter>&&,
+            slots = other.slots as vector::vector<Slot>&&, values = other.values as vector::vector<Value>&&,
+            blocks = other.blocks as vector::vector<Block>&&,
+            instructions = other.instructions as vector::vector<Instruction>&&,
+            arguments = other.arguments as vector::vector<Argument>&& {
+        this->entry_function = other.entry_function;
+        other.entry_function = no_id();
+    }
+
+    operator =(other: Module&&) {
+        this->globals = other.globals as vector::vector<Global>&&;
+        this->global_bytes = other.global_bytes as buffer::byte_buffer&&;
+        this->global_references = other.global_references as vector::vector<GlobalReference>&&;
+        this->functions = other.functions as vector::vector<Function>&&;
+        this->callable_signatures = other.callable_signatures as buffer::byte_buffer&&;
+        this->parameters = other.parameters as vector::vector<Parameter>&&;
+        this->slots = other.slots as vector::vector<Slot>&&;
+        this->values = other.values as vector::vector<Value>&&;
+        this->blocks = other.blocks as vector::vector<Block>&&;
+        this->instructions = other.instructions as vector::vector<Instruction>&&;
+        this->arguments = other.arguments as vector::vector<Argument>&&;
+        this->entry_function = other.entry_function;
+        other.entry_function = no_id();
+    }
+
+    fn storage_is_valid() const -> bool {
+        let globals_are_valid: bool = this->globals.is_valid() && this->global_bytes.is_valid();
+        let references_are_valid: bool = this->global_references.is_valid() && this->functions.is_valid();
+        let signatures_are_valid: bool = this->callable_signatures.is_valid() && this->parameters.is_valid();
+        let locals_are_valid: bool = this->slots.is_valid() && this->values.is_valid();
+        let control_is_valid: bool = this->blocks.is_valid() && this->instructions.is_valid();
+        let module_is_valid: bool = globals_are_valid && references_are_valid;
+        let callable_is_valid: bool = signatures_are_valid && locals_are_valid;
+        let ownership_is_valid: bool = module_is_valid && callable_is_valid;
+        let sequence_is_valid: bool = control_is_valid && this->arguments.is_valid();
+        return ownership_is_valid && sequence_is_valid;
+    }
+
+    fn view() const -> View {
+        return {
+            globals = this->globals.empty() ? null : &this->globals.get(0), global_count = this->globals.size(),
+            global_bytes = this->global_bytes.data(), global_byte_count = this->global_bytes.size(),
+            global_references = this->global_references.empty() ? null : &this->global_references.get(0),
+            global_reference_count = this->global_references.size(),
+            functions = this->functions.empty() ? null : &this->functions.get(0),
+            function_count = this->functions.size(), callable_signatures = this->callable_signatures.data(),
+            callable_signature_count = this->callable_signatures.size(),
+            parameters = this->parameters.empty() ? null : &this->parameters.get(0),
+            parameter_count = this->parameters.size(), slots = this->slots.empty() ? null : &this->slots.get(0),
+            slot_count = this->slots.size(), values = this->values.empty() ? null : &this->values.get(0),
+            value_count = this->values.size(), blocks = this->blocks.empty() ? null : &this->blocks.get(0),
+            block_count = this->blocks.size(),
+            instructions = this->instructions.empty() ? null : &this->instructions.get(0),
+            instruction_count = this->instructions.size(),
+            arguments = this->arguments.empty() ? null : &this->arguments.get(0),
+            argument_count = this->arguments.size(), entry_function = this->entry_function,
+        };
+    }
+
+    fn function(function_id: usize) const -> FunctionResult {
+        if (!this->storage_is_valid() || function_id >= this->functions.size()) {
+            return {function = invalid_function(), error = runtime::Error.invalid_argument};
+        }
+        return {function = this->functions.get(function_id), error = runtime::Error.none};
+    }
+
+    fn block(block_id: usize) const -> BlockResult {
+        if (!this->storage_is_valid() || block_id >= this->blocks.size()) {
+            return {block = invalid_block(), error = runtime::Error.invalid_argument};
+        }
+        return {block = this->blocks.get(block_id), error = runtime::Error.none};
+    }
+
+    fn instruction(instruction_id: usize) const -> InstructionResult {
+        if (!this->storage_is_valid() || instruction_id >= this->instructions.size()) {
+            return {instruction = invalid_instruction(), error = runtime::Error.invalid_argument};
+        }
+        return {instruction = this->instructions.get(instruction_id), error = runtime::Error.none};
+    }
+
+    fn global_bytes_data() -> *u8 {
+        return this->global_bytes.data();
+    }
+
+    fn global_reference_data() -> *GlobalReference {
+        return this->global_references.empty() ? null : &this->global_references.get(0);
+    }
+
+    deinit() {
+    }
+}
+
+impl Builder {
+    init(): storage = Module() {
+        this->error_code = runtime::Error.none;
+        this->active = true;
+    }
+
+    init(source: Module&&): storage = source as Module&& {
+        this->error_code = runtime::Error.none;
+        this->active = true;
+    }
+
+    priv fn ready() const -> bool {
+        let state_is_valid: bool = this->error_code == runtime::Error.none && this->storage.storage_is_valid();
+        return this->active && state_is_valid;
+    }
+
+    priv fn fail(error: runtime::Error) -> runtime::Error {
+        if (this->error_code == runtime::Error.none) {
+            this->error_code = error;
+        }
+        return this->error_code;
+    }
+
+    fn storage_is_valid() const -> bool {
+        return this->storage.storage_is_valid();
+    }
+
+    fn is_valid() const -> bool {
+        return this->ready();
+    }
+
+    fn error() const -> runtime::Error {
+        return this->error_code;
+    }
+
+    fn view() const -> View {
+        return this->storage.view();
+    }
+
+    fn block(block_id: usize) const -> BlockResult {
+        return this->storage.block(block_id);
+    }
+
+    fn take_module() -> Module {
+        if (!this->ready()) {
+            this->fail(runtime::Error.invalid_argument);
+            return Module();
+        }
+        this->active = false;
+        return this->storage as Module&&;
+    }
+
+    deinit() {
+    }
+}

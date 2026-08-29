@@ -51,7 +51,8 @@ library modules. Interfaces and implementations are physically separated:
 
 - `library/include/luna/**/*.lh` contains exported library interfaces;
 - `library/src/**/*.la` contains library implementations;
-- `compiler/include/luna/bootstrap/**/*.lh` contains compiler interfaces;
+- `compiler/include/luna/{bootstrap,compiler}/**/*.lh` contains transitional
+  and modern compiler interfaces;
 - `compiler/src/**/*.la` contains compiler implementations;
 - `drivers/src/*.la` contains source-only executable entry modules.
 
@@ -312,8 +313,14 @@ graph. The old `.lmi` byte layout remains documented only as an
 
 ## Luna IR
 
-The bootstrap IR is deliberately non-SSA. It is a typed control-flow graph
-with virtual values and explicit local slots:
+`luna.compiler.ir` is one cohesive module with a move-only RAII `Module`, an
+exclusive `Builder` construction phase and borrowed read-only `View` records.
+The historical store and separately imported `ir.verify` module have been
+removed; whole-module verification is now a private phase object behind
+`Module::is_valid`. The detailed contract is [Luna typed IR](ir.md).
+
+The IR is deliberately non-SSA. It is a typed control-flow graph with virtual
+values and explicit local slots:
 
 - `const`
 - `load` and `store`
@@ -345,10 +352,11 @@ pointer IRs: source-level pointee compatibility is established by semantic
 checking, and the verifier independently checks address operands, access
 types, bounds checks, slot layouts and global-data references.
 
-Local slots record byte size and ABI alignment instead of assuming one
-eight-byte home. Fixed arrays, structures and unions therefore occupy their
-exact target layout while scalar and enum virtual values remain abstract until
-the verified x86-64 rewrite assigns registers or spill slots.
+Local slots record exact type identity and an optional explicit alignment
+override instead of assuming one eight-byte home. The type table supplies the
+corresponding target size and natural alignment. Fixed arrays, structures and
+unions therefore occupy their exact layout while scalar and enum virtual
+values remain abstract until x86-64 frame construction assigns storage.
 The `member_address` instruction derives an opaque pointer from a verified
 base pointer and a bounded byte offset; scalar field loads and stores remain
 ordinary typed indirect memory operations. `memory_copy` takes destination
@@ -365,9 +373,9 @@ mode. Mutable variables use slots, avoiding phi nodes until optimization work
 demonstrates that SSA is worth its compiler cost.
 
 The verifier independently checks exact operand and result types, call
-signatures and flattened argument ownership, terminator placement, cached
-predecessor counts and graph reachability. Backend emission never receives
-unchecked compiler-generated IR.
+signatures and flattened argument ownership, terminator placement and cached
+predecessor counts. Backend emission never receives unchecked
+compiler-generated IR.
 
 Function linkage is explicit IR metadata. Internal and module-export
 definitions own parameter slots, values and a CFG body. Bodyless declarations
@@ -375,23 +383,19 @@ from dependency source interfaces and external C functions own only a typed
 signature and have no body blocks. No declaration may be the module entry
 point. Library IR has no entry function at all.
 
-The Luna IR instruction set is target-neutral. Each module is parameterized by an
-explicit target data layout so `isize` and `usize` retain their exact IR types
-while width-dependent verification and conversion printing remain
-deterministic. Textual IR records the target triple. Target-specific
-registers, calling convention, instruction encodings and relocations do not
-appear in IR instructions.
+The Luna IR opcode vocabulary is target-neutral, while the current compiler
+and type table intentionally support only `x86_64-unknown-linux-gnu`.
+Target-sized types retain exact type IDs; target-specific registers, calling
+convention locations, instruction encodings and relocations do not appear in
+IR instructions.
 
-Every IR function signature owns one aggregate descriptor for its result and
-one descriptor parallel to each parameter. Scalar descriptors are empty.
-Aggregate descriptors contain exact size and alignment; register-eligible
-descriptors additionally contain flattened scalar leaves, while larger values
-are already unconditionally `MEMORY` class. The source type remains a
-structure, union or array in semantic checking, while the IR run-time carrier
-is an opaque object address. Aggregate arguments must address exact-layout
-snapshot slots, aggregate returns must address exact-layout return snapshots,
-and aggregate calls name an exact result slot; all three contracts are
-independently verified.
+Every IR function stores its exact return and parameter type IDs together with
+the canonical callable-signature bytes used for symbol identity. Aggregate ABI
+classification is derived later by `CodeGenerator` from those types and the
+type table. The source type remains a structure, union or array in semantic
+checking, while the IR run-time carrier is an opaque object address. Aggregate
+arguments and returns use exact-layout snapshot slots, and those carrier
+contracts are independently verified.
 
 ## Current x86-64 backend
 
