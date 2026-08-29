@@ -41,9 +41,9 @@ or when several Luna sessions are present.
 - The semantic domain batch and its anchor promotion are committed and pushed.
 - The ClassTable, GenericTable and passive-metadata domain batches plus anchor
   promotion are committed and pushed.
-- The current working tree contains a documentation-only credibility pass:
-  six untracked `docs/codebase-*.md` audit volumes plus updates to current and
-  historical tracked documentation. It has not been committed or pushed.
+- The documentation credibility pass, including six `docs/codebase-*.md`
+  audit volumes and updates to current/historical documentation, is committed
+  and pushed as `e362685c74ba3c0d518814519a21142a1da06eb8`.
 - `advice.md` is an untracked user-owned file and has not been modified as part
   of the IR or semantic work.
 - Anchor before this work:
@@ -450,7 +450,7 @@ tests are complete. The byte-identical fixed artifact has been promoted and
 belongs to the requested combined commit/push. The next batch should contract
 Context/lookup/builder into the planned `luna.compiler.sema.session` boundary.
 
-## Active local task: codebase audit documentation credibility pass
+## Completed task: codebase audit documentation credibility pass
 
 The user added six untracked audit volumes and asked for a careful source-based
 review. The current documentation-only working tree does the following:
@@ -485,9 +485,9 @@ Static validation already completed:
 
 No build, fixed-point verification or test suite was run: this pass changes
 documentation only, and the user explicitly does not want a full build for a
-documentation edit. Before handoff, inspect the complete diff once more and
-preserve untracked user-owned `advice.md`. No commit or push has been requested
-for this documentation pass.
+documentation edit. The complete diff and links were inspected, commit
+`e362685c74ba3c0d518814519a21142a1da06eb8` was pushed to `origin/main`, and
+untracked user-owned `advice.md` remains untouched.
 
 ## Recovery checklist
 
@@ -496,5 +496,5 @@ for this documentation pass.
 3. Run `git status --short`, `git diff --stat` and inspect the table/domain stack.
 4. Preserve `advice.md` and all existing comments/changes.
 5. Do not redo the completed IR, semantic ownership or domain work.
-6. The compiler/domain work is already pushed. Resume the active documentation
-   pass only; do not redo implementation, promotion or cold validation.
+6. The compiler/domain and documentation work is already pushed. Do not redo
+   implementation, promotion, documentation correction or cold validation.
