@@ -32,9 +32,9 @@ or when several Luna sessions are present.
 ## Repository state
 
 - Branch: `main`
-- Base commit: `4670cb463547a75418c6691d0d2145767f1f0644`
-  (`refactor: introduce typed semantic symbol ownership`)
-- `HEAD` and `origin/main` are both `4670cb463547a75418c6691d0d2145767f1f0644`
+- Base commit: `df94becd615710902d4a9614ee1edf18ea57a012`
+  (`refactor: introduce typed semantic callable ownership`)
+- `HEAD` and `origin/main` are both `df94becd615710902d4a9614ee1edf18ea57a012`
   when this snapshot was refreshed.
 - The IR modernization and its anchor promotion are committed and pushed.
 - The semantic ownership batches and their anchor promotion are committed and
@@ -54,15 +54,16 @@ or when several Luna sessions are present.
   promotion are committed and pushed as
   `e7ab8982d202d3e0f110f447a41f63b8fdea6899`.
 - The SymbolTable ownership and `context.lookup` contraction batch is included
-  in the current base commit above. The current working tree additionally
-  contains the uncommitted CallableTable implementation and its documentation,
-  relocation contract, registry and three-lane workflow changes described below.
+  in the current base commit above. The CallableTable source, anchor,
+  configuration, documentation and tests are committed and pushed in
+  `df94becd615710902d4a9614ee1edf18ea57a012` (`4670cb4..df94bec` main ->
+  main). This SESSION-only follow-up remains outside that commit until the
+  main thread records it; do not record a hash for that follow-up here.
 - `advice.md` is an untracked user-owned file and has not been modified as part
   of the IR or semantic work.
 - The user-owned `.agents/` Luna repository skill and `.codex/` Sol/Luna role
-  configuration are part of the current uncommitted workflow change because
-  the tracked AGENTS contract references them. Preserve them and `advice.md`;
-  no commit, push or anchor promotion is claimed for this active batch.
+  configuration were included in the pushed CallableTable batch because the
+  tracked AGENTS contract references them. Preserve them and `advice.md`.
 - Anchor before this work:
   `c8e6dbac2dac2b97c146efb761943fbd2da70634731daa59f3e1817afc0e4f5a`,
   4,994,899 bytes.
@@ -795,11 +796,12 @@ Final isolated validation host and workspace:
 - verified stage-fixed `luna`: 5,257,043 bytes, SHA-256
   `e9b2f2c365b9bb7a2487f54b142483c170bad9436e817fed4be1ff9a72111daa`.
 
-The SymbolTable artifact is promoted in the current base commit. The active
-CallableTable batch below is implementation- and validation-complete locally,
-and its exact stage-fixed artifact is promoted into the local anchor. It is
-not yet committed or pushed; preserve `advice.md`. After the pending
-commit/push, the next bounded batch is LoweringState and `context.builder`.
+The SymbolTable artifact is promoted in the current base commit. The
+CallableTable batch below is implementation-, validation- and anchor-complete
+locally, and its source/anchor/configuration/documentation/tests commit is
+pushed to `origin/main` as `df94becd615710902d4a9614ee1edf18ea57a012`.
+Preserve `advice.md`. The next bounded batch is LoweringState and
+`context.builder`.
 
 ## Default three-lane gpt-5.6-luna workflow
 
@@ -826,25 +828,26 @@ read-only source/dependency mapping lane before implementation, not a fourth
 default lane. Writers use disjoint files; registry, tests, docs and anchor
 changes are serialized with their owner.
 
-## Current local task: CallableTable ownership (implementation + validation complete locally; anchor promoted)
+## Completed task: CallableTable ownership (implementation + validation + anchor promotion complete)
 
 This batch is the move-only callable-storage extraction on top of the current
-base commit. The implementation and the validator's final isolated caw gates
-are complete locally and accepted by the main thread. Anchor promotion is
-complete locally; commit and push remain pending, and this handoff does not
-claim either of them.
+base commit. The implementation and the validator's final isolated caw gates,
+local anchor promotion, commit and push are complete and accepted by the main
+thread. The main batch is `df94becd615710902d4a9614ee1edf18ea57a012`, pushed
+from `4670cb4` to `origin/main`; this SESSION-only follow-up has no separate
+commit hash recorded here.
 
 ### Current workspace and evidence
 
-- Current branch/base: `main` at `4670cb463547a75418c6691d0d2145767f1f0644`;
+- Current branch/base: `main` at `df94becd615710902d4a9614ee1edf18ea57a012`;
   `origin/main` resolves to the same commit.
 - Validator host: caw, x86_64 WSL2 Linux 6.6.87.2, Python 3.13.9.
 - Isolated caw workspace:
   `/home/aoweichen/codex-workspaces/luna-callable-table-haI1UoW1` (retained).
 - Current evidence: `incremental build passed; pre-final complete suite 450
   passed, 0 failed, 0 skipped`.
-- Final validator evidence is recorded below. No validation gate remains
-  pending; commit and push are deliberately still pending.
+- Final validator evidence is recorded below. No validation or publication
+  gate remains pending for the main batch; its commit and push are complete.
 
 ### Accepted validator evidence
 
@@ -871,8 +874,9 @@ claim either of them.
   above. Remote next/fixed comparison succeeded; `anchor/SHA256SUMS` was
   refreshed and `anchor/PROVENANCE.md` received the note
   `2026-08-30: promotion to typed semantic callable ownership`.
-- The caw workspace is retained for review and reproducibility. No commit or push has
-  been performed.
+- The caw workspace is retained for review and reproducibility. The main batch
+  commit and push are complete; this SESSION-only follow-up has no separate
+  commit hash recorded here.
 
 ### Implementation decisions
 
@@ -941,8 +945,10 @@ claim either of them.
   `docs/roadmap.md`, `docs/sema.md` and `docs/test-architecture.md`.
 
 The roadmap marks this batch complete as implementation + validation complete
-locally. Anchor promotion is also complete locally; commit and push remain
-pending and must not be described as complete until they occur.
+locally. Anchor promotion, commit and push are complete in
+`df94becd615710902d4a9614ee1edf18ea57a012`, pushed from `4670cb4` to
+`origin/main`. This SESSION-only follow-up intentionally records no separate
+commit hash.
 
 ## Recovery checklist
 
@@ -952,6 +958,7 @@ pending and must not be described as complete until they occur.
 4. Preserve `advice.md` and all existing comments/changes.
 5. Do not redo the completed IR, semantic ownership or domain work.
 6. SymbolTable implementation, remote validation and promotion are complete;
-   CallableTable implementation, validation and local anchor promotion are
-   complete, while commit and push remain pending. Preserve `advice.md` and do
-   not claim a pushed commit until the main thread completes it.
+   CallableTable implementation, validation, local anchor promotion, commit
+   and push are complete in `df94becd615710902d4a9614ee1edf18ea57a012`.
+   Preserve `advice.md`; do not invent a separate hash for this SESSION-only
+   follow-up.
