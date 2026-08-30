@@ -1,7 +1,5 @@
 module luna.bootstrap.middleend.semantic.modules;
 
-import luna.bootstrap.middleend.semantic.context.lookup as names;
-
 import luna.compiler.syntax as syntax;
 
 import luna.runtime as runtime;
@@ -14,36 +12,40 @@ fn collect_modules(context: *context::Context) -> bool {
         let unit: *const context::Unit = context::input_unit(context, unit_index);
         let root: syntax::SyntaxNode = context::node(context, unit_index, unit->tree.root());
         let interface_unit: bool = (root.flags & (syntax::SyntaxFlag.interface_unit as usize)) != 0;
-        let name_node: usize = names::program_module_node(context, unit_index);
-        var module_id: usize = names::find_module_by_name(context, unit_index, name_node);
+        let name_node: usize = context::program_module_node(context, unit_index);
+        var module_id: usize = context->symbols.find_module_by_name(context, unit_index, name_node);
         if (module_id == context::no_id()) {
-            module_id = names::append_module(
-                context, {
+            let appended: context::IndexResult = context->symbols.append_module({
                     interface_unit = context::no_id(), implementation_count = 0, name_unit = unit_index,
                     name_node = name_node, first_import = context::no_id(), import_count = 0, visit_state = 0,
                     reachable = false,
                 });
+            context->error = appended.error;
+            module_id = appended.index;
         }
         if (module_id == context::no_id()) {
             return false;
         }
-        let modules: *context::Module = context->modules.data as *context::Module;
+        let modules: *const context::Module = context->symbols.module_data();
         let previous: usize = modules[module_id].interface_unit;
         if (interface_unit && previous != context::no_id()) {
-            let previous_node: usize = names::program_module_node(context, previous);
+            let previous_node: usize = context::program_module_node(context, previous);
             context::add_diagnostic(
                 context, context::DiagnosticKind.duplicate_interface, unit_index,
                 context::node(context, unit_index, name_node).span,
                 previous, context::node(context, previous, previous_node).span, module_id);
         } else if (interface_unit) {
-            modules[module_id].interface_unit = unit_index;
+            context->error = context->symbols.set_interface_unit(module_id, unit_index);
         } else {
-            modules[module_id].implementation_count += 1;
+            context->error = context->symbols.add_implementation_unit(module_id);
         }
-        if (!names::append_unit_info(
-                context, {
+        if (context->error != runtime::Error.none) {
+            return false;
+        }
+        context->error = context->symbols.append_unit({
                     module_id = module_id, interface_unit = interface_unit ? 1 : 0,
-                })) {
+                });
+        if (context->error != runtime::Error.none) {
             return false;
         }
     }
@@ -57,8 +59,8 @@ struct ImportBinding {
 }
 
 fn find_import_to(context: *context::Context, module_id: usize, target_module: usize) -> usize {
-    let modules: *const context::Module = context->modules.data as *const context::Module;
-    let imports: *const context::Import = context->imports.data as *const context::Import;
+    let modules: *const context::Module = context->symbols.module_data() as *const context::Module;
+    let imports: *const context::Import = context->symbols.import_data() as *const context::Import;
     for (var index: usize = 0; index < modules[module_id].import_count; index += 1) {
         let import_id: usize = modules[module_id].first_import + index;
         if (imports[import_id].target_module == target_module) {
@@ -90,21 +92,14 @@ fn resolve_import_binding(
 fn append_module_import(
     context: *context::Context, module_id: usize, unit_index: usize, declaration_node: usize,
     target_module: usize, interface_import: bool, binding: ImportBinding) -> bool {
-    let import_id: usize = names::append_import(
-        context, {
+    let appended: context::IndexResult = context->symbols.append_import(
+        module_id, {
             owner_module = module_id, source_unit = unit_index, declaration_node = declaration_node,
             target_module = target_module, interface_import = interface_import, alias_token = binding.alias_token,
             selective_node = binding.selective_node,
         });
-    if (import_id == context::no_id()) {
-        return false;
-    }
-    let modules: *context::Module = context->modules.data as *context::Module;
-    if (modules[module_id].import_count == 0) {
-        modules[module_id].first_import = import_id;
-    }
-    modules[module_id].import_count += 1;
-    return true;
+    context->error = appended.error;
+    return appended.error == runtime::Error.none;
 }
 
 fn collect_unit_imports(
@@ -122,7 +117,7 @@ fn collect_unit_imports(
         if (declaration.kind != syntax::SyntaxKind.import_declaration) {
             break;
         }
-        let target: usize = names::find_module_by_name(context, unit_index, child);
+        let target: usize = context->symbols.find_module_by_name(context, unit_index, child);
         if (target == none) {
             context::add_diagnostic(
                 context, context::DiagnosticKind.unknown_import, unit_index, declaration.span, none,
@@ -132,7 +127,7 @@ fn collect_unit_imports(
                 context, context::DiagnosticKind.self_import, unit_index, declaration.span, none, context::empty_span(),
                 module_id);
         } else {
-            let imports: *const context::Import = context->imports.data as
+            let imports: *const context::Import = context->symbols.import_data() as
                     *const context::Import;
             let duplicate: usize = find_import_to(context, module_id, target);
             if (duplicate != none) {
@@ -155,9 +150,9 @@ fn collect_unit_imports(
 
 fn collect_imports(context: *context::Context) -> bool {
     for (var module_id: usize = 0;
-        module_id < context->module_count && context->error == runtime::Error.none;
+        module_id < context->symbols.module_count() && context->error == runtime::Error.none;
         module_id += 1) {
-        let modules: *const context::Module = context->modules.data as
+        let modules: *const context::Module = context->symbols.module_data() as
                 *const context::Module;
         let interface_unit: usize = modules[module_id].interface_unit;
         if (!collect_unit_imports(context, module_id, interface_unit, true)) {
@@ -167,7 +162,7 @@ fn collect_imports(context: *context::Context) -> bool {
             implementation_index < modules[module_id].implementation_count;
             implementation_index += 1) {
             let implementation_unit: usize =
-                names::module_implementation_unit(context, module_id, implementation_index);
+                context->symbols.module_implementation_unit(context, module_id, implementation_index);
             if (implementation_unit == context::no_id() ||
                 !collect_unit_imports(
                     context, module_id, implementation_unit, false)) {
@@ -189,7 +184,7 @@ fn import_qualifier_location(
         *token_index = record.alias_token;
         return true;
     }
-    let modules: *const context::Module = context->modules.data as
+    let modules: *const context::Module = context->symbols.module_data() as
             *const context::Module;
     let target: context::Module = modules[record.target_module];
     let name: syntax::SyntaxNode = context::node(context, target.name_unit, target.name_node);
@@ -213,12 +208,12 @@ fn import_qualifiers_equal(context: *context::Context, left: context::Import, ri
 }
 
 fn validate_import_qualifiers(context: *context::Context) -> bool {
-    let modules: *const context::Module = context->modules.data as
+    let modules: *const context::Module = context->symbols.module_data() as
             *const context::Module;
-    let imports: *const context::Import = context->imports.data as
+    let imports: *const context::Import = context->symbols.import_data() as
             *const context::Import;
     for (var module_id: usize = 0;
-        module_id < context->module_count && context->error == runtime::Error.none;
+        module_id < context->symbols.module_count() && context->error == runtime::Error.none;
         module_id += 1) {
         let module_record: context::Module = modules[module_id];
         for (var right_index: usize = 1; right_index < module_record.import_count; right_index += 1) {
@@ -240,25 +235,25 @@ fn validate_import_qualifiers(context: *context::Context) -> bool {
 }
 
 fn visit_imports(context: *context::Context, module_id: usize, depth: usize) -> bool {
-    var modules: *context::Module = context->modules.data as *context::Module;
-    if (modules[module_id].visit_state == 2) {
+    let module_record: context::Module = context->symbols.module_data()[module_id];
+    if (module_record.visit_state == 2) {
         return true;
     }
-    if (modules[module_id].visit_state == 1) {
+    if (module_record.visit_state == 1) {
         return false;
     }
     if (depth >= context::Limit.maximum_module_depth as usize) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.resource_limit, modules[module_id].name_unit,
-            context::node(context, modules[module_id].name_unit, modules[module_id].name_node).span,
+            context, context::DiagnosticKind.resource_limit, module_record.name_unit,
+            context::node(context, module_record.name_unit, module_record.name_node).span,
             context::no_id(), context::empty_span(), depth);
         return false;
     }
-    modules[module_id].visit_state = 1;
-    let first_import: usize = modules[module_id].first_import;
-    let import_count: usize = modules[module_id].import_count;
+    context->error = context->symbols.set_visit_state(module_id, 1);
+    let first_import: usize = module_record.first_import;
+    let import_count: usize = module_record.import_count;
     for (var index: usize = 0; index < import_count; index += 1) {
-        let imports: *const context::Import = context->imports.data as
+        let imports: *const context::Import = context->symbols.import_data() as
                 *const context::Import;
         let record: context::Import = imports[first_import + index];
         let diagnostic_count: usize = context->diagnostics.size();
@@ -270,22 +265,20 @@ fn visit_imports(context: *context::Context, module_id: usize, depth: usize) -> 
             context::add_diagnostic(
                 context, context::DiagnosticKind.import_cycle, record.source_unit,
                 context::node(context, record.source_unit, record.declaration_node).span,
-                modules[record.target_module].name_unit,
+                context->symbols.module_data()[record.target_module].name_unit,
                 context::node(
-                    context, modules[record.target_module].name_unit, modules[record.target_module].name_node).span,
-                record.target_module);
+                    context, context->symbols.module_data()[record.target_module].name_unit,
+                    context->symbols.module_data()[record.target_module].name_node).span, record.target_module);
             return false;
         }
     }
-    modules = context->modules.data as
-        *context::Module;
-    modules[module_id].visit_state = 2;
-    return true;
+    context->error = context->symbols.set_visit_state(module_id, 2);
+    return context->error == runtime::Error.none;
 }
 
 fn validate_import_graph(context: *context::Context) -> bool {
-    for (var module_id: usize = 0; module_id < context->module_count; module_id += 1) {
-        let modules: *const context::Module = context->modules.data as
+    for (var module_id: usize = 0; module_id < context->symbols.module_count(); module_id += 1) {
+        let modules: *const context::Module = context->symbols.module_data() as
                 *const context::Module;
         if (modules[module_id].visit_state == 0) {
             visit_imports(context, module_id, 0);
@@ -324,7 +317,7 @@ fn symbol_is_exported_from(symbol: context::Symbol, module_id: usize) -> bool {
 
 fn import_exposes_symbol(context: *context::Context, import_record: context::Import, symbol: context::Symbol) -> bool {
     return symbol_is_exported_from(symbol, import_record.target_module) &&
-        names::import_binds_symbol(context, import_record, symbol);
+        context->symbols.import_binds_symbol(context, import_record, symbol);
 }
 
 fn diagnose_import_collision(
@@ -341,12 +334,12 @@ fn validate_selective_import_pair(
     if (left.selective_node == none || right.selective_node == none) {
         return;
     }
-    for (var left_symbol_id: usize = 0; left_symbol_id < context->symbol_count; left_symbol_id += 1) {
+    for (var left_symbol_id: usize = 0; left_symbol_id < context->symbols.symbol_count(); left_symbol_id += 1) {
         let left_symbol: context::Symbol = symbols[left_symbol_id];
         if (!import_exposes_symbol(context, left, left_symbol)) {
             continue;
         }
-        for (var right_symbol_id: usize = 0; right_symbol_id < context->symbol_count; right_symbol_id += 1) {
+        for (var right_symbol_id: usize = 0; right_symbol_id < context->symbols.symbol_count(); right_symbol_id += 1) {
             let right_symbol: context::Symbol = symbols[right_symbol_id];
             let right_is_exposed: bool = import_exposes_symbol(context, right, right_symbol);
             let names_match: bool = symbols_have_same_name(context, left_symbol, right_symbol);
@@ -384,7 +377,7 @@ fn diagnose_local_import_collision(
 fn validate_local_import_collisions(
     context: *context::Context, module_id: usize, module_record: context::Module,
     imports: *const context::Import, symbols: *const context::Symbol) {
-    for (var local_id: usize = 0; local_id < context->symbol_count; local_id += 1) {
+    for (var local_id: usize = 0; local_id < context->symbols.symbol_count(); local_id += 1) {
         let local: context::Symbol = symbols[local_id];
         if (!local_symbol_is_visible(local, module_id)) {
             continue;
@@ -394,7 +387,7 @@ fn validate_local_import_collisions(
             if (import_record.selective_node == context::no_id()) {
                 continue;
             }
-            for (var imported_id: usize = 0; imported_id < context->symbol_count; imported_id += 1) {
+            for (var imported_id: usize = 0; imported_id < context->symbols.symbol_count(); imported_id += 1) {
                 let imported: context::Symbol = symbols[imported_id];
                 let imported_is_exposed: bool = import_exposes_symbol(context, import_record, imported);
                 let names_match: bool = symbols_have_same_name(context, local, imported);
@@ -409,7 +402,7 @@ fn validate_local_import_collisions(
 fn selective_name_is_exported(
     context: *context::Context, import_record: context::Import,
     name: syntax::SyntaxNode, symbols: *const context::Symbol) -> bool {
-    for (var symbol_id: usize = 0; symbol_id < context->symbol_count; symbol_id += 1) {
+    for (var symbol_id: usize = 0; symbol_id < context->symbols.symbol_count(); symbol_id += 1) {
         let symbol: context::Symbol = symbols[symbol_id];
         if (!symbol_is_exported_from(symbol, import_record.target_module)) {
             continue;
@@ -462,10 +455,10 @@ fn validate_selective_imports(
 }
 
 fn validate_imported_names(context: *context::Context) -> bool {
-    let modules: *const context::Module = context->modules.data as *const context::Module;
-    let imports: *const context::Import = context->imports.data as *const context::Import;
-    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
-    for (var module_id: usize = 0; module_id < context->module_count; module_id += 1) {
+    let modules: *const context::Module = context->symbols.module_data() as *const context::Module;
+    let imports: *const context::Import = context->symbols.import_data() as *const context::Import;
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
+    for (var module_id: usize = 0; module_id < context->symbols.module_count(); module_id += 1) {
         let module_record: context::Module = modules[module_id];
         validate_import_collisions(context, module_record, imports, symbols);
         validate_local_import_collisions(context, module_id, module_record, imports, symbols);
@@ -475,26 +468,26 @@ fn validate_imported_names(context: *context::Context) -> bool {
 }
 
 fn mark_reachable(context: *context::Context, module_id: usize, depth: usize) -> bool {
-    if (module_id >= context->module_count) {
+    if (module_id >= context->symbols.module_count()) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    let modules: *context::Module = context->modules.data as *context::Module;
-    if (modules[module_id].reachable) {
+    let module_record: context::Module = context->symbols.module_data()[module_id];
+    if (module_record.reachable) {
         return true;
     }
     if (depth >= context::Limit.maximum_module_depth as usize) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.resource_limit, modules[module_id].name_unit,
-            context::node(context, modules[module_id].name_unit, modules[module_id].name_node).span,
+            context, context::DiagnosticKind.resource_limit, module_record.name_unit,
+            context::node(context, module_record.name_unit, module_record.name_node).span,
             context::no_id(), context::empty_span(), depth);
         return false;
     }
-    modules[module_id].reachable = true;
-    let first_import: usize = modules[module_id].first_import;
-    let import_count: usize = modules[module_id].import_count;
+    context->error = context->symbols.mark_reachable(module_id);
+    let first_import: usize = module_record.first_import;
+    let import_count: usize = module_record.import_count;
     for (var index: usize = 0; index < import_count; index += 1) {
-        let imports: *const context::Import = context->imports.data as
+        let imports: *const context::Import = context->symbols.import_data() as
                 *const context::Import;
         if (!mark_reachable(
             context, imports[first_import + index].target_module, depth + 1)) {
@@ -505,16 +498,16 @@ fn mark_reachable(context: *context::Context, module_id: usize, depth: usize) ->
 }
 
 fn validate_reachability(context: *context::Context, root_module: usize) -> bool {
-    if (root_module >= context->module_count) {
+    if (root_module >= context->symbols.module_count()) {
         return false;
     }
     if (!mark_reachable(
             context, root_module, 0)) {
         return false;
     }
-    let modules: *const context::Module = context->modules.data as
+    let modules: *const context::Module = context->symbols.module_data() as
             *const context::Module;
-    for (var module_id: usize = 0; module_id < context->module_count; module_id += 1) {
+    for (var module_id: usize = 0; module_id < context->symbols.module_count(); module_id += 1) {
         if (!modules[module_id].reachable) {
             context::add_diagnostic(
                 context, context::DiagnosticKind.unreachable_module, modules[module_id].name_unit,

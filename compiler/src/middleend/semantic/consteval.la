@@ -3,7 +3,6 @@ module luna.bootstrap.middleend.semantic.consteval;
 import luna.bootstrap.middleend.semantic.attributes as attributes;
 import luna.bootstrap.middleend.semantic.consteval.engine as engine;
 import luna.bootstrap.middleend.semantic.context.builder as builder;
-import luna.bootstrap.middleend.semantic.context.lookup as names;
 import luna.bootstrap.middleend.semantic.types as types;
 import luna.compiler.syntax as syntax;
 import luna.runtime as runtime;
@@ -46,9 +45,9 @@ fn declaration_alignment(context: *context::Context, unit_index: usize, declarat
 
 fn resolve_alignment_attributes(context: *context::Context) -> bool {
     let none: usize = context::no_id();
-    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
     for (var symbol_id: usize = 0;
-        symbol_id < context->symbol_count && context->error == runtime::Error.none; symbol_id += 1) {
+        symbol_id < context->symbols.symbol_count() && context->error == runtime::Error.none; symbol_id += 1) {
         let symbol: context::Symbol = symbols[symbol_id];
         if (symbol.kind == context::SymbolKind.named_type) {
             let record: type_info::Record = context::type_record(context, symbol.type_id);
@@ -216,7 +215,7 @@ fn check_module_asserts(context: *context::Context) -> bool {
     for (var unit_index: usize = 0;
         unit_index < context->input.size() && context->error == runtime::Error.none;
         unit_index += 1) {
-        var declaration_id: usize = names::first_declaration(context, unit_index);
+        var declaration_id: usize = context::first_declaration(context, unit_index);
         while (declaration_id != context::no_id() && context->error == runtime::Error.none) {
             let declaration: syntax::SyntaxNode = context::node(context, unit_index, declaration_id);
             if (declaration.kind == syntax::SyntaxKind.assert_statement) {
@@ -238,9 +237,10 @@ fn collect_constant_declaration(
             context, context::DiagnosticKind.invalid_export, unit_index, declaration.span, none, context::empty_span(),
             0);
     }
-    let duplicate: usize = names::find_any_local_symbol(context, module_id, unit_index, declaration.token_index);
+    let duplicate: usize = context->symbols.find_any_local_symbol(context, module_id, unit_index,
+        declaration.token_index);
     if (duplicate != none) {
-        let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+        let symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
         context::add_diagnostic(
             context, context::DiagnosticKind.duplicate_name, unit_index,
             context::token(context, unit_index, declaration.token_index).span, symbols[duplicate].declaration_unit,
@@ -270,12 +270,13 @@ fn collect_constant_declaration(
     if (interface_unit) {
         flags |= context::SymbolFlag.interface_declaration as usize;
     }
-    return names::append_symbol(
-        context, {
+    let appended: context::IndexResult = context->symbols.append_symbol({
             kind = context::SymbolKind.constant, module_id = module_id, declaration_unit = unit_index,
             declaration_node = declaration_id, name_token = declaration.token_index, type_id = type_id,
             function_id = none, integer_value = 0, flags = flags,
-        }) != none;
+        });
+    context->error = appended.error;
+    return appended.error == runtime::Error.none;
 }
 
 fn collect_constants_in_unit(
@@ -284,7 +285,7 @@ fn collect_constants_in_unit(
     if (unit_index == none) {
         return true;
     }
-    var declaration_id: usize = names::first_declaration(context, unit_index);
+    var declaration_id: usize = context::first_declaration(context, unit_index);
     while (declaration_id != none && context->error == runtime::Error.none) {
         let declaration: syntax::SyntaxNode = context::node(context, unit_index, declaration_id);
         if (declaration.kind == syntax::SyntaxKind.const_declaration &&
@@ -301,15 +302,15 @@ fn collect_constants_in_unit(
 // resolving 标志切断初始化环；未被不动点求解的常量最终统一报告。
 fn collect_constant_declarations(context: *context::Context) -> bool {
     for (var module_id: usize = 0;
-        module_id < context->module_count && context->error == runtime::Error.none; module_id += 1) {
-        let modules: *const context::Module = context->modules.data as *const context::Module;
+        module_id < context->symbols.module_count() && context->error == runtime::Error.none; module_id += 1) {
+        let modules: *const context::Module = context->symbols.module_data() as *const context::Module;
         if (!collect_constants_in_unit(context, module_id, modules[module_id].interface_unit, true)) {
             return false;
         }
         for (var implementation_index: usize = 0;
             implementation_index < modules[module_id].implementation_count; implementation_index += 1) {
             let implementation_unit: usize =
-                names::module_implementation_unit(context, module_id, implementation_index);
+                context->symbols.module_implementation_unit(context, module_id, implementation_index);
             if (implementation_unit == context::no_id() ||
                 !collect_constants_in_unit(
                     context, module_id, implementation_unit, false)) {
@@ -343,7 +344,7 @@ fn prescan_array_lengths(context: *context::Context) -> bool {
                     entry.value = value.value;
                     entry.valid = true;
                 }
-                if (!names::append_record(
+                if (!context::append_record(
                         context, &context->array_lengths, (&entry) as
                             *const context::ArrayLength as
                                 *const u8, sizeof(context::ArrayLength))) {
@@ -360,8 +361,8 @@ fn prescan_array_lengths(context: *context::Context) -> bool {
 // 类型符号上的 resolving 标志切断枚举值环；即使枚举未被其他类型引用，也会在这里完成或报告错误。
 fn finalize_enum_constants(context: *context::Context) -> bool {
     for (var symbol_id: usize = 0;
-        symbol_id < context->symbol_count && context->error == runtime::Error.none; symbol_id += 1) {
-        let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+        symbol_id < context->symbols.symbol_count() && context->error == runtime::Error.none; symbol_id += 1) {
+        let symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
         let symbol: context::Symbol = symbols[symbol_id];
         if (symbol.kind != context::SymbolKind.named_type) {
             continue;

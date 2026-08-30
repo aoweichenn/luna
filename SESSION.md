@@ -32,8 +32,8 @@ or when several Luna sessions are present.
 ## Repository state
 
 - Branch: `main`
-- Base commit: `1803af7be30abbb060fd715bb28356f8dc6593eb`
-  (`refactor: tighten semantic pipeline boundaries`)
+- Base commit: `e7ab8982d202d3e0f110f447a41f63b8fdea6899`
+  (`refactor: contract semantic type passes`)
 - `origin/main` matched that commit when this snapshot was refreshed.
 - The IR modernization and its anchor promotion are committed and pushed.
 - The semantic ownership batches and their anchor promotion are committed and
@@ -49,12 +49,19 @@ or when several Luna sessions are present.
 - The semantic-pass runtime-readiness and `functions.ir` contraction batches
   plus their combined anchor promotion are committed and pushed as
   `1803af7be30abbb060fd715bb28356f8dc6593eb`.
-- The current working tree contains the independently validated and promoted
-  `types.visibility` and `types.lookup` module contractions. They belong to the
-  requested combined commit and push; reconcile HEAD and `origin/main` after
+- The `types.visibility` and `types.lookup` contractions plus their anchor
+  promotion are committed and pushed as
+  `e7ab8982d202d3e0f110f447a41f63b8fdea6899`.
+- The current working tree contains the complete, independently validated and
+  promoted SymbolTable ownership and `context.lookup` contraction batch. It
+  belongs to the requested commit/push; reconcile HEAD and `origin/main` after
   recovery to determine whether that final operation completed.
 - `advice.md` is an untracked user-owned file and has not been modified as part
   of the IR or semantic work.
+- The user-owned `.agents/` Luna repository skill and `.codex/` Sol/Luna role
+  configuration are included in the requested commit because the tracked
+  AGENTS contract references them. They were inspected for credentials, their
+  resources exist and every TOML file parses on caw.
 - Anchor before this work:
   `c8e6dbac2dac2b97c146efb761943fbd2da70634731daa59f3e1817afc0e4f5a`,
   4,994,899 bytes.
@@ -85,6 +92,10 @@ or when several Luna sessions are present.
   `2aa8853e6ee05237f71f052b00415733abc03a70397798ff974bbae424497ab5`,
   5,187,411 bytes. It contains the contracted visibility and field-lookup
   implementations in their parent `types` module.
+- Promoted semantic symbol anchor:
+  `e9b2f2c365b9bb7a2487f54b142483c170bad9436e817fed4be1ff9a72111daa`,
+  5,257,043 bytes. It contains typed SymbolTable ownership and the contracted
+  parent-module lookup implementation.
 
 ## Engineering direction established in this conversation
 
@@ -731,6 +742,62 @@ The latest artifact is promoted. The requested commit/push must include both
 deleted child interfaces, source, consumers, registry, AGENTS, docs, SESSION
 and anchor together. Preserve `advice.md`.
 
+## Completed local task: SymbolTable ownership and lookup contraction
+
+The first Context state-class batch is complete locally on top of `e7ab898`:
+
+- move-only `SymbolTable` owns typed vectors for UnitInfo, Module, Import and
+  Symbol records with sticky failure and const-only projections;
+- bound publication methods own interface/implementation counts, contiguous
+  import slices, import-graph visit/reachability transitions and symbol
+  flag/value mutation;
+- `LookupResult` uses only an ID plus found/not-found/ambiguous/invalid status;
+  an unused related-ID field was removed during final simplicity review;
+- local, imported, selective and qualified lookup are bound SymbolTable
+  methods; bounded record traversal uses `for`, and the only two `while` loops
+  follow syntax sibling links;
+- Context composes SymbolTable and no longer contains four byte buffers plus
+  four mirrored counts; no semantic consumer retains a writable Module or
+  Symbol pointer;
+- `context/symbols.la` and `context/lookup.la` are same-module implementation
+  units of `luna.bootstrap.middleend.semantic.context`;
+- the `context.lookup` child interface, reverse import, registry node and
+  linked object are removed without an alias;
+- Binding and callable-candidate slices remain separate because their
+  overload-order invariant belongs to a future CallableTable, not SymbolTable;
+- the transitional context interface is 581 lines and explicitly remains debt
+  for the CallableTable/LoweringState batches rather than being hidden behind
+  another fake module; storage and lookup implementations are 225/367 lines.
+
+The relocation-data contract now constructs SymbolTable directly and verifies
+the four typed stores, import slices, state publication, const projections,
+move/moved-from state and sticky failure. Existing module/import/qualified-name
+tests cover all LookupStatus behavior. One intermediate test revision attempted
+an unsupported `usize`-enum-to-`u64` cast; replacing that test-only cast with a
+typed `u64` constant exercised the intended API, after which the suite passed.
+
+Final isolated validation host and workspace:
+
+- host `caw`, x86-64 WSL2 Linux 6.6.87.2, Python 3.13.9;
+- workspace
+  `/home/aoweichen/codex-workspaces/luna-symbol-table-ejSXfHTu`
+  (removed after promotion);
+- formatter: zero files needing reflow and zero token drift;
+- audit: 62 modules, one driver, 32 driver interfaces and 52 library objects;
+- initial cold stage-next build: 15.88 seconds;
+- final `verify --fresh`: transition/next/fixed completed in
+  15.55/15.67/15.53 seconds, and every next/fixed assembly, object and
+  executable was byte-identical;
+- final post-fixed-point suite: `450 passed, 0 failed, 0 skipped`;
+- verified stage-fixed `luna`: 5,257,043 bytes, SHA-256
+  `e9b2f2c365b9bb7a2487f54b142483c170bad9436e817fed4be1ff9a72111daa`.
+
+The artifact is promoted. The requested commit/push must include source,
+deleted child interface, registry, AGENTS, repository skill/agent config,
+docs, test, SESSION and anchor together. Preserve `advice.md`. Afterward the
+next bounded batch is a move-only CallableTable for Binding and ordinary/
+generic candidate slices, followed by LoweringState and `context.builder`.
+
 ## Recovery checklist
 
 1. Confirm the session UUID and working directory shown above.
@@ -738,5 +805,5 @@ and anchor together. Preserve `advice.md`.
 3. Run `git status --short`, `git diff --stat` and inspect the table/domain stack.
 4. Preserve `advice.md` and all existing comments/changes.
 5. Do not redo the completed IR, semantic ownership or domain work.
-6. All implementation, remote validation and promotion work is complete. Only
-   confirm the requested combined commit/push and preserve `advice.md`.
+6. SymbolTable implementation, remote validation and promotion are complete.
+   Only confirm the requested commit/push and preserve `advice.md`.

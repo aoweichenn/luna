@@ -289,6 +289,18 @@ ordinary typed IR. Statement lowering processes canonical ordinary roots first
 and then a bounded concrete-instance worklist, so recursive instantiation does
 not require a generic backend representation.
 
+Semantic program names use a move-only `SymbolTable` composed by Context. Four
+typed vectors own unit, module, import and symbol records; callers receive only
+const projections. Bound publication methods preserve the module-to-import
+contiguous-slice invariant, interface/implementation counts, import-graph
+state and symbol flag/value updates. Bound lookup methods return an explicit
+found/not-found/ambiguous/invalid state instead of pairing a no-id sentinel
+with an output boolean. The former `semantic.context.lookup` child interface
+and object do not represent an independent dependency and are removed;
+`context/symbols.la` and `context/lookup.la` are implementation families of the
+parent context module. Callable bindings and their candidate slices remain a
+separate invariant and are intentionally not absorbed into the name table.
+
 M3.1 adds one canonical `base_type` field to the semantic type record. TypeTable
 is now the only owner of that relation; layout, class policy, field lookup, IR
 member verification and x86-64 ABI classification all consume it directly.

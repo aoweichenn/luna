@@ -1148,3 +1148,36 @@ Both complete test runs passed 450/450 with no failures or skips.
 
 The promoted 5,187,411-byte executable has SHA-256
 `2aa8853e6ee05237f71f052b00415733abc03a70397798ff974bbae424497ab5`.
+
+## 2026-08-30: promotion to typed semantic symbol ownership
+
+The anchor now contains the stage-fixed `luna` executable from the SymbolTable
+ownership and lookup-contraction batch accompanying this note. A move-only
+`SymbolTable` owns typed UnitInfo, Module, Import and Symbol vectors with
+sticky failure, const projections and focused publication methods for module
+membership, contiguous import slices, graph traversal state and symbol
+flags/values. Context no longer exposes the corresponding four byte buffers,
+four mirrored counts or writable Module/Symbol pointers.
+
+Local, imported, selective and qualified lookup are bound SymbolTable methods.
+`LookupResult` distinguishes found, not-found, ambiguous and invalid states;
+the former no-id plus output-boolean qualifier contract is gone. Bounded record
+scans use `for`, while the only two retained `while` loops follow syntax
+sibling links. The old `semantic.context.lookup` child interface, reverse
+parent import, registry node and linked object are removed without an alias;
+`context/symbols.la` and `context/lookup.la` remain cohesive same-module
+implementation units. Callable binding/candidate storage remains separate for
+its own later ownership boundary.
+
+The relocation-data contract directly verifies typed storage, import slices,
+state publication, const projections, move/moved-from state and sticky failure.
+Remote x86-64 verification used the isolated caw workspace
+`/home/aoweichen/codex-workspaces/luna-symbol-table-ejSXfHTu` on WSL2 Linux
+6.6.87.2 with Python 3.13.9. Audit reported 62 modules, one driver, 32 driver
+interfaces and 52 library objects; formatting reported zero files needing
+reflow and zero token drift. The fresh transition/next/fixed stages completed
+in 15.55/15.67/15.53 seconds, and every next/fixed artifact was byte-identical.
+The complete post-fixed-point suite passed 450/450 with no failures or skips.
+
+The promoted 5,257,043-byte executable has SHA-256
+`e9b2f2c365b9bb7a2487f54b142483c170bad9436e817fed4be1ff9a72111daa`.

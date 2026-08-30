@@ -2,7 +2,7 @@ module luna.bootstrap.middleend.semantic.functions;
 
 fn append_const_function(context: *context::Context, record: context::ConstFunction) -> usize {
     let result: usize = context->const_function_count;
-    if (!names::append_record(
+    if (!context::append_record(
             context, &context->const_functions, (&record) as
                 *const context::ConstFunction as *const u8, sizeof(context::ConstFunction))) {
         return context::no_id();
@@ -35,11 +35,12 @@ fn validate_const_call(context: *context::Context, unit_index: usize, node: synt
         return false;
     }
     let symbol_id: usize =
-        names::lookup_qualified_symbol(context, unit_index, callee, context::SymbolKind.const_function, false);
+        context->symbols.lookup_qualified_symbol(
+            context, unit_index, callee, context::SymbolKind.const_function, false).value;
     if (symbol_id == none) {
         return false;
     }
-    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
     let records: *const context::ConstFunction = context->const_functions.data as
             *const context::ConstFunction;
     if (node.child_count - 1 != records[symbols[symbol_id].function_id].parameter_count) {
@@ -175,7 +176,7 @@ fn validate_const_function(context: *context::Context, const_function_id: usize)
     let none: usize = context::no_id();
     let records: *const context::ConstFunction = context->const_functions.data as
             *const context::ConstFunction;
-    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
     let symbol: context::Symbol = symbols[records[const_function_id].symbol_id];
     var body_id: usize = none;
     let declaration: syntax::SyntaxNode = context::node(context, symbol.declaration_unit, symbol.declaration_node);
@@ -220,9 +221,10 @@ fn collect_const_function(
             context, context::DiagnosticKind.invalid_export, unit_index, declaration.span, none, context::empty_span(),
             0);
     }
-    let duplicate: usize = names::find_any_local_symbol(context, module_id, unit_index, declaration.token_index);
+    let duplicate: usize = context->symbols.find_any_local_symbol(context, module_id, unit_index,
+        declaration.token_index);
     if (duplicate != none) {
-        let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+        let symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
         context::add_diagnostic(
             context, context::DiagnosticKind.duplicate_name, unit_index,
             context::token(context, unit_index, declaration.token_index).span, symbols[duplicate].declaration_unit,
@@ -260,12 +262,13 @@ fn collect_const_function(
     if (!const_scalar_type(context, return_type)) {
         report_invalid_const_function(context, unit_index, context::node(context, unit_index, return_node).span);
     }
-    let symbol_id: usize = names::append_symbol(
-        context, {
+    let appended_symbol: context::IndexResult = context->symbols.append_symbol({
             kind = context::SymbolKind.const_function, module_id = module_id, declaration_unit = unit_index,
             declaration_node = declaration_id, name_token = declaration.token_index, type_id = return_type,
             function_id = context->const_function_count, integer_value = 0, flags = context::SymbolFlag.none as usize,
         });
+    context->error = appended_symbol.error;
+    let symbol_id: usize = appended_symbol.index;
     if (symbol_id == none) {
         return false;
     }
@@ -325,7 +328,7 @@ fn collect_const_functions_in_unit(
     if (unit_index == none) {
         return true;
     }
-    for (var declaration_id: usize = names::first_declaration(context, unit_index);
+    for (var declaration_id: usize = context::first_declaration(context, unit_index);
         declaration_id != none && context->error == runtime::Error.none;
         declaration_id = context::node(context, unit_index, declaration_id).next_sibling) {
         let declaration: syntax::SyntaxNode = context::node(context, unit_index, declaration_id);
@@ -347,9 +350,9 @@ fn collect_const_functions_in_unit(
 
 fn collect_const_functions(context: *context::Context) -> bool {
     for (var module_id: usize = 0;
-        module_id < context->module_count && context->error == runtime::Error.none;
+        module_id < context->symbols.module_count() && context->error == runtime::Error.none;
         module_id += 1) {
-        let modules: *const context::Module = context->modules.data as *const context::Module;
+        let modules: *const context::Module = context->symbols.module_data() as *const context::Module;
         if (!collect_const_functions_in_unit(context, module_id, modules[module_id].interface_unit, true)) {
             return false;
         }
@@ -357,7 +360,7 @@ fn collect_const_functions(context: *context::Context) -> bool {
             implementation_index < modules[module_id].implementation_count;
             implementation_index += 1) {
             let implementation_unit: usize =
-                names::module_implementation_unit(context, module_id, implementation_index);
+                context->symbols.module_implementation_unit(context, module_id, implementation_index);
             if (implementation_unit == context::no_id() ||
                 !collect_const_functions_in_unit(
                     context, module_id, implementation_unit, false)) {

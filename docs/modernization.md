@@ -292,6 +292,16 @@ The eleventh batch folds `types.lookup` into the same parent. Only the complete
 field-lookup operation remains public; direct and anonymous-promotion helpers
 become private, while the algorithm keeps its own same-module implementation
 file and all five consumer families drop the child import.
+The twelfth batch replaces Context's four raw unit/module/import/symbol buffers
+and mirrored counts with one move-only `SymbolTable`. Typed vectors, sticky
+failure and focused publication methods own its storage and graph invariants;
+const projections replace writable pointer escapes. Name and qualifier lookup
+are bound methods with explicit `LookupResult` state. The old
+`context.lookup` child interface, reverse parent import, registry node and
+linked object disappear, while `context/symbols.la` and `context/lookup.la`
+remain cohesive same-module implementation units. Binding/candidate storage is
+not folded into this class because overload ordering and contiguous candidate
+slices form a different ownership boundary.
 
 `ir::Module` owns the completed typed CFG, `ir::Builder` owns its append-only
 construction phase, and the private `Verifier` owns whole-module validation

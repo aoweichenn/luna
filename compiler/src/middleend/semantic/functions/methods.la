@@ -442,9 +442,7 @@ fn mark_member_exported(context: *context::Context, function_id: usize) {
             *context::Function;
     let symbol_id: usize = functions[function_id].symbol_id;
     functions[function_id].flags |= context::SymbolFlag.member_exported as usize;
-    let symbols: *context::Symbol = context->symbols.data as
-            *context::Symbol;
-    symbols[symbol_id].flags |= context::SymbolFlag.member_exported as usize;
+    context->error = context->symbols.add_symbol_flags(symbol_id, context::SymbolFlag.member_exported as usize);
 }
 
 fn collect_declared_method(
@@ -502,7 +500,7 @@ fn impl_owner_type(
         return owner_type;
     }
     let owner: type_info::Record = context::type_record(context, owner_type);
-    let owner_module: usize = names::unit_module(context, owner.declaration_unit);
+    let owner_module: usize = context->symbols.unit_module(context, owner.declaration_unit);
     if (owner.kind != type_info::Kind.class_type || owner_module != module_id) {
         method_diagnostic(context, context::DiagnosticKind.invalid_method_definition, unit_index, declaration,
             owner_type);
@@ -566,8 +564,8 @@ fn collect_impl_methods(
     let declaration_is_invalid: bool = (declaration.flags & invalid_flags) != 0;
     if (declaration.child_count != 0) {
         let generic_node: syntax::SyntaxNode = context::node(context, unit_index, declaration.first_child);
-        let generic_owner: usize = names::lookup_qualified_symbol(
-            context, unit_index, generic_node, context::SymbolKind.generic_type, false);
+        let generic_owner: usize = context->symbols.lookup_qualified_symbol(
+            context, unit_index, generic_node, context::SymbolKind.generic_type, false).value;
         if (generic_owner != context::no_id()) {
             for (var child: usize = generic_node.next_sibling; child != context::no_id();
                 child = context::node(context, unit_index, child).next_sibling) {
@@ -582,7 +580,7 @@ fn collect_impl_methods(
             return;
         }
     }
-    if (names::unit_is_interface(context, unit_index) || declaration_is_invalid) {
+    if (context->symbols.unit_is_interface(context, unit_index) || declaration_is_invalid) {
         method_diagnostic(context, context::DiagnosticKind.invalid_method_definition, unit_index, declaration,
             context::no_id());
         return;
@@ -607,12 +605,12 @@ fn generic_impl_matches(
         return false;
     }
     let owner: syntax::SyntaxNode = context::node(context, unit_index, declaration.first_child);
-    let symbol_id: usize = names::lookup_qualified_symbol(
-        context, unit_index, owner, context::SymbolKind.generic_type, false);
+    let symbol_id: usize = context->symbols.lookup_qualified_symbol(
+        context, unit_index, owner, context::SymbolKind.generic_type, false).value;
     if (symbol_id == context::no_id()) {
         return false;
     }
-    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
     return symbols[symbol_id].type_id == generic_id;
 }
 
@@ -643,7 +641,7 @@ fn collect_generic_impls_in_unit(
     if (unit_index == context::no_id()) {
         return;
     }
-    for (var declaration_id: usize = names::first_declaration(context, unit_index);
+    for (var declaration_id: usize = context::first_declaration(context, unit_index);
         declaration_id != context::no_id() && context->error == runtime::Error.none;
         declaration_id = context::node(context, unit_index, declaration_id).next_sibling) {
         let declaration: syntax::SyntaxNode = context::node(context, unit_index, declaration_id);
@@ -679,11 +677,12 @@ fn instantiate_generic_class(context: *context::Context, type_id: usize) -> bool
     let type_record: type_info::Record = context::type_record(context, type_id);
     let first_function: usize = context->function_count;
     collect_class_declaration_methods(context, module_id, type_id, type_record);
-    let modules: *const context::Module = context->modules.data as *const context::Module;
+    let modules: *const context::Module = context->symbols.module_data() as *const context::Module;
     collect_generic_impls_in_unit(context, generic_id, module_id, type_id, modules[module_id].interface_unit);
     for (var index: usize = 0; index < modules[module_id].implementation_count; index += 1) {
         collect_generic_impls_in_unit(
-            context, generic_id, module_id, type_id, names::module_implementation_unit(context, module_id, index));
+            context, generic_id, module_id, type_id, context->symbols.module_implementation_unit(context, module_id,
+                index));
     }
     for (var function_id: usize = first_function;
         function_id < context->function_count && context->error == runtime::Error.none;
@@ -722,7 +721,7 @@ fn collect_impl_blocks_in_unit(context: *context::Context, module_id: usize, uni
     if (unit_index == context::no_id()) {
         return;
     }
-    for (var declaration_id: usize = names::first_declaration(context, unit_index);
+    for (var declaration_id: usize = context::first_declaration(context, unit_index);
         declaration_id != context::no_id() && context->error == runtime::Error.none;
         declaration_id = context::node(context, unit_index, declaration_id).next_sibling) {
         let declaration: syntax::SyntaxNode = context::node(context, unit_index, declaration_id);
@@ -745,17 +744,17 @@ fn collect_class_methods(context: *context::Context) -> bool {
         }
         let type_record: type_info::Record = context::type_record(context, owner_type);
         collect_class_declaration_methods(
-            context, names::unit_module(context, type_record.declaration_unit), owner_type, type_record);
+            context, context->symbols.unit_module(context, type_record.declaration_unit), owner_type, type_record);
     }
-    let modules: *const context::Module = context->modules.data as
+    let modules: *const context::Module = context->symbols.module_data() as
             *const context::Module;
     for (var module_id: usize = 0;
-        module_id < context->module_count && context->error == runtime::Error.none;
+        module_id < context->symbols.module_count() && context->error == runtime::Error.none;
         module_id += 1) {
         collect_impl_blocks_in_unit(context, module_id, modules[module_id].interface_unit);
         for (var index: usize = 0; index < modules[module_id].implementation_count; index += 1) {
             collect_impl_blocks_in_unit(
-                context, module_id, names::module_implementation_unit(context, module_id, index));
+                context, module_id, context->symbols.module_implementation_unit(context, module_id, index));
         }
     }
     return context->error == runtime::Error.none;

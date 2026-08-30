@@ -2,7 +2,7 @@ module luna.bootstrap.middleend.semantic.functions;
 
 fn append_binding(context: *context::Context, binding: context::Binding) -> usize {
     let binding_id: usize = context->binding_count;
-    if (!names::append_record(
+    if (!context::append_record(
             context, &context->bindings, (&binding) as
                 *const context::Binding as *const u8, sizeof(context::Binding))) {
         return context::no_id();
@@ -48,7 +48,7 @@ fn token_is_before(
 }
 
 fn module_name_is_before(context: *context::Context, left_module: usize, right_module: usize) -> bool {
-    let modules: *const context::Module = context->modules.data as
+    let modules: *const context::Module = context->symbols.module_data() as
             *const context::Module;
     let left: context::Module = modules[left_module];
     let right: context::Module = modules[right_module];
@@ -75,7 +75,7 @@ fn module_name_is_before(context: *context::Context, left_module: usize, right_m
 fn functions_share_binding(context: *context::Context, left_function: usize, right_function: usize) -> bool {
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
-    let symbols: *const context::Symbol = context->symbols.data as
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as
             *const context::Symbol;
     let left_record: context::Function = functions[left_function];
     let right_record: context::Function = functions[right_function];
@@ -104,8 +104,8 @@ fn function_owner_is_before(context: *context::Context, left_function: usize, ri
             *const type_info::Record;
     let left: type_info::Record = records[left_owner];
     let right: type_info::Record = records[right_owner];
-    let left_module: usize = names::unit_module(context, left.declaration_unit);
-    let right_module: usize = names::unit_module(context, right.declaration_unit);
+    let left_module: usize = context->symbols.unit_module(context, left.declaration_unit);
+    let right_module: usize = context->symbols.unit_module(context, right.declaration_unit);
     if (left_module != right_module) {
         return module_name_is_before(context, left_module, right_module);
     }
@@ -115,7 +115,7 @@ fn function_owner_is_before(context: *context::Context, left_function: usize, ri
 fn function_is_before(context: *context::Context, left_function: usize, right_function: usize) -> bool {
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
-    let symbols: *const context::Symbol = context->symbols.data as
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as
             *const context::Symbol;
     let left: context::Symbol = symbols[functions[left_function].symbol_id];
     let right: context::Symbol = symbols[functions[right_function].symbol_id];
@@ -190,7 +190,7 @@ fn function_order(context: *context::Context) -> bytes::Buffer {
 fn begin_binding(context: *context::Context, function_id: usize, candidate_index: usize) -> usize {
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
-    let symbols: *const context::Symbol = context->symbols.data as
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as
             *const context::Symbol;
     let symbol: context::Symbol = symbols[functions[function_id].symbol_id];
     return append_binding(
@@ -638,21 +638,21 @@ fn candidate_is_visible_in_module(
     context: *context::Context, function_id: usize, unit_index: usize, binding_module: usize) -> bool {
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
-    let symbols: *const context::Symbol = context->symbols.data as
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as
             *const context::Symbol;
     let function: context::Function = functions[function_id];
     let symbol: context::Symbol = symbols[function.symbol_id];
     if (domain::has_owner(function.identity) && !classes::method_is_accessible(context, function_id)) {
         return false;
     }
-    let owner_module: usize = names::unit_module(context, unit_index);
+    let owner_module: usize = context->symbols.unit_module(context, unit_index);
     if (owner_module != binding_module) {
         if (domain::has_owner(function.identity)) {
             return (function.flags & (context::SymbolFlag.member_exported as usize)) != 0;
         }
         return (symbol.flags & (context::SymbolFlag.exported as usize)) != 0;
     }
-    if (!names::unit_is_interface(context, unit_index)) {
+    if (!context->symbols.unit_is_interface(context, unit_index)) {
         return true;
     }
     return (symbol.flags & (context::SymbolFlag.interface_declaration as usize)) != 0;
@@ -694,7 +694,7 @@ fn binding_has_visible_candidate(context: *context::Context, binding: context::B
     let generic_candidates: *const usize = context->generic_callable_candidates.data as *const usize;
     let declarations: *const domain::GenericDeclaration = context->generics.declaration_data() as
             *const domain::GenericDeclaration;
-    let owner_module: usize = names::unit_module(context, unit_index);
+    let owner_module: usize = context->symbols.unit_module(context, unit_index);
     for (var index: usize = 0; index < binding.generic_candidate_count; index += 1) {
         let generic_id: usize = generic_candidates[binding.first_generic_candidate + index];
         if (generic_id >= context->generics.declaration_count()) {
@@ -734,7 +734,7 @@ fn lookup_owned_callable_binding(
         return context::no_id();
     }
     let owner: type_info::Record = context::type_record(context, owner_type);
-    let module_id: usize = names::unit_module(context, owner.declaration_unit);
+    let module_id: usize = context->symbols.unit_module(context, owner.declaration_unit);
     let bindings: *const context::Binding = context->bindings.data as
             *const context::Binding;
     for (var binding_id: usize = 0; binding_id < context->binding_count; binding_id += 1) {
@@ -771,17 +771,17 @@ fn lookup_constructor_binding(context: *context::Context, owner_type: usize) -> 
 
 fn find_imported_binding(context: *context::Context, unit_index: usize, name_token: usize) -> usize {
     let none: usize = context::no_id();
-    let module_id: usize = names::unit_module(context, unit_index);
-    let interface_scope: bool = names::unit_is_interface(context, unit_index);
-    let modules: *const context::Module = context->modules.data as
+    let module_id: usize = context->symbols.unit_module(context, unit_index);
+    let interface_scope: bool = context->symbols.unit_is_interface(context, unit_index);
+    let modules: *const context::Module = context->symbols.module_data() as
             *const context::Module;
-    let imports: *const context::Import = context->imports.data as
+    let imports: *const context::Import = context->symbols.import_data() as
             *const context::Import;
     var found: usize = none;
     for (var import_index: usize = 0; import_index < modules[module_id].import_count; import_index += 1) {
         let import_record: context::Import = imports[modules[module_id].first_import + import_index];
         let import_is_visible: bool = !interface_scope || import_record.interface_import;
-        let name_is_bound: bool = names::import_binds_name(context, import_record, unit_index, name_token);
+        let name_is_bound: bool = context->symbols.import_binds_name(context, import_record, unit_index, name_token);
         if (import_is_visible && name_is_bound) {
             let binding_id: usize = find_module_binding(context, unit_index, import_record.target_module, name_token);
             let binding_conflicts: bool = found != none && found != binding_id;
@@ -804,7 +804,7 @@ fn find_imported_binding(context: *context::Context, unit_index: usize, name_tok
 }
 
 fn lookup_callable_binding(context: *context::Context, unit_index: usize, name_token: usize) -> usize {
-    let module_id: usize = names::unit_module(context, unit_index);
+    let module_id: usize = context->symbols.unit_module(context, unit_index);
     let local: usize = find_module_binding(context, unit_index, module_id, name_token);
     if (local != context::no_id()) {
         return local;
@@ -827,16 +827,16 @@ fn lookup_qualified_callable_binding(
         return none;
     }
     let qualifier: syntax::SyntaxNode = context::node(context, unit_index, path.first_child);
-    var ambiguous: bool = false;
-    let target: usize = diagnose ? names::resolve_module_qualifier(
+    let target_result: context::LookupResult = diagnose ? context->symbols.resolve_module_qualifier(
             context, unit_index, qualifier.token_index, qualifier.span) :
-        names::find_qualifier_target(context, unit_index, qualifier.token_index, &ambiguous);
+        context->symbols.find_qualifier_target(context, unit_index, qualifier.token_index);
+    let target: usize = target_result.value;
     if (target == none) {
         return none;
     }
     let binding_id: usize = find_module_binding(context, unit_index, target, path.token_index);
     if (binding_id == none && diagnose) {
-        let modules: *const context::Module = context->modules.data as
+        let modules: *const context::Module = context->symbols.module_data() as
                 *const context::Module;
         context::add_diagnostic(
             context, context::DiagnosticKind.unknown_qualified_name, unit_index, path.span, modules[target].name_unit,

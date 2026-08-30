@@ -28,6 +28,13 @@ enum GenericProbe: usize {
     additional_instances = 13, argument_base = 100,
 }
 
+enum SymbolProbe: usize {
+    module_count = 2, unit_count = 2, import_count = 1, symbol_count = 1,
+    name_node = 3, name_token = 5,
+}
+
+const SYMBOL_VALUE: u64 = 17;
+
 fn pattern_count(data: *const u8, length: usize, pattern: *const u8, pattern_length: usize) -> usize {
     if (data == null || pattern == null) {
         return 0;
@@ -295,6 +302,112 @@ fn generic_table_move_is_valid() -> bool {
     return generic_table_failure_is_sticky(declaration);
 }
 
+fn initial_module(name_unit: usize) -> context::Module {
+    return {
+        interface_unit = context::no_id(), implementation_count = 0,
+        name_unit = name_unit, name_node = SymbolProbe.name_node as usize,
+        first_import = context::no_id(), import_count = 0, visit_state = 0, reachable = false,
+    };
+}
+
+fn symbol_table_failure_is_sticky() -> bool {
+    var rejected: context::SymbolTable = context::SymbolTable();
+    let rejected_error: runtime::Error = rejected.append_unit({module_id = 0, interface_unit = 1});
+    let rejection_is_visible: bool = rejected_error == runtime::Error.invalid_argument &&
+        rejected.error() == runtime::Error.invalid_argument;
+    if (!rejection_is_visible || rejected.unit_count() != 0) {
+        return false;
+    }
+    let next: context::IndexResult = rejected.append_module(initial_module(0));
+    return next.error == runtime::Error.invalid_argument && rejected.module_count() == 0;
+}
+
+fn symbol_table_move_is_valid() -> bool {
+    var original: context::SymbolTable = context::SymbolTable();
+    let first: context::IndexResult = original.append_module(initial_module(0));
+    if (first.error != runtime::Error.none || first.index != 0) {
+        return false;
+    }
+    if (original.set_interface_unit(first.index, 0) != runtime::Error.none) {
+        return false;
+    }
+    if (original.append_unit({module_id = first.index, interface_unit = 1}) != runtime::Error.none) {
+        return false;
+    }
+    let second: context::IndexResult = original.append_module(initial_module(1));
+    if (second.error != runtime::Error.none || second.index != 1) {
+        return false;
+    }
+    if (original.add_implementation_unit(second.index) != runtime::Error.none) {
+        return false;
+    }
+    if (original.append_unit({module_id = second.index, interface_unit = 0}) != runtime::Error.none) {
+        return false;
+    }
+    let imported: context::IndexResult = original.append_import(first.index, {
+        owner_module = first.index, source_unit = 0, declaration_node = 1,
+        target_module = second.index, interface_import = true,
+        alias_token = context::no_id(), selective_node = context::no_id(),
+    });
+    if (imported.error != runtime::Error.none || imported.index != 0) {
+        return false;
+    }
+    let appended_symbol: context::IndexResult = original.append_symbol({
+        kind = context::SymbolKind.constant, module_id = first.index,
+        declaration_unit = 0, declaration_node = 2, name_token = SymbolProbe.name_token as usize,
+        type_id = 0, function_id = context::no_id(), integer_value = 0,
+        flags = context::SymbolFlag.none as usize,
+    });
+    if (appended_symbol.error != runtime::Error.none || appended_symbol.index != 0) {
+        return false;
+    }
+    if (original.add_symbol_flags(0, context::SymbolFlag.exported as usize) != runtime::Error.none) {
+        return false;
+    }
+    if (original.set_symbol_value(0, SYMBOL_VALUE) != runtime::Error.none) {
+        return false;
+    }
+    if (original.set_visit_state(0, 1) != runtime::Error.none ||
+            original.set_visit_state(0, 2) != runtime::Error.none) {
+        return false;
+    }
+    if (original.mark_reachable(0) != runtime::Error.none) {
+        return false;
+    }
+
+    var moved: context::SymbolTable = utility::move(original);
+    let source_counts_are_empty: bool = original.unit_count() == 0 && original.module_count() == 0;
+    let source_names_are_empty: bool = original.import_count() == 0 && original.symbol_count() == 0;
+    if (!source_counts_are_empty || !source_names_are_empty) {
+        return false;
+    }
+    let moved_program_counts_are_valid: bool = moved.unit_count() == SymbolProbe.unit_count as usize &&
+        moved.module_count() == SymbolProbe.module_count as usize;
+    let moved_name_counts_are_valid: bool = moved.import_count() == SymbolProbe.import_count as usize &&
+        moved.symbol_count() == SymbolProbe.symbol_count as usize;
+    if (!moved_program_counts_are_valid || !moved_name_counts_are_valid) {
+        return false;
+    }
+    let source_state_is_valid: bool = original.storage_is_valid() && original.error() == runtime::Error.none;
+    let moved_state_is_valid: bool = moved.storage_is_valid() && moved.error() == runtime::Error.none;
+    if (!source_state_is_valid || !moved_state_is_valid) {
+        return false;
+    }
+    let first_module: context::Module = moved.module_data()[0];
+    let module_slice_is_valid: bool = first_module.first_import == 0 && first_module.import_count == 1;
+    let module_state_is_valid: bool = first_module.visit_state == 2 && first_module.reachable;
+    if (!module_slice_is_valid || !module_state_is_valid) {
+        return false;
+    }
+    let imported_record_is_valid: bool = moved.import_data()[0].target_module == second.index;
+    let symbol_record_is_valid: bool = moved.symbol_data()[0].integer_value == SYMBOL_VALUE &&
+        (moved.symbol_data()[0].flags & (context::SymbolFlag.exported as usize)) != 0;
+    if (!imported_record_is_valid || !symbol_record_is_valid) {
+        return false;
+    }
+    return symbol_table_failure_is_sticky();
+}
+
 fn semantic_diagnostic_flow_is_valid() -> bool {
     let source: string_views::string_view_result = string_views::from_c_string(
         "module tests.semantic_diagnostic_probe;\n@align(3) struct Bad {\n    value: i32;\n}\n"
@@ -349,6 +462,9 @@ fn main() -> i32 {
     }
     if (!semantic_diagnostic_flow_is_valid()) {
         return 34;
+    }
+    if (!symbol_table_move_is_valid()) {
+        return 35;
     }
     let source: string_views::string_view_result = string_views::from_c_string(
         "module tests.relocation_probe;\nextern fn dispatch_target() -> i32;\n", 96);

@@ -79,6 +79,11 @@ projection 边界。该契约复用既有编译/链接协议，不为每个 clas
 反向映射、active-binding 回滚、深验证、move/moved-from 和首错粘滞。generic model 的索引与生命周期契约因此
 同样不增加独立工具链启动。
 
+同一 relocation-data 大用例还直接构造`SymbolTable`：验证 unit/module/import/symbol 四个 typed vector、接口和
+实现单元计数、连续 import slice、图遍历/可达状态、符号 flag/value 受控发布、const projection、move 后所有权、
+moved-from 空状态和首错粘滞。现有模块顺序、重复/循环 import、selective import、qualified name 和歧义 qualifier
+用例继续覆盖`LookupResult`的行为分支；`audit`要求旧`context.lookup`接口与 registry object 消失。
+
 semantic domain 收缩不新增逐概念编译用例；现有 overload、class policy、generic instance、method receiver、
 reference binding、value category、lifetime 和负诊断 corpus 原样覆盖`luna.compiler.sema.domain`。`audit`验证旧
 callable/value 模块已经消失；本批图审查另外确认 class/generic owner 只由 Context 直接导入。relocation-data

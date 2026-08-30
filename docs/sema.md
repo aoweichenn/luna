@@ -262,6 +262,38 @@ Consteval and expression passes already consume `types`, so their child lookup
 imports and the remaining visibility-independent interface/object/registry
 boundary are removed.
 
+## Symbol ownership and name lookup
+
+`SymbolTable` is the move-only owner of unit, module, import and symbol records.
+Each family uses a typed vector, so Context no longer mirrors byte lengths with
+four separately mutable counters. Its public data projections are const;
+interface/implementation registration, contiguous import-slice publication,
+graph visit/reachability state and symbol flag/value changes pass through bound
+methods with sticky runtime failure.
+
+Name lookup is behavior of that owner. `LookupResult` distinguishes `found`,
+`not_found`, `ambiguous` and `invalid`, removing the former qualifier contract
+that paired a no-id return with an output boolean. Lookup still borrows Context
+for syntax text and diagnostics; it does not own source or diagnostic storage.
+Bound scans use `for` for typed record ranges, while the two remaining `while`
+loops follow syntax sibling links. No condition in either SymbolTable
+implementation exceeds two logical clauses.
+
+The old `luna.bootstrap.middleend.semantic.context.lookup` child module had no
+independent consumer or acyclic boundary: every operation required Context.
+Its interface and registry object are deleted. `context/symbols.la` implements
+storage/publication and `context/lookup.la` implements bound lookup in the
+parent module. The parent interface is temporarily 581 lines because the
+transitional Context still exports unrelated passive records and builder
+state; this batch does not hide that debt by creating another facade. The next
+owner extractions must reduce the interface rather than adding more operations
+to it.
+
+`Binding`, ordinary candidates and generic candidates deliberately remain out
+of SymbolTable. They encode overload ordering and contiguous callable slices,
+not source-name ownership, and therefore belong to the next `CallableTable`
+batch.
+
 ## Entry selection
 
 Entry selection is now a bound session operation. Function traversal uses
@@ -293,29 +325,31 @@ sets the IR entry through `ir::Builder` before graph reachability validation.
 | `semantic/context.la` | transitional Context storage and shared low-level services |
 | `semantic/context/input.la` | Input owner, InputView validation and Context unit/path access |
 | `semantic/context/diagnostics.la` | DiagnosticView, DiagnosticBuffer and final success predicate |
+| `semantic/context/symbols.la` | SymbolTable typed ownership, publication invariants and sticky failure |
+| `semantic/context/lookup.la` | SymbolTable local/imported/qualified lookup methods |
 
 The two domain files implement one real `luna.compiler.sema.domain` module.
 Class/generic records need no artificial implementation file because they are
 passive declarations with no behavior.
-`context/input.la` and `context/diagnostics.la` are additional implementations
-of the existing context module, not new submodules; no consumer imports them
-independently.
+The four `context/{input,diagnostics,symbols,lookup}.la` files are additional
+implementations of the existing context module, not new submodules; no
+consumer imports them independently.
 
 ## Current Luna feature review
 
 | feature | disposition |
 | --- | --- |
-| Classes | SemanticSession owns phases; Input, DiagnosticBuffer, ClassTable and GenericTable own resource lifetimes |
-| Generics | semantic records and private index entries use typed vectors instead of exposed byte arithmetic |
-| Composition | Input composes vector/byte_buffer; Context composes the semantic owners |
-| Access control | session phase, metadata vectors, diagnostic storage and sticky errors are private |
+| Classes | SemanticSession owns phases; Input, DiagnosticBuffer, SymbolTable, ClassTable and GenericTable own state/lifetimes |
+| Generics | SymbolTable and the other owners use typed vectors instead of exposed byte arithmetic |
+| Composition | Input composes vector/byte_buffer; Context composes SymbolTable and the other semantic owners |
+| Access control | session phase, symbol/metadata vectors, diagnostic storage and sticky errors are private |
 | Constructors/destructors | constructors establish ready/empty states; destructors close each resource path once |
-| Copy/move | Input, DiagnosticBuffer, ClassTable and GenericTable are move-only; views are copied borrows |
-| Overloads/defaults | no operation has one semantic family that benefits from overloads or a meaningful default |
+| Copy/move | Input, DiagnosticBuffer, SymbolTable, ClassTable and GenericTable are move-only; views are copied borrows |
+| Overloads/defaults | SymbolTable operations have distinct contracts and no meaningful overload or default |
 | Operators | no natural value operator exists for a semantic session or diagnostic stream |
-| Bound methods | owner mutations remain bound; SemanticPass is a plain function pointer because passes capture no receiver |
-| Friends | unnecessary because the public methods preserve the required boundaries |
-| Virtual dispatch/RTTI | rejected: these are closed compile-time domains without runtime substitution |
+| Bound methods | SymbolTable owns publication/lookup behavior; SemanticPass stays a pointer because passes capture no receiver |
+| Friends | unnecessary because const projections and focused mutations preserve the owner boundary |
+| Virtual dispatch/RTTI | rejected: SymbolTable is one closed implementation with no runtime substitution |
 
 The domain module adopts enums, structs and switch-based free predicates
 because its values are passive and stateless. Adding a class merely to group
@@ -325,11 +359,13 @@ those functions would introduce pattern-shaped indirection without an owner.
 
 The next semantic batches should remain independently green:
 
-1. contract context/lookup/builder into a coherent session module after its
-   interface can remain narrow;
-2. migrate pass families to bound methods or focused strategy objects where
+1. extract callable bindings and candidate slices into a move-only
+   `CallableTable`, then remove the remaining general record append uses;
+2. extract lowering state and contract `context.builder` without merging its
+   unrelated responsibilities into SymbolTable;
+3. migrate pass families to bound methods or focused strategy objects where
    they own real state;
-3. rename the remaining `luna.bootstrap.middleend.semantic.*` graph only when
+4. rename the remaining `luna.bootstrap.middleend.semantic.*` graph only when
    the new dependency boundary is acyclic and independently useful.
 
 ## Validation gates

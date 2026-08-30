@@ -8,6 +8,16 @@ This branch is pure Luna. The C23 reconstruction seed and its C/C++ test
 infrastructure are archived on the `m0` branch; the only trusted binary
 input here is `anchor/`.
 
+## Codex project skill
+
+- For every task whose scope includes this repository, load and follow
+  `.agents/skills/luna-compiler-engineering/SKILL.md` before substantive
+  analysis, planning, editing or validation. This is the repository's default
+  skill; do not wait for an explicit `$luna-compiler-engineering` mention.
+- The skill routes subsystem documentation, Sol/Luna subagent roles and the
+  remote validation protocol. This file remains the authoritative repository
+  contract when the skill summarizes or links back to it.
+
 ## Build & test
 
 Requires Python 3 and an x86-64 Linux host (or `qemu-x86_64-static` via
@@ -166,12 +176,13 @@ python3 tools/refmt.py --check     # formatting gate: zero files needing
 - Semantic lowering implementations live under
   `compiler/src/middleend/semantic/`, with the pipeline entry remaining
   in `compiler/src/middleend/sema.la`; imports flow strictly downward in
-  this order: `callable`, `value`, `classes/model`, `context` (+ `context/{lookup,builder}`),
+  this order: `callable`, `value`, `classes/model`, `context` (+ `context/builder`),
   `attributes`, `modules`, `types`,
   `classes`, `consteval` (+ `consteval/{model,engine}`), `intrinsics`,
   `functions`, `lifetime`, `expr` (+ `expr/{base,numeric,
   strings,api,probe,initializer,access,operators}`), `stmt` (+
-  `stmt/{api,labels}`). The same-module files `types/{layout,lookup,visibility}.la`,
+  `stmt/{api,labels}`). The same-module files `context/{input,diagnostics,symbols,lookup}.la`,
+  `types/{layout,lookup,visibility}.la`,
   `consteval/engine/execute.la`,
   `functions/{const,signature,overloads,bindings,defaults,generics,methods,special,ir}.la`, plus
   `expr/probe/{operators,call}.la`, are implementation splits, not

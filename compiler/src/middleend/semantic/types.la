@@ -2,7 +2,6 @@ module luna.bootstrap.middleend.semantic.types;
 
 import luna.bootstrap.middleend.semantic.attributes as attributes;
 import luna.bootstrap.middleend.semantic.context.builder as builder;
-import luna.bootstrap.middleend.semantic.context.lookup as names;
 import luna.bootstrap.middleend.semantic.generics;
 import luna.compiler.sema.domain as domain;
 import luna.runtime as runtime;
@@ -40,7 +39,7 @@ fn report_opaque_class(
     var related_unit: usize = context::no_id();
     var related_span: lexer::SourceSpan = context::empty_span();
     if (related != context::no_id()) {
-        let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+        let symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
         related_unit = symbols[related].declaration_unit;
         related_span = context::node(context, related_unit, symbols[related].declaration_node).span;
     }
@@ -76,7 +75,7 @@ fn try_define_opaque_class(
     if (duplicate == context::no_id()) {
         return false;
     }
-    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
     let symbol: context::Symbol = symbols[duplicate];
     if (symbol.kind != context::SymbolKind.named_type) {
         return false;
@@ -122,12 +121,11 @@ fn append_named_type(
         flags |= context::SymbolFlag.interface_declaration as usize;
     }
     let type_id: usize = added.type_id;
-    names::append_symbol(
-        context, {
+    context->error = context->symbols.append_symbol({
             kind = context::SymbolKind.named_type, module_id = module_id, declaration_unit = unit_index,
             declaration_node = declaration_id, name_token = declaration.token_index, type_id = type_id,
             function_id = context::no_id(), integer_value = 0, flags = flags,
-        });
+        }).error;
 }
 
 fn generic_class_features_are_supported(
@@ -180,13 +178,12 @@ fn append_generic_type(
     if (interface_unit) {
         flags |= context::SymbolFlag.interface_declaration as usize;
     }
-    names::append_symbol(
-        context, {
+    context->error = context->symbols.append_symbol({
             kind = context::SymbolKind.generic_type, module_id = module_id,
             declaration_unit = unit_index, declaration_node = declaration_id,
             name_token = declaration.token_index, type_id = generic_id,
             function_id = context::no_id(), integer_value = 0, flags = flags,
-        });
+        }).error;
 }
 
 fn collect_types_in_unit(context: *context::Context, module_id: usize, unit_index: usize) -> bool {
@@ -194,8 +191,8 @@ fn collect_types_in_unit(context: *context::Context, module_id: usize, unit_inde
     if (unit_index == none) {
         return true;
     }
-    let interface_unit: bool = names::unit_is_interface(context, unit_index);
-    for (var declaration_id: usize = names::first_declaration(context, unit_index);
+    let interface_unit: bool = context->symbols.unit_is_interface(context, unit_index);
+    for (var declaration_id: usize = context::first_declaration(context, unit_index);
         declaration_id != none && context->error == runtime::Error.none;
         declaration_id = context::node(context, unit_index, declaration_id).next_sibling) {
         let declaration: syntax::SyntaxNode = context::node(context, unit_index, declaration_id);
@@ -209,11 +206,11 @@ fn collect_types_in_unit(context: *context::Context, module_id: usize, unit_inde
                     context::empty_span(), 0);
             }
             let duplicate: usize =
-                names::find_any_local_symbol(context, module_id, unit_index, declaration.token_index);
+                context->symbols.find_any_local_symbol(context, module_id, unit_index, declaration.token_index);
             let opaque_definition: bool = !generic && try_define_opaque_class(
                 context, unit_index, declaration_id, declaration, duplicate, interface_unit);
             if (duplicate != none && !opaque_definition) {
-                let symbols: *const context::Symbol = context->symbols.data as
+                let symbols: *const context::Symbol = context->symbols.symbol_data() as
                         *const context::Symbol;
                 context::add_diagnostic(
                     context, context::DiagnosticKind.duplicate_name, unit_index,
@@ -247,9 +244,9 @@ fn validate_opaque_definitions(context: *context::Context) {
 
 fn collect_named_types(context: *context::Context) -> bool {
     for (var module_id: usize = 0;
-        module_id < context->module_count && context->error == runtime::Error.none;
+        module_id < context->symbols.module_count() && context->error == runtime::Error.none;
         module_id += 1) {
-        let modules: *const context::Module = context->modules.data as
+        let modules: *const context::Module = context->symbols.module_data() as
                 *const context::Module;
         if (!collect_types_in_unit(context, module_id, modules[module_id].interface_unit)) {
             return false;
@@ -258,7 +255,7 @@ fn collect_named_types(context: *context::Context) -> bool {
             implementation_index < modules[module_id].implementation_count;
             implementation_index += 1) {
             let implementation_unit: usize =
-                names::module_implementation_unit(context, module_id, implementation_index);
+                context->symbols.module_implementation_unit(context, module_id, implementation_index);
             if (implementation_unit == context::no_id() ||
                 !collect_types_in_unit(
                     context, module_id, implementation_unit)) {
@@ -464,8 +461,8 @@ fn instantiate_generic_type(
 fn resolve_generic_reference(
     context: *context::Context, unit_index: usize, node: syntax::SyntaxNode,
     base: syntax::SyntaxNode, arguments_node: usize) -> usize {
-    let symbol_id: usize = names::lookup_qualified_symbol(
-        context, unit_index, base, context::SymbolKind.generic_type, true);
+    let symbol_id: usize = context->symbols.lookup_qualified_symbol(
+        context, unit_index, base, context::SymbolKind.generic_type, true).value;
     if (symbol_id == context::no_id()) {
         return context::no_id();
     }
@@ -477,7 +474,7 @@ fn resolve_generic_reference(
         }
         return context::no_id();
     }
-    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
     let type_id: usize = instantiate_generic_type(
         context, symbols[symbol_id].type_id, unit_index, node, resolved_arguments);
     let release_error: runtime::Error = bytes::release(resolved_arguments.values);
@@ -545,13 +542,14 @@ fn resolve_type_node(context: *context::Context, unit_index: usize, node_index: 
             }
         }
         let symbol_id: usize =
-            names::lookup_qualified_symbol(context, unit_index, node, context::SymbolKind.named_type, true);
+            context->symbols.lookup_qualified_symbol(
+                context, unit_index, node, context::SymbolKind.named_type, true).value;
         if (symbol_id == none && node.child_count != 0) {
             // Qualified lookups diagnose their own failures.
             return none;
         }
         if (symbol_id != none) {
-            let symbols: *const context::Symbol = context->symbols.data as
+            let symbols: *const context::Symbol = context->symbols.symbol_data() as
                     *const context::Symbol;
             let type_id: usize = symbols[symbol_id].type_id;
             let record: type_info::Record = context::type_record(context, type_id);
@@ -792,12 +790,13 @@ fn resolve_type_expression(context: *context::Context, unit_index: usize, node: 
         }
     }
     let symbol_id: usize = node.child_count == 0 ?
-        names::lookup_symbol(context, unit_index, node.token_index, context::SymbolKind.named_type) :
-        names::lookup_qualified_symbol(context, unit_index, node, context::SymbolKind.named_type, false);
+        context->symbols.lookup_symbol(context, unit_index, node.token_index, context::SymbolKind.named_type).value :
+        context->symbols.lookup_qualified_symbol(
+            context, unit_index, node, context::SymbolKind.named_type, false).value;
     if (symbol_id == context::no_id()) {
         return context::no_id();
     }
-    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
     var type_id: usize = symbols[symbol_id].type_id;
     for (var depth: usize = 0; depth < context::Limit.maximum_type_depth as usize; depth += 1) {
         let record: type_info::Record = context::type_record(context, type_id);
@@ -825,9 +824,9 @@ fn opaque_value_is_available(context: *context::Context, type_id: usize, unit_in
     if (!type_info::is_opaque_class(record)) {
         return true;
     }
-    let defining_module: usize = names::unit_module(context, record.declaration_unit);
-    let using_module: usize = names::unit_module(context, unit_index);
-    let implementation_unit: bool = !names::unit_is_interface(context, unit_index);
+    let defining_module: usize = context->symbols.unit_module(context, record.declaration_unit);
+    let using_module: usize = context->symbols.unit_module(context, unit_index);
+    let implementation_unit: bool = !context->symbols.unit_is_interface(context, unit_index);
     return defining_module == using_module && implementation_unit;
 }
 
@@ -840,7 +839,7 @@ fn require_opaque_value_access(
     var related_unit: usize = context::no_id();
     var related_span: lexer::SourceSpan = context::empty_span();
     if (symbol_id != context::no_id()) {
-        let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+        let symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
         related_unit = symbols[symbol_id].declaration_unit;
         related_span = context::node(context, related_unit, symbols[symbol_id].declaration_node).span;
     }

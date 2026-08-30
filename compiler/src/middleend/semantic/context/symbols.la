@@ -1,0 +1,225 @@
+module luna.bootstrap.middleend.semantic.context;
+
+fn module_record_is_initial(record: Module) -> bool {
+    let declaration_is_empty: bool = record.interface_unit == no_id() && record.implementation_count == 0;
+    let import_slice_is_empty: bool = record.first_import == no_id() && record.import_count == 0;
+    let traversal_is_initial: bool = record.visit_state == 0 && !record.reachable;
+    return declaration_is_empty && import_slice_is_empty && traversal_is_initial;
+}
+
+fn import_slice_is_appendable(record: Module, next_import: usize) -> bool {
+    if (record.import_count == 0) {
+        return record.first_import == no_id();
+    }
+    if (record.first_import > next_import) {
+        return false;
+    }
+    return record.import_count == next_import - record.first_import;
+}
+
+impl SymbolTable {
+    init(): units = vector::vector<UnitInfo>(), modules = vector::vector<Module>(),
+            imports = vector::vector<Import>(), symbols = vector::vector<Symbol>() {
+        this->error_code = runtime::Error.none;
+    }
+
+    init(other: SymbolTable&&): units = other.units as vector::vector<UnitInfo>&&,
+            modules = other.modules as vector::vector<Module>&&, imports = other.imports as vector::vector<Import>&&,
+            symbols = other.symbols as vector::vector<Symbol>&& {
+        this->error_code = other.error_code;
+        other.error_code = runtime::Error.none;
+    }
+
+    priv fn ready() const -> bool {
+        return this->error_code == runtime::Error.none && this->storage_is_valid();
+    }
+
+    priv fn fail(error: runtime::Error) -> runtime::Error {
+        if (this->error_code == runtime::Error.none) {
+            this->error_code = error;
+        }
+        return this->error_code;
+    }
+
+    fn storage_is_valid() const -> bool {
+        let program_storage_is_valid: bool = this->units.is_valid() && this->modules.is_valid();
+        let name_storage_is_valid: bool = this->imports.is_valid() && this->symbols.is_valid();
+        return program_storage_is_valid && name_storage_is_valid;
+    }
+
+    fn error() const -> runtime::Error {
+        return this->error_code;
+    }
+
+    fn unit_count() const -> usize {
+        return this->units.size();
+    }
+
+    fn module_count() const -> usize {
+        return this->modules.size();
+    }
+
+    fn import_count() const -> usize {
+        return this->imports.size();
+    }
+
+    fn symbol_count() const -> usize {
+        return this->symbols.size();
+    }
+
+    fn unit_data() const -> *const UnitInfo {
+        return this->units.empty() ? null : &this->units.get(0) as *const UnitInfo;
+    }
+
+    fn module_data() const -> *const Module {
+        return this->modules.empty() ? null : &this->modules.get(0) as *const Module;
+    }
+
+    fn import_data() const -> *const Import {
+        return this->imports.empty() ? null : &this->imports.get(0) as *const Import;
+    }
+
+    fn symbol_data() const -> *const Symbol {
+        return this->symbols.empty() ? null : &this->symbols.get(0) as *const Symbol;
+    }
+
+    fn append_unit(info: UnitInfo) -> runtime::Error {
+        let module_is_valid: bool = info.module_id < this->modules.size();
+        let interface_flag_is_valid: bool = info.interface_unit <= 1;
+        if (!this->ready() || !module_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!interface_flag_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let error: runtime::Error = this->units.push_back(info);
+        return error == runtime::Error.none ? error : this->fail(error);
+    }
+
+    fn append_module(record: Module) -> IndexResult {
+        if (!this->ready() || !module_record_is_initial(record)) {
+            return {index = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        let module_id: usize = this->modules.size();
+        let error: runtime::Error = this->modules.push_back(record);
+        if (error != runtime::Error.none) {
+            return {index = no_id(), error = this->fail(error)};
+        }
+        return {index = module_id, error = runtime::Error.none};
+    }
+
+    fn append_import(module_id: usize, record: Import) -> IndexResult {
+        if (!this->ready() || module_id >= this->modules.size()) {
+            return {index = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        let target_is_valid: bool = record.target_module < this->modules.size();
+        let source_is_valid: bool = record.source_unit < this->units.size();
+        let owner_is_valid: bool = record.owner_module == module_id;
+        if (!target_is_valid || !source_is_valid) {
+            return {index = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        let module_record: Module = this->modules.get(module_id);
+        let import_id: usize = this->imports.size();
+        if (!owner_is_valid || !import_slice_is_appendable(module_record, import_id)) {
+            return {index = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        let error: runtime::Error = this->imports.push_back(record);
+        if (error != runtime::Error.none) {
+            return {index = no_id(), error = this->fail(error)};
+        }
+        if (module_record.import_count == 0) {
+            this->modules.get(module_id).first_import = import_id;
+        }
+        this->modules.get(module_id).import_count += 1;
+        return {index = import_id, error = runtime::Error.none};
+    }
+
+    fn append_symbol(record: Symbol) -> IndexResult {
+        if (!this->ready() || record.module_id >= this->modules.size()) {
+            return {index = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        let source_is_valid: bool = record.declaration_unit < this->units.size();
+        if (!source_is_valid || record.name_token == no_id()) {
+            return {index = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        let symbol_id: usize = this->symbols.size();
+        let error: runtime::Error = this->symbols.push_back(record);
+        if (error != runtime::Error.none) {
+            return {index = no_id(), error = this->fail(error)};
+        }
+        return {index = symbol_id, error = runtime::Error.none};
+    }
+
+    fn set_interface_unit(module_id: usize, unit_index: usize) -> runtime::Error {
+        let module_is_valid: bool = module_id < this->modules.size();
+        let unit_is_next: bool = unit_index == this->units.size();
+        if (!this->ready() || !module_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!unit_is_next || this->modules.get(module_id).interface_unit != no_id()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->modules.get(module_id).interface_unit = unit_index;
+        return runtime::Error.none;
+    }
+
+    fn add_implementation_unit(module_id: usize) -> runtime::Error {
+        if (!this->ready() || module_id >= this->modules.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (this->modules.get(module_id).implementation_count == Limit.maximum_size as usize) {
+            return this->fail(runtime::Error.out_of_memory);
+        }
+        this->modules.get(module_id).implementation_count += 1;
+        return runtime::Error.none;
+    }
+
+    fn set_visit_state(module_id: usize, state: usize) -> runtime::Error {
+        if (!this->ready() || module_id >= this->modules.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let current: usize = this->modules.get(module_id).visit_state;
+        let starts_visit: bool = current == 0 && state == 1;
+        let finishes_visit: bool = current == 1 && state == 2;
+        if (!starts_visit && !finishes_visit) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->modules.get(module_id).visit_state = state;
+        return runtime::Error.none;
+    }
+
+    fn mark_reachable(module_id: usize) -> runtime::Error {
+        if (!this->ready() || module_id >= this->modules.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->modules.get(module_id).reachable = true;
+        return runtime::Error.none;
+    }
+
+    fn add_symbol_flags(symbol_id: usize, flags: usize) -> runtime::Error {
+        if (!this->ready() || symbol_id >= this->symbols.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->symbols.get(symbol_id).flags |= flags;
+        return runtime::Error.none;
+    }
+
+    fn remove_symbol_flags(symbol_id: usize, flags: usize) -> runtime::Error {
+        if (!this->ready() || symbol_id >= this->symbols.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->symbols.get(symbol_id).flags &= ~flags;
+        return runtime::Error.none;
+    }
+
+    fn set_symbol_value(symbol_id: usize, value: u64) -> runtime::Error {
+        if (!this->ready() || symbol_id >= this->symbols.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->symbols.get(symbol_id).integer_value = value;
+        return runtime::Error.none;
+    }
+
+    deinit() {
+    }
+}

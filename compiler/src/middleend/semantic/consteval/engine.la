@@ -1,7 +1,6 @@
 module luna.bootstrap.middleend.semantic.consteval.engine;
 
 import luna.bootstrap.middleend.semantic.context.builder as builder;
-import luna.bootstrap.middleend.semantic.context.lookup as names;
 import luna.bootstrap.middleend.semantic.types as types;
 import luna.runtime as runtime;
 import luna.std.bytes as bytes;
@@ -61,11 +60,12 @@ fn eval_enum_member(context: *context::Context, unit_index: usize, node: syntax:
         return not_constant();
     }
     let type_symbol: usize =
-        names::lookup_qualified_symbol(context, unit_index, owner_node, context::SymbolKind.named_type, false);
+        context->symbols.lookup_qualified_symbol(
+            context, unit_index, owner_node, context::SymbolKind.named_type, false).value;
     if (type_symbol == context::no_id()) {
         return not_constant();
     }
-    let symbols: *const context::Symbol = context->symbols.data as
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as
             *const context::Symbol;
     var type_id: usize = symbols[type_symbol].type_id;
     let alias_record: type_info::Record = context::type_record(context, type_id);
@@ -85,7 +85,7 @@ fn eval_enum_member(context: *context::Context, unit_index: usize, node: syntax:
     }
     // require_complete_type may have appended member symbols, so take a
     // fresh pointer before reading them.
-    let resolved_symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let resolved_symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
     if ((resolved_symbols[member_symbol].flags & (context::SymbolFlag.enum_value_pending as usize)) == 0) {
         return integer(resolved_symbols[member_symbol].integer_value);
     }
@@ -93,7 +93,7 @@ fn eval_enum_member(context: *context::Context, unit_index: usize, node: syntax:
             context, type_id)) {
         return error();
     }
-    let folded: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let folded: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
     if ((folded[member_symbol].flags & (context::SymbolFlag.enum_value_pending as usize)) != 0) {
         return error();
     }
@@ -129,11 +129,11 @@ fn eval_name(context: *context::Context, unit_index: usize, node: syntax::Syntax
         }
     }
     let symbol_id: usize =
-        names::lookup_qualified_symbol(context, unit_index, node, context::SymbolKind.constant, false);
+        context->symbols.lookup_qualified_symbol(context, unit_index, node, context::SymbolKind.constant, false).value;
     if (symbol_id == none) {
         return not_constant();
     }
-    var symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    var symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
     var symbol: context::Symbol = symbols[symbol_id];
     if ((symbol.flags & (context::SymbolFlag.constant_resolved as usize)) == 0) {
         // Resolve the initializer on demand so constants declared anywhere
@@ -141,7 +141,7 @@ fn eval_name(context: *context::Context, unit_index: usize, node: syntax::Syntax
         if (!resolve_constant(context, symbol_id)) {
             return not_constant();
         }
-        symbols = context->symbols.data as
+        symbols = context->symbols.symbol_data() as
             *const context::Symbol;
         symbol = symbols[symbol_id];
     }
@@ -475,8 +475,8 @@ fn resolve_enum_constant_values(context: *context::Context, type_id: usize) -> b
     }
     var has_pending: bool = false;
     var scan: usize = 0;
-    let all_symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
-    while (scan < context->symbol_count) {
+    let all_symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
+    while (scan < context->symbols.symbol_count()) {
         let candidate: context::Symbol = all_symbols[scan];
         if (candidate.kind == context::SymbolKind.enum_member && candidate.type_id == type_id &&
             (candidate.flags & pending_flag) != 0) {
@@ -491,11 +491,11 @@ fn resolve_enum_constant_values(context: *context::Context, type_id: usize) -> b
     if (type_symbol == none) {
         return false;
     }
-    let symbols: *context::Symbol = context->symbols.data as *context::Symbol;
+    let symbols: *const context::Symbol = context->symbols.symbol_data();
     if ((symbols[type_symbol].flags & resolving_flag) != 0) {
         return false;
     }
-    symbols[type_symbol].flags |= resolving_flag;
+    context->error = context->symbols.add_symbol_flags(type_symbol, resolving_flag);
     let record: type_info::Record = context::type_record(context, type_id);
     let underlying_kind: type_info::Kind = context::type_record(context, record.element_type).kind;
     let bits: usize = type_info::bit_width(underlying_kind);
@@ -513,9 +513,9 @@ fn resolve_enum_constant_values(context: *context::Context, type_id: usize) -> b
         }
         var member_symbol: usize = none;
         var index: usize = 0;
-        let members: *const context::Symbol = context->symbols.data as
+        let members: *const context::Symbol = context->symbols.symbol_data() as
                 *const context::Symbol;
-        while (index < context->symbol_count) {
+        while (index < context->symbols.symbol_count()) {
             let candidate: context::Symbol = members[index];
             if (candidate.kind == context::SymbolKind.enum_member && candidate.type_id == type_id &&
                 candidate.declaration_node == member_id) {
@@ -549,16 +549,14 @@ fn resolve_enum_constant_values(context: *context::Context, type_id: usize) -> b
                 }
                 value = builder::mask_integer(evaluated.value, bits);
             }
-            let fresh: *context::Symbol = context->symbols.data as *context::Symbol;
-            fresh[member_symbol].integer_value = value;
-            fresh[member_symbol].flags = fresh[member_symbol].flags & ~pending_flag;
+            context->error = context->symbols.set_symbol_value(member_symbol, value);
+            context->error = context->symbols.remove_symbol_flags(member_symbol, pending_flag);
             next_value = builder::mask_integer(value + 1, bits);
             next_value_valid = types::enum_can_increment(underlying_kind, value);
         }
         member_id = member.next_sibling;
     }
-    let done: *context::Symbol = context->symbols.data as *context::Symbol;
-    done[type_symbol].flags = done[type_symbol].flags & ~resolving_flag;
+    context->error = context->symbols.remove_symbol_flags(type_symbol, resolving_flag);
     return success && context->error == runtime::Error.none;
 }
 
@@ -588,7 +586,7 @@ fn const_value_conforms(
 fn resolve_constant(context: *context::Context, symbol_id: usize) -> bool {
     let resolved_flag: usize = context::SymbolFlag.constant_resolved as usize;
     let resolving_flag: usize = context::SymbolFlag.constant_resolving as usize;
-    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
     let symbol: context::Symbol = symbols[symbol_id];
     if ((symbol.flags & resolved_flag) != 0) {
         return true;
@@ -596,23 +594,20 @@ fn resolve_constant(context: *context::Context, symbol_id: usize) -> bool {
     if ((symbol.flags & resolving_flag) != 0) {
         return false;
     }
-    let writable: *context::Symbol = context->symbols.data as *context::Symbol;
-    writable[symbol_id].flags |= resolving_flag;
+    context->error = context->symbols.add_symbol_flags(symbol_id, resolving_flag);
     let declaration: syntax::SyntaxNode = context::node(context, symbol.declaration_unit, symbol.declaration_node);
     let initializer_id: usize = context::node(context, symbol.declaration_unit, declaration.first_child).next_sibling;
     let value: model::Value = expression(context, symbol.declaration_unit, initializer_id);
-    // Consteval may complete enum layouts and append member symbols, so
-    // take a fresh pointer before mutating.
-    let fresh: *context::Symbol = context->symbols.data as *context::Symbol;
-    fresh[symbol_id].flags = fresh[symbol_id].flags & ~resolving_flag;
+    // 常量求值可能补全枚举并追加成员，因此结束状态通过稳定 ID 发布。
+    context->error = context->symbols.remove_symbol_flags(symbol_id, resolving_flag);
     if (!value.is_constant || value.error) {
         return false;
     }
-    fresh[symbol_id].flags |= resolved_flag;
+    context->error = context->symbols.add_symbol_flags(symbol_id, resolved_flag);
     if (const_value_conforms(
             context, symbol.declaration_unit, context::node(context, symbol.declaration_unit, initializer_id).span,
             symbol.type_id, value)) {
-        fresh[symbol_id].integer_value = value.value;
+        context->error = context->symbols.set_symbol_value(symbol_id, value.value);
     }
     return true;
 }
@@ -628,8 +623,8 @@ fn resolve_constants(context: *context::Context) -> bool {
     while (progress && context->error == runtime::Error.none) {
         progress = false;
         var symbol_id: usize = 0;
-        while (symbol_id < context->symbol_count && context->error == runtime::Error.none) {
-            let symbols: *const context::Symbol = context->symbols.data as
+        while (symbol_id < context->symbols.symbol_count() && context->error == runtime::Error.none) {
+            let symbols: *const context::Symbol = context->symbols.symbol_data() as
                     *const context::Symbol;
             let symbol: context::Symbol = symbols[symbol_id];
             if (symbol.kind == context::SymbolKind.constant && (symbol.flags & resolved_flag) == 0 &&
@@ -641,8 +636,8 @@ fn resolve_constants(context: *context::Context) -> bool {
         }
     }
     var symbol_id: usize = 0;
-    while (symbol_id < context->symbol_count && context->error == runtime::Error.none) {
-        let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    while (symbol_id < context->symbols.symbol_count() && context->error == runtime::Error.none) {
+        let symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
         let symbol: context::Symbol = symbols[symbol_id];
         if (symbol.kind == context::SymbolKind.constant && (symbol.flags & resolved_flag) == 0) {
             context::add_diagnostic(

@@ -4,7 +4,6 @@ import luna.bootstrap.middleend.semantic.attributes as attributes;
 import luna.bootstrap.middleend.semantic.classes as classes;
 import luna.bootstrap.middleend.semantic.consteval.engine as const_engine;
 import luna.bootstrap.middleend.semantic.consteval.model as const_model;
-import luna.bootstrap.middleend.semantic.context.lookup as names;
 import luna.bootstrap.middleend.semantic.generics;
 import luna.bootstrap.middleend.semantic.types as types;
 import luna.compiler.types as type_info;
@@ -14,7 +13,7 @@ import luna.std.checked as checked;
 
 fn append_function(context: *context::Context, function: context::Function) -> usize {
     let result: usize = context->function_count;
-    if (!names::append_record(
+    if (!context::append_record(
             context, &context->functions, (&function) as
                 *const context::Function as *const u8, sizeof(context::Function))) {
         return context::no_id();
@@ -25,7 +24,7 @@ fn append_function(context: *context::Context, function: context::Function) -> u
 
 fn append_parameter(context: *context::Context, parameter: context::Parameter) -> usize {
     let result: usize = context->parameter_count;
-    if (!names::append_record(
+    if (!context::append_record(
             context, &context->parameters, (&parameter) as
                 *const context::Parameter as *const u8, sizeof(context::Parameter))) {
         return context::no_id();
@@ -261,7 +260,7 @@ fn validate_external_signature(context: *context::Context, function_id: usize) -
             *const context::Function;
     let parameters: *const context::Parameter = context->parameters.data as
             *const context::Parameter;
-    let symbols: *const context::Symbol = context->symbols.data as
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as
             *const context::Symbol;
     let function: context::Function = functions[function_id];
     let symbol: context::Symbol = symbols[function.symbol_id];
@@ -413,12 +412,13 @@ fn add_function_declaration(
             context, unit_index, declaration, attributes::Attribute.inline_hint)) {
         flags |= context::SymbolFlag.inline_hint as usize;
     }
-    let symbol_id: usize = names::append_symbol(
-        context, {
+    let appended_symbol: context::IndexResult = context->symbols.append_symbol({
             kind = context::SymbolKind.function, module_id = module_id, declaration_unit = unit_index,
             declaration_node = declaration_id, name_token = declaration.token_index, type_id = none,
             function_id = context->function_count, integer_value = 0, flags = flags,
         });
+    context->error = appended_symbol.error;
+    let symbol_id: usize = appended_symbol.index;
     if (symbol_id == none) {
         return none;
     }
@@ -514,11 +514,12 @@ fn generic_function_form_is_valid(
 
 fn generic_name_conflicts(
     context: *context::Context, module_id: usize, unit_index: usize, declaration: syntax::SyntaxNode) -> usize {
-    let duplicate: usize = names::find_any_local_symbol(context, module_id, unit_index, declaration.token_index);
+    let duplicate: usize = context->symbols.find_any_local_symbol(context, module_id, unit_index,
+        declaration.token_index);
     if (duplicate == context::no_id()) {
         return context::no_id();
     }
-    let symbols: *const context::Symbol = context->symbols.data as *const context::Symbol;
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as *const context::Symbol;
     let callable_name: bool = symbols[duplicate].kind == context::SymbolKind.function ||
         symbols[duplicate].kind == context::SymbolKind.generic_function;
     return callable_name ? context::no_id() : duplicate;
@@ -569,7 +570,7 @@ fn collect_generic_function(
         name_token = declaration.token_index, type_id = context::no_id(),
         function_id = generic_id, integer_value = 0, flags = flags,
     };
-    names::append_symbol(context, symbol);
+    context->error = context->symbols.append_symbol(symbol).error;
 }
 
 fn collect_functions_in_unit(
@@ -579,7 +580,7 @@ fn collect_functions_in_unit(
     if (unit_index == none) {
         return true;
     }
-    for (var declaration_id: usize = names::first_declaration(context, unit_index);
+    for (var declaration_id: usize = context::first_declaration(context, unit_index);
         declaration_id != none && context->error == runtime::Error.none;
         declaration_id = context::node(context, unit_index, declaration_id).next_sibling) {
         let declaration: syntax::SyntaxNode = context::node(context, unit_index, declaration_id);
@@ -591,7 +592,7 @@ fn collect_functions_in_unit(
             }
             validate_asm_function(context, unit_index, declaration, interface_unit);
             let duplicate_name: usize =
-                names::find_any_local_symbol(context, module_id, unit_index, declaration.token_index);
+                context->symbols.find_any_local_symbol(context, module_id, unit_index, declaration.token_index);
             collect_function_declaration(
                 context, identity, module_id, unit_index, declaration_id, declaration, interface_unit, duplicate_name);
         }
@@ -601,9 +602,9 @@ fn collect_functions_in_unit(
 
 fn collect_functions(context: *context::Context) -> bool {
     for (var module_id: usize = 0;
-        module_id < context->module_count && context->error == runtime::Error.none;
+        module_id < context->symbols.module_count() && context->error == runtime::Error.none;
         module_id += 1) {
-        let modules: *const context::Module = context->modules.data as
+        let modules: *const context::Module = context->symbols.module_data() as
                 *const context::Module;
         if (!collect_functions_in_unit(context, module_id, modules[module_id].interface_unit, true)) {
             return false;
@@ -612,7 +613,7 @@ fn collect_functions(context: *context::Context) -> bool {
             implementation_index < modules[module_id].implementation_count;
             implementation_index += 1) {
             let implementation_unit: usize =
-                names::module_implementation_unit(context, module_id, implementation_index);
+                context->symbols.module_implementation_unit(context, module_id, implementation_index);
             if (implementation_unit == context::no_id() ||
                 !collect_functions_in_unit(
                     context, module_id, implementation_unit, false)) {
@@ -625,9 +626,9 @@ fn collect_functions(context: *context::Context) -> bool {
     }
     let functions: *const context::Function = context->functions.data as
             *const context::Function;
-    let symbols: *const context::Symbol = context->symbols.data as
+    let symbols: *const context::Symbol = context->symbols.symbol_data() as
             *const context::Symbol;
-    let modules: *const context::Module = context->modules.data as
+    let modules: *const context::Module = context->symbols.module_data() as
             *const context::Module;
     for (var function_id: usize = 0; function_id < context->function_count; function_id += 1) {
         let function: context::Function = functions[function_id];
