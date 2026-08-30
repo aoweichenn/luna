@@ -32,10 +32,10 @@ or when several Luna sessions are present.
 ## Repository state
 
 - Branch: `main`
-- Base commit: `df94becd615710902d4a9614ee1edf18ea57a012`
-  (`refactor: introduce typed semantic callable ownership`)
-- `HEAD` and `origin/main` are both `df94becd615710902d4a9614ee1edf18ea57a012`
-  when this snapshot was refreshed.
+- Base commit: `13a1a319c64f3e10442e44f7f4b362cc60bdedf6`
+  (`docs: refresh callable ownership handoff`).
+- `HEAD` and `origin/main` are both `13a1a319c64f3e10442e44f7f4b362cc60bdedf6`
+  before the current LoweringState working-tree batch.
 - The IR modernization and its anchor promotion are committed and pushed.
 - The semantic ownership batches and their anchor promotion are committed and
   pushed.
@@ -54,7 +54,7 @@ or when several Luna sessions are present.
   promotion are committed and pushed as
   `e7ab8982d202d3e0f110f447a41f63b8fdea6899`.
 - The SymbolTable ownership and `context.lookup` contraction batch is included
-  in the current base commit above. The CallableTable source, anchor,
+  in the current base commit history. The CallableTable source, anchor,
   configuration, documentation and tests are committed and pushed in
   `df94becd615710902d4a9614ee1edf18ea57a012` (`4670cb4..df94bec` main ->
   main). This SESSION-only follow-up remains outside that commit until the
@@ -950,6 +950,79 @@ locally. Anchor promotion, commit and push are complete in
 `origin/main`. This SESSION-only follow-up intentionally records no separate
 commit hash.
 
+## Current working-tree task: LoweringState ownership extraction
+
+This is the accepted current batch on top of
+`13a1a319c64f3e10442e44f7f4b362cc60bdedf6`. The commit containing this note
+includes the accepted source, documentation, tests and promoted stage-fixed
+anchor. Preserve the untracked user-owned `advice.md`.
+
+### Accepted source shape
+
+- The existing `luna.bootstrap.middleend.semantic.context` module gains the
+  same-module implementation unit
+  `compiler/src/middleend/semantic/context/lowering.la`; this is not a new
+  `context.lowering` module. The implementation is 721 lines and the parent
+  interface is 580 lines.
+- `LoweringState` is a move-only class with private typed vectors for locals,
+  temporaries, labels, label-local snapshots, pending gotos, goto-local
+  snapshots and loop labels. It owns current function/unit/block cursors,
+  scope depth, pending loop label, control targets with local-count
+  watermarks, and the sticky first runtime error.
+- Public access is const-only projections plus focused mutation methods. Deep
+  validity checks cover typed storage, function ownership, snapshot coverage,
+  published contiguous goto ranges, scope/control watermarks and valid empty
+  or active states. Move construction leaves a valid empty source; scope and
+  local truncation reject active watermarks without mutating the state.
+- Goto lowering distinguishes an unpublished speculative snapshot tail from
+  published ranges and can explicitly discard that tail. The old
+  `clear_label_state` API is deleted.
+- `Context`'s legacy raw storage registry shrinks from 13 groups to 6 groups:
+  alignment overrides, bit-field segments, const functions, const locals,
+  array lengths and call selections. IR Builder, const/type metadata and call
+  selection caches remain outside LoweringState by design.
+- `context.builder` remains; it delegates the new owner for local/scope state
+  and adds a narrow `set_current_block` first-error bridge. This batch does not
+  yet delete `context.builder` or move the remaining IR-facing state into the
+  future `luna.compiler.sema.session` boundary.
+- `tests/relocation_data/ir_codegen.la` is now 1,004 lines and adds one large
+  LoweringState lifecycle contract covering two real locals, label/goto
+  snapshots, published-tail discard, move/moved-from state, sticky failure and
+  watermark rejection. It remains one relocation-data executable rather than
+  creating a per-assertion compiler launch.
+
+The source changes also migrate semantic consumers from Context's removed raw
+local/temporary/label/goto/loop fields to `context->lowering`, and update the
+registry with the new same-module implementation path. The working-tree diff
+touches `context.lh`, `context.la`, `context/builder.la`, the semantic class,
+consteval, expression, functions, intrinsics, lifetime and statement
+consumers, `context/lowering.la`, `tests/relocation_data/ir_codegen.la` and
+`tools/selfhost.py`. The same commit promotes the verified stage-fixed binary,
+refreshes `anchor/SHA256SUMS` and appends its `anchor/PROVENANCE.md` record.
+
+### Independent caw validation evidence
+
+- Host: caw x86_64 Linux, Python 3.13.9.
+- Isolated workspace:
+  `/home/aoweichen/codex-workspaces/luna-lowering-validation-paBIOS`.
+- `audit`: 63 modules, one driver, 33 interfaces and 53 objects.
+- `refmt --check`: zero files needing reflow and zero token drift.
+- `verify --fresh`: 64.71 seconds; transition, next and fixed each performed
+  54 compiles, 54 assemblies and one link. All artifacts were byte-identical.
+- Verified stage-fixed artifact: 5,474,131 bytes,
+  SHA-256 `1bc10a126bdbd2cf524502f444ff04e7897f2f6b33a5f820bfc38f465ff43e51`.
+- Complete test suite: 450 passed, zero failed and zero skipped in 6.69
+  seconds.
+
+### Exact next action
+
+Once the commit containing this note is present on `origin/main`, the next
+bounded batch is to contract `context.builder` and the remaining IR access
+toward the modern `luna.compiler.sema.session` module. Do not record that
+future contraction as complete in this handoff: `context.builder` still exists
+and the IR Builder, const/type metadata and call-selection caches were
+deliberately not migrated here.
+
 ## Recovery checklist
 
 1. Confirm the session UUID and working directory shown above.
@@ -959,6 +1032,6 @@ commit hash.
 5. Do not redo the completed IR, semantic ownership or domain work.
 6. SymbolTable implementation, remote validation and promotion are complete;
    CallableTable implementation, validation, local anchor promotion, commit
-   and push are complete in `df94becd615710902d4a9614ee1edf18ea57a012`.
-   Preserve `advice.md`; do not invent a separate hash for this SESSION-only
-   follow-up.
+   and push are complete in the prior pushed history. The commit containing
+   this note includes the LoweringState source and verified anchor promotion;
+   preserve `advice.md`.

@@ -1213,3 +1213,34 @@ passed 450/450 with no failures or skips.
 
 The promoted 5,355,347-byte executable has SHA-256
 `817788b20d49267287b77dd34816ebb936f66eca0df545df4214eec3258c6dd8`.
+
+## 2026-08-30: promotion to typed semantic lowering ownership
+
+The anchor now contains the stage-fixed `luna` executable from the
+LoweringState ownership batch accompanying this note. The move-only
+`LoweringState` class owns function-local cursors, typed local and temporary
+storage, label and goto snapshots, loop labels, control-target watermarks and
+sticky failure state. Context no longer exposes the corresponding raw buffers,
+mirrored counters or writable projections; its legacy raw-storage registry
+contracts from thirteen groups to six.
+
+Goto snapshot publication is explicit and contiguous. Speculative snapshots
+form an unpublished tail that is discarded through a focused owner operation,
+not as a hidden side effect of changing the current IR block. The retained
+`context.builder` module provides a narrow first-error bridge for block
+selection; its broader IR/session contraction remains a later batch. The
+relocation-data contract covers real two-local snapshots, published-tail
+discard, move/moved-from state, temporary adoption, control watermarks and
+sticky rejection.
+
+Remote x86-64 verification used the retained isolated caw workspace
+`/home/aoweichen/codex-workspaces/luna-lowering-validation-paBIOS` on WSL2
+Linux 6.6.87.2 with Python 3.13.9. Audit reported 63 modules, one driver, 33
+interfaces and 53 library objects; formatting reported zero files needing
+reflow and zero token drift. Fresh transition/next/fixed stages completed in
+20.78/21.25/20.82 seconds, and every assembly, object and executable artifact
+was byte-identical. The complete test suite passed 450/450 with no failures or
+skips.
+
+The promoted 5,474,131-byte executable has SHA-256
+`1bc10a126bdbd2cf524502f444ff04e7897f2f6b33a5f820bfc38f465ff43e51`.

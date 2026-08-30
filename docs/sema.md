@@ -4,8 +4,8 @@
 
 The semantic pipeline validates the parsed source-module graph, constructs the
 canonical type model and lowers checked functions into `luna.compiler.ir`.
-This document records the first thirteen ownership/domain batches of its
-modernization.
+This document records the first thirteen ownership/domain batches and the
+current lowering-state batch of its modernization.
 
 The root module is still named `luna.bootstrap.middleend.sema` while the
 downstream semantic dependency graph is contracted incrementally. The current
@@ -343,7 +343,48 @@ The owner is a real dependency boundary with a 64-line interface and three
 same-module implementation families: `storage.la` for lifetime/declarations,
 `bindings.la` for ordered publication and slice mutation, and `validation.la`
 for deep final-state verification. `call_selections` is not callable metadata;
-it remains transitional expression-lowering state for the LoweringState batch.
+it remains transitional expression-lowering state alongside the new
+`LoweringState`; it is intentionally not mixed into callable ownership.
+
+## Function lowering state
+
+The current batch adds `context/lowering.la` as another implementation unit of
+the existing `luna.bootstrap.middleend.semantic.context` module. It is not a
+new `context.lowering` dependency: the interface remains
+`compiler/include/luna/bootstrap/middleend/semantic/context.lh`, and the
+registry records the implementation path under the parent module.
+
+`LoweringState` is a move-only class with private typed vectors for locals,
+temporaries, labels, label-local snapshots, pending gotos, goto-local snapshots
+and loop labels. It also owns the current function/unit/block cursors, scope
+depth, a pending loop label, control targets with local-count watermarks and a
+sticky first runtime error. Its public surface is deliberately split between
+const projections (`*_data`, counts and cursors), focused mutations and deep
+validity checks. There are no writable vector projections or public raw byte
+counts.
+
+The state is function-scoped: `begin_function` clears the previous function
+state before publishing the new owner, and `clear_function` returns an empty,
+valid state. Move construction transfers all typed vectors and cursors, then
+resets the source to a valid empty state. Scope exit and local truncation reject
+operations that would cross any active control or loop watermark. Label and
+goto snapshots are checked for valid, non-overlapping ownership; a pending
+goto publishes one contiguous snapshot range. Goto lowering can append an
+unpublished tail and explicitly discard that tail before the next publication,
+so speculative snapshots cannot remain orphaned.
+
+`Context` now retains six legacy raw byte-buffer groups (alignment overrides,
+bit-field segments, const functions, const locals, array lengths and call
+selections); the former thirteen-group raw storage table no longer contains
+function-local locals, temporaries, labels, goto records, loop labels or their
+snapshot buffers. `context.la` validates the new owner and checks that its
+current function/unit/block still belongs to the Context's callable and IR
+owners. `context.builder` remains in place for now: it delegates local/scope
+operations and adds a narrow `set_current_block` first-error bridge, but this
+batch does not remove that implementation unit or migrate `ir::Builder`, const
+metadata, type-depth state or call-selection caches into `LoweringState`. The
+old `clear_label_state` API is deleted rather than retained as a compatibility
+alias.
 
 ## Entry selection
 
@@ -381,6 +422,7 @@ sets the IR entry through `ir::Builder` before graph reachability validation.
 | `semantic/context/diagnostics.la` | DiagnosticView, DiagnosticBuffer and final success predicate |
 | `semantic/context/symbols.la` | SymbolTable typed ownership, publication invariants and sticky failure |
 | `semantic/context/lookup.la` | SymbolTable local/imported/qualified lookup methods |
+| `semantic/context/lowering.la` | LoweringState function-local cursors, typed lowering storage, snapshots and control watermarks |
 
 The two domain files implement one real `luna.compiler.sema.domain` module.
 Class/generic records need no artificial implementation file because they are
@@ -395,10 +437,10 @@ consumer imports them independently.
 | --- | --- |
 | Classes | SemanticSession owns phases; Input, DiagnosticBuffer, SymbolTable, ClassTable, GenericTable and CallableTable own state/lifetimes |
 | Generics | SymbolTable and the other owners use typed vectors instead of exposed byte arithmetic |
-| Composition | Input composes vector/byte_buffer; Context composes SymbolTable, ClassTable, GenericTable and CallableTable |
+| Composition | Input composes vector/byte_buffer; Context composes SymbolTable, ClassTable, GenericTable, CallableTable and LoweringState |
 | Access control | session phase, symbol/metadata vectors, diagnostic storage and sticky errors are private |
 | Constructors/destructors | constructors establish ready/empty states; destructors close each resource path once |
-| Copy/move | Input, DiagnosticBuffer and all four table owners are move-only; views are copied borrows |
+| Copy/move | Input, DiagnosticBuffer, all four table owners and LoweringState are move-only; views are copied borrows |
 | Overloads/defaults | CallableTable owns overload-set storage; its mutation operations have distinct contracts and need no API defaults |
 | Operators | no natural value operator exists for a semantic session or diagnostic stream |
 | Bound methods | SymbolTable owns name publication/lookup and CallableTable owns callable publication; SemanticPass stays a pointer because passes capture no receiver |
@@ -413,8 +455,10 @@ those functions would introduce pattern-shaped indirection without an owner.
 
 The next semantic batches should remain independently green:
 
-1. extract lowering state and contract `context.builder` without merging its
-   unrelated responsibilities into SymbolTable or CallableTable;
+1. contract `context.builder` and migrate its remaining IR-facing operations
+   toward the planned `luna.compiler.sema.session` boundary; keep IR Builder,
+   const/type metadata and call-selection caches out of LoweringState unless a
+   later ownership proof requires a different split;
 2. migrate pass families to bound methods or focused strategy objects where
    they own real state;
 3. rename the remaining `luna.bootstrap.middleend.semantic.*` graph only when
@@ -432,10 +476,23 @@ python3 tools/selfhost.py test
 ```
 
 The relocation-data contract exercises Input, ClassTable, GenericTable,
-SymbolTable and CallableTable move/moved-from storage; class, generic,
-name/import and callable slices; hierarchy/runtime publication; generic
-indexes and rollback; transactional candidate publication; signature
-contiguity; sticky owner failures; borrowed InputView use; and IR ownership
-transfer. The ordinary overload/default/generic/class corpus exercises the
-same owner through real lowering. The negative corpus preserves stable leading
-diagnostic kinds through the command driver.
+SymbolTable, CallableTable and LoweringState move/moved-from storage; class,
+generic, name/import, callable and function-lowering slices; hierarchy/runtime
+publication; generic indexes and rollback; transactional candidate
+publication; signature contiguity; scope/control watermark rejection;
+published and explicitly discarded goto snapshot tails; sticky owner
+failures; borrowed InputView use; and IR ownership transfer. The ordinary
+overload/default/generic/class corpus exercises the same owners through real
+lowering. The negative corpus preserves stable leading diagnostic kinds
+through the command driver.
+
+For the current LoweringState batch, the independent caw validation workspace
+is `/home/aoweichen/codex-workspaces/luna-lowering-validation-paBIOS` on
+x86_64 Linux with Python 3.13.9. `audit` reported 63 modules, one driver, 33
+interfaces and 53 objects; `refmt --check` reported zero files needing reflow
+and zero token drift. `verify --fresh` completed in 64.71 seconds with 54
+compiles, 54 assemblies and one link in each transition/next/fixed stage; all
+artifacts were byte-identical, with stage-fixed hash
+`1bc10a126bdbd2cf524502f444ff04e7897f2f6b33a5f820bfc38f465ff43e51` and size
+5,474,131 bytes. The complete test suite reported 450 passed, zero failed and
+zero skipped in 6.69 seconds.

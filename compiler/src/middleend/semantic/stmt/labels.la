@@ -2,13 +2,13 @@ module luna.bootstrap.middleend.semantic.stmt.labels;
 
 import luna.bootstrap.middleend.semantic.context.builder as builder;
 import luna.runtime as runtime;
-import luna.std.bytes as bytes;
 
 fn find_label(context: *context::Context, name_token: usize) -> usize {
-    let labels: *const context::Label = context->labels.data as *const context::Label;
-    for (var index: usize = 0; index < context->label_count; index += 1) {
+    let labels: *const context::Label = context->lowering.label_data();
+    for (var index: usize = 0; index < context->lowering.label_count(); index += 1) {
         if (context::tokens_equal(
-                context, context->current_unit, name_token, context->current_unit, labels[index].name_token)) {
+                context, context->lowering.current_unit(), name_token, context->lowering.current_unit(),
+                    labels[index].name_token)) {
             return index;
         }
     }
@@ -16,30 +16,30 @@ fn find_label(context: *context::Context, name_token: usize) -> usize {
 }
 
 fn append_label(context: *context::Context, label: context::Label) -> usize {
-    let result: usize = context->label_count;
-    if (!context::append_record(
-            context, &context->labels, (&label) as *const context::Label as *const u8, sizeof(context::Label))) {
-        return context::no_id();
+    let result: usize = context->lowering.append_label(label);
+    if (result == context::no_id()) {
+        context->error = context::release_error(context->error, context->lowering.error());
     }
-    context->label_count += 1;
     return result;
 }
 
 // Appends the identity and type of every live local of the current function
 // to destination and returns the first snapshot index.
-fn snapshot_locals(context: *context::Context, destination: *bytes::Buffer) -> usize {
-    let first: usize = destination->length / sizeof(context::LocalSnapshot);
-    let locals: *const context::Local = context->locals.data as *const context::Local;
+fn snapshot_locals(context: *context::Context, label_snapshot: bool) -> usize {
+    let first: usize = label_snapshot ? context->lowering.label_snapshot_count() :
+        context->lowering.goto_snapshot_count();
+    let locals: *const context::Local = context->lowering.local_data();
     for (var index: usize = 0;
-        index < context->local_count && context->error == runtime::Error.none;
+        index < context->lowering.local_count() && context->error == runtime::Error.none;
         index += 1) {
         let snapshot: context::LocalSnapshot = {
             declaration_node = locals[index].declaration_node, type_id = locals[index].cleanup_type_id,
         };
-        let appended: bytes::BufferResult = bytes::append(
-            *destination, (&snapshot) as *const context::LocalSnapshot as *const u8, sizeof(context::LocalSnapshot));
-        *destination = appended.buffer;
-        context->error = appended.error;
+        let snapshot_id: usize = label_snapshot ? context->lowering.append_label_snapshot(snapshot) :
+            context->lowering.append_goto_snapshot(snapshot);
+        if (snapshot_id == context::no_id()) {
+            context->error = context::release_error(context->error, context->lowering.error());
+        }
     }
     return first;
 }
@@ -55,8 +55,8 @@ fn snapshot_contains(
 }
 
 fn label_is_subset_of_source(context: *context::Context, label: context::Label, source: context::PendingGoto) -> bool {
-    let labels: *const context::LocalSnapshot = context->label_locals.data as *const context::LocalSnapshot;
-    let sources: *const context::LocalSnapshot = context->goto_locals.data as *const context::LocalSnapshot;
+    let labels: *const context::LocalSnapshot = context->lowering.label_snapshot_data();
+    let sources: *const context::LocalSnapshot = context->lowering.goto_snapshot_data();
     for (var index: usize = 0; index < label.local_count; index += 1) {
         let identity: usize = labels[label.first_local + index].declaration_node;
         if (!snapshot_contains(sources, source.first_local, source.local_count, identity)) {
@@ -69,8 +69,8 @@ fn label_is_subset_of_source(context: *context::Context, label: context::Label, 
 fn source_crosses_nontrivial_lifetime(
     context: *context::Context, label: context::Label,
     source: context::PendingGoto, needs_cleanup: api::NeedsCleanup) -> bool {
-    let labels: *const context::LocalSnapshot = context->label_locals.data as *const context::LocalSnapshot;
-    let sources: *const context::LocalSnapshot = context->goto_locals.data as *const context::LocalSnapshot;
+    let labels: *const context::LocalSnapshot = context->lowering.label_snapshot_data();
+    let sources: *const context::LocalSnapshot = context->lowering.goto_snapshot_data();
     for (var index: usize = 0; index < source.local_count; index += 1) {
         let snapshot: context::LocalSnapshot = sources[source.first_local + index];
         let remains_live: bool = snapshot_contains(
@@ -99,60 +99,52 @@ fn jump_is_valid(
 // statement wraps a loop) onto the loop-label stack; returns whether an
 // entry was pushed so the caller can pop it when the loop is done.
 fn push_loop_label(context: *context::Context) -> bool {
-    if (context->pending_loop_label == context::no_id()) {
+    let name_token: usize = context->lowering.pending_loop_label();
+    if (name_token == context::no_id()) {
         return false;
     }
+    let targets: context::ControlTargets = context->lowering.control_targets();
     let entry: context::LoopLabel = {
-        name_token = context->pending_loop_label, break_block = context->break_block,
-        continue_block = context->continue_block, break_local_count = context->break_local_count,
-        continue_local_count = context->continue_local_count,
+        name_token = name_token, break_block = targets.break_target.block,
+        continue_block = targets.continue_target.block, break_local_count = targets.break_target.local_count,
+        continue_local_count = targets.continue_target.local_count,
     };
-    context->pending_loop_label = context::no_id();
-    if (!context::append_record(
-            context, &context->loop_labels, (&entry) as *const context::LoopLabel as *const u8,
-            sizeof(context::LoopLabel))) {
+    context->error = context::release_error(context->error, context->lowering.set_pending_loop_label(context::no_id()));
+    if (context->error != runtime::Error.none) {
         return false;
     }
-    context->loop_label_count += 1;
-    return true;
+    context->error = context::release_error(context->error, context->lowering.append_loop_label(entry));
+    return context->error == runtime::Error.none;
 }
 
 fn pop_loop_label(context: *context::Context) -> bool {
-    if (context->loop_label_count == 0) {
-        context->error = runtime::Error.invalid_argument;
-        return false;
-    }
-    let truncated: bytes::BufferResult =
-        bytes::truncate(context->loop_labels, (context->loop_label_count - 1) * sizeof(context::LoopLabel));
-    context->loop_labels = truncated.buffer;
-    context->error = truncated.error;
-    context->loop_label_count -= 1;
+    context->error = context::release_error(context->error, context->lowering.pop_loop_label());
     return context->error == runtime::Error.none;
 }
 
 fn lower_labeled_control(
     context: *context::Context, node: syntax::SyntaxNode, is_break: bool, cleanup: api::Cleanup) -> bool {
     let none: usize = context::no_id();
-    let name_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-    let entries: *const context::LoopLabel = context->loop_labels.data as *const context::LoopLabel;
-    for (var remaining: usize = context->loop_label_count; remaining != 0; remaining -= 1) {
+    let name_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
+    let entries: *const context::LoopLabel = context->lowering.loop_label_data();
+    for (var remaining: usize = context->lowering.loop_label_count(); remaining != 0; remaining -= 1) {
         let index: usize = remaining - 1;
         if (context::tokens_equal(
-                context, context->current_unit, name_node.token_index, context->current_unit, entries[index].name_token
-            )) {
+                context, context->lowering.current_unit(), name_node.token_index, context->lowering.current_unit(),
+                    entries[index].name_token)) {
             let local_count: usize = is_break ? entries[index].break_local_count : entries[index].continue_local_count;
             if (cleanup == null || !cleanup(context, local_count, node)) {
                 return false;
             }
             builder::emit_jump(context, node, is_break ? entries[index].break_block : entries[index].continue_block);
-            context->current_block = builder::add_current_block(context);
+            builder::set_current_block(context, builder::add_current_block(context));
             return context->error == runtime::Error.none;
         }
     }
     context::add_diagnostic(
         context, find_label(context, name_node.token_index) != none ? context::DiagnosticKind.non_loop_label :
-            context::DiagnosticKind.unknown_label, context->current_unit, name_node.span, none, context::empty_span(), 0
-    );
+            context::DiagnosticKind.unknown_label, context->lowering.current_unit(), name_node.span, none,
+                context::empty_span(), 0);
     return false;
 }
 
@@ -164,7 +156,7 @@ fn lower_labeled(
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    let statement: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let statement: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
     let pre_test_loop: bool = statement.kind == syntax::SyntaxKind.while_statement ||
         statement.kind == syntax::SyntaxKind.for_statement;
     let post_test_loop: bool = statement.kind == syntax::SyntaxKind.do_statement ||
@@ -172,16 +164,22 @@ fn lower_labeled(
     let is_loop: bool = pre_test_loop || post_test_loop;
     var label_index: usize = find_label(context, node.token_index);
     if (label_index != none) {
-        let labels: *context::Label = context->labels.data as *context::Label;
-        if (labels[label_index].defined) {
+        let labels: *const context::Label = context->lowering.label_data();
+        var existing_label: context::Label = labels[label_index];
+        if (existing_label.defined) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.duplicate_label, context->current_unit, node.span,
-                context->current_unit, labels[label_index].span, label_index);
+                context, context::DiagnosticKind.duplicate_label, context->lowering.current_unit(), node.span,
+                context->lowering.current_unit(), existing_label.span, label_index);
             return false;
         }
-        labels[label_index].defined = true;
-        labels[label_index].is_loop = is_loop;
-        labels[label_index].span = node.span;
+        existing_label.defined = true;
+        existing_label.is_loop = is_loop;
+        existing_label.span = node.span;
+        context->error = context::release_error(context->error, context->lowering.set_label(label_index,
+            existing_label));
+        if (context->error != runtime::Error.none) {
+            return false;
+        }
     } else {
         let block: usize = builder::add_current_block(context);
         if (block == none) {
@@ -196,39 +194,50 @@ fn lower_labeled(
             return false;
         }
     }
-    let labels: *context::Label = context->labels.data as *context::Label;
-    let first_local: usize = snapshot_locals(context, &context->label_locals);
+    let labels: *const context::Label = context->lowering.label_data();
+    let first_local: usize = snapshot_locals(context, true);
     if (context->error != runtime::Error.none) {
         return false;
     }
-    labels[label_index].first_local = first_local;
-    labels[label_index].local_count = context->local_count;
-    let label: context::Label = labels[label_index];
-    let pendings: *context::PendingGoto = context->pending_gotos.data as *context::PendingGoto;
-    for (var pending_index: usize = 0; pending_index < context->pending_goto_count; pending_index += 1) {
+    var current_label: context::Label = labels[label_index];
+    current_label.first_local = first_local;
+    current_label.local_count = context->lowering.local_count();
+    context->error = context::release_error(context->error, context->lowering.set_label(label_index, current_label));
+    if (context->error != runtime::Error.none) {
+        return false;
+    }
+    let label: context::Label = current_label;
+    let pendings: *const context::PendingGoto = context->lowering.pending_goto_data();
+    for (var pending_index: usize = 0;
+        pending_index < context->lowering.pending_goto_count(); pending_index += 1) {
         let unresolved: bool = !pendings[pending_index].resolved;
         let names_match: bool = context::tokens_equal(
-            context, context->current_unit, pendings[pending_index].label_token,
-            context->current_unit, label.name_token);
+            context, context->lowering.current_unit(), pendings[pending_index].label_token,
+            context->lowering.current_unit(), label.name_token);
         if (unresolved && names_match) {
             if (!jump_is_valid(context, label, pendings[pending_index], needs_cleanup)) {
                 context::add_diagnostic(
-                    context, context::DiagnosticKind.invalid_goto, context->current_unit, pendings[pending_index].span,
-                    context->current_unit, label.span, label_index);
+                    context, context::DiagnosticKind.invalid_goto, context->lowering.current_unit(),
+                        pendings[pending_index].span, context->lowering.current_unit(), label.span, label_index);
             }
-            pendings[pending_index].resolved = true;
+            context->error = context::release_error(
+                context->error, context->lowering.set_pending_goto_resolved(pending_index));
+            if (context->error != runtime::Error.none) {
+                return false;
+            }
         }
     }
     if (!builder::block_is_terminated(
-            context, context->current_block)) {
+            context, context->lowering.current_block())) {
         builder::emit_jump(context, node, label.block);
     }
-    context->current_block = label.block;
+    builder::set_current_block(context, label.block);
     if (is_loop) {
-        context->pending_loop_label = node.token_index;
+        context->error = context::release_error(
+            context->error, context->lowering.set_pending_loop_label(node.token_index));
     }
     let result: bool = lowerer(context, node.first_child);
-    context->pending_loop_label = none;
+    context->error = context::release_error(context->error, context->lowering.set_pending_loop_label(none));
     return result;
 }
 
@@ -238,27 +247,34 @@ fn lower_goto(context: *context::Context, node: syntax::SyntaxNode, needs_cleanu
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    let name_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let name_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
     var label_index: usize = find_label(context, name_node.token_index);
     if (label_index != none) {
-        let labels: *const context::Label = context->labels.data as *const context::Label;
+        let labels: *const context::Label = context->lowering.label_data();
         if (labels[label_index].defined) {
-            let first_local: usize = snapshot_locals(context, &context->goto_locals);
+            let first_local: usize = snapshot_locals(context, false);
             if (context->error != runtime::Error.none) {
                 return false;
             }
             let source: context::PendingGoto = {
                 label_token = name_node.token_index, span = name_node.span, first_local = first_local,
-                local_count = context->local_count, resolved = true,
+                local_count = context->lowering.local_count(), resolved = true,
             };
-            if (!jump_is_valid(context, labels[label_index], source, needs_cleanup)) {
+            let jump_is_allowed: bool = jump_is_valid(context, labels[label_index], source, needs_cleanup);
+            let discard_error: runtime::Error = context->lowering.discard_goto_snapshots(first_local);
+            context->error = context::release_error(context->error, discard_error);
+            if (!jump_is_allowed) {
                 context::add_diagnostic(
-                    context, context::DiagnosticKind.invalid_goto, context->current_unit, name_node.span,
-                    context->current_unit, labels[label_index].span, label_index);
+                    context, context::DiagnosticKind.invalid_goto, context->lowering.current_unit(), name_node.span,
+                    context->lowering.current_unit(), labels[label_index].span, label_index);
+                return false;
+            }
+            if (context->error != runtime::Error.none) {
                 return false;
             }
             builder::emit_jump(context, node, labels[label_index].block);
-            context->current_block = builder::add_current_block(context);
+            let block: usize = builder::add_current_block(context);
+            builder::set_current_block(context, block);
             return context->error == runtime::Error.none;
         }
     }
@@ -277,64 +293,35 @@ fn lower_goto(context: *context::Context, node: syntax::SyntaxNode, needs_cleanu
             return false;
         }
     } else {
-        let labels: *const context::Label = context->labels.data as *const context::Label;
+        let labels: *const context::Label = context->lowering.label_data();
         block = labels[label_index].block;
     }
-    let first_local: usize = snapshot_locals(context, &context->goto_locals);
+    let first_local: usize = snapshot_locals(context, false);
     if (context->error != runtime::Error.none) {
         return false;
     }
     let pending: context::PendingGoto = {
         label_token = name_node.token_index, span = name_node.span, first_local = first_local,
-        local_count = context->local_count, resolved = false,
+        local_count = context->lowering.local_count(), resolved = false,
     };
-    if (!context::append_record(
-            context, &context->pending_gotos, (&pending) as *const context::PendingGoto as *const u8,
-            sizeof(context::PendingGoto))) {
+    if (context->lowering.append_pending_goto(pending) == none) {
+        context->error = context::release_error(context->error, context->lowering.error());
         return false;
     }
-    context->pending_goto_count += 1;
     builder::emit_jump(context, node, block);
-    context->current_block = builder::add_current_block(context);
+    builder::set_current_block(context, builder::add_current_block(context));
     return context->error == runtime::Error.none;
 }
 
 fn validate_labels(context: *context::Context) -> bool {
     let none: usize = context::no_id();
-    let labels: *const context::Label = context->labels.data as *const context::Label;
-    for (var index: usize = 0; index < context->label_count; index += 1) {
+    let labels: *const context::Label = context->lowering.label_data();
+    for (var index: usize = 0; index < context->lowering.label_count(); index += 1) {
         if (!labels[index].defined) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.unknown_label, context->current_unit, labels[index].span, none,
-                context::empty_span(), index);
+                context, context::DiagnosticKind.unknown_label, context->lowering.current_unit(), labels[index].span,
+                    none, context::empty_span(), index);
         }
-    }
-    return context->error == runtime::Error.none;
-}
-
-fn clear_label_state(context: *context::Context) -> bool {
-    var error: runtime::Error = runtime::Error.none;
-    let cleared_labels: bytes::BufferResult = bytes::clear(context->labels);
-    context->labels = cleared_labels.buffer;
-    error = context::release_error(error, cleared_labels.error);
-    let cleared_label_locals: bytes::BufferResult = bytes::clear(context->label_locals);
-    context->label_locals = cleared_label_locals.buffer;
-    error = context::release_error(error, cleared_label_locals.error);
-    let cleared_gotos: bytes::BufferResult = bytes::clear(context->pending_gotos);
-    context->pending_gotos = cleared_gotos.buffer;
-    error = context::release_error(error, cleared_gotos.error);
-    let cleared_goto_locals: bytes::BufferResult = bytes::clear(context->goto_locals);
-    context->goto_locals = cleared_goto_locals.buffer;
-    error = context::release_error(error, cleared_goto_locals.error);
-    let cleared_loops: bytes::BufferResult = bytes::clear(context->loop_labels);
-    context->loop_labels = cleared_loops.buffer;
-    error = context::release_error(error, cleared_loops.error);
-    context->label_count = 0;
-    context->pending_goto_count = 0;
-    context->loop_label_count = 0;
-    context->pending_loop_label = context::no_id();
-    if (context->error == runtime::Error.none) {
-        context->error = error;
     }
     return context->error == runtime::Error.none;
 }

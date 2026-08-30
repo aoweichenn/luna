@@ -68,7 +68,7 @@ fn function_matches_type(context: *context::Context, function_id: usize, target_
 
 fn resolve_function_value(
     context: *context::Context, binding_id: usize, request: syntax::SyntaxNode, expected_type: usize) -> Resolution {
-    let visible_count: usize = functions::binding_visible_count(context, binding_id, context->current_unit);
+    let visible_count: usize = functions::binding_visible_count(context, binding_id, context->lowering.current_unit());
     if (context->error != runtime::Error.none) {
         return {status = ResolutionStatus.invalid, function_id = context::no_id()};
     }
@@ -76,7 +76,8 @@ fn resolve_function_value(
         if (visible_count == 0) {
             return {status = ResolutionStatus.ambiguous, function_id = context::no_id()};
         }
-        let function_id: usize = functions::binding_single_function(context, binding_id, context->current_unit);
+        let function_id: usize = functions::binding_single_function(context, binding_id,
+            context->lowering.current_unit());
         if (visible_count != 1) {
             return {status = ResolutionStatus.ambiguous, function_id = context::no_id()};
         }
@@ -92,7 +93,7 @@ fn resolve_function_value(
     let candidate_count: usize = bindings[binding_id].candidate_count;
     for (var candidate_index: usize = 0; candidate_index < candidate_count; candidate_index += 1) {
         let function_id: usize = functions::binding_candidate(context, binding_id, candidate_index);
-        let visible: bool = functions::function_is_visible(context, function_id, context->current_unit);
+        let visible: bool = functions::function_is_visible(context, function_id, context->lowering.current_unit());
         if (visible && function_matches_type(context, function_id, expected_type)) {
             if (selected != context::no_id()) {
                 return {status = ResolutionStatus.ambiguous, function_id = context::no_id()};
@@ -170,7 +171,7 @@ fn prepare_generic_class_methods(context: *context::Context, owner_type: usize) 
 }
 
 fn constructor_call_target(context: *context::Context, callee: syntax::SyntaxNode) -> CallTarget {
-    let owner_type: usize = types::resolve_class_expression(context, context->current_unit, callee);
+    let owner_type: usize = types::resolve_class_expression(context, context->lowering.current_unit(), callee);
     if (owner_type == context::no_id()) {
         return invalid_call_target();
     }
@@ -191,7 +192,7 @@ fn lookup_member_binding(context: *context::Context, owner_type: usize, name_tok
     var current: usize = owner_type;
     for (var depth: usize = 0; depth < context::Limit.maximum_type_depth as usize; depth += 1) {
         let binding_id: usize = functions::lookup_owned_callable_binding(
-            context, context->current_unit, current, name_token);
+            context, context->lowering.current_unit(), current, name_token);
         if (binding_id != context::no_id()) {
             return binding_id;
         }
@@ -204,7 +205,7 @@ fn lookup_member_binding(context: *context::Context, owner_type: usize, name_tok
 }
 
 fn static_call_target(context: *context::Context, base: syntax::SyntaxNode, member: syntax::SyntaxNode) -> CallTarget {
-    let owner_type: usize = types::resolve_class_expression(context, context->current_unit, base);
+    let owner_type: usize = types::resolve_class_expression(context, context->lowering.current_unit(), base);
     if (owner_type == context::no_id()) {
         return invalid_call_target();
     }
@@ -227,7 +228,8 @@ fn instance_call_target(
     if (base.status != Status.compatible) {
         return invalid_call_target();
     }
-    let operation: lexer::TokenKind = context::token(context, context->current_unit, callee.token_index).kind;
+    let operation: lexer::TokenKind = context::token(context, context->lowering.current_unit(),
+        callee.token_index).kind;
     var owner_type: usize = base.type_id;
     var receiver_category: domain::ValueCategory = base.category;
     if (operation == lexer::TokenKind.arrow) {
@@ -257,12 +259,12 @@ fn instance_call_target(
 }
 
 fn current_receiver_category(context: *context::Context) -> domain::ValueCategory {
-    if (context->current_function >= context->callables.function_count()) {
+    if (context->lowering.current_function() >= context->callables.function_count()) {
         return domain::ValueCategory.rvalue;
     }
     let functions_data: *const domain::Function = context->callables.function_data() as
             *const domain::Function;
-    let function: domain::Function = functions_data[context->current_function];
+    let function: domain::Function = functions_data[context->lowering.current_function()];
     switch (function.identity.receiver) {
     case domain::ReceiverKind.writable {
         return domain::ValueCategory.writable_lvalue;
@@ -290,18 +292,19 @@ fn super_call_target(context: *context::Context, base: syntax::SyntaxNode, membe
     if (base.kind != syntax::SyntaxKind.super_expression) {
         return invalid;
     }
-    if (context->current_function >= context->callables.function_count()) {
+    if (context->lowering.current_function() >= context->callables.function_count()) {
         return invalid;
     }
     let functions_data: *const domain::Function = context->callables.function_data() as
             *const domain::Function;
-    let current: domain::Function = functions_data[context->current_function];
+    let current: domain::Function = functions_data[context->lowering.current_function()];
     let owner_type: usize = classes::base_type(context, current.identity.owner_type);
     invalid.owner_type = owner_type;
     if (!domain::has_receiver(current.identity) || owner_type == context::no_id()) {
         return invalid;
     }
-    let constructor: bool = context::token_equals_bytes(context, context->current_unit, member.token_index, "init", 4);
+    let constructor: bool = context::token_equals_bytes(context, context->lowering.current_unit(), member.token_index,
+        "init", 4);
     if (constructor && current.identity.kind != domain::CallableKind.constructor) {
         invalid.kind = domain::CallableKind.constructor;
         invalid.name_token = context::no_id();
@@ -322,9 +325,10 @@ fn member_call_target(context: *context::Context, callee: syntax::SyntaxNode) ->
     if (callee.kind != syntax::SyntaxKind.member_expression || callee.child_count != 2) {
         return invalid_call_target();
     }
-    let base: syntax::SyntaxNode = context::node(context, context->current_unit, callee.first_child);
-    let member: syntax::SyntaxNode = context::node(context, context->current_unit, base.next_sibling);
-    let operation: lexer::TokenKind = context::token(context, context->current_unit, callee.token_index).kind;
+    let base: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), callee.first_child);
+    let member: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), base.next_sibling);
+    let operation: lexer::TokenKind = context::token(context, context->lowering.current_unit(),
+        callee.token_index).kind;
     if (operation == lexer::TokenKind.dot) {
         let super_target: CallTarget = super_call_target(context, base, member);
         if (base.kind == syntax::SyntaxKind.super_expression) {
@@ -388,10 +392,10 @@ fn direct_call_target(context: *context::Context, node: syntax::SyntaxNode) -> C
     if (node.child_count == 0) {
         return invalid_call_target();
     }
-    let source_callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let source_callee: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
     var callee: syntax::SyntaxNode = source_callee;
     if (callee.kind == syntax::SyntaxKind.generic_expression && callee.child_count == 2) {
-        callee = context::node(context, context->current_unit, callee.first_child);
+        callee = context::node(context, context->lowering.current_unit(), callee.first_child);
     }
     let constructor: CallTarget = constructor_call_target(context, source_callee);
     if (constructor.owner_type != context::no_id()) {
@@ -537,7 +541,7 @@ fn candidate_call_status(
     if (!functions::function_accepts_arity(context, function_id, argument_count)) {
         return {status = Status.incompatible, rank = BindingRank.no_match as usize};
     }
-    let callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let callee: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
     var child: usize = callee.next_sibling;
     var candidate_status: Status = Status.compatible;
     var candidate_rank: usize = domain::has_receiver(function.identity) ?
@@ -576,7 +580,7 @@ fn candidate_call_status(
                 return {status = Status.incompatible, rank = BindingRank.no_match as usize};
             }
         }
-        child = context::node(context, context->current_unit, child).next_sibling;
+        child = context::node(context, context->lowering.current_unit(), child).next_sibling;
     }
     return {status = candidate_status, rank = candidate_rank};
 }
@@ -668,17 +672,17 @@ fn call_selection_index(context: *context::Context, node_id: usize, result: *usi
     if (!initialize_call_selections(context)) {
         return false;
     }
-    if (result == null || context->current_unit >= context->input.size()) {
+    if (result == null || context->lowering.current_unit() >= context->input.size()) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
     let units: *const context::Unit = context->input.data();
-    if (node_id >= units[context->current_unit].tree.size()) {
+    if (node_id >= units[context->lowering.current_unit()].tree.size()) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
     var index: usize = node_id;
-    for (var unit_index: usize = 0; unit_index < context->current_unit; unit_index += 1) {
+    for (var unit_index: usize = 0; unit_index < context->lowering.current_unit(); unit_index += 1) {
         if (@add_overflow(index, units[unit_index].tree.size(), &index)) {
             context->error = runtime::Error.invalid_argument;
             return false;
@@ -721,7 +725,8 @@ fn target_binding(context: *context::Context, target: CallTarget, owner_type: us
     if (target.name_token == context::no_id()) {
         return owner_type == target.owner_type ? target.binding_id : context::no_id();
     }
-    return functions::lookup_owned_callable_binding(context, context->current_unit, owner_type, target.name_token);
+    return functions::lookup_owned_callable_binding(context, context->lowering.current_unit(), owner_type,
+        target.name_token);
 }
 
 fn target_candidate_is_visible(context: *context::Context, target: CallTarget, function_id: usize) -> bool {
@@ -734,7 +739,7 @@ fn target_candidate_is_visible(context: *context::Context, target: CallTarget, f
     if (target.name_token != context::no_id() && classes::method_is_shadowed(context, target.owner_type, function_id)) {
         return false;
     }
-    return functions::function_is_visible(context, function_id, context->current_unit);
+    return functions::function_is_visible(context, function_id, context->lowering.current_unit());
 }
 
 fn visit_target_candidates(
@@ -774,7 +779,7 @@ fn call_target_visible_count(context: *context::Context, target: CallTarget) -> 
                     *const domain::Binding;
             for (var index: usize = 0; index < bindings[binding_id].candidate_count; index += 1) {
                 let function_id: usize = functions::binding_candidate(context, binding_id, index);
-                if (functions::function_is_visible(context, function_id, context->current_unit)) {
+                if (functions::function_is_visible(context, function_id, context->lowering.current_unit())) {
                     count += 1;
                 }
             }
@@ -796,7 +801,8 @@ fn resolve_call_target(
         context->error = runtime::Error.invalid_argument;
         return {status = ResolutionStatus.invalid, function_id = context::no_id()};
     }
-    let generic_context: bool = context->generics.instance_for_function(context->current_function) != context::no_id();
+    let generic_context: bool = context->generics.instance_for_function(context->lowering.current_function()) !=
+        context::no_id();
     let cached: usize = generic_context ? context::no_id() : selected_call(context, node_id);
     if (context->error != runtime::Error.none) {
         return {status = ResolutionStatus.invalid, function_id = context::no_id()};
@@ -811,11 +817,11 @@ fn resolve_call_target(
         }
         return {status = ResolutionStatus.selected, function_id = cached};
     }
-    let callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let callee: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
     let generic_callee: bool = callee.kind == syntax::SyntaxKind.generic_expression && callee.child_count == 2;
     let explicit_generic_call: bool = generic_callee && target.kind == domain::CallableKind.free_function;
     let explicit_arguments: usize = explicit_generic_call ?
-        context::node(context, context->current_unit, callee.first_child).next_sibling : context::no_id();
+        context::node(context, context->lowering.current_unit(), callee.first_child).next_sibling : context::no_id();
     var resolution: Resolution = {status = ResolutionStatus.no_match, function_id = context::no_id()};
     if (explicit_arguments == context::no_id()) {
         var candidates: CandidateResolution = candidate_resolution();
@@ -865,17 +871,17 @@ fn resolve_call(context: *context::Context, node_id: usize, node: syntax::Syntax
 fn direct_call_binding(context: *context::Context, callee: syntax::SyntaxNode) -> usize {
     var target: syntax::SyntaxNode = callee;
     if (target.kind == syntax::SyntaxKind.generic_expression && target.child_count == 2) {
-        target = context::node(context, context->current_unit, target.first_child);
+        target = context::node(context, context->lowering.current_unit(), target.first_child);
     }
     if (target.kind != syntax::SyntaxKind.name_expression) {
         return context::no_id();
     }
     if (target.child_count != 0) {
-        return functions::lookup_qualified_callable_binding(context, context->current_unit, target, false);
+        return functions::lookup_qualified_callable_binding(context, context->lowering.current_unit(), target, false);
     }
-    let local_id: usize = builder::find_local(context, context->current_unit, target.token_index);
-    return local_id == context::no_id() ?
-        functions::lookup_callable_binding(context, context->current_unit, target.token_index) : context::no_id();
+    let local_id: usize = builder::find_local(context, context->lowering.current_unit(), target.token_index);
+    return local_id == context::no_id() ? functions::lookup_callable_binding(context, context->lowering.current_unit(),
+            target.token_index) : context::no_id();
 }
 
 fn generic_argument_type(context: *context::Context, node_id: usize, expected_type: usize) -> usize {
@@ -912,7 +918,7 @@ fn probe_indirect_call(
         if (argument.status != Status.compatible) {
             return failure_result(argument);
         }
-        child = context::node(context, context->current_unit, child).next_sibling;
+        child = context::node(context, context->lowering.current_unit(), child).next_sibling;
     }
     let result_type: type_info::Record = context::type_record(context, function_type.element_type);
     if (result_type.kind == type_info::Kind.reference) {
@@ -929,7 +935,7 @@ fn probe_call(context: *context::Context, node_id: usize, node: syntax::SyntaxNo
     if (node.child_count == 0) {
         return invalid_result();
     }
-    let callee: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let callee: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
     let target: CallTarget = direct_call_target(context, node);
     if (!target.valid) {
         if (target.kind == domain::CallableKind.constructor && target.owner_type != context::no_id()) {
@@ -965,12 +971,12 @@ fn probe_va_arg(context: *context::Context, node: syntax::SyntaxNode, expected_t
     if (node.child_count != 2) {
         return invalid_result();
     }
-    let list_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let list_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
     let list: Result = expression(context, node.first_child, type_info::BuiltinType.va_list_type as usize);
     if (list.status != Status.compatible) {
         return failure_result(list);
     }
-    let type_id: usize = types::resolve_type_node(context, context->current_unit, list_node.next_sibling);
+    let type_id: usize = types::resolve_type_node(context, context->lowering.current_unit(), list_node.next_sibling);
     if (!type_is_valid(context, type_id)) {
         return invalid_result();
     }
@@ -982,7 +988,7 @@ fn intrinsic_index(context: *context::Context, node: syntax::SyntaxNode) -> usiz
     for (var index: usize = 0; index < intrinsics::IntrinsicLimit.entries as usize; index += 1) {
         let entry: intrinsics::IntrinsicEntry = intrinsics::intrinsic_entry(index);
         if (context::token_equals_bytes(
-                context, context->current_unit, node.token_index, entry.name, entry.name_length)) {
+                context, context->lowering.current_unit(), node.token_index, entry.name, entry.name_length)) {
             return index;
         }
     }
@@ -1002,7 +1008,7 @@ fn probe_source_intrinsic(
 fn probe_rtti_intrinsic(
     context: *context::Context, node: syntax::SyntaxNode,
     entry: intrinsics::IntrinsicEntry, expected_type: usize) -> Result {
-    let source_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let source_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
     let source: Result = expression(context, node.first_child, context::no_id());
     if (source.status != Status.compatible || !type_is_valid(context, source.type_id)) {
         return failure_result(source);
@@ -1016,8 +1022,9 @@ fn probe_rtti_intrinsic(
     if (!source_is_class || !classes::rtti_is_enabled(context, source_class)) {
         return incompatible_result();
     }
-    let target_node: syntax::SyntaxNode = context::node(context, context->current_unit, source_node.next_sibling);
-    let target_class: usize = types::resolve_class_expression(context, context->current_unit, target_node);
+    let target_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(),
+        source_node.next_sibling);
+    let target_class: usize = types::resolve_class_expression(context, context->lowering.current_unit(), target_node);
     if (target_class == context::no_id() || !classes::rtti_is_enabled(context, target_class)) {
         return incompatible_result();
     }
@@ -1055,8 +1062,8 @@ fn probe_intrinsic(context: *context::Context, node: syntax::SyntaxNode, expecte
         return probe_rtti_intrinsic(context, node, entry, expected_type);
     }
     if (entry.operand_class == intrinsics::IntrinsicOperandClass.type_property) {
-        let argument: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-        let type_id: usize = types::resolve_type_expression(context, context->current_unit, argument);
+        let argument: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
+        let type_id: usize = types::resolve_type_expression(context, context->lowering.current_unit(), argument);
         return type_id == context::no_id() ? invalid_result() :
             type_result(expected_type, type_info::BuiltinType.boolean as usize);
     }
@@ -1083,7 +1090,7 @@ fn probe_intrinsic(context: *context::Context, node: syntax::SyntaxNode, expecte
         return incompatible_result();
     }
     if (entry.arity >= 2) {
-        let first_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+        let first_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
         let second_expected: usize = integer_class ? type_info::BuiltinType.unsigned_size as usize : first.type_id;
         let second: Result = expression(context, first_node.next_sibling, second_expected);
         if (second.status != Status.compatible) {

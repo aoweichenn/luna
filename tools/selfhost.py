@@ -217,6 +217,7 @@ LIBRARIES = {
         "middleend/semantic/context/diagnostics",
         "middleend/semantic/context/symbols",
         "middleend/semantic/context/lookup",
+        "middleend/semantic/context/lowering",
     ),
     "sem_ctx_builder": compiler_module(
         "luna.bootstrap.middleend.semantic.context.builder",

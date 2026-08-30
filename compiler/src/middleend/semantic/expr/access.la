@@ -68,7 +68,7 @@ fn add_callable_diagnostic(
         let candidate_count: usize = bindings[binding_id].candidate_count;
         for (var candidate_index: usize = 0; candidate_index < candidate_count; candidate_index += 1) {
             let function_id: usize = functions::binding_candidate(context, binding_id, candidate_index);
-            if (functions::function_is_visible(context, function_id, context->current_unit)) {
+            if (functions::function_is_visible(context, function_id, context->lowering.current_unit())) {
                 let functions_data: *const domain::Function = context->callables.function_data() as
                         *const domain::Function;
                 let symbols: *const context::Symbol = context->symbols.symbol_data() as
@@ -80,7 +80,8 @@ fn add_callable_diagnostic(
             }
         }
     }
-    context::add_diagnostic(context, kind, context->current_unit, node.span, related_unit, related_span, binding_id);
+    context::add_diagnostic(context, kind, context->lowering.current_unit(), node.span, related_unit, related_span,
+        binding_id);
 }
 
 fn function_binding_value(
@@ -117,7 +118,7 @@ fn lower_const_name(context: *context::Context, node: syntax::SyntaxNode) -> con
         // module applies; the lookup diagnoses failures itself.
         let qualified_symbol: usize =
             context->symbols.lookup_qualified_symbol(
-                context, context->current_unit, node, context::SymbolKind.constant, true).value;
+                context, context->lowering.current_unit(), node, context::SymbolKind.constant, true).value;
         if (qualified_symbol == none) {
             return base::invalid_expression();
         }
@@ -125,9 +126,9 @@ fn lower_const_name(context: *context::Context, node: syntax::SyntaxNode) -> con
     }
     var type_id: usize = none;
     var value: u64 = 0;
-    let local_id: usize = builder::find_local(context, context->current_unit, node.token_index);
+    let local_id: usize = builder::find_local(context, context->lowering.current_unit(), node.token_index);
     if (local_id != none) {
-        let locals: *const context::Local = context->locals.data as *const context::Local;
+        let locals: *const context::Local = context->lowering.local_data();
         let local: context::Local = locals[local_id];
         if (!local.constant_binding) {
             return base::invalid_expression();
@@ -136,7 +137,7 @@ fn lower_const_name(context: *context::Context, node: syntax::SyntaxNode) -> con
         value = local.integer_value;
     } else {
         let symbol_id: usize = context->symbols.lookup_symbol(
-            context, context->current_unit, node.token_index, context::SymbolKind.constant).value;
+            context, context->lowering.current_unit(), node.token_index, context::SymbolKind.constant).value;
         if (symbol_id == none) {
             return base::invalid_expression();
         }
@@ -161,15 +162,17 @@ fn lower_qualified_name(
     let none: usize = context::no_id();
     var symbol_id: usize =
         context->symbols.lookup_qualified_symbol(
-            context, context->current_unit, node, context::SymbolKind.constant, false).value;
+            context, context->lowering.current_unit(), node, context::SymbolKind.constant, false).value;
     if (symbol_id != none) {
         return emit_symbol_constant(context, node, symbol_id);
     }
-    let binding_id: usize = functions::lookup_qualified_callable_binding(context, context->current_unit, node, false);
+    let binding_id: usize = functions::lookup_qualified_callable_binding(context, context->lowering.current_unit(),
+        node, false);
     if (binding_id != none) {
         return function_binding_value(context, node, binding_id, expected_type);
     }
-    context->symbols.lookup_qualified_symbol(context, context->current_unit, node, context::SymbolKind.constant, true);
+    context->symbols.lookup_qualified_symbol(context, context->lowering.current_unit(), node,
+        context::SymbolKind.constant, true);
     return base::invalid_expression();
 }
 
@@ -181,19 +184,19 @@ fn lower_name(context: *context::Context, node: syntax::SyntaxNode, expected_typ
     if (const_name.valid) {
         return const_name;
     }
-    let local_id: usize = builder::find_local(context, context->current_unit, node.token_index);
+    let local_id: usize = builder::find_local(context, context->lowering.current_unit(), node.token_index);
     if (local_id == context::no_id()) {
-        let binding_id: usize = functions::lookup_callable_binding(context, context->current_unit, node.token_index);
+        let binding_id: usize = functions::lookup_callable_binding(context, context->lowering.current_unit(),
+            node.token_index);
         if (binding_id != context::no_id()) {
             return function_binding_value(context, node, binding_id, expected_type);
         }
         context::add_diagnostic(
-            context, context::DiagnosticKind.unknown_name, context->current_unit, node.span, context::no_id(),
-            context::empty_span(), node.token_index);
+            context, context::DiagnosticKind.unknown_name, context->lowering.current_unit(), node.span,
+                context::no_id(), context::empty_span(), node.token_index);
         return base::invalid_expression();
     }
-    let locals: *const context::Local = context->locals.data as
-            *const context::Local;
+    let locals: *const context::Local = context->lowering.local_data();
     let local: context::Local = locals[local_id];
     let address_id: usize = builder::address_of_slot(
         context, node, local.slot_id, local.type_id, !local.mutable_binding, local.volatile_binding);
@@ -222,19 +225,19 @@ fn lower_name(context: *context::Context, node: syntax::SyntaxNode, expected_typ
 
 fn lower_this(context: *context::Context, node: syntax::SyntaxNode) -> context::Expression {
     let none: usize = context::no_id();
-    if (context->current_function >= context->callables.function_count()) {
+    if (context->lowering.current_function() >= context->callables.function_count()) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_receiver, context->current_unit, node.span, none,
+            context, context::DiagnosticKind.invalid_receiver, context->lowering.current_unit(), node.span, none,
             context::empty_span(), none);
         return base::invalid_expression();
     }
     let functions: *const domain::Function = context->callables.function_data() as
             *const domain::Function;
-    let function: domain::Function = functions[context->current_function];
+    let function: domain::Function = functions[context->lowering.current_function()];
     if (!domain::has_receiver(function.identity)) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_receiver, context->current_unit, node.span, none,
-            context::empty_span(), context->current_function);
+            context, context::DiagnosticKind.invalid_receiver, context->lowering.current_unit(), node.span, none,
+            context::empty_span(), context->lowering.current_function());
         return base::invalid_expression();
     }
     let receiver_type: usize = functions::function_receiver_type(context, function);
@@ -257,15 +260,16 @@ fn lower_enum_member(context: *context::Context, node: syntax::SyntaxNode) -> co
     if (node.child_count != 2) {
         return base::invalid_expression();
     }
-    let owner_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-    let member_node: syntax::SyntaxNode = context::node(context, context->current_unit, owner_node.next_sibling);
+    let owner_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
+    let member_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(),
+        owner_node.next_sibling);
     if (owner_node.kind != syntax::SyntaxKind.name_expression || member_node.kind !=
             syntax::SyntaxKind.name_expression) {
         return base::invalid_expression();
     }
     let type_symbol: usize =
         context->symbols.lookup_qualified_symbol(
-            context, context->current_unit, owner_node, context::SymbolKind.named_type, false).value;
+            context, context->lowering.current_unit(), owner_node, context::SymbolKind.named_type, false).value;
     if (type_symbol == context::no_id()) {
         return base::invalid_expression();
     }
@@ -283,11 +287,11 @@ fn lower_enum_member(context: *context::Context, node: syntax::SyntaxNode) -> co
         return base::invalid_expression();
     }
     let member_symbol: usize =
-        types::find_enum_member(context, type_id, context->current_unit, member_node.token_index);
+        types::find_enum_member(context, type_id, context->lowering.current_unit(), member_node.token_index);
     if (member_symbol == context::no_id()) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.unknown_field, context->current_unit, member_node.span, context::no_id(),
-            context::empty_span(), type_id);
+            context, context::DiagnosticKind.unknown_field, context->lowering.current_unit(), member_node.span,
+                context::no_id(), context::empty_span(), type_id);
         return base::invalid_expression();
     }
     return builder::emit_integer_constant(context, node, type_id, symbols[member_symbol].integer_value);
@@ -484,7 +488,7 @@ fn lower_bound_method(
     let resolution: probe::Resolution = probe::resolve_bound_method(context, node, expected_type);
     if (!target.valid || resolution.status != probe::ResolutionStatus.selected) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_bound_method, context->current_unit, node.span,
+            context, context::DiagnosticKind.invalid_bound_method, context->lowering.current_unit(), node.span,
             none, context::empty_span(), expected_type);
         return base::invalid_expression();
     }
@@ -495,7 +499,7 @@ fn lower_bound_method(
     let entry: usize = bound_method_entry(context, node, target, resolution.function_id, receiver_address);
     if (receiver_address == none || entry == none) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_bound_method, context->current_unit, node.span,
+            context, context::DiagnosticKind.invalid_bound_method, context->lowering.current_unit(), node.span,
             none, context::empty_span(), resolution.function_id);
         return base::invalid_expression();
     }
@@ -527,9 +531,10 @@ fn lower_member(
     if (node.child_count != 2) {
         return base::invalid_expression();
     }
-    let base_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-    let name_node: syntax::SyntaxNode = context::node(context, context->current_unit, base_node.next_sibling);
-    let operation: lexer::TokenKind = context::token(context, context->current_unit, node.token_index).kind;
+    let base_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
+    let name_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(),
+        base_node.next_sibling);
+    let operation: lexer::TokenKind = context::token(context, context->lowering.current_unit(), node.token_index).kind;
     let base: context::Expression = api::invoke(lowerer, context, node.first_child, context::no_id());
     if (!base.valid) {
         return base;
@@ -541,8 +546,8 @@ fn lower_member(
         let pointer_record: type_info::Record = context::type_record(context, base.type_id);
         if (pointer_record.kind != type_info::Kind.pointer) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.invalid_member, context->current_unit, node.span, context::no_id(),
-                context::empty_span(), base.type_id);
+                context, context::DiagnosticKind.invalid_member, context->lowering.current_unit(), node.span,
+                    context::no_id(), context::empty_span(), base.type_id);
             return base::invalid_expression();
         }
         owner_type = pointer_record.element_type;
@@ -553,8 +558,8 @@ fn lower_member(
         builder::emit_void(context, check);
     } else if (operation != lexer::TokenKind.dot || base.address_id == context::no_id()) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_member, context->current_unit, node.span, context::no_id(),
-            context::empty_span(), base.type_id);
+            context, context::DiagnosticKind.invalid_member, context->lowering.current_unit(), node.span,
+                context::no_id(), context::empty_span(), base.type_id);
         return base::invalid_expression();
     }
     if (!types::require_complete_type(context, owner_type)) {
@@ -563,31 +568,31 @@ fn lower_member(
     let owner_record: type_info::Record = context::type_record(context, owner_type);
     if (!type_info::is_record(owner_record.kind)) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_member, context->current_unit, node.span, context::no_id(),
-            context::empty_span(), owner_type);
+            context, context::DiagnosticKind.invalid_member, context->lowering.current_unit(), node.span,
+                context::no_id(), context::empty_span(), owner_type);
         return base::invalid_expression();
     }
     if (!types::require_opaque_value_access(
-            context, owner_type, context->current_unit, name_node.span)) {
+            context, owner_type, context->lowering.current_unit(), name_node.span)) {
         return base::invalid_expression();
     }
     let lookup: types::FieldLookup =
-        types::lookup_field(context, owner_type, context->current_unit, name_node.token_index);
+        types::lookup_field(context, owner_type, context->lowering.current_unit(), name_node.token_index);
     if (lookup.status == types::FieldStatus.ambiguous) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.ambiguous_field, context->current_unit, name_node.span, context::no_id(),
-            context::empty_span(), owner_type);
+            context, context::DiagnosticKind.ambiguous_field, context->lowering.current_unit(), name_node.span,
+                context::no_id(), context::empty_span(), owner_type);
         return base::invalid_expression();
     }
     if (lookup.status != types::FieldStatus.found) {
-        let segment_id: usize =
-            builder::lookup_bitfield_segment(context, owner_type, context->current_unit, name_node.token_index);
+        let segment_id: usize = builder::lookup_bitfield_segment(context, owner_type, context->lowering.current_unit(),
+                name_node.token_index);
         if (segment_id != context::no_id()) {
             return lower_bitfield_member(context, node, owner_address, segment_id, member_category);
         }
         context::add_diagnostic(
-            context, context::DiagnosticKind.unknown_field, context->current_unit, name_node.span, context::no_id(),
-            context::empty_span(), owner_type);
+            context, context::DiagnosticKind.unknown_field, context->lowering.current_unit(), name_node.span,
+                context::no_id(), context::empty_span(), owner_type);
         return base::invalid_expression();
     }
     let fields: *const type_info::Field = context->types.field_data() as
@@ -595,7 +600,7 @@ fn lower_member(
     let field: type_info::Field = fields[lookup.field_id];
     if (owner_record.kind == type_info::Kind.class_type && !classes::field_is_accessible(context, lookup.field_id)) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.inaccessible_member, context->current_unit, name_node.span,
+            context, context::DiagnosticKind.inaccessible_member, context->lowering.current_unit(), name_node.span,
             field.declaration_unit, context::node(context, field.declaration_unit, field.declaration_node).span,
             lookup.field_id);
         return base::invalid_expression();
@@ -637,7 +642,7 @@ fn lower_index(context: *context::Context, node: syntax::SyntaxNode, lowerer: ap
     if (node.child_count != 2) {
         return base::invalid_expression();
     }
-    let base_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let base_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
     let index_node: usize = base_node.next_sibling;
     let base: context::Expression = api::invoke(lowerer, context, node.first_child, context::no_id());
     let index: context::Expression = api::invoke(lowerer, context, index_node,
@@ -645,8 +650,8 @@ fn lower_index(context: *context::Context, node: syntax::SyntaxNode, lowerer: ap
     let operands_are_valid: bool = base.valid && index.valid;
     if (!operands_are_valid || index.type_id != type_info::BuiltinType.unsigned_size as usize) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_index, context->current_unit, node.span, context::no_id(),
-            context::empty_span(), index.type_id);
+            context, context::DiagnosticKind.invalid_index, context->lowering.current_unit(), node.span,
+                context::no_id(), context::empty_span(), index.type_id);
         return base::invalid_expression();
     }
     let base_record: type_info::Record = context::type_record(context, base.type_id);
@@ -679,12 +684,12 @@ fn lower_index(context: *context::Context, node: syntax::SyntaxNode, lowerer: ap
     }
     if (element_type == context::no_id()) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_index, context->current_unit, node.span, context::no_id(),
-            context::empty_span(), base.type_id);
+            context, context::DiagnosticKind.invalid_index, context->lowering.current_unit(), node.span,
+                context::no_id(), context::empty_span(), base.type_id);
         return base::invalid_expression();
     }
     if (!types::require_opaque_value_access(
-            context, element_type, context->current_unit, node.span)) {
+            context, element_type, context->lowering.current_unit(), node.span)) {
         return base::invalid_expression();
     }
     let element_record: type_info::Record = context::type_record(context, element_type);
@@ -757,7 +762,7 @@ fn call_argument_value(context: *context::Context, node: syntax::SyntaxNode, arg
     }
     if (!functions::type_is_trivially_copyable(context, argument.type_id)) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_initializer, context->current_unit, node.span,
+            context, context::DiagnosticKind.invalid_initializer, context->lowering.current_unit(), node.span,
             context::no_id(), context::empty_span(), argument.type_id);
         return context::no_id();
     }
@@ -774,7 +779,7 @@ fn collect_fixed_call_argument(
         let type_matches: bool = argument.valid && argument.type_id == parameter.element_type;
         if (!type_matches || binding_rank == type_info::no_id()) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span,
+                context, context::DiagnosticKind.type_mismatch, context->lowering.current_unit(), node.span,
                 context::no_id(), context::empty_span(), parameter_type);
             return;
         }
@@ -788,7 +793,7 @@ fn collect_fixed_call_argument(
     }
     if (!argument.valid || argument.type_id != parameter_type) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span,
+            context, context::DiagnosticKind.type_mismatch, context->lowering.current_unit(), node.span,
             context::no_id(), context::empty_span(), parameter_type);
         return;
     }
@@ -808,7 +813,7 @@ fn collect_variadic_call_argument(
     }
     if (!scalar) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_call, context->current_unit, node.span,
+            context, context::DiagnosticKind.invalid_call, context->lowering.current_unit(), node.span,
             context::no_id(), context::empty_span(), argument.valid ? argument.type_id : context::no_id());
         return;
     }
@@ -1114,8 +1119,9 @@ fn instance_receiver_address(
         return context::no_id();
     }
     let access_node: syntax::SyntaxNode = node.kind == syntax::SyntaxKind.call_expression ?
-        context::node(context, context->current_unit, node.first_child) : node;
-    let operation: lexer::TokenKind = context::token(context, context->current_unit, access_node.token_index).kind;
+        context::node(context, context->lowering.current_unit(), node.first_child) : node;
+    let operation: lexer::TokenKind = context::token(context, context->lowering.current_unit(),
+        access_node.token_index).kind;
     var address_id: usize = context::no_id();
     if (operation == lexer::TokenKind.arrow) {
         address_id = receiver.value_id;
@@ -1208,7 +1214,7 @@ fn lower_target_call_with_receiver(
         context->error = runtime::Error.invalid_argument;
         return base::invalid_expression();
     }
-    let callee_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let callee_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
     var selected_function: usize = none;
     var callee_value: usize = none;
     var call_dispatch: domain::DispatchPlan = {
@@ -1217,14 +1223,14 @@ fn lower_target_call_with_receiver(
     let constructor_is_unbound: bool = target.kind == domain::CallableKind.constructor && !target.valid;
     if (target.receiver_source == probe::ReceiverSource.current_object && !target.valid) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_super, context->current_unit, node.span, none,
+            context, context::DiagnosticKind.invalid_super, context->lowering.current_unit(), node.span, none,
             context::empty_span(), target.owner_type);
         return base::invalid_expression();
     }
     if (constructor_is_unbound && target.owner_type != none) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_class_initialization, context->current_unit, node.span, none,
-            context::empty_span(), target.owner_type);
+            context, context::DiagnosticKind.invalid_class_initialization, context->lowering.current_unit(), node.span,
+                none, context::empty_span(), target.owner_type);
         return base::invalid_expression();
     }
     if (target.valid) {
@@ -1271,7 +1277,7 @@ fn lower_target_call_with_receiver(
         let bound_method: bool = callee_record.kind == type_info::Kind.bound_method;
         if (!ordinary_pointer && !bound_method) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.invalid_call, context->current_unit, node.span, none,
+                context, context::DiagnosticKind.invalid_call, context->lowering.current_unit(), node.span, none,
                 context::empty_span(), callee.type_id);
             return base::invalid_expression();
         }
@@ -1290,7 +1296,7 @@ fn lower_target_call_with_receiver(
     }
     if (result_address != none && return_type != expected_result) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span,
+            context, context::DiagnosticKind.type_mismatch, context->lowering.current_unit(), node.span,
             none, context::empty_span(), expected_result);
         return base::invalid_expression();
     }
@@ -1301,7 +1307,7 @@ fn lower_target_call_with_receiver(
         let related_unit: usize = selected_function == none ? none :
             symbols[selected_record.symbol_id].declaration_unit;
         context::add_diagnostic(
-            context, context::DiagnosticKind.argument_count, context->current_unit, node.span,
+            context, context::DiagnosticKind.argument_count, context->lowering.current_unit(), node.span,
             related_unit, context::empty_span(), required_parameter_count);
         return base::invalid_expression();
     }
@@ -1347,7 +1353,7 @@ fn lower_target_call_with_receiver(
             }
         }
         let argument: context::Expression = api::invoke(lowerer, context, child, expected_type);
-        let argument_node: syntax::SyntaxNode = context::node(context, context->current_unit, child);
+        let argument_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), child);
         if (variadic_extra) {
             collect_variadic_call_argument(context, argument_node, argument, &argument_values);
         } else {
@@ -1403,7 +1409,7 @@ fn lower_target_call_with_receiver(
     if (callee_no_return && instruction_id != context::no_id()) {
         var marker: ir::Instruction = builder::instruction(ir::Opcode.unreachable, node);
         builder::emit_void(context, marker);
-        context->current_block = builder::add_current_block(context);
+        builder::set_current_block(context, builder::add_current_block(context));
     }
     if (target.receiver_source == probe::ReceiverSource.construction && instruction_id != none) {
         return {

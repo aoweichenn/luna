@@ -33,7 +33,7 @@ fn release_error(current: runtime::Error, next: runtime::Error) -> runtime::Erro
 }
 
 enum ContextStorageCount: usize {
-    records = 13,
+    records = 6,
 }
 
 struct ContextStorageRecord {
@@ -71,46 +71,75 @@ fn storage_records_are_valid(records: *const ContextStorageRecord, count: usize)
     return true;
 }
 
+fn context_ir_block_is_in_function(function: ir::Function, block_id: usize, view: ir::View) -> bool {
+    if (function.first_block == no_id() || function.first_block > view.block_count) {
+        return false;
+    }
+    if (block_id < function.first_block) {
+        return false;
+    }
+    let block_offset: usize = block_id - function.first_block;
+    let block_is_in_slice: bool = block_offset < function.block_count;
+    let slice_fits_storage: bool = function.block_count <= view.block_count - function.first_block;
+    return block_is_in_slice && slice_fits_storage;
+}
+
+fn context_lowering_owner_is_valid(context: *const Context) -> bool {
+    let function_id: usize = context->lowering.current_function();
+    let unit_index: usize = context->lowering.current_unit();
+    let function_is_empty: bool = function_id == no_id() && unit_index == no_id();
+    if (function_is_empty) {
+        return true;
+    }
+    let function_is_valid: bool = function_id < context->callables.function_count();
+    let unit_is_valid: bool = unit_index < context->input.size();
+    if (!function_is_valid || !unit_is_valid) {
+        return false;
+    }
+    let block_id: usize = context->lowering.current_block();
+    if (block_id == no_id()) {
+        return true;
+    }
+    let functions: *const domain::Function = context->callables.function_data() as *const domain::Function;
+    let function: domain::Function = functions[function_id];
+    let ir_view: ir::View = context->ir.view();
+    let ir_function_is_valid: bool = function.ir_function < ir_view.function_count;
+    if (!ir_function_is_valid) {
+        return false;
+    }
+    let ir_functions: *const ir::Function = ir_view.functions;
+    let ir_function: ir::Function = ir_functions[function.ir_function];
+    return context_ir_block_is_in_function(ir_function, block_id, ir_view);
+}
+
+fn context_lowering_state_is_valid(context: *const Context) -> bool {
+    if (context->lowering.error() != runtime::Error.none) {
+        return true;
+    }
+    return context->lowering.is_valid() && context_lowering_owner_is_valid(context);
+}
+
 fn context_record_storage_is_valid(context: *const Context) -> bool {
     var records: [ContextStorageCount.records]ContextStorageRecord = {};
-    records[0] = {buffer = context->locals, count = context->local_count, record_size = sizeof(Local)};
-    records[1] = {
+    records[0] = {
         buffer = context->alignment_overrides, count = context->alignment_override_count,
         record_size = sizeof(AlignmentOverride),
     };
-    records[2] = {
+    records[1] = {
         buffer = context->bitfield_segments, count = context->bitfield_segment_count,
         record_size = sizeof(BitfieldSegment),
     };
-    records[3] = {
+    records[2] = {
         buffer = context->const_functions, count = context->const_function_count, record_size = sizeof(ConstFunction),
     };
-    records[4] = {
+    records[3] = {
         buffer = context->const_locals, count = context->const_local_count, record_size = sizeof(ConstLocal),
     };
-    records[5] = {
+    records[4] = {
         buffer = context->array_lengths, count = context->array_length_count, record_size = sizeof(ArrayLength),
     };
-    records[6] = {buffer = context->labels, count = context->label_count, record_size = sizeof(Label)};
-    records[7] = {
-        buffer = context->pending_gotos, count = context->pending_goto_count, record_size = sizeof(PendingGoto),
-    };
-    records[8] = {
-        buffer = context->loop_labels, count = context->loop_label_count, record_size = sizeof(LoopLabel),
-    };
-    records[9] = {
-        buffer = context->label_locals, count = context->label_locals.length / sizeof(LocalSnapshot),
-        record_size = sizeof(LocalSnapshot),
-    };
-    records[10] = {
-        buffer = context->goto_locals, count = context->goto_locals.length / sizeof(LocalSnapshot),
-        record_size = sizeof(LocalSnapshot),
-    };
-    records[11] = {
+    records[5] = {
         buffer = context->call_selections, count = context->call_selection_count, record_size = sizeof(usize),
-    };
-    records[12] = {
-        buffer = context->temporaries, count = context->temporary_count, record_size = sizeof(Temporary),
     };
     return storage_records_are_valid(
         (&records[0]) as *const ContextStorageRecord, ContextStorageCount.records as usize);
@@ -126,8 +155,9 @@ fn context_storage_is_valid(context: *const Context) -> bool {
     context_storage_require(&validator, context->callables.storage_is_valid());
     context_storage_require(&validator, context->classes.storage_is_valid());
     context_storage_require(&validator, context->generics.storage_is_valid());
-    context_storage_require(&validator, context->scope_depth <= Limit.maximum_scope_depth as usize &&
-        context->type_depth <= Limit.maximum_type_depth as usize);
+    context_storage_require(&validator, context->lowering.storage_is_valid());
+    context_storage_require(&validator, context_lowering_state_is_valid(context as *const Context));
+    context_storage_require(&validator, context->type_depth <= Limit.maximum_type_depth as usize);
     context_storage_require(&validator, context->diagnostics.is_valid());
     context_storage_require(&validator, context->types.storage_is_valid());
     context_storage_require(&validator, context->ir.storage_is_valid());
@@ -140,38 +170,27 @@ fn context_init(input: InputView) -> Context {
     return {
         input = input, symbols = SymbolTable(), callables = callable_model::CallableTable(),
         call_selections = bytes::empty(), call_selection_count = 0, classes = class_model::ClassTable(),
-        generics = generic_model::GenericTable(),
-        locals = bytes::empty(), local_count = 0, temporaries = bytes::empty(), temporary_count = 0,
+        generics = generic_model::GenericTable(), lowering = LoweringState(),
         alignment_overrides = bytes::empty(), alignment_override_count = 0,
         bitfield_segments = bytes::empty(), bitfield_segment_count = 0, const_functions = bytes::empty(),
         const_function_count = 0, const_locals = bytes::empty(), const_local_count = 0, array_lengths = bytes::empty(),
-        array_length_count = 0, labels = bytes::empty(), label_count = 0, label_locals = bytes::empty(),
-        pending_gotos = bytes::empty(), pending_goto_count = 0, goto_locals = bytes::empty(),
-        loop_labels = bytes::empty(), loop_label_count = 0, pending_loop_label = no_id(), const_call_depth = 0,
+        array_length_count = 0, const_call_depth = 0,
         const_steps = 0, types = type_table as type_info::TypeTable&&, ir = ir::Builder(),
-        diagnostics = DiagnosticBuffer(), error = type_error, current_function = no_id(), current_unit = no_id(),
-        scope_depth = 0, type_depth = 0, break_block = no_id(), continue_block = no_id(),
-        break_local_count = 0, continue_local_count = 0,
+        diagnostics = DiagnosticBuffer(), error = type_error, type_depth = 0,
     };
 }
 
 fn context_release_work(context: *Context) -> runtime::Error {
+    context->error = release_error(context->error, context->lowering.error());
     if (!context_storage_is_valid(context as *const Context)) {
         return runtime::Error.invalid_argument;
     }
     var error: runtime::Error = bytes::release(context->call_selections);
-    error = release_error(error, bytes::release(context->locals));
-    error = release_error(error, bytes::release(context->temporaries));
     error = release_error(error, bytes::release(context->alignment_overrides));
     error = release_error(error, bytes::release(context->bitfield_segments));
     error = release_error(error, bytes::release(context->const_functions));
     error = release_error(error, bytes::release(context->const_locals));
     error = release_error(error, bytes::release(context->array_lengths));
-    error = release_error(error, bytes::release(context->labels));
-    error = release_error(error, bytes::release(context->label_locals));
-    error = release_error(error, bytes::release(context->pending_gotos));
-    error = release_error(error, bytes::release(context->goto_locals));
-    error = release_error(error, bytes::release(context->loop_labels));
     return error;
 }
 
@@ -433,8 +452,8 @@ fn callable_value_type(
         let error: runtime::Error = context->types.add_parameter(type_id, parameter_types[index]);
         if (error != runtime::Error.none) {
             add_diagnostic(
-                context, DiagnosticKind.invalid_external, context->current_unit, empty_span(), none, empty_span(),
-                parameter_types[index]);
+                context, DiagnosticKind.invalid_external, context->lowering.current_unit(), empty_span(), none,
+                    empty_span(), parameter_types[index]);
             return none;
         }
     }

@@ -242,35 +242,52 @@ Lexer 用例断言 67 关键字 / 46 标点 / 12 字面量的 token 序列与 sp
 宿主 `gcc -no-pie` 链接 → 运行返回 42。这是整个仓库唯一让宿主工具链接器接触产物的地方，
 且它验证的是 FFI 方向，不参与自举。
 
-### 6.2 `tests/relocation_data/ir_codegen.la`（426 行）
+### 6.2 `tests/relocation_data/ir_codegen.la`（当前 1,004 行）
 
 **它本身是一个 Luna 程序，import 了真实的编译器模块**
 （`luna.compiler.x86.codegen`、`luna.compiler.ir`、
-`luna.bootstrap.middleend.semantic.classes.model` 等），
+`luna.bootstrap.middleend.semantic.context` 等），
 因此能在**一次既有工具链启动内**直接构造并验证内部数据结构——
 这正是它存在的意义：**不增加额外的工具链启动**。
 
+同一 relocation probe 中已有的 ClassTable、GenericTable、SymbolTable 与
+CallableTable 契约保持不变；当前工作树在这些检查后新增
+`lowering_state_lifecycle_is_valid()`。该大用例直接覆盖：
+
+- `LoweringState` 的空状态、函数/unit 生命周期、typed local/temporary
+  存储和只读计数/投影；
+- 真实两个 local 的 label 快照与 pending-goto 快照，含连续 published
+  range 及显式 unpublished tail discard；
+- loop label、break/continue control targets 与 local-count watermark；
+- move 后目标状态及 moved-from 空状态、`clear_function()`，以及首个
+  `invalid_argument` 的 sticky error 和禁止越过 watermark 的截断。
+
 **ClassTable 部分**：
 
-- `class_table_move_is_valid()`（L68-133）——依次 `append_record` / `append_field` /
+- `class_table_move_is_valid()`——依次 `append_record` / `append_field` /
   `append_method` / `append_friend`，move 后断言目标
-  `record_count()==1 && field_count()==1 && method_count()==1 && friend_count()==1`
-  （102-106）、源为全 0 且 `storage_is_valid()`（107-116）、
-  三个成员切片连续（118-120）、元素值正确（125-130）
-- `class_table_failure_is_sticky()`（L54-66）——把 `first_field` 置 0 制造非法记录，
+  `record_count()==1 && field_count()==1 && method_count()==1 && friend_count()==1`，
+  源为全 0 且 `storage_is_valid()`，三个成员切片连续、元素值正确，且层级/RTTI
+  元数据通过 focused mutator 发布。
+- `class_table_failure_is_sticky()`——传入无效 type id，
   要求 `append_record` 返回 `invalid_argument`、`record_count()==0`，
-  且**后续合法 append 仍被拒绝**（首错粘滞，64-65）
+  且**后续合法 append 仍被拒绝**（首错粘滞）。
 
-**GenericTable 部分**（`generic_table_move_is_valid()` L181-282）：参数连续切片、
-实例去重（206-213，同参数两次返回同一 `instance_id`）、
-`additional_instances = 13` 个实例（166-177，含 16→32 bucket rehash）、
-type/function 反向映射（221-234）、active-binding 深验证与
-`truncate_active_bindings(0)` 回滚（237-252）、move/moved-from（255-263）。
+**GenericTable 部分**（`generic_table_move_is_valid()`）：参数连续切片、实例去重
+（同参数两次返回同一 `instance_id`）、`additional_instances = 13` 个实例
+（含 16→32 bucket rehash）、type/function 反向映射、active-binding 深验证与
+`truncate_active_bindings(0)` 回滚、move/moved-from。
 
-**之后** `main()`（L284-426）才走真实的 lex → parse → `sema::check` →
-`ir::Builder.add_global` → 两次 `emit_assembly` 比对字节（407-417），
-并统计 `"    .quad dispatch_target\n"` 出现 2 次（418-421）。
-退出码 32 / 33 分别定位 ClassTable / GenericTable 失败，主路径成功返回 42。
+`symbol_table_move_is_valid()` 和 `callable_table_move_is_valid()` 位于同一大用例中，
+分别覆盖 typed symbol/callable stores、发布顺序、绑定切片、move/moved-from 和
+sticky failure。
+
+**之后** `main()` 继续走真实的 lex → parse → `sema::check` →
+`ir::Builder.add_global` → 两次 `emit_assembly` 比对字节，并统计
+`"    .quad dispatch_target\n"` 出现 2 次。
+当前退出码 37 定位 LoweringState 失败，32 / 33 / 35 / 36 分别定位
+ClassTable / GenericTable / SymbolTable / CallableTable 失败，34 定位
+语义诊断流失败，主路径成功返回 42。
 
 `object_roundtrip.la`（421 行）则是 assembler → `object::serialize` → `deserialize` →
 再 serialize → `elf::save` → `elf::load` → 再 save 的**六段字节等价链**（32-63）。

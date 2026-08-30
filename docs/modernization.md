@@ -146,7 +146,7 @@ contain files or child module/family directories at one level, never both.
 | `bootstrap.middleend.ir` + `ir.verify` | `luna.compiler.ir` | storage, globals, functions, control, instructions, validation, verify |
 | semantic foundational records | `luna.compiler.sema.domain` | callable, value, classes, generics |
 | semantic callable ownership | `luna.compiler.sema.callables` | storage, bindings, validation |
-| semantic `context.*` | `luna.compiler.sema.session` | session, names, builder |
+| semantic `context.*` | `luna.compiler.sema.session` | session, names, builder, lowering |
 | semantic `types.*` | `luna.compiler.sema.types` | resolution, lookup, visibility, layout |
 | semantic `consteval.*` | `luna.compiler.sema.consteval` | model, engine, execution |
 | semantic `functions.*` | `luna.compiler.sema.functions` | signatures, overloads, bindings, generics, methods, IR |
@@ -324,6 +324,27 @@ raw buffers and five mirrored record counters; `call_selections` remains
 lowering state for the next batch rather than being mixed into callable
 ownership. The direct relocation contract covers duplicate generic candidates,
 repeated publication and invalid binding extension.
+
+The current lowering-state batch adds `context/lowering.la` as a same-module
+implementation unit of the existing transitional
+`luna.bootstrap.middleend.semantic.context` module. Its move-only
+`LoweringState` class owns function-local cursors, typed local and temporary
+storage, label/goto snapshots, loop labels, control targets and sticky error
+state. Const projections replace writable raw storage access; deep validation
+checks function ownership, snapshot coverage, publication ranges and scope or
+control watermarks. Move construction leaves a valid empty source. Goto
+lowering distinguishes a published contiguous range from an unpublished
+speculative tail and provides explicit tail discard.
+
+This is an ownership extraction, not the final namespace contraction. Context's
+legacy raw storage table shrinks from thirteen groups to six groups. The
+existing `context.builder` implementation remains and now supplies a narrow
+first-error bridge for `set_current_block`; IR Builder, const metadata,
+type-depth state and call-selection caches remain outside LoweringState until
+their own ownership boundary is designed. The obsolete `clear_label_state`
+operation is removed. The eventual `luna.compiler.sema.session` row above is
+therefore a target shape, not a claim that the rename or builder deletion has
+already landed.
 
 `ir::Module` owns the completed typed CFG, `ir::Builder` owns its append-only
 construction phase, and the private `Verifier` owns whole-module validation

@@ -6,22 +6,24 @@ import luna.compiler.types as type_info;
 import luna.runtime as runtime;
 
 fn current_ir_function(context: *context::Context) -> usize {
-    if (context->current_function >= context->callables.function_count()) {
+    let function_id: usize = context->lowering.current_function();
+    if (function_id >= context->callables.function_count()) {
         context->error = runtime::Error.invalid_argument;
         return context::no_id();
     }
     let functions: *const domain::Function = context->callables.function_data() as
             *const domain::Function;
-    return functions[context->current_function].ir_function;
+    return functions[function_id].ir_function;
 }
 
 fn current_function_is_variadic(context: *context::Context) -> bool {
-    if (context->current_function >= context->callables.function_count()) {
+    let function_id: usize = context->lowering.current_function();
+    if (function_id >= context->callables.function_count()) {
         return false;
     }
     let functions: *const domain::Function = context->callables.function_data() as
             *const domain::Function;
-    return (functions[context->current_function].flags & (context::SymbolFlag.variadic as usize)) != 0;
+    return (functions[function_id].flags & (context::SymbolFlag.variadic as usize)) != 0;
 }
 
 fn instruction(opcode: ir::Opcode, node: syntax::SyntaxNode) -> ir::Instruction {
@@ -35,10 +37,13 @@ fn instruction(opcode: ir::Opcode, node: syntax::SyntaxNode) -> ir::Instruction 
 
 fn emit_value(context: *context::Context, instruction: ir::Instruction, type_id: usize) -> usize {
     let none: usize = context::no_id();
-    if (context->error != runtime::Error.none || context->current_block == none || type_id == none) {
+    let current_block: usize = context->lowering.current_block();
+    let context_is_invalid: bool = context->error != runtime::Error.none || current_block == none;
+    let type_is_invalid: bool = type_id == none;
+    if (context_is_invalid || type_is_invalid) {
         return none;
     }
-    let value_id: usize = context->ir.add_value(current_ir_function(context), context->current_block, type_id);
+    let value_id: usize = context->ir.add_value(current_ir_function(context), current_block, type_id);
     if (value_id == none) {
         context->error = context->ir.error();
         return none;
@@ -46,7 +51,7 @@ fn emit_value(context: *context::Context, instruction: ir::Instruction, type_id:
     var record: ir::Instruction = instruction;
     record.type_id = type_id;
     record.result = value_id;
-    record.block_id = context->current_block;
+    record.block_id = current_block;
     if (context->ir.emit(record) == none) {
         context->error = context->ir.error();
         return none;
@@ -56,7 +61,7 @@ fn emit_value(context: *context::Context, instruction: ir::Instruction, type_id:
 
 fn emit_void(context: *context::Context, instruction: ir::Instruction) -> usize {
     var record: ir::Instruction = instruction;
-    record.block_id = context->current_block;
+    record.block_id = context->lowering.current_block();
     let instruction_id: usize = context->ir.emit(record);
     if (instruction_id == context::no_id()) {
         context->error = context->ir.error();
@@ -99,24 +104,18 @@ fn emit_null_constant(context: *context::Context, node: syntax::SyntaxNode, type
 }
 
 fn append_local(context: *context::Context, local: context::Local) -> usize {
-    let result: usize = context->local_count;
-    if (!context::append_record(
-            context, &context->locals, (&local) as
-                *const context::Local as *const u8, sizeof(context::Local))) {
-        return context::no_id();
+    let result: usize = context->lowering.append_local(local);
+    if (result == context::no_id()) {
+        context->error = context::release_error(context->error, context->lowering.error());
     }
-    context->local_count += 1;
     return result;
 }
 
 fn append_temporary(context: *context::Context, temporary: context::Temporary) -> usize {
-    let result: usize = context->temporary_count;
-    if (!context::append_record(
-            context, &context->temporaries, (&temporary) as
-                *const context::Temporary as *const u8, sizeof(context::Temporary))) {
-        return context::no_id();
+    let result: usize = context->lowering.append_temporary(temporary);
+    if (result == context::no_id()) {
+        context->error = context::release_error(context->error, context->lowering.error());
     }
-    context->temporary_count += 1;
     return result;
 }
 
@@ -138,13 +137,11 @@ fn append_alignment_override(
 fn alignment_override(context: *context::Context, declaration_unit: usize, declaration_node: usize) -> usize {
     let overrides: *const context::AlignmentOverride = context->alignment_overrides.data as
             *const context::AlignmentOverride;
-    var index: usize = 0;
-    while (index < context->alignment_override_count) {
+    for (var index: usize = 0; index < context->alignment_override_count; index += 1) {
         if (overrides[index].declaration_unit == declaration_unit &&
             overrides[index].declaration_node == declaration_node) {
             return overrides[index].alignment;
         }
-        index += 1;
     }
     return 0;
 }
@@ -162,12 +159,10 @@ fn append_bitfield_segment(context: *context::Context, segment: context::Bitfiel
 fn find_array_length(context: *context::Context, unit_index: usize, node_index: usize) -> usize {
     let lengths: *const context::ArrayLength = context->array_lengths.data as
             *const context::ArrayLength;
-    var index: usize = 0;
-    while (index < context->array_length_count) {
+    for (var index: usize = 0; index < context->array_length_count; index += 1) {
         if (lengths[index].unit_index == unit_index && lengths[index].node_index == node_index) {
             return index;
         }
-        index += 1;
     }
     return context::no_id();
 }
@@ -186,13 +181,11 @@ fn bitfield_segment(context: *context::Context, segment_id: usize) -> context::B
 
 fn bitfield_storage_field(context: *context::Context, segment: context::BitfieldSegment) -> usize {
     let fields: *const type_info::Field = context->types.field_data() as *const type_info::Field;
-    var field_id: usize = 0;
-    while (field_id < context->types.field_size()) {
+    for (var field_id: usize = 0; field_id < context->types.field_size(); field_id += 1) {
         if (fields[field_id].declaration_unit == segment.declaration_unit && fields[field_id].declaration_node ==
                 segment.declaration_node) {
             return field_id;
         }
-        field_id += 1;
     }
     return context::no_id();
 }
@@ -203,54 +196,52 @@ fn lookup_bitfield_segment(context: *context::Context, owner_type: usize, unit_i
     let fields: *const type_info::Field = context->types.field_data() as *const type_info::Field;
     let segments: *const context::BitfieldSegment = context->bitfield_segments.data as
             *const context::BitfieldSegment;
-    var field_index: usize = 0;
-    while (field_index < record.field_count) {
+    for (var field_index: usize = 0; field_index < record.field_count; field_index += 1) {
         let field: type_info::Field = fields[record.first_field + field_index];
-        var segment_id: usize = 0;
-        while (segment_id < context->bitfield_segment_count) {
-            if (segments[segment_id].declaration_unit == field.declaration_unit &&
-                segments[segment_id].declaration_node == field.declaration_node &&
-                context::tokens_equal(
+        for (var segment_id: usize = 0; segment_id < context->bitfield_segment_count; segment_id += 1) {
+            let declaration_matches: bool = segments[segment_id].declaration_unit == field.declaration_unit &&
+                segments[segment_id].declaration_node == field.declaration_node;
+            if (declaration_matches) {
+                let name_matches: bool = context::tokens_equal(
                     context, unit_index, name_token, segments[segment_id].declaration_unit,
-                    segments[segment_id].name_token)) {
-                return segment_id;
+                    segments[segment_id].name_token);
+                if (name_matches) {
+                    return segment_id;
+                }
             }
-            segment_id += 1;
         }
-        field_index += 1;
     }
     return context::no_id();
 }
 
 fn find_local(context: *context::Context, unit_index: usize, name_token: usize) -> usize {
-    let locals: *const context::Local = context->locals.data as
-            *const context::Local;
-    var index: usize = context->local_count;
-    while (index != 0) {
-        index -= 1;
-        if (locals[index].function_id == context->current_function &&
-            locals[index].scope_depth <= context->scope_depth &&
-            context::tokens_equal(
-                context, unit_index, name_token, locals[index].unit_index, locals[index].name_token)) {
-            return index;
+    let locals: *const context::Local = context->lowering.local_data();
+    for (var remaining: usize = context->lowering.local_count(); remaining != 0; remaining -= 1) {
+        let index: usize = remaining - 1;
+        let function_matches: bool = locals[index].function_id == context->lowering.current_function();
+        let scope_matches: bool = locals[index].scope_depth <= context->lowering.scope_depth();
+        if (function_matches && scope_matches) {
+            let name_matches: bool = context::tokens_equal(
+                context, unit_index, name_token, locals[index].unit_index, locals[index].name_token);
+            if (name_matches) {
+                return index;
+            }
         }
     }
     return context::no_id();
 }
 
 fn local_in_current_scope(context: *context::Context, unit_index: usize, name_token: usize) -> usize {
-    let locals: *const context::Local = context->locals.data as
-            *const context::Local;
-    var index: usize = context->local_count;
-    while (index != 0) {
-        index -= 1;
-        if (locals[index].function_id != context->current_function) {
+    let locals: *const context::Local = context->lowering.local_data();
+    for (var remaining: usize = context->lowering.local_count(); remaining != 0; remaining -= 1) {
+        let index: usize = remaining - 1;
+        if (locals[index].function_id != context->lowering.current_function()) {
             break;
         }
-        if (locals[index].scope_depth < context->scope_depth) {
+        if (locals[index].scope_depth < context->lowering.scope_depth()) {
             break;
         }
-        if (locals[index].scope_depth == context->scope_depth &&
+        if (locals[index].scope_depth == context->lowering.scope_depth() &&
             context::tokens_equal(
                 context, unit_index, name_token, locals[index].unit_index, locals[index].name_token)) {
             return index;
@@ -300,7 +291,9 @@ fn mask_integer(value: u64, bits: usize) -> u64 {
 fn store_to_address(
     context: *context::Context, node: syntax::SyntaxNode, destination: usize, type_id: usize,
         value: context::Expression) -> bool {
-    if (!value.valid || value.type_id != type_id || destination == context::no_id()) {
+    let value_is_invalid: bool = !value.valid || value.type_id != type_id;
+    let destination_is_invalid: bool = destination == context::no_id();
+    if (value_is_invalid || destination_is_invalid) {
         return false;
     }
     let type_record: type_info::Record = context::type_record(context, type_id);
@@ -347,6 +340,15 @@ fn add_current_block(context: *context::Context) -> usize {
     return block_id;
 }
 
+fn set_current_block(context: *context::Context, block_id: usize) -> bool {
+    if (context->error != runtime::Error.none) {
+        return false;
+    }
+    let lowering_error: runtime::Error = context->lowering.set_current_block(block_id);
+    context->error = context::release_error(context->error, lowering_error);
+    return context->error == runtime::Error.none;
+}
+
 fn block_is_terminated(context: *context::Context, block_id: usize) -> bool {
     let result: ir::BlockResult = context->ir.block(block_id);
     if (result.error != runtime::Error.none) {
@@ -376,13 +378,17 @@ fn enqueue_reachable_block(
 }
 
 fn block_is_reachable(context: *context::Context, function: ir::Function, target_block: usize) -> bool {
-    if (function.block_count == 0 || target_block < function.first_block || target_block - function.first_block >=
-            function.block_count) {
+    if (target_block < function.first_block) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
+    }
+    if (function.block_count == 0 || target_block - function.first_block >= function.block_count) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
     var reached: bytes::Buffer = bytes::empty();
-    while (reached.length < function.block_count && context->error == runtime::Error.none) {
+    for (var block_index: usize = 0;
+        block_index < function.block_count && context->error == runtime::Error.none; block_index += 1) {
         let pushed: bytes::BufferResult = bytes::push(reached, 0);
         reached = pushed.buffer;
         context->error = pushed.error;
@@ -422,49 +428,51 @@ fn block_is_reachable(context: *context::Context, function: ir::Function, target
 }
 
 fn terminate_unreachable_blocks(context: *context::Context, function: ir::Function, node: syntax::SyntaxNode) -> bool {
-    var index: usize = 0;
-    while (index < function.block_count && context->error == runtime::Error.none) {
+    for (var index: usize = 0; index < function.block_count && context->error == runtime::Error.none;
+        index += 1) {
         let block_id: usize = function.first_block + index;
         let result: ir::BlockResult = context->ir.block(block_id);
         if (result.error != runtime::Error.none) {
             context->error = result.error;
             return false;
         }
-        if (result.block.instruction_count != 0 && !result.block.terminated &&
-            !block_is_reachable(
-                context, function, block_id)) {
-            let saved_block: usize = context->current_block;
-            context->current_block = block_id;
+        let block_has_instructions: bool = result.block.instruction_count != 0;
+        let block_is_unterminated: bool = !result.block.terminated;
+        if (block_has_instructions && block_is_unterminated) {
+            let block_is_unreachable: bool = !block_is_reachable(context, function, block_id);
+            if (!block_is_unreachable) {
+                continue;
+            }
+            let saved_block: usize = context->lowering.current_block();
+            if (!set_current_block(context, block_id)) {
+                return false;
+            }
             var instruction: ir::Instruction = instruction(ir::Opcode.unreachable, node);
             emit_void(context, instruction);
-            context->current_block = saved_block;
+            if (context->error == runtime::Error.none) {
+                set_current_block(context, saved_block);
+            }
         }
-        index += 1;
     }
     return context->error == runtime::Error.none;
 }
 
 fn enter_scope(context: *context::Context) -> usize {
-    let local_start: usize = context->local_count;
-    if (context->scope_depth >= context::Limit.maximum_scope_depth as usize) {
-        context::add_diagnostic(
-            context, context::DiagnosticKind.resource_limit, context->current_unit, context::empty_span(),
-                context::no_id(), context::empty_span(), context->scope_depth);
-        return context::no_id();
+    let local_start: usize = context->lowering.enter_scope(context::Limit.maximum_scope_depth as usize);
+    if (local_start == context::no_id()) {
+        let lowering_error: runtime::Error = context->lowering.error();
+        if (lowering_error != runtime::Error.none) {
+            context->error = context::release_error(context->error, lowering_error);
+        } else {
+            context::add_diagnostic(
+                context, context::DiagnosticKind.resource_limit, context->lowering.current_unit(),
+                    context::empty_span(), context::no_id(), context::empty_span(), context->lowering.scope_depth());
+        }
     }
-    context->scope_depth += 1;
     return local_start;
 }
 
 fn leave_scope(context: *context::Context, local_start: usize) -> bool {
-    if (context->scope_depth == 0 || local_start == context::no_id() || local_start > context->local_count) {
-        context->error = runtime::Error.invalid_argument;
-        return false;
-    }
-    let truncated: bytes::BufferResult = bytes::truncate(context->locals, local_start * sizeof(context::Local));
-    context->locals = truncated.buffer;
-    context->error = truncated.error;
-    context->local_count = local_start;
-    context->scope_depth -= 1;
+    context->error = context::release_error(context->error, context->lowering.leave_scope(local_start));
     return context->error == runtime::Error.none;
 }

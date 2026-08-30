@@ -4,7 +4,8 @@
 > 现状分析和技术债发现。与 `AGENTS.md`、语言规范、架构契约或当前源码冲突时，
 > 以后者为准；文中的行号和计数不会随重构自动更新。
 
-`compiler/src/middleend/` 是全仓最大的子系统，25,996 行，占 `compiler/` 的约 60%。
+`compiler/src/middleend/` 是全仓最大的子系统。下表保留绑定快照时的规模；当前工作树规模见
+“当前工作树更新”小节。
 
 | 子树 | 行数 | 说明 |
 |---|---:|---|
@@ -19,7 +20,30 @@
 - `luna.bootstrap.middleend.semantic.types`（`compiler/src/middleend/semantic/types.la`）——
   **语义层的名字解析与布局驱动**，是类型表的使用者
 
-行号截至提交 `39a2d87`。
+行号截至提交 `39a2d87`；下文未特别标注的行号和计数属于该历史快照。
+
+## 当前工作树更新：LoweringState 批次
+
+当前工作树的中端实现共 27,649 行，其中 `semantic/` 为 24,142 行，
+`ir/` 为 1,879 行，类型表为 1,408 行，`sema.la` 为 220 行。本批在同一
+`luna.bootstrap.middleend.semantic.context` 模块下新增
+`compiler/src/middleend/semantic/context/lowering.la`（721 行）；它不是
+`context.lowering` 子模块。当前 Context 接口为 580 行，Context 主实现、
+builder 和 lowering 实现分别为 613、478 和 721 行。
+
+`LoweringState` 是 move-only class，私有拥有函数级游标、typed vector 局部与
+临时值、label/goto 快照、loop label、控制目标及 sticky error。它以 const
+projection 提供只读数据，以 deep validity 检查函数归属、快照覆盖、scope 和
+control watermark；goto 快照明确区分已发布范围与可丢弃的未发布尾部。
+Context 的 legacy raw storage registry 从 13 组收缩为 6 组；IR Builder、
+const/type/call caches 仍不属于 LoweringState。`context.builder` 尚未删除，
+只增加了窄的 `set_current_block` 首错桥接；旧 `clear_label_state` API 已删除。
+
+`tests/relocation_data/ir_codegen.la` 当前为 1,004 行，新增 LoweringState
+生命周期、真实两-local 快照、published/unpublished goto 尾部丢弃、move、
+sticky error 和 watermark 拒绝的直接契约。独立 caw 验证已记录在
+`docs/sema.md`；本文件后面的旧 Context 分析仍保留作为重构前对照，不应再
+当作当前字段布局或行号依据。
 
 ---
 

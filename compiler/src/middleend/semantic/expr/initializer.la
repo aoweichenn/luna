@@ -106,31 +106,31 @@ fn validate_initializer_fields(
     var initializer_count: usize = 0;
     var valid: bool = true;
     while (child != none && context->error == runtime::Error.none) {
-        let initializer: syntax::SyntaxNode = context::node(context, context->current_unit, child);
+        let initializer: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), child);
         if (initializer.kind == syntax::SyntaxKind.initializer_element) {
             // 位置项和带下标项只适用于数组初始化器。
             context::add_diagnostic(
-                context, context::DiagnosticKind.invalid_initializer, context->current_unit, initializer.span, none,
-                context::empty_span(), expected_type);
+                context, context::DiagnosticKind.invalid_initializer, context->lowering.current_unit(),
+                    initializer.span, none, context::empty_span(), expected_type);
             valid = false;
             child = initializer.next_sibling;
             continue;
         }
         let lookup: types::FieldLookup =
-            types::lookup_field(context, expected_type, context->current_unit, initializer.token_index);
+            types::lookup_field(context, expected_type, context->lowering.current_unit(), initializer.token_index);
         if (lookup.status == types::FieldStatus.ambiguous) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.ambiguous_field, context->current_unit, initializer.span, none,
-                context::empty_span(), expected_type);
+                context, context::DiagnosticKind.ambiguous_field, context->lowering.current_unit(), initializer.span,
+                    none, context::empty_span(), expected_type);
             valid = false;
         } else if (lookup.status != types::FieldStatus.found) {
             let segment_id: usize =
                 builder::lookup_bitfield_segment(
-                    context, expected_type, context->current_unit, initializer.token_index);
+                    context, expected_type, context->lowering.current_unit(), initializer.token_index);
             // 位段段组尚不能直接初始化；命中段组应报告位段错误，而不是未知字段。
             context::add_diagnostic(
                 context, segment_id != none ? context::DiagnosticKind.invalid_bitfield :
-                    context::DiagnosticKind.unknown_field, context->current_unit, initializer.span, none,
+                    context::DiagnosticKind.unknown_field, context->lowering.current_unit(), initializer.span, none,
                 context::empty_span(), segment_id != none ? segment_id : expected_type);
             valid = false;
         } else {
@@ -142,7 +142,7 @@ fn validate_initializer_fields(
             context->error = inserted.error;
             if (!inserted.inserted && inserted.error == runtime::Error.none) {
                 context::add_diagnostic(
-                    context, context::DiagnosticKind.duplicate_initializer_field, context->current_unit,
+                    context, context::DiagnosticKind.duplicate_initializer_field, context->lowering.current_unit(),
                     initializer.span, none, context::empty_span(), field_id);
                 valid = false;
             } else if (inserted.inserted) {
@@ -159,7 +159,7 @@ fn validate_initializer_fields(
                 context, fields[field_id].type_id);
             if (requires_value && !seen_fields.contains(field_id)) {
                 context::add_diagnostic(
-                    context, context::DiagnosticKind.invalid_initializer, context->current_unit, node.span,
+                    context, context::DiagnosticKind.invalid_initializer, context->lowering.current_unit(), node.span,
                     none, context::empty_span(), field_id);
                 valid = false;
                 break;
@@ -186,12 +186,12 @@ fn lower_array_initializer(
     var valid: bool = true;
     var child: usize = node.first_child;
     while (child != none && context->error == runtime::Error.none) {
-        let element: syntax::SyntaxNode = context::node(context, context->current_unit, child);
+        let element: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), child);
         if (element.kind != syntax::SyntaxKind.initializer_element) {
             // `field =`具名项只适用于记录初始化器。
             context::add_diagnostic(
-                context, context::DiagnosticKind.invalid_initializer, context->current_unit, element.span, none,
-                context::empty_span(), expected_type);
+                context, context::DiagnosticKind.invalid_initializer, context->lowering.current_unit(), element.span,
+                    none, context::empty_span(), expected_type);
             valid = false;
             child = element.next_sibling;
             continue;
@@ -203,24 +203,24 @@ fn lower_array_initializer(
                 context->error = runtime::Error.invalid_argument;
                 break;
             }
-            let index: const_model::Value = const_engine::expression(context, context->current_unit,
+            let index: const_model::Value = const_engine::expression(context, context->lowering.current_unit(),
                 element.first_child);
             let index_shape_is_invalid: bool = !index.is_constant || index.is_boolean;
             if (index.error || index_shape_is_invalid) {
                 context::add_diagnostic(
-                    context, context::DiagnosticKind.invalid_index, context->current_unit,
-                    context::node(context, context->current_unit, element.first_child).span,
+                    context, context::DiagnosticKind.invalid_index, context->lowering.current_unit(),
+                    context::node(context, context->lowering.current_unit(), element.first_child).span,
                     none, context::empty_span(), expected_type);
                 valid = false;
                 child = element.next_sibling;
                 continue;
             }
             position = index.value;
-            value_child = context::node(context, context->current_unit, element.first_child).next_sibling;
+            value_child = context::node(context, context->lowering.current_unit(), element.first_child).next_sibling;
         }
         if (position >= element_count as u64) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.invalid_index, context->current_unit, element.span, none,
+                context, context::DiagnosticKind.invalid_index, context->lowering.current_unit(), element.span, none,
                 context::empty_span(), expected_type);
             valid = false;
             child = element.next_sibling;
@@ -234,8 +234,8 @@ fn lower_array_initializer(
         }
         if (!inserted.inserted) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.duplicate_initializer_field, context->current_unit, element.span, none,
-                context::empty_span(), expected_type);
+                context, context::DiagnosticKind.duplicate_initializer_field, context->lowering.current_unit(),
+                    element.span, none, context::empty_span(), expected_type);
             valid = false;
             child = element.next_sibling;
             continue;
@@ -254,7 +254,7 @@ fn lower_array_initializer(
         let value: context::Expression = api::invoke_into(lowerer, context, value_child, element_type, element_address);
         if (value.type_id != element_type) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.type_mismatch, context->current_unit, element.span, none,
+                context, context::DiagnosticKind.type_mismatch, context->lowering.current_unit(), element.span, none,
                 context::empty_span(), element_type);
             valid = false;
         } else if (value.address_id != element_address) {
@@ -266,7 +266,7 @@ fn lower_array_initializer(
     let initialized_count: usize = seen_indices.size();
     if (requires_every_element && initialized_count != element_count) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_initializer, context->current_unit, node.span,
+            context, context::DiagnosticKind.invalid_initializer, context->lowering.current_unit(), node.span,
             none, context::empty_span(), expected_type);
         valid = false;
     }
@@ -277,13 +277,13 @@ fn lower_initializer_at(
     context: *context::Context, node_id: usize, expected_type: usize,
     destination: usize, lowerer: api::IntoLowerer) -> context::Expression {
     let none: usize = context::no_id();
-    let node: syntax::SyntaxNode = context::node(context, context->current_unit, node_id);
+    let node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node_id);
     let type_record: type_info::Record = context::type_record(context, expected_type);
     let nontrivial_union: bool = type_record.kind == type_info::Kind.record_union &&
         functions::type_requires_explicit_initialization(context, expected_type);
     if (nontrivial_union) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_initializer, context->current_unit, node.span,
+            context, context::DiagnosticKind.invalid_initializer, context->lowering.current_unit(), node.span,
             none, context::empty_span(), expected_type);
         return base::invalid_expression();
     }
@@ -292,20 +292,20 @@ fn lower_initializer_at(
         context, expected_type);
     if (requires_aggregate && node.kind != syntax::SyntaxKind.aggregate_initializer) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_initializer, context->current_unit, node.span,
+            context, context::DiagnosticKind.invalid_initializer, context->lowering.current_unit(), node.span,
             none, context::empty_span(), expected_type);
         return base::invalid_expression();
     }
     if (type_record.kind == type_info::Kind.class_type) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_class_initialization, context->current_unit, node.span, none,
-            context::empty_span(), expected_type);
+            context, context::DiagnosticKind.invalid_class_initialization, context->lowering.current_unit(), node.span,
+                none, context::empty_span(), expected_type);
         return base::invalid_expression();
     }
     let aggregate_target_is_valid: bool = type_accepts_aggregate_initializer(type_record.kind);
     if (node.kind == syntax::SyntaxKind.aggregate_initializer && !aggregate_target_is_valid) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_initializer, context->current_unit, node.span, none,
+            context, context::DiagnosticKind.invalid_initializer, context->lowering.current_unit(), node.span, none,
             context::empty_span(), expected_type);
         return base::invalid_expression();
     }
@@ -322,7 +322,7 @@ fn lower_initializer_at(
             }
         }
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_initializer, context->current_unit, node.span, none,
+            context, context::DiagnosticKind.invalid_initializer, context->lowering.current_unit(), node.span, none,
             context::empty_span(), expected_type);
         return base::invalid_expression();
     }
@@ -349,31 +349,32 @@ fn lower_initializer_at(
         var child: usize = node.first_child;
         var initializer_count: usize = 0;
         while (child != none && context->error == runtime::Error.none) {
-            let initializer: syntax::SyntaxNode = context::node(context, context->current_unit, child);
+            let initializer: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), child);
             let lookup: types::FieldLookup =
-                types::lookup_field(context, expected_type, context->current_unit, initializer.token_index);
+                types::lookup_field(context, expected_type, context->lowering.current_unit(), initializer.token_index);
             if (lookup.status == types::FieldStatus.ambiguous) {
                 context::add_diagnostic(
-                    context, context::DiagnosticKind.ambiguous_field, context->current_unit, initializer.span, none,
-                    context::empty_span(), expected_type);
+                    context, context::DiagnosticKind.ambiguous_field, context->lowering.current_unit(),
+                        initializer.span, none, context::empty_span(), expected_type);
             } else if (lookup.status != types::FieldStatus.found) {
                 context::add_diagnostic(
-                    context, context::DiagnosticKind.unknown_field, context->current_unit, initializer.span, none,
-                    context::empty_span(), expected_type);
+                    context, context::DiagnosticKind.unknown_field, context->lowering.current_unit(), initializer.span,
+                        none, context::empty_span(), expected_type);
             } else {
                 let field_id: usize = lookup.field_id;
                 let union_already_initialized: bool = type_record.kind == type_info::Kind.record_union &&
                     initializer_count != 0;
                 if (union_already_initialized) {
                     context::add_diagnostic(
-                        context, context::DiagnosticKind.duplicate_initializer_field, context->current_unit,
+                        context, context::DiagnosticKind.duplicate_initializer_field, context->lowering.current_unit(),
                         initializer.span, none, context::empty_span(), field_id);
                 } else if (initializer.child_count == 1) {
                     let inserted: InitializerInsertResult = seen_fields.insert(field_id);
                     context->error = inserted.error;
                     if (!inserted.inserted && inserted.error == runtime::Error.none) {
                         context::add_diagnostic(
-                            context, context::DiagnosticKind.duplicate_initializer_field, context->current_unit,
+                            context, context::DiagnosticKind.duplicate_initializer_field,
+                                context->lowering.current_unit(),
                             initializer.span, none, context::empty_span(), field_id);
                     } else if (inserted.inserted) {
                         let field: type_info::Field = fields[field_id];
@@ -388,7 +389,7 @@ fn lower_initializer_at(
                             lowerer, context, initializer.first_child, field.type_id, field_address);
                         if (value.type_id != field.type_id) {
                             context::add_diagnostic(
-                                context, context::DiagnosticKind.type_mismatch, context->current_unit,
+                                context, context::DiagnosticKind.type_mismatch, context->lowering.current_unit(),
                                 initializer.span, none, context::empty_span(), field.type_id);
                         } else if (value.address_id != field_address) {
                             builder::store_to_address(context, initializer, field_address, field.type_id, value);

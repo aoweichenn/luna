@@ -82,7 +82,7 @@ fn integer_literal(
         return incompatible_result();
     }
     var magnitude: u64 = 0;
-    if (!context::parse_unsigned(context, context->current_unit, node.token_index, &magnitude)) {
+    if (!context::parse_unsigned(context, context->lowering.current_unit(), node.token_index, &magnitude)) {
         return invalid_result();
     }
     if (!context::integer_fits_type(kind, magnitude, negative)) {
@@ -102,7 +102,7 @@ fn character_literal(context: *context::Context, node: syntax::SyntaxNode, expec
         return incompatible_result();
     }
     var value: u64 = 0;
-    if (!context::decode_character(context, context->current_unit, node.token_index, &value)) {
+    if (!context::decode_character(context, context->lowering.current_unit(), node.token_index, &value)) {
         return invalid_result();
     }
     if (!context::integer_fits_type(kind, value, false)) {
@@ -133,7 +133,7 @@ fn null_literal(context: *context::Context, expected_type: usize) -> Result {
 }
 
 fn string_literal(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
-    let token: lexer::Token = context::token(context, context->current_unit, node.token_index);
+    let token: lexer::Token = context::token(context, context->lowering.current_unit(), node.token_index);
     var element_type: usize = type_info::BuiltinType.unsigned_8 as usize;
     if (token.kind == lexer::TokenKind.string_u16) {
         element_type = type_info::BuiltinType.unsigned_16 as usize;
@@ -150,15 +150,14 @@ fn string_literal(context: *context::Context, node: syntax::SyntaxNode, expected
 
 fn constant_symbol(context: *context::Context, node: syntax::SyntaxNode) -> usize {
     return context->symbols.lookup_qualified_symbol(
-        context, context->current_unit, node, context::SymbolKind.constant, false).value;
+        context, context->lowering.current_unit(), node, context::SymbolKind.constant, false).value;
 }
 
 fn probe_name(context: *context::Context, node: syntax::SyntaxNode, expected_type: usize) -> Result {
     if (node.child_count == 0) {
-        let local_id: usize = builder::find_local(context, context->current_unit, node.token_index);
+        let local_id: usize = builder::find_local(context, context->lowering.current_unit(), node.token_index);
         if (local_id != context::no_id()) {
-            let locals: *const context::Local = context->locals.data as
-                    *const context::Local;
+            let locals: *const context::Local = context->lowering.local_data();
             let local: context::Local = locals[local_id];
             let local_type: type_info::Record = context::type_record(context, local.type_id);
             let result_type: usize = local_type.kind == type_info::Kind.reference ?
@@ -180,7 +179,8 @@ fn probe_name(context: *context::Context, node: syntax::SyntaxNode, expected_typ
                 *const context::Symbol;
         return type_result(expected_type, symbols[symbol_id].type_id);
     }
-    let binding_id: usize = functions::lookup_qualified_callable_binding(context, context->current_unit, node, false);
+    let binding_id: usize = functions::lookup_qualified_callable_binding(context, context->lowering.current_unit(),
+        node, false);
     if (binding_id != context::no_id()) {
         return function_value_expression(context, binding_id, node, expected_type);
     }
@@ -188,12 +188,12 @@ fn probe_name(context: *context::Context, node: syntax::SyntaxNode, expected_typ
 }
 
 fn probe_this(context: *context::Context, expected_type: usize) -> Result {
-    if (context->current_function >= context->callables.function_count()) {
+    if (context->lowering.current_function() >= context->callables.function_count()) {
         return invalid_result();
     }
     let functions_data: *const domain::Function = context->callables.function_data() as
             *const domain::Function;
-    let function: domain::Function = functions_data[context->current_function];
+    let function: domain::Function = functions_data[context->lowering.current_function()];
     if (!domain::has_receiver(function.identity)) {
         return invalid_result();
     }
@@ -228,8 +228,8 @@ fn probe_initializer(context: *context::Context, node: syntax::SyntaxNode, expec
     }
     var array_cursor: usize = 0;
     for (var child: usize = node.first_child; child != context::no_id();
-        child = context::node(context, context->current_unit, child).next_sibling) {
-        let initializer: syntax::SyntaxNode = context::node(context, context->current_unit, child);
+        child = context::node(context, context->lowering.current_unit(), child).next_sibling) {
+        let initializer: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), child);
         var value_node: usize = initializer.first_child;
         var value_type: usize = context::no_id();
         if (record.kind == type_info::Kind.array) {
@@ -241,7 +241,7 @@ fn probe_initializer(context: *context::Context, node: syntax::SyntaxNode, expec
                     return invalid_result();
                 }
                 let index: const_model::Value = const_engine::expression(
-                    context, context->current_unit, initializer.first_child);
+                    context, context->lowering.current_unit(), initializer.first_child);
                 let index_is_valid: bool = index.is_constant && !index.error;
                 if (!index_is_valid || index.is_boolean) {
                     return invalid_result();
@@ -250,21 +250,21 @@ fn probe_initializer(context: *context::Context, node: syntax::SyntaxNode, expec
                     return incompatible_result();
                 }
                 array_cursor = index.value as usize;
-                value_node = context::node(context, context->current_unit, value_node).next_sibling;
+                value_node = context::node(context, context->lowering.current_unit(), value_node).next_sibling;
             }
             if (array_cursor >= record.element_count) {
                 return incompatible_result();
             }
             array_cursor += 1;
             value_type = record.element_type;
-            let value: syntax::SyntaxNode = context::node(context, context->current_unit, value_node);
+            let value: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), value_node);
             let nested_array: bool = context::type_record(context, value_type).kind == type_info::Kind.array;
             if (nested_array && value.kind == syntax::SyntaxKind.aggregate_initializer) {
                 return incompatible_result();
             }
         } else {
             let field: types::FieldLookup =
-                types::lookup_field(context, expected_type, context->current_unit, initializer.token_index);
+                types::lookup_field(context, expected_type, context->lowering.current_unit(), initializer.token_index);
             if (field.status != types::FieldStatus.found || initializer.child_count != 1) {
                 return incompatible_result();
             }
@@ -284,13 +284,13 @@ fn probe_enum_member(context: *context::Context, node: syntax::SyntaxNode, expec
     if (node.child_count != 2) {
         return incompatible_result();
     }
-    let owner: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-    let member: syntax::SyntaxNode = context::node(context, context->current_unit, owner.next_sibling);
+    let owner: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
+    let member: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), owner.next_sibling);
     if (owner.kind != syntax::SyntaxKind.name_expression || member.kind != syntax::SyntaxKind.name_expression) {
         return incompatible_result();
     }
     let symbol_id: usize = context->symbols.lookup_qualified_symbol(
-        context, context->current_unit, owner, context::SymbolKind.named_type, false).value;
+        context, context->lowering.current_unit(), owner, context::SymbolKind.named_type, false).value;
     if (symbol_id == context::no_id()) {
         return incompatible_result();
     }
@@ -304,7 +304,8 @@ fn probe_enum_member(context: *context::Context, node: syntax::SyntaxNode, expec
     if (context::type_record(context, type_id).kind != type_info::Kind.enumeration) {
         return incompatible_result();
     }
-    let member_id: usize = types::find_enum_member(context, type_id, context->current_unit, member.token_index);
+    let member_id: usize = types::find_enum_member(context, type_id, context->lowering.current_unit(),
+        member.token_index);
     return member_id == context::no_id() ? incompatible_result() : type_result(expected_type, type_id);
 }
 
@@ -327,8 +328,9 @@ fn probe_member(context: *context::Context, node: syntax::SyntaxNode, expected_t
     if (node.child_count != 2) {
         return invalid_result();
     }
-    let base_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-    let member_node: syntax::SyntaxNode = context::node(context, context->current_unit, base_node.next_sibling);
+    let base_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
+    let member_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(),
+        base_node.next_sibling);
     let base: Result = expression(context, node.first_child, context::no_id());
     if (base.status != Status.compatible) {
         return failure_result(base);
@@ -336,7 +338,7 @@ fn probe_member(context: *context::Context, node: syntax::SyntaxNode, expected_t
     if (!type_is_valid(context, base.type_id)) {
         return invalid_result();
     }
-    let operation: lexer::TokenKind = context::token(context, context->current_unit, node.token_index).kind;
+    let operation: lexer::TokenKind = context::token(context, context->lowering.current_unit(), node.token_index).kind;
     var owner_type: usize = base.type_id;
     var member_category: domain::ValueCategory = domain::project(base.category);
     let base_record: type_info::Record = context::type_record(context, base.type_id);
@@ -353,11 +355,11 @@ fn probe_member(context: *context::Context, node: syntax::SyntaxNode, expected_t
     if (!type_info::is_record(owner.kind)) {
         return incompatible_result();
     }
-    if (!types::opaque_value_is_available(context, owner_type, context->current_unit)) {
+    if (!types::opaque_value_is_available(context, owner_type, context->lowering.current_unit())) {
         return incompatible_result();
     }
     let lookup: types::FieldLookup =
-        types::lookup_field(context, owner_type, context->current_unit, member_node.token_index);
+        types::lookup_field(context, owner_type, context->lowering.current_unit(), member_node.token_index);
     if (lookup.status != types::FieldStatus.found) {
         return incompatible_result();
     }
@@ -375,7 +377,7 @@ fn probe_index(context: *context::Context, node: syntax::SyntaxNode, expected_ty
     if (node.child_count != 2) {
         return invalid_result();
     }
-    let base_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let base_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
     let base: Result = expression(context, node.first_child, context::no_id());
     let index: Result = expression(context, base_node.next_sibling, type_info::BuiltinType.unsigned_size as usize);
     if (base.status != Status.compatible || index.status != Status.compatible) {
@@ -386,7 +388,7 @@ fn probe_index(context: *context::Context, node: syntax::SyntaxNode, expected_ty
     if (!indexable) {
         return incompatible_result();
     }
-    if (!types::opaque_value_is_available(context, record.element_type, context->current_unit)) {
+    if (!types::opaque_value_is_available(context, record.element_type, context->lowering.current_unit())) {
         return incompatible_result();
     }
     var indexed: Result = type_result(expected_type, record.element_type);
@@ -399,7 +401,7 @@ fn probe_index(context: *context::Context, node: syntax::SyntaxNode, expected_ty
 }
 
 fn expression(context: *context::Context, node_id: usize, expected_type: usize) -> Result {
-    let node: syntax::SyntaxNode = context::node(context, context->current_unit, node_id);
+    let node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node_id);
     switch (node.kind) {
     case syntax::SyntaxKind.integer_expression {
         return integer_literal(context, node, expected_type, false);

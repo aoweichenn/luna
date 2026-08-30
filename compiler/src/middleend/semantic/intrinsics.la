@@ -356,7 +356,7 @@ fn intrinsic_float_guarded(
         context, node, builder::address_of_slot(context, node, result_slot, type_id, false, false),
         type_id, intrinsic_float_rvalue(type_id, x));
     builder::emit_branch(context, node, in_range, compute_block, merge_block);
-    context->current_block = compute_block;
+    builder::set_current_block(context, compute_block);
     var result: usize = none;
     if (lowering == IntrinsicLowering.float_round) {
         let magic: usize = intrinsic_float_constant(context, node, type_id, info.magic);
@@ -385,7 +385,7 @@ fn intrinsic_float_guarded(
         context, node, builder::address_of_slot(context, node, result_slot, type_id, false, false),
         type_id, intrinsic_float_rvalue(type_id, result));
     builder::emit_jump(context, node, merge_block);
-    context->current_block = merge_block;
+    builder::set_current_block(context, merge_block);
     let source: context::Expression = {
         type_id = type_id, value_id = none,
         address_id = builder::address_of_slot(context, node, result_slot, type_id, false, false), constant_value = 0,
@@ -414,7 +414,7 @@ fn lower_float_intrinsic(
     if (!float_operand || (entry.operand_class == IntrinsicOperandClass.float_scalar_binary &&
             second.type_id != operand.type_id)) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span, none,
+            context, context::DiagnosticKind.type_mismatch, context->lowering.current_unit(), node.span, none,
             context::empty_span(), operand.type_id);
         return intrinsic_invalid_expression();
     }
@@ -486,7 +486,7 @@ fn lower_overflow_intrinsic(
         destination_record.element_type != operand.type_id ||
         (destination_record.flags & (type_info::Flag.read_only as usize)) != 0) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span, none,
+            context, context::DiagnosticKind.type_mismatch, context->lowering.current_unit(), node.span, none,
             context::empty_span(), operand.type_id);
         return intrinsic_invalid_expression();
     }
@@ -551,10 +551,10 @@ fn intrinsic_resolve(context: *context::Context, node: syntax::SyntaxNode) -> us
     for (var index: usize = 0; index < IntrinsicLimit.entries as usize; index += 1) {
         let entry: IntrinsicEntry = intrinsic_entry(index);
         if (context::token_equals_bytes(
-                context, context->current_unit, node.token_index, entry.name, entry.name_length)) {
+                context, context->lowering.current_unit(), node.token_index, entry.name, entry.name_length)) {
             if (node.child_count != entry.arity) {
                 context::add_diagnostic(
-                    context, context::DiagnosticKind.argument_count, context->current_unit, node.span, none,
+                    context, context::DiagnosticKind.argument_count, context->lowering.current_unit(), node.span, none,
                     context::empty_span(), entry.arity);
                 return none;
             }
@@ -562,7 +562,7 @@ fn intrinsic_resolve(context: *context::Context, node: syntax::SyntaxNode) -> us
         }
     }
     context::add_diagnostic(
-        context, context::DiagnosticKind.unknown_intrinsic, context->current_unit, node.span, none,
+        context, context::DiagnosticKind.unknown_intrinsic, context->lowering.current_unit(), node.span, none,
         context::empty_span(), 0);
     return none;
 }
@@ -576,7 +576,7 @@ fn lower_source_intrinsic(
         return builder::emit_integer_constant(
             context, node, type_info::BuiltinType.unsigned_size as usize, node.span.line as u64);
     }
-    let path: string_views::string_view = context::unit_path(context, context->current_unit);
+    let path: string_views::string_view = context::unit_path(context, context->lowering.current_unit());
     var bytes: bytes::Buffer = bytes::empty();
     var step: bytes::BufferResult = bytes::append(bytes, path.data, path.length);
     bytes = step.buffer;
@@ -640,9 +640,10 @@ fn resolve_rtti_types(
     if (!source_has_rtti || node.child_count != entry.arity) {
         return invalid_rtti_types();
     }
-    let source_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-    let target_node: syntax::SyntaxNode = context::node(context, context->current_unit, source_node.next_sibling);
-    let target_class: usize = types::resolve_class_expression(context, context->current_unit, target_node);
+    let source_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
+    let target_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(),
+        source_node.next_sibling);
+    let target_class: usize = types::resolve_class_expression(context, context->lowering.current_unit(), target_node);
     if (target_class == context::no_id() || !classes::rtti_is_enabled(context, target_class)) {
         return invalid_rtti_types();
     }
@@ -774,7 +775,7 @@ fn lower_rtti_intrinsic(
     let resolved: RttiTypes = resolve_rtti_types(context, node, entry, source);
     if (!resolved.valid) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_rtti, context->current_unit, node.span,
+            context, context::DiagnosticKind.invalid_rtti, context->lowering.current_unit(), node.span,
             context::no_id(), context::empty_span(), source.type_id);
         return intrinsic_invalid_expression();
     }
@@ -803,41 +804,41 @@ fn lower_rtti_intrinsic(
         context, node, lexer::TokenKind.bang_equal, source.value_id, null_source);
     builder::emit_branch(context, node, source_exists, setup_block, failure_block);
 
-    context->current_block = setup_block;
+    builder::set_current_block(context, setup_block);
     let descriptor: usize = descriptor_from_object(
         context, node, source, resolved.source_class, byte_pointer, pointer_storage);
     store_rtti_value(context, node, state_address, byte_pointer, descriptor);
     builder::emit_jump(context, node, compare_block);
 
-    context->current_block = compare_block;
+    builder::set_current_block(context, compare_block);
     let current_descriptor: usize = intrinsic_load(context, node, state_address, byte_pointer);
     let target_descriptor: usize = descriptor_global_address(context, node, resolved.target_class, byte_pointer);
     let matches: usize = intrinsic_compare(
         context, node, lexer::TokenKind.equal_equal, current_descriptor, target_descriptor);
     builder::emit_branch(context, node, matches, success_block, advance_block);
 
-    context->current_block = advance_block;
+    builder::set_current_block(context, advance_block);
     let base_descriptor: usize = descriptor_base(context, node, current_descriptor, byte_pointer, pointer_storage);
     let null_descriptor: usize = builder::emit_null_constant(context, node, byte_pointer).value_id;
     let has_base: usize = intrinsic_compare(
         context, node, lexer::TokenKind.bang_equal, base_descriptor, null_descriptor);
     builder::emit_branch(context, node, has_base, continue_block, failure_block);
 
-    context->current_block = continue_block;
+    builder::set_current_block(context, continue_block);
     store_rtti_value(context, node, state_address, byte_pointer, base_descriptor);
     builder::emit_jump(context, node, compare_block);
 
-    context->current_block = success_block;
+    builder::set_current_block(context, success_block);
     let success_value: usize = rtti_success_value(context, node, entry, source, resolved.result_type);
     store_rtti_value(context, node, result_address, resolved.result_type, success_value);
     builder::emit_jump(context, node, merge_block);
 
-    context->current_block = failure_block;
+    builder::set_current_block(context, failure_block);
     let failure_value: usize = rtti_failure_value(context, node, entry, resolved.result_type);
     store_rtti_value(context, node, result_address, resolved.result_type, failure_value);
     builder::emit_jump(context, node, merge_block);
 
-    context->current_block = merge_block;
+    builder::set_current_block(context, merge_block);
     let result: usize = intrinsic_load(context, node, result_address, resolved.result_type);
     return intrinsic_rvalue(resolved.result_type, result);
 }
@@ -885,7 +886,7 @@ fn lower_intrinsic(
         (entry.operand_class == IntrinsicOperandClass.integer_scalar_rotated &&
             count.type_id != type_info::BuiltinType.unsigned_size as usize)) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span, none,
+            context, context::DiagnosticKind.type_mismatch, context->lowering.current_unit(), node.span, none,
             context::empty_span(), operand.type_id);
         return intrinsic_invalid_expression();
     }

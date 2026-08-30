@@ -30,17 +30,16 @@ fn address_chain_gcd(left: usize, right: usize) -> usize {
 // strides relative to the innermost base, returning the chain's type.
 fn address_chain_type(context: *context::Context, node_id: usize, offset: *usize, stride: *usize) -> usize {
     let none: usize = context::no_id();
-    let node: syntax::SyntaxNode = context::node(context, context->current_unit, node_id);
+    let node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node_id);
     if (node.kind == syntax::SyntaxKind.parenthesized_expression && node.child_count == 1) {
         return address_chain_type(context, node.first_child, offset, stride);
     }
     if (node.kind == syntax::SyntaxKind.name_expression) {
-        let local_id: usize = builder::find_local(context, context->current_unit, node.token_index);
+        let local_id: usize = builder::find_local(context, context->lowering.current_unit(), node.token_index);
         if (local_id == none) {
             return none;
         }
-        let locals: *const context::Local = context->locals.data as
-                *const context::Local;
+        let locals: *const context::Local = context->lowering.local_data();
         *offset = 0;
         *stride = 0;
         return locals[local_id].type_id;
@@ -53,7 +52,7 @@ fn address_chain_type(context: *context::Context, node_id: usize, offset: *usize
         return none;
     }
     let base_record: type_info::Record = context::type_record(context, base_type);
-    let operation: lexer::TokenKind = context::token(context, context->current_unit, node.token_index).kind;
+    let operation: lexer::TokenKind = context::token(context, context->lowering.current_unit(), node.token_index).kind;
     if (node.kind == syntax::SyntaxKind.unary_expression && node.child_count == 1 &&
         operation == lexer::TokenKind.star) {
         if (base_record.kind != type_info::Kind.pointer) {
@@ -79,11 +78,11 @@ fn address_chain_type(context: *context::Context, node_id: usize, offset: *usize
         if (owner_record.kind != type_info::Kind.structure && owner_record.kind != type_info::Kind.record_union) {
             return none;
         }
-        let base_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+        let base_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
         let lookup: types::FieldLookup =
             types::lookup_field(
-                context, owner_type, context->current_unit,
-                context::node(context, context->current_unit, base_node.next_sibling).token_index);
+                context, owner_type, context->lowering.current_unit(),
+                context::node(context, context->lowering.current_unit(), base_node.next_sibling).token_index);
         if (lookup.status != types::FieldStatus.found) {
             return none;
         }
@@ -122,8 +121,8 @@ fn lower_unary(context: *context::Context, node_id: usize, node: syntax::SyntaxN
     if (node.child_count != 1) {
         return base::invalid_expression();
     }
-    let operation: lexer::TokenKind = context::token(context, context->current_unit, node.token_index).kind;
-    let operand_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let operation: lexer::TokenKind = context::token(context, context->lowering.current_unit(), node.token_index).kind;
+    let operand_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
     let expected_record: type_info::Record =
         context::type_record(context, numeric::type_for_integer_literal(context, expected_type));
     if (operation == lexer::TokenKind.minus && operand_node.kind == syntax::SyntaxKind.integer_expression &&
@@ -143,10 +142,11 @@ fn lower_unary(context: *context::Context, node_id: usize, node: syntax::SyntaxN
         var binding_id: usize = context::no_id();
         if (operand_node.child_count != 0) {
             binding_id = functions::lookup_qualified_callable_binding(
-                context, context->current_unit, operand_node, false);
+                context, context->lowering.current_unit(), operand_node, false);
         } else if (builder::find_local(
-                context, context->current_unit, operand_node.token_index) == context::no_id()) {
-            binding_id = functions::lookup_callable_binding(context, context->current_unit, operand_node.token_index);
+                context, context->lowering.current_unit(), operand_node.token_index) == context::no_id()) {
+            binding_id = functions::lookup_callable_binding(context, context->lowering.current_unit(),
+                operand_node.token_index);
         }
         if (binding_id != context::no_id()) {
             return access::function_binding_value(context, node, binding_id, expected_type);
@@ -160,21 +160,21 @@ fn lower_unary(context: *context::Context, node_id: usize, node: syntax::SyntaxN
     if (operation == lexer::TokenKind.ampersand) {
         if (operand.bitfield_segment != context::no_id()) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.invalid_bitfield, context->current_unit, node.span, context::no_id(),
-                context::empty_span(), operand.bitfield_segment);
+                context, context::DiagnosticKind.invalid_bitfield, context->lowering.current_unit(), node.span,
+                    context::no_id(), context::empty_span(), operand.bitfield_segment);
             return base::invalid_expression();
         }
         if (!domain::is_addressable(operand.category)) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.invalid_lvalue, context->current_unit, node.span, context::no_id(),
-                context::empty_span(), operand.type_id);
+                context, context::DiagnosticKind.invalid_lvalue, context->lowering.current_unit(), node.span,
+                    context::no_id(), context::empty_span(), operand.type_id);
             return base::invalid_expression();
         }
         if (operand_record.alignment_bytes > 1 &&
             !address_is_aligned(
                 context, node.first_child, operand_record.alignment_bytes)) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.unaligned_field_address, context->current_unit, node.span,
+                context, context::DiagnosticKind.unaligned_field_address, context->lowering.current_unit(), node.span,
                 context::no_id(), context::empty_span(), operand.type_id);
             return base::invalid_expression();
         }
@@ -194,12 +194,12 @@ fn lower_unary(context: *context::Context, node_id: usize, node: syntax::SyntaxN
             context::type_record(
                 context, operand_record.element_type).kind == type_info::Kind.type_void) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.invalid_operator, context->current_unit, node.span, context::no_id(),
-                context::empty_span(), operand.type_id);
+                context, context::DiagnosticKind.invalid_operator, context->lowering.current_unit(), node.span,
+                    context::no_id(), context::empty_span(), operand.type_id);
             return base::invalid_expression();
         }
         if (!types::require_opaque_value_access(
-                context, operand_record.element_type, context->current_unit, node.span)) {
+                context, operand_record.element_type, context->lowering.current_unit(), node.span)) {
             return base::invalid_expression();
         }
         var check: ir::Instruction = builder::instruction(ir::Opcode.null_check, node);
@@ -230,8 +230,8 @@ fn lower_unary(context: *context::Context, node_id: usize, node: syntax::SyntaxN
     }
     if (opcode == ir::Opcode.invalid) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_operator, context->current_unit, node.span, context::no_id(),
-            context::empty_span(), operand.type_id);
+            context, context::DiagnosticKind.invalid_operator, context->lowering.current_unit(), node.span,
+                context::no_id(), context::empty_span(), operand.type_id);
         return base::invalid_expression();
     }
     var instruction: ir::Instruction = builder::instruction(opcode, node);
@@ -304,7 +304,7 @@ fn cast_is_valid(source: type_info::Record, target: type_info::Record, source_ty
 }
 
 fn default_literal_family(context: *context::Context, node_id: usize) -> context::LiteralFamily {
-    let node: syntax::SyntaxNode = context::node(context, context->current_unit, node_id);
+    let node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node_id);
     if (node.kind == syntax::SyntaxKind.integer_expression) {
         return context::LiteralFamily.integer;
     }
@@ -321,14 +321,15 @@ fn default_literal_family(context: *context::Context, node_id: usize) -> context
         return default_literal_family(context, node.first_child);
     }
     if (node.kind == syntax::SyntaxKind.unary_expression && node.child_count == 1) {
-        let operation: lexer::TokenKind = context::token(context, context->current_unit, node.token_index).kind;
+        let operation: lexer::TokenKind = context::token(context, context->lowering.current_unit(),
+            node.token_index).kind;
         if (operation == lexer::TokenKind.plus || operation == lexer::TokenKind.minus) {
             return default_literal_family(context, node.first_child);
         }
         return context::LiteralFamily.none;
     }
     if (node.kind == syntax::SyntaxKind.binary_expression && node.child_count == 2) {
-        let left: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+        let left: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
         let left_family: context::LiteralFamily = default_literal_family(context, node.first_child);
         let right_family: context::LiteralFamily = default_literal_family(context, left.next_sibling);
         if (left_family == context::LiteralFamily.floating || right_family == context::LiteralFamily.floating) {
@@ -342,8 +343,9 @@ fn default_literal_family(context: *context::Context, node_id: usize) -> context
             context::LiteralFamily.integer : context::LiteralFamily.none;
     }
     if (node.kind == syntax::SyntaxKind.conditional_expression && node.child_count == 3) {
-        let condition: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-        let then_node: syntax::SyntaxNode = context::node(context, context->current_unit, condition.next_sibling);
+        let condition: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
+        let then_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(),
+            condition.next_sibling);
         let then_family: context::LiteralFamily = default_literal_family(context, condition.next_sibling);
         let else_family: context::LiteralFamily = default_literal_family(context, then_node.next_sibling);
         return then_family == else_family ? then_family : context::LiteralFamily.none;
@@ -355,9 +357,9 @@ fn lower_cast(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
     if (node.child_count != 2) {
         return base::invalid_expression();
     }
-    let operand_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+    let operand_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
     let target_node: usize = operand_node.next_sibling;
-    let target_type: usize = types::resolve_type_node(context, context->current_unit, target_node);
+    let target_type: usize = types::resolve_type_node(context, context->lowering.current_unit(), target_node);
     if (target_type == context::no_id()) {
         return base::invalid_expression();
     }
@@ -371,8 +373,8 @@ fn lower_cast(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
         let category_is_valid: bool = rvalue ? stored : domain::is_lvalue(operand.category);
         if (!writable || !category_is_valid) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.invalid_cast, context->current_unit, node.span, context::no_id(),
-                context::empty_span(), target_type);
+                context, context::DiagnosticKind.invalid_cast, context->lowering.current_unit(), node.span,
+                    context::no_id(), context::empty_span(), target_type);
             return base::invalid_expression();
         }
         var result: context::Expression = operand;
@@ -401,8 +403,8 @@ fn lower_cast(context: *context::Context, node: syntax::SyntaxNode, lowerer: api
     if (!cast_is_valid(
             source_record, target_record, operand.type_id, target_type)) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_cast, context->current_unit, node.span, context::no_id(),
-            context::empty_span(), target_type);
+            context, context::DiagnosticKind.invalid_cast, context->lowering.current_unit(), node.span,
+                context::no_id(), context::empty_span(), target_type);
         return base::invalid_expression();
     }
     if (target_type == operand.type_id) {
@@ -445,8 +447,8 @@ fn lower_short_circuit(
     context: *context::Context, node: syntax::SyntaxNode, operation: lexer::TokenKind,
         lowerer: api::Lowerer) -> context::Expression {
     let none: usize = context::no_id();
-    let left_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-    let left_temporary_start: usize = context->temporary_count;
+    let left_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
+    let left_temporary_start: usize = context->lowering.temporary_count();
     let left: context::Expression = api::invoke(lowerer, context, node.first_child,
         type_info::BuiltinType.boolean as usize);
     if (!left.valid || left.type_id != type_info::BuiltinType.boolean as usize) {
@@ -467,13 +469,13 @@ fn lower_short_circuit(
     } else {
         builder::emit_branch(context, node, left.value_id, merge_block, right_block);
     }
-    context->current_block = right_block;
-    let right_temporary_start: usize = context->temporary_count;
+    builder::set_current_block(context, right_block);
+    let right_temporary_start: usize = context->lowering.temporary_count();
     let right: context::Expression = api::invoke(lowerer, context, left_node.next_sibling,
         type_info::BuiltinType.boolean as usize);
     if (!right.valid || right.type_id != type_info::BuiltinType.boolean as usize) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span, none,
+            context, context::DiagnosticKind.type_mismatch, context->lowering.current_unit(), node.span, none,
             context::empty_span(), type_info::BuiltinType.boolean as usize);
         return base::invalid_expression();
     }
@@ -482,7 +484,7 @@ fn lower_short_circuit(
         return base::invalid_expression();
     }
     builder::emit_jump(context, node, merge_block);
-    context->current_block = merge_block;
+    builder::set_current_block(context, merge_block);
     let source: context::Expression = {
         type_id = type_info::BuiltinType.boolean as usize, value_id = none, address_id = address, constant_value = 0,
         has_constant = false, category = domain::lvalue(false, false), valid = true,
@@ -511,7 +513,7 @@ fn pointer_arithmetic_is_allowed(context: *context::Context, pointer_type: usize
     let element_kind_is_valid: bool = element.kind != type_info::Kind.type_void &&
         element.kind != type_info::Kind.array;
     let layout_is_available: bool = types::opaque_value_is_available(
-        context, record.element_type, context->current_unit);
+        context, record.element_type, context->lowering.current_unit());
     let element_is_sized: bool = layout_is_available && element.size_bytes != 0;
     return element_kind_is_valid && element_is_sized;
 }
@@ -543,8 +545,8 @@ fn lower_binary(context: *context::Context, node_id: usize, node: syntax::Syntax
     if (node.child_count != 2) {
         return base::invalid_expression();
     }
-    let left_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-    let operation: lexer::TokenKind = context::token(context, context->current_unit, node.token_index).kind;
+    let left_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
+    let operation: lexer::TokenKind = context::token(context, context->lowering.current_unit(), node.token_index).kind;
     if (operation == lexer::TokenKind.logical_and || operation == lexer::TokenKind.logical_or) {
         return lower_short_circuit(context, node, operation, lowerer);
     }
@@ -558,8 +560,8 @@ fn lower_binary(context: *context::Context, node_id: usize, node: syntax::Syntax
         api::invoke(lowerer, context, left_node.next_sibling, left.valid ? left.type_id : operand_expected);
     if (!left.valid || !right.valid) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span, context::no_id(),
-            context::empty_span(), left.valid ? left.type_id : right.type_id);
+            context, context::DiagnosticKind.type_mismatch, context->lowering.current_unit(), node.span,
+                context::no_id(), context::empty_span(), left.valid ? left.type_id : right.type_id);
         return base::invalid_expression();
     }
     let left_record: type_info::Record = context::type_record(context, left.type_id);
@@ -574,8 +576,8 @@ fn lower_binary(context: *context::Context, node_id: usize, node: syntax::Syntax
             !pointer_arithmetic_is_allowed(
                 context, pointer_type)) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.invalid_operator, context->current_unit, node.span, context::no_id(),
-                context::empty_span(), left.type_id);
+                context, context::DiagnosticKind.invalid_operator, context->lowering.current_unit(), node.span,
+                    context::no_id(), context::empty_span(), left.type_id);
             return base::invalid_expression();
         }
         let pointer_value: usize = left_is_pointer ? left.value_id : right.value_id;
@@ -622,8 +624,8 @@ fn lower_binary(context: *context::Context, node_id: usize, node: syntax::Syntax
     }
     if (left.type_id != right.type_id) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span, context::no_id(),
-            context::empty_span(), left.type_id);
+            context, context::DiagnosticKind.type_mismatch, context->lowering.current_unit(), node.span,
+                context::no_id(), context::empty_span(), left.type_id);
         return base::invalid_expression();
     }
     let type_record: type_info::Record = context::type_record(context, left.type_id);
@@ -664,8 +666,8 @@ fn lower_binary(context: *context::Context, node_id: usize, node: syntax::Syntax
     }
     if (opcode == ir::Opcode.invalid) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_operator, context->current_unit, node.span, context::no_id(),
-            context::empty_span(), left.type_id);
+            context, context::DiagnosticKind.invalid_operator, context->lowering.current_unit(), node.span,
+                context::no_id(), context::empty_span(), left.type_id);
         return base::invalid_expression();
     }
     var instruction: ir::Instruction = builder::instruction(opcode, node);
@@ -684,15 +686,16 @@ fn lower_scalar_conditional(
     context: *context::Context, node: syntax::SyntaxNode,
     expected_type: usize, lowerer: api::Lowerer) -> context::Expression {
     let none: usize = context::no_id();
-    let condition_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-    let then_node: syntax::SyntaxNode = context::node(context, context->current_unit, condition_node.next_sibling);
-    let condition_temporary_start: usize = context->temporary_count;
+    let condition_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
+    let then_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(),
+        condition_node.next_sibling);
+    let condition_temporary_start: usize = context->lowering.temporary_count();
     let condition: context::Expression = api::invoke(
         lowerer, context, node.first_child, type_info::BuiltinType.boolean as usize);
     if (!condition.valid || condition.type_id != type_info::BuiltinType.boolean as usize) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_condition, context->current_unit, condition_node.span, none,
-            context::empty_span(), condition.type_id);
+            context, context::DiagnosticKind.invalid_condition, context->lowering.current_unit(), condition_node.span,
+                none, context::empty_span(), condition.type_id);
         return base::invalid_expression();
     }
     if (!lifetime::emit_temporary_cleanup(context, condition_temporary_start, condition_node)) {
@@ -702,8 +705,8 @@ fn lower_scalar_conditional(
     let else_block: usize = builder::add_current_block(context);
     let merge_block: usize = builder::add_current_block(context);
     builder::emit_branch(context, node, condition.value_id, then_block, else_block);
-    context->current_block = then_block;
-    let then_temporary_start: usize = context->temporary_count;
+    builder::set_current_block(context, then_block);
+    let then_temporary_start: usize = context->lowering.temporary_count();
     let then_value: context::Expression = api::invoke(lowerer, context, condition_node.next_sibling, expected_type);
     if (!then_value.valid) {
         return then_value;
@@ -716,12 +719,12 @@ fn lower_scalar_conditional(
         return base::invalid_expression();
     }
     builder::emit_jump(context, node, merge_block);
-    context->current_block = else_block;
-    let else_temporary_start: usize = context->temporary_count;
+    builder::set_current_block(context, else_block);
+    let else_temporary_start: usize = context->lowering.temporary_count();
     let else_value: context::Expression = api::invoke(lowerer, context, then_node.next_sibling, then_value.type_id);
     if (!else_value.valid || else_value.type_id != then_value.type_id) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span, none,
+            context, context::DiagnosticKind.type_mismatch, context->lowering.current_unit(), node.span, none,
             context::empty_span(), then_value.type_id);
         return base::invalid_expression();
     }
@@ -731,7 +734,7 @@ fn lower_scalar_conditional(
         return base::invalid_expression();
     }
     builder::emit_jump(context, node, merge_block);
-    context->current_block = merge_block;
+    builder::set_current_block(context, merge_block);
     let result_address: usize = builder::address_of_slot(context, node, result_slot, then_value.type_id, false, false);
     let source: context::Expression = {
         type_id = then_value.type_id, value_id = none, address_id = result_address, constant_value = 0,
@@ -752,15 +755,16 @@ fn lower_conditional_at(
     if (node.child_count != 3) {
         return base::invalid_expression();
     }
-    let condition_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
-    let then_node: syntax::SyntaxNode = context::node(context, context->current_unit, condition_node.next_sibling);
-    let condition_temporary_start: usize = context->temporary_count;
+    let condition_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
+    let then_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(),
+        condition_node.next_sibling);
+    let condition_temporary_start: usize = context->lowering.temporary_count();
     let condition: context::Expression = api::invoke(lowerer, context, node.first_child,
         type_info::BuiltinType.boolean as usize);
     if (!condition.valid || condition.type_id != type_info::BuiltinType.boolean as usize) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_condition, context->current_unit, condition_node.span, none,
-            context::empty_span(), condition.type_id);
+            context, context::DiagnosticKind.invalid_condition, context->lowering.current_unit(), condition_node.span,
+                none, context::empty_span(), condition.type_id);
         return base::invalid_expression();
     }
     if (!lifetime::emit_temporary_cleanup(context, condition_temporary_start, condition_node)) {
@@ -789,8 +793,8 @@ fn lower_conditional_at(
     let else_block: usize = builder::add_current_block(context);
     let merge_block: usize = builder::add_current_block(context);
     builder::emit_branch(context, node, condition.value_id, then_block, else_block);
-    context->current_block = then_block;
-    let then_temporary_start: usize = context->temporary_count;
+    builder::set_current_block(context, then_block);
+    let then_temporary_start: usize = context->lowering.temporary_count();
     let then_value: context::Expression = memory_result ? api::invoke_into(
         into_lowerer, context, condition_node.next_sibling, result_type, result_address) :
         api::invoke(lowerer, context, condition_node.next_sibling, result_type);
@@ -805,14 +809,14 @@ fn lower_conditional_at(
         return base::invalid_expression();
     }
     builder::emit_jump(context, node, merge_block);
-    context->current_block = else_block;
-    let else_temporary_start: usize = context->temporary_count;
+    builder::set_current_block(context, else_block);
+    let else_temporary_start: usize = context->lowering.temporary_count();
     let else_value: context::Expression = memory_result ? api::invoke_into(
         into_lowerer, context, then_node.next_sibling, result_type, result_address) :
         api::invoke(lowerer, context, then_node.next_sibling, result_type);
     if (!else_value.valid || else_value.type_id != result_type) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span, none,
+            context, context::DiagnosticKind.type_mismatch, context->lowering.current_unit(), node.span, none,
             context::empty_span(), result_type);
         return base::invalid_expression();
     }
@@ -824,7 +828,7 @@ fn lower_conditional_at(
         return base::invalid_expression();
     }
     builder::emit_jump(context, node, merge_block);
-    context->current_block = merge_block;
+    builder::set_current_block(context, merge_block);
     if (memory_result) {
         if (!owns_destination && !lifetime::register_temporary(context, result_type, result_address)) {
             return base::invalid_expression();
@@ -851,7 +855,7 @@ fn lower_conditional(
     lowerer: api::Lowerer, into_lowerer: api::IntoLowerer) -> context::Expression {
     var result_type: usize = expected_type;
     if (result_type == context::no_id()) {
-        let condition: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+        let condition: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
         let result: probe::Result = probe::expression(context, condition.next_sibling, context::no_id());
         if (result.status == probe::Status.compatible) {
             result_type = result.type_id;
@@ -877,7 +881,7 @@ fn lower_va_arg(context: *context::Context, node: syntax::SyntaxNode, lowerer: a
     }
     if (!builder::current_function_is_variadic(context)) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_va_list, context->current_unit, node.span, none,
+            context, context::DiagnosticKind.invalid_va_list, context->lowering.current_unit(), node.span, none,
             context::empty_span(), 0);
         return base::invalid_expression();
     }
@@ -887,14 +891,14 @@ fn lower_va_arg(context: *context::Context, node: syntax::SyntaxNode, lowerer: a
     }
     if (!domain::is_assignable(list.category) || list.type_id != (type_info::BuiltinType.va_list_type as usize)) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_va_list, context->current_unit, node.span, none,
+            context, context::DiagnosticKind.invalid_va_list, context->lowering.current_unit(), node.span, none,
             context::empty_span(), 0);
         return base::invalid_expression();
     }
     let type_id: usize =
         types::resolve_type_node(
-            context, context->current_unit, context::node(context, context->current_unit, node.first_child).next_sibling
-        );
+            context, context->lowering.current_unit(), context::node(context, context->lowering.current_unit(),
+                node.first_child).next_sibling);
     if (type_id == none) {
         return base::invalid_expression();
     }
@@ -903,7 +907,7 @@ fn lower_va_arg(context: *context::Context, node: syntax::SyntaxNode, lowerer: a
     // scalar; aggregates have no register-save slot shape to read.
     if (!type_info::is_scalar(record.kind)) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.type_mismatch, context->current_unit, node.span, none,
+            context, context::DiagnosticKind.type_mismatch, context->lowering.current_unit(), node.span, none,
             context::empty_span(), type_id);
         return base::invalid_expression();
     }
@@ -922,7 +926,7 @@ fn lower_layout_query(context: *context::Context, node: syntax::SyntaxNode,
         return base::invalid_expression();
     }
     var type_id: usize = context::no_id();
-    if (context::node(context, context->current_unit, node.first_child).kind ==
+    if (context::node(context, context->lowering.current_unit(), node.first_child).kind ==
         syntax::SyntaxKind.intrinsic_expression) {
         // Layout queries resolve type nodes; an intrinsic operand (e.g. sizeof(@embed("path"))) is
         // lowered as an expression instead and the query reads the lowered type's layout.
@@ -931,13 +935,13 @@ fn lower_layout_query(context: *context::Context, node: syntax::SyntaxNode,
             type_id = operand.type_id;
         }
     } else {
-        type_id = types::resolve_type_node(context, context->current_unit, node.first_child);
+        type_id = types::resolve_type_node(context, context->lowering.current_unit(), node.first_child);
     }
     if (type_id == context::no_id()) {
         return base::invalid_expression();
     }
     if (!types::require_opaque_value_access(
-            context, type_id, context->current_unit, node.span)) {
+            context, type_id, context->lowering.current_unit(), node.span)) {
         return base::invalid_expression();
     }
     if (!types::require_complete_type(context, type_id)) {
@@ -946,8 +950,8 @@ fn lower_layout_query(context: *context::Context, node: syntax::SyntaxNode,
     let record: type_info::Record = context::type_record(context, type_id);
     if (record.kind == type_info::Kind.type_void || record.size_bytes == 0 || record.alignment_bytes == 0) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.invalid_layout_query, context->current_unit, node.span, context::no_id(),
-            context::empty_span(), type_id);
+            context, context::DiagnosticKind.invalid_layout_query, context->lowering.current_unit(), node.span,
+                context::no_id(), context::empty_span(), type_id);
         return base::invalid_expression();
     }
     var value: usize = 0;
@@ -956,7 +960,7 @@ fn lower_layout_query(context: *context::Context, node: syntax::SyntaxNode,
     } else if (node.kind == syntax::SyntaxKind.alignof_expression) {
         value = record.alignment_bytes;
     } else if (node.kind == syntax::SyntaxKind.offsetof_expression && node.child_count >= 2) {
-        let type_node: syntax::SyntaxNode = context::node(context, context->current_unit, node.first_child);
+        let type_node: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), node.first_child);
         let fields: *const type_info::Field = context->types.field_data() as
                 *const type_info::Field;
         var current_type: usize = type_id;
@@ -964,9 +968,9 @@ fn lower_layout_query(context: *context::Context, node: syntax::SyntaxNode,
         var ambiguous: bool = false;
         var failed: bool = false;
         while (member_index != context::no_id() && !ambiguous && !failed) {
-            let member: syntax::SyntaxNode = context::node(context, context->current_unit, member_index);
+            let member: syntax::SyntaxNode = context::node(context, context->lowering.current_unit(), member_index);
             let lookup: types::FieldLookup =
-                types::lookup_field(context, current_type, context->current_unit, member.token_index);
+                types::lookup_field(context, current_type, context->lowering.current_unit(), member.token_index);
             if (lookup.status == types::FieldStatus.ambiguous) {
                 ambiguous = true;
             } else if (lookup.status != types::FieldStatus.found) {
@@ -980,13 +984,13 @@ fn lower_layout_query(context: *context::Context, node: syntax::SyntaxNode,
         }
         if (ambiguous) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.ambiguous_field, context->current_unit, node.span, context::no_id(),
-                context::empty_span(), current_type);
+                context, context::DiagnosticKind.ambiguous_field, context->lowering.current_unit(), node.span,
+                    context::no_id(), context::empty_span(), current_type);
             return base::invalid_expression();
         }
         if (failed) {
             context::add_diagnostic(
-                context, context::DiagnosticKind.invalid_layout_query, context->current_unit, node.span,
+                context, context::DiagnosticKind.invalid_layout_query, context->lowering.current_unit(), node.span,
                 context::no_id(), context::empty_span(), current_type);
             return base::invalid_expression();
         }

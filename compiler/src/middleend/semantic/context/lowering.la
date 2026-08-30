@@ -1,0 +1,721 @@
+module luna.bootstrap.middleend.semantic.context;
+
+fn lowering_control_target_is_empty(target: ControlTarget) -> bool {
+    let block_is_empty: bool = target.block == no_id();
+    let count_is_empty: bool = target.local_count == 0;
+    return block_is_empty && count_is_empty;
+}
+
+fn lowering_target_is_valid(target: ControlTarget, local_count: usize) -> bool {
+    let empty_target: bool = lowering_control_target_is_empty(target);
+    let block_is_active: bool = target.block != no_id();
+    let active_target: bool = block_is_active && target.local_count <= local_count;
+    return empty_target || active_target;
+}
+
+fn lowering_slice_is_valid(first: usize, count: usize, size: usize) -> bool {
+    if (first > size) {
+        return false;
+    }
+    return count <= size - first;
+}
+
+fn lowering_control_targets_are_empty(targets: ControlTargets) -> bool {
+    let break_is_empty: bool = lowering_control_target_is_empty(targets.break_target);
+    let continue_is_empty: bool = lowering_control_target_is_empty(targets.continue_target);
+    return break_is_empty && continue_is_empty;
+}
+
+fn lowering_control_targets_are_valid(targets: ControlTargets, local_count: usize) -> bool {
+    let break_is_valid: bool = lowering_target_is_valid(targets.break_target, local_count);
+    let continue_is_valid: bool = lowering_target_is_valid(targets.continue_target, local_count);
+    return break_is_valid && continue_is_valid;
+}
+
+impl LoweringState {
+    init(): locals = vector::vector<Local>(), temporaries = vector::vector<Temporary>(),
+            labels = vector::vector<Label>(), label_locals = vector::vector<LocalSnapshot>(),
+            pending_gotos = vector::vector<PendingGoto>(), goto_locals = vector::vector<LocalSnapshot>(),
+            loop_labels = vector::vector<LoopLabel>(), current_function_id = no_id(),
+            current_unit_index = no_id(), current_block_id = no_id(), scope_depth_value = 0,
+            pending_loop_label_token = no_id(), goto_snapshot_published_count = 0, control_targets_value = {
+                break_target = {block = no_id(), local_count = 0}, continue_target = {block = no_id(), local_count = 0},
+            } {
+        this->error_code = runtime::Error.none;
+    }
+
+    init(other: LoweringState&&): locals = other.locals as vector::vector<Local>&&,
+            temporaries = other.temporaries as vector::vector<Temporary>&&,
+            labels = other.labels as vector::vector<Label>&&,
+            label_locals = other.label_locals as vector::vector<LocalSnapshot>&&,
+            pending_gotos = other.pending_gotos as vector::vector<PendingGoto>&&,
+            goto_locals = other.goto_locals as vector::vector<LocalSnapshot>&&,
+            loop_labels = other.loop_labels as vector::vector<LoopLabel>&&,
+            current_function_id = other.current_function_id, current_unit_index = other.current_unit_index,
+            current_block_id = other.current_block_id, scope_depth_value = other.scope_depth_value,
+            pending_loop_label_token = other.pending_loop_label_token,
+            goto_snapshot_published_count = other.goto_snapshot_published_count,
+            control_targets_value = other.control_targets_value {
+        this->error_code = other.error_code;
+        other.current_function_id = no_id();
+        other.current_unit_index = no_id();
+        other.current_block_id = no_id();
+        other.scope_depth_value = 0;
+        other.pending_loop_label_token = no_id();
+        other.goto_snapshot_published_count = 0;
+        other.control_targets_value = {
+            break_target = {block = no_id(), local_count = 0}, continue_target = {block = no_id(), local_count = 0},
+        };
+        other.error_code = runtime::Error.none;
+    }
+
+    priv fn fail(error: runtime::Error) -> runtime::Error {
+        if (this->error_code == runtime::Error.none) {
+            this->error_code = error;
+        }
+        return this->error_code;
+    }
+
+    priv fn ready() const -> bool {
+        return this->error_code == runtime::Error.none && this->storage_is_valid();
+    }
+
+    priv fn function_is_empty() const -> bool {
+        let function_is_empty: bool = this->current_function_id == no_id();
+        let unit_is_empty: bool = this->current_unit_index == no_id();
+        return function_is_empty && unit_is_empty;
+    }
+
+    priv fn function_is_active() const -> bool {
+        let function_is_active: bool = this->current_function_id != no_id();
+        let unit_is_active: bool = this->current_unit_index != no_id();
+        return function_is_active && unit_is_active;
+    }
+
+    priv fn state_is_empty() const -> bool {
+        let declaration_storage_is_empty: bool = this->locals.empty() && this->temporaries.empty();
+        let label_storage_is_empty: bool = this->labels.empty() && this->label_locals.empty();
+        let goto_storage_is_empty: bool = this->pending_gotos.empty() && this->goto_locals.empty();
+        let first_storage_is_empty: bool = declaration_storage_is_empty && label_storage_is_empty;
+        let second_storage_is_empty: bool = goto_storage_is_empty && this->loop_labels.empty();
+        let storage_is_empty: bool = first_storage_is_empty && second_storage_is_empty;
+        let cursors_are_empty: bool = this->function_is_empty() && this->current_block_id == no_id();
+        let scope_is_empty: bool = this->scope_depth_value == 0 && this->pending_loop_label_token == no_id();
+        let publication_is_empty: bool = this->goto_snapshot_published_count == 0;
+        let controls_are_empty: bool = lowering_control_targets_are_empty(this->control_targets_value);
+        let cursor_state_is_empty: bool = cursors_are_empty && scope_is_empty;
+        let pending_state_is_empty: bool = publication_is_empty && controls_are_empty;
+        let owned_state_is_empty: bool = storage_is_empty && cursor_state_is_empty;
+        return owned_state_is_empty && pending_state_is_empty;
+    }
+
+    priv fn local_watermarks_are_valid(count: usize) const -> bool {
+        let targets_are_valid: bool = lowering_control_targets_are_valid(this->control_targets_value, count);
+        if (!targets_are_valid) {
+            return false;
+        }
+        for (var index: usize = 0; index < this->loop_labels.size(); index += 1) {
+            let loop_label: LoopLabel = this->loop_labels.get(index);
+            let break_target: ControlTarget = {
+                block = loop_label.break_block, local_count = loop_label.break_local_count,
+            };
+            let continue_target: ControlTarget = {
+                block = loop_label.continue_block, local_count = loop_label.continue_local_count,
+            };
+            let break_is_valid: bool = lowering_target_is_valid(break_target, count);
+            let continue_is_valid: bool = lowering_target_is_valid(continue_target, count);
+            if (!break_is_valid || !continue_is_valid) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    priv fn label_record_is_valid(label: Label) const -> bool {
+        let slice_is_valid: bool = lowering_slice_is_valid(
+            label.first_local, label.local_count, this->label_locals.size());
+        let defined_record_is_valid: bool = label.defined && slice_is_valid;
+        let forward_slice_is_empty: bool = label.first_local == 0 && label.local_count == 0;
+        let forward_record_is_empty: bool = !label.defined && forward_slice_is_empty;
+        return defined_record_is_valid || forward_record_is_empty;
+    }
+
+    priv fn label_snapshot_is_covered(index: usize) const -> bool {
+        var coverage: usize = 0;
+        for (var label_index: usize = 0; label_index < this->labels.size(); label_index += 1) {
+            let label: Label = this->labels.get(label_index);
+            let nonempty_range: bool = label.defined && label.local_count != 0;
+            let after_first: bool = index >= label.first_local;
+            let in_range: bool = after_first && index - label.first_local < label.local_count;
+            if (nonempty_range && in_range) {
+                coverage += 1;
+            }
+        }
+        return coverage == 1;
+    }
+
+    priv fn label_snapshots_are_valid() const -> bool {
+        for (var label_index: usize = 0; label_index < this->labels.size(); label_index += 1) {
+            if (!this->label_record_is_valid(this->labels.get(label_index))) {
+                return false;
+            }
+        }
+        for (var snapshot_index: usize = 0; snapshot_index < this->label_locals.size(); snapshot_index += 1) {
+            if (!this->label_snapshot_is_covered(snapshot_index)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    priv fn goto_snapshot_is_covered(index: usize) const -> bool {
+        var coverage: usize = 0;
+        for (var goto_index: usize = 0; goto_index < this->pending_gotos.size(); goto_index += 1) {
+            let goto_record: PendingGoto = this->pending_gotos.get(goto_index);
+            let nonempty_range: bool = goto_record.local_count != 0;
+            let after_first: bool = index >= goto_record.first_local;
+            let in_range: bool = after_first && index - goto_record.first_local < goto_record.local_count;
+            if (nonempty_range && in_range) {
+                coverage += 1;
+            }
+        }
+        return coverage == 1;
+    }
+
+    priv fn goto_snapshot_ranges_are_valid() const -> bool {
+        if (this->goto_locals.size() != this->goto_snapshot_published_count) {
+            return false;
+        }
+        var next_first: usize = 0;
+        for (var goto_index: usize = 0; goto_index < this->pending_gotos.size(); goto_index += 1) {
+            let goto_record: PendingGoto = this->pending_gotos.get(goto_index);
+            let slice_is_valid: bool = lowering_slice_is_valid(
+                goto_record.first_local, goto_record.local_count, this->goto_locals.size());
+            let range_is_contiguous: bool = goto_record.first_local == next_first;
+            if (!slice_is_valid || !range_is_contiguous) {
+                return false;
+            }
+            next_first += goto_record.local_count;
+        }
+        if (next_first != this->goto_locals.size()) {
+            return false;
+        }
+        for (var snapshot_index: usize = 0; snapshot_index < this->goto_locals.size(); snapshot_index += 1) {
+            if (!this->goto_snapshot_is_covered(snapshot_index)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn storage_is_valid() const -> bool {
+        let first_storage_is_valid: bool = this->locals.is_valid() && this->temporaries.is_valid();
+        let second_storage_is_valid: bool = this->labels.is_valid() && this->label_locals.is_valid();
+        let third_storage_is_valid: bool = this->pending_gotos.is_valid() && this->goto_locals.is_valid();
+        let storage_is_valid: bool = first_storage_is_valid && second_storage_is_valid;
+        let goto_publication_is_valid: bool = this->goto_snapshot_published_count <= this->goto_locals.size();
+        let snapshot_storage_is_valid: bool = third_storage_is_valid && goto_publication_is_valid;
+        let all_storage_is_valid: bool = storage_is_valid && snapshot_storage_is_valid;
+        return all_storage_is_valid && this->loop_labels.is_valid();
+    }
+
+    fn is_valid() const -> bool {
+        if (!this->ready()) {
+            return false;
+        }
+        let empty_function: bool = this->function_is_empty();
+        if (empty_function) {
+            return this->state_is_empty();
+        }
+        if (!this->function_is_active()) {
+            return false;
+        }
+        if (this->scope_depth_value > Limit.maximum_scope_depth as usize) {
+            return false;
+        }
+        if (!lowering_control_targets_are_valid(this->control_targets_value, this->locals.size())) {
+            return false;
+        }
+        if (!this->local_watermarks_are_valid(this->locals.size())) {
+            return false;
+        }
+        for (var index: usize = 0; index < this->locals.size(); index += 1) {
+            let local: Local = this->locals.get(index);
+            let function_matches: bool = local.function_id == this->current_function_id;
+            let scope_is_valid: bool = local.scope_depth <= this->scope_depth_value;
+            if (!function_matches || !scope_is_valid) {
+                return false;
+            }
+        }
+        for (var index: usize = 0; index < this->temporaries.size(); index += 1) {
+            let temporary: Temporary = this->temporaries.get(index);
+            if (temporary.type_id == no_id() || temporary.address_id == no_id()) {
+                return false;
+            }
+        }
+        if (!this->label_snapshots_are_valid()) {
+            return false;
+        }
+        if (!this->goto_snapshot_ranges_are_valid()) {
+            return false;
+        }
+        return true;
+    }
+
+    fn error() const -> runtime::Error {
+        return this->error_code;
+    }
+
+    fn current_function() const -> usize {
+        return this->current_function_id;
+    }
+
+    fn current_unit() const -> usize {
+        return this->current_unit_index;
+    }
+
+    fn current_block() const -> usize {
+        return this->current_block_id;
+    }
+
+    fn scope_depth() const -> usize {
+        return this->scope_depth_value;
+    }
+
+    fn pending_loop_label() const -> usize {
+        return this->pending_loop_label_token;
+    }
+
+    fn control_targets() const -> ControlTargets {
+        return this->control_targets_value;
+    }
+
+    fn local_count() const -> usize {
+        return this->locals.size();
+    }
+
+    fn temporary_count() const -> usize {
+        return this->temporaries.size();
+    }
+
+    fn label_count() const -> usize {
+        return this->labels.size();
+    }
+
+    fn label_snapshot_count() const -> usize {
+        return this->label_locals.size();
+    }
+
+    fn pending_goto_count() const -> usize {
+        return this->pending_gotos.size();
+    }
+
+    fn goto_snapshot_count() const -> usize {
+        return this->goto_locals.size();
+    }
+
+    fn loop_label_count() const -> usize {
+        return this->loop_labels.size();
+    }
+
+    fn local_data() const -> *const Local {
+        return this->locals.empty() ? null : &this->locals.get(0) as *const Local;
+    }
+
+    fn temporary_data() const -> *const Temporary {
+        return this->temporaries.empty() ? null : &this->temporaries.get(0) as *const Temporary;
+    }
+
+    fn label_data() const -> *const Label {
+        return this->labels.empty() ? null : &this->labels.get(0) as *const Label;
+    }
+
+    fn label_snapshot_data() const -> *const LocalSnapshot {
+        return this->label_locals.empty() ? null : &this->label_locals.get(0) as *const LocalSnapshot;
+    }
+
+    fn pending_goto_data() const -> *const PendingGoto {
+        return this->pending_gotos.empty() ? null : &this->pending_gotos.get(0) as *const PendingGoto;
+    }
+
+    fn goto_snapshot_data() const -> *const LocalSnapshot {
+        return this->goto_locals.empty() ? null : &this->goto_locals.get(0) as *const LocalSnapshot;
+    }
+
+    fn loop_label_data() const -> *const LoopLabel {
+        return this->loop_labels.empty() ? null : &this->loop_labels.get(0) as *const LoopLabel;
+    }
+
+    fn clear_function() -> runtime::Error {
+        if (!this->is_valid()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->locals.clear();
+        this->temporaries.clear();
+        this->labels.clear();
+        this->label_locals.clear();
+        this->pending_gotos.clear();
+        this->goto_locals.clear();
+        this->loop_labels.clear();
+        this->current_function_id = no_id();
+        this->current_unit_index = no_id();
+        this->current_block_id = no_id();
+        this->scope_depth_value = 0;
+        this->pending_loop_label_token = no_id();
+        this->goto_snapshot_published_count = 0;
+        this->control_targets_value = {
+            break_target = {block = no_id(), local_count = 0}, continue_target = {block = no_id(), local_count = 0},
+        };
+        return runtime::Error.none;
+    }
+
+    fn begin_function(function_id: usize, unit_index: usize) -> runtime::Error {
+        let identifiers_are_valid: bool = function_id != no_id() && unit_index != no_id();
+        if (!this->ready() || !identifiers_are_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let cleared: runtime::Error = this->clear_function();
+        if (cleared != runtime::Error.none) {
+            return cleared;
+        }
+        this->current_function_id = function_id;
+        this->current_unit_index = unit_index;
+        return runtime::Error.none;
+    }
+
+    fn set_current_block(block_id: usize) -> runtime::Error {
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        let block_is_valid: bool = block_id != no_id();
+        if (!state_is_ready || !function_is_active) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!block_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->current_block_id = block_id;
+        return runtime::Error.none;
+    }
+
+    fn discard_goto_snapshots(first: usize) -> runtime::Error {
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        let first_is_published: bool = first == this->goto_snapshot_published_count;
+        let first_is_in_range: bool = first <= this->goto_locals.size();
+        let first_is_valid: bool = first_is_published && first_is_in_range;
+        if (!state_is_ready || !function_is_active) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!first_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let truncation: runtime::Error = this->goto_locals.truncate(first);
+        return truncation == runtime::Error.none ? truncation : this->fail(truncation);
+    }
+
+    fn set_pending_loop_label(name_token: usize) -> runtime::Error {
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        if (!state_is_ready || !function_is_active) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->pending_loop_label_token = name_token;
+        return runtime::Error.none;
+    }
+
+    fn set_control_targets(targets: ControlTargets) -> runtime::Error {
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        let targets_are_valid: bool = lowering_control_targets_are_valid(targets, this->locals.size());
+        if (!state_is_ready || !function_is_active) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!targets_are_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->control_targets_value = targets;
+        return runtime::Error.none;
+    }
+
+    fn enter_scope(maximum_depth: usize) -> usize {
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        if (!state_is_ready || !function_is_active) {
+            this->fail(runtime::Error.invalid_argument);
+            return no_id();
+        }
+        if (this->scope_depth_value >= maximum_depth) {
+            return no_id();
+        }
+        let local_start: usize = this->locals.size();
+        this->scope_depth_value += 1;
+        return local_start;
+    }
+
+    fn leave_scope(local_start: usize) -> runtime::Error {
+        let start_is_valid: bool = local_start != no_id() && local_start <= this->locals.size();
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        let scope_is_open: bool = this->scope_depth_value != 0;
+        if (!state_is_ready || !function_is_active) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!scope_is_open || !start_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!this->local_watermarks_are_valid(local_start)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let truncation: runtime::Error = this->locals.truncate(local_start);
+        if (truncation != runtime::Error.none) {
+            return this->fail(truncation);
+        }
+        this->scope_depth_value -= 1;
+        return runtime::Error.none;
+    }
+
+    fn append_local(local: Local) -> usize {
+        let identity_is_valid: bool = local.function_id == this->current_function_id &&
+            local.scope_depth <= this->scope_depth_value;
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        if (!state_is_ready || !function_is_active) {
+            this->fail(runtime::Error.invalid_argument);
+            return no_id();
+        }
+        if (!identity_is_valid) {
+            this->fail(runtime::Error.invalid_argument);
+            return no_id();
+        }
+        let index: usize = this->locals.size();
+        let appended: runtime::Error = this->locals.push_back(local);
+        if (appended != runtime::Error.none) {
+            this->fail(appended);
+            return no_id();
+        }
+        return index;
+    }
+
+    fn append_temporary(temporary: Temporary) -> usize {
+        let temporary_is_valid: bool = temporary.type_id != no_id() && temporary.address_id != no_id();
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        if (!state_is_ready || !function_is_active) {
+            this->fail(runtime::Error.invalid_argument);
+            return no_id();
+        }
+        if (!temporary_is_valid) {
+            this->fail(runtime::Error.invalid_argument);
+            return no_id();
+        }
+        let index: usize = this->temporaries.size();
+        let appended: runtime::Error = this->temporaries.push_back(temporary);
+        if (appended != runtime::Error.none) {
+            this->fail(appended);
+            return no_id();
+        }
+        return index;
+    }
+
+    fn append_label(label: Label) -> usize {
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        let block_is_valid: bool = label.block != no_id();
+        let label_is_valid: bool = this->label_record_is_valid(label);
+        if (!state_is_ready || !function_is_active) {
+            this->fail(runtime::Error.invalid_argument);
+            return no_id();
+        }
+        if (!block_is_valid || !label_is_valid) {
+            this->fail(runtime::Error.invalid_argument);
+            return no_id();
+        }
+        let index: usize = this->labels.size();
+        let appended: runtime::Error = this->labels.push_back(label);
+        if (appended != runtime::Error.none) {
+            this->fail(appended);
+            return no_id();
+        }
+        return index;
+    }
+
+    fn append_label_snapshot(snapshot: LocalSnapshot) -> usize {
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        if (!state_is_ready || !function_is_active) {
+            this->fail(runtime::Error.invalid_argument);
+            return no_id();
+        }
+        let index: usize = this->label_locals.size();
+        let appended: runtime::Error = this->label_locals.push_back(snapshot);
+        if (appended != runtime::Error.none) {
+            this->fail(appended);
+            return no_id();
+        }
+        return index;
+    }
+
+    fn append_pending_goto(goto_record: PendingGoto) -> usize {
+        let slice_is_valid: bool = lowering_slice_is_valid(
+            goto_record.first_local, goto_record.local_count, this->goto_locals.size());
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        let range_is_contiguous: bool = goto_record.first_local == this->goto_snapshot_published_count;
+        if (!state_is_ready || !function_is_active) {
+            this->fail(runtime::Error.invalid_argument);
+            return no_id();
+        }
+        if (!slice_is_valid || !range_is_contiguous) {
+            this->fail(runtime::Error.invalid_argument);
+            return no_id();
+        }
+        let index: usize = this->pending_gotos.size();
+        let appended: runtime::Error = this->pending_gotos.push_back(goto_record);
+        if (appended != runtime::Error.none) {
+            this->fail(appended);
+            return no_id();
+        }
+        this->goto_snapshot_published_count += goto_record.local_count;
+        return index;
+    }
+
+    fn append_goto_snapshot(snapshot: LocalSnapshot) -> usize {
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        if (!state_is_ready || !function_is_active) {
+            this->fail(runtime::Error.invalid_argument);
+            return no_id();
+        }
+        let index: usize = this->goto_locals.size();
+        let appended: runtime::Error = this->goto_locals.push_back(snapshot);
+        if (appended != runtime::Error.none) {
+            this->fail(appended);
+            return no_id();
+        }
+        return index;
+    }
+
+    fn append_loop_label(loop_label: LoopLabel) -> runtime::Error {
+        let break_target: ControlTarget = {
+            block = loop_label.break_block, local_count = loop_label.break_local_count,
+        };
+        let continue_target: ControlTarget = {
+            block = loop_label.continue_block, local_count = loop_label.continue_local_count,
+        };
+        let targets: ControlTargets = {break_target = break_target, continue_target = continue_target};
+        let targets_are_valid: bool = lowering_control_targets_are_valid(targets, this->locals.size());
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        if (!state_is_ready || !function_is_active) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!targets_are_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let appended: runtime::Error = this->loop_labels.push_back(loop_label);
+        return appended == runtime::Error.none ? appended : this->fail(appended);
+    }
+
+    fn pop_loop_label() -> runtime::Error {
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        let stack_is_nonempty: bool = !this->loop_labels.empty();
+        if (!state_is_ready || !function_is_active) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!stack_is_nonempty) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let truncation: runtime::Error = this->loop_labels.truncate(this->loop_labels.size() - 1);
+        return truncation == runtime::Error.none ? truncation : this->fail(truncation);
+    }
+
+    fn set_label(index: usize, label: Label) -> runtime::Error {
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        let index_is_valid: bool = index < this->labels.size();
+        let block_is_valid: bool = label.block != no_id();
+        let label_is_valid: bool = this->label_record_is_valid(label);
+        let record_is_valid: bool = block_is_valid && label_is_valid;
+        if (!state_is_ready || !function_is_active) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!index_is_valid || !record_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->labels.get(index) = label;
+        return runtime::Error.none;
+    }
+
+    fn set_pending_goto_resolved(index: usize) -> runtime::Error {
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        let index_is_valid: bool = index < this->pending_gotos.size();
+        if (!state_is_ready || !function_is_active) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!index_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->pending_gotos.get(index).resolved = true;
+        return runtime::Error.none;
+    }
+
+    fn truncate_locals(count: usize) -> runtime::Error {
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        let count_is_valid: bool = count <= this->locals.size();
+        let watermarks_are_valid: bool = count_is_valid && this->local_watermarks_are_valid(count);
+        if (!state_is_ready || !function_is_active) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!watermarks_are_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let truncation: runtime::Error = this->locals.truncate(count);
+        return truncation == runtime::Error.none ? truncation : this->fail(truncation);
+    }
+
+    fn truncate_temporaries(count: usize) -> runtime::Error {
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        let count_is_valid: bool = count <= this->temporaries.size();
+        if (!state_is_ready || !function_is_active) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (!count_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let truncation: runtime::Error = this->temporaries.truncate(count);
+        return truncation == runtime::Error.none ? truncation : this->fail(truncation);
+    }
+
+    fn deactivate_temporary(first: usize, address_id: usize, type_id: *usize, owned_address: *usize) -> bool {
+        let outputs_are_valid: bool = type_id != null && owned_address != null;
+        let state_is_ready: bool = this->ready();
+        let function_is_active: bool = this->function_is_active();
+        let first_is_valid: bool = first <= this->temporaries.size();
+        if (!state_is_ready || !function_is_active) {
+            this->fail(runtime::Error.invalid_argument);
+            return false;
+        }
+        if (!outputs_are_valid || !first_is_valid) {
+            this->fail(runtime::Error.invalid_argument);
+            return false;
+        }
+        for (var remaining: usize = this->temporaries.size(); remaining > first; remaining -= 1) {
+            let index: usize = remaining - 1;
+            let temporary: Temporary = this->temporaries.get(index);
+            if (temporary.active && temporary.address_id == address_id) {
+                this->temporaries.get(index).active = false;
+                *type_id = temporary.type_id;
+                *owned_address = temporary.address_id;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    deinit() {
+    }
+}

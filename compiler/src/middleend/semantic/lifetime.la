@@ -6,7 +6,6 @@ import luna.bootstrap.middleend.semantic.functions as functions;
 import luna.compiler.ir as ir;
 import luna.compiler.types as type_info;
 import luna.runtime as runtime;
-import luna.std.bytes as bytes;
 
 fn type_requires_destruction(context: *context::Context, type_id: usize, depth: usize) -> bool {
     if (type_id >= context->types.size() || depth >= context::Limit.maximum_type_depth as usize) {
@@ -97,7 +96,7 @@ fn emit_destructor_call(
     let function: domain::Function = function_records[function_id];
     if (!classes::method_is_accessible(context, function_id)) {
         context::add_diagnostic(
-            context, context::DiagnosticKind.inaccessible_member, context->current_unit, node.span,
+            context, context::DiagnosticKind.inaccessible_member, context->lowering.current_unit(), node.span,
             function.interface_unit,
             context::node(context, function.interface_unit, function.interface_node).span, function_id);
         return false;
@@ -174,12 +173,12 @@ fn emit_destroy_object(
 }
 
 fn emit_scope_cleanup(context: *context::Context, local_start: usize, node: syntax::SyntaxNode) -> bool {
-    if (local_start > context->local_count) {
+    if (local_start > context->lowering.local_count()) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    let locals: *const context::Local = context->locals.data as *const context::Local;
-    for (var remaining: usize = context->local_count; remaining > local_start; remaining -= 1) {
+    let locals: *const context::Local = context->lowering.local_data();
+    for (var remaining: usize = context->lowering.local_count(); remaining > local_start; remaining -= 1) {
         let local: context::Local = locals[remaining - 1];
         if (local.cleanup_type_id == context::no_id()) {
             continue;
@@ -211,30 +210,24 @@ fn register_temporary(context: *context::Context, type_id: usize, address_id: us
 fn adopt_temporary(
     context: *context::Context, first: usize, address_id: usize, type_id: *usize, owned_address: *usize) -> bool {
     let outputs_are_valid: bool = type_id != null && owned_address != null;
-    if (!outputs_are_valid || first > context->temporary_count) {
+    if (!outputs_are_valid || first > context->lowering.temporary_count()) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    let temporaries: *context::Temporary = context->temporaries.data as *context::Temporary;
-    for (var remaining: usize = context->temporary_count; remaining > first; remaining -= 1) {
-        let index: usize = remaining - 1;
-        if (temporaries[index].active && temporaries[index].address_id == address_id) {
-            temporaries[index].active = false;
-            *type_id = temporaries[index].type_id;
-            *owned_address = temporaries[index].address_id;
-            return true;
-        }
+    let deactivated: bool = context->lowering.deactivate_temporary(first, address_id, type_id, owned_address);
+    if (!deactivated && context->lowering.error() != runtime::Error.none) {
+        context->error = context::release_error(context->error, context->lowering.error());
     }
-    return false;
+    return deactivated;
 }
 
 fn emit_temporary_cleanup(context: *context::Context, first: usize, node: syntax::SyntaxNode) -> bool {
-    if (first > context->temporary_count) {
+    if (first > context->lowering.temporary_count()) {
         context->error = runtime::Error.invalid_argument;
         return false;
     }
-    let temporaries: *const context::Temporary = context->temporaries.data as *const context::Temporary;
-    for (var remaining: usize = context->temporary_count; remaining > first; remaining -= 1) {
+    let temporaries: *const context::Temporary = context->lowering.temporary_data();
+    for (var remaining: usize = context->lowering.temporary_count(); remaining > first; remaining -= 1) {
         let temporary: context::Temporary = temporaries[remaining - 1];
         if (!temporary.active || !type_requires_destruction(context, temporary.type_id, 0)) {
             continue;
@@ -243,10 +236,7 @@ fn emit_temporary_cleanup(context: *context::Context, first: usize, node: syntax
             return false;
         }
     }
-    let truncated: bytes::BufferResult = bytes::truncate(context->temporaries, first * sizeof(context::Temporary));
-    context->temporaries = truncated.buffer;
-    context->error = truncated.error;
-    context->temporary_count = first;
+    context->error = context::release_error(context->error, context->lowering.truncate_temporaries(first));
     return context->error == runtime::Error.none;
 }
 
