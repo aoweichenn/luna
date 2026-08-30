@@ -433,6 +433,24 @@ fn generic_declaration_is_visible(context: *context::Context, declaration: domai
     return (declaration.flags & (syntax::SyntaxFlag.exported as usize)) != 0;
 }
 
+fn publish_generic_instance_function(
+    context: *context::Context, function_id: usize, binding_id: usize, exported_flags: usize) -> bool {
+    if (context->error != runtime::Error.none) {
+        return false;
+    }
+    context->error = context->callables.set_function_binding(function_id, binding_id);
+    if (context->error != runtime::Error.none) {
+        return false;
+    }
+    context->error = context->callables.remove_function_flags(function_id, exported_flags);
+    if (context->error != runtime::Error.none) {
+        return false;
+    }
+    let function: domain::Function = context->callables.function_data()[function_id];
+    context->error = context->symbols.remove_symbol_flags(function.symbol_id, exported_flags);
+    return context->error == runtime::Error.none;
+}
+
 fn instantiate_generic_function(
     context: *context::Context, declaration_id: usize, arguments: *const usize,
     argument_count: usize, request: syntax::SyntaxNode) -> usize {
@@ -485,19 +503,19 @@ fn instantiate_generic_function(
         context, domain::free_function(), declaration.module_id,
         declaration.unit_index, declaration.node_index, source, false, defaults);
     if (function_id != context::no_id()) {
-        let functions_data: *context::Function = context->functions.data as *context::Function;
         let exported_flags: usize = (context::SymbolFlag.exported as usize) |
             (context::SymbolFlag.interface_declaration as usize);
-        functions_data[function_id].binding_id = declaration.binding_id;
-        functions_data[function_id].flags &= ~exported_flags;
-        context->error = context->symbols.remove_symbol_flags(functions_data[function_id].symbol_id, exported_flags);
+        publish_generic_instance_function(context, function_id, declaration.binding_id, exported_flags);
     }
     let successful: bool = function_id != context::no_id() && context->diagnostics.size() == diagnostic_start;
     let state: domain::GenericInstanceState = successful ?
         domain::GenericInstanceState.resolving : domain::GenericInstanceState.failed;
     let result_function: usize = successful ? function_id : context::no_id();
-    let state_error: runtime::Error = context->generics.set_instance_result(
-        created.instance_id, context::no_id(), result_function, state);
+    var state_error: runtime::Error = runtime::Error.none;
+    if (context->error == runtime::Error.none) {
+        state_error = context->generics.set_instance_result(
+            created.instance_id, context::no_id(), result_function, state);
+    }
     generics::restore_active_bindings(context, mark);
     if (context->error == runtime::Error.none) {
         context->error = state_error;
@@ -536,7 +554,7 @@ fn collect_argument_types(
 fn resolve_generic_call(
     context: *context::Context, binding_id: usize, call_node: syntax::SyntaxNode,
     explicit_arguments: usize, probe: ArgumentTypeProbe) -> GenericResolution {
-    if (binding_id >= context->binding_count) {
+    if (binding_id >= context->callables.binding_count()) {
         return {status = GenericResolutionStatus.invalid, function_id = context::no_id()};
     }
     var actual_types: bytes::Buffer = bytes::empty();
@@ -546,8 +564,8 @@ fn resolve_generic_call(
     }
     let actual_count: usize = actual_types.length / sizeof(usize);
     let actual: *const usize = actual_types.data as *const usize;
-    let bindings: *const context::Binding = context->bindings.data as *const context::Binding;
-    let binding: context::Binding = bindings[binding_id];
+    let bindings: *const domain::Binding = context->callables.binding_data() as *const domain::Binding;
+    let binding: domain::Binding = bindings[binding_id];
     let declarations: *const domain::GenericDeclaration = context->generics.declaration_data() as
             *const domain::GenericDeclaration;
     var selected_declaration: usize = context::no_id();
@@ -624,15 +642,15 @@ fn function_value_inference(
 
 fn instantiated_function_matches_type(
     context: *context::Context, function_id: usize, target: type_info::Record) -> bool {
-    if (function_id >= context->function_count) {
+    if (function_id >= context->callables.function_count()) {
         return false;
     }
-    let functions_data: *const context::Function = context->functions.data as *const context::Function;
-    let function: context::Function = functions_data[function_id];
+    let functions_data: *const domain::Function = context->callables.function_data() as *const domain::Function;
+    let function: domain::Function = functions_data[function_id];
     if (function.parameter_count != target.field_count || function.return_type != target.element_type) {
         return false;
     }
-    let parameters: *const context::Parameter = context->parameters.data as *const context::Parameter;
+    let parameters: *const domain::Parameter = context->callables.parameter_data() as *const domain::Parameter;
     let fields: *const type_info::Field = context->types.field_data() as *const type_info::Field;
     for (var index: usize = 0; index < function.parameter_count; index += 1) {
         if (parameters[function.first_parameter + index].type_id != fields[target.first_field + index].type_id) {
@@ -645,15 +663,15 @@ fn instantiated_function_matches_type(
 fn resolve_generic_function_value(
     context: *context::Context, binding_id: usize,
     request: syntax::SyntaxNode, expected_type: usize) -> GenericResolution {
-    if (binding_id >= context->binding_count || expected_type >= context->types.size()) {
+    if (binding_id >= context->callables.binding_count() || expected_type >= context->types.size()) {
         return {status = GenericResolutionStatus.invalid, function_id = context::no_id()};
     }
     let target: type_info::Record = context::type_record(context, expected_type);
     if (target.kind != type_info::Kind.function_pointer) {
         return {status = GenericResolutionStatus.no_match, function_id = context::no_id()};
     }
-    let bindings: *const context::Binding = context->bindings.data as *const context::Binding;
-    let binding: context::Binding = bindings[binding_id];
+    let bindings: *const domain::Binding = context->callables.binding_data() as *const domain::Binding;
+    let binding: domain::Binding = bindings[binding_id];
     let declarations: *const domain::GenericDeclaration = context->generics.declaration_data() as
             *const domain::GenericDeclaration;
     var selected_declaration: usize = context::no_id();

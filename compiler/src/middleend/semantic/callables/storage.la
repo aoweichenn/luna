@@ -1,0 +1,262 @@
+module luna.compiler.sema.callables;
+
+enum CallableLimit: usize {
+    maximum_size = 18446744073709551615,
+}
+
+fn no_id() -> usize {
+    return CallableLimit.maximum_size as usize;
+}
+
+fn function_is_initial(record: domain::Function) -> bool {
+    let parameter_slice_is_empty: bool = record.first_parameter == no_id() && record.parameter_count == 0;
+    let signature_is_empty: bool = record.signature_offset == no_id() && record.signature_length == 0;
+    let products_are_empty: bool = record.binding_id == no_id() && record.ir_function == no_id();
+    let declaration_is_empty: bool = parameter_slice_is_empty && signature_is_empty;
+    return declaration_is_empty && products_are_empty;
+}
+
+fn parameter_slice_is_appendable(record: domain::Function, next_parameter: usize) -> bool {
+    if (record.parameter_count == 0) {
+        return record.first_parameter == no_id();
+    }
+    if (record.first_parameter > next_parameter) {
+        return false;
+    }
+    return record.parameter_count == next_parameter - record.first_parameter;
+}
+
+impl CallableTable {
+    init(): functions = vector::vector<domain::Function>(), parameters = vector::vector<domain::Parameter>(),
+            bindings = vector::vector<domain::Binding>(), candidates = vector::vector<IndexEntry>(),
+            generic_candidates = vector::vector<IndexEntry>(), signatures = buffer::byte_buffer() {
+        assert(sizeof(IndexEntry) == sizeof(usize));
+        this->error_code = runtime::Error.none;
+        this->order_is_published = false;
+    }
+
+    init(other: CallableTable&&): functions = other.functions as vector::vector<domain::Function>&&,
+            parameters = other.parameters as vector::vector<domain::Parameter>&&,
+            bindings = other.bindings as vector::vector<domain::Binding>&&,
+            candidates = other.candidates as vector::vector<IndexEntry>&&,
+            generic_candidates = other.generic_candidates as vector::vector<IndexEntry>&&,
+            signatures = other.signatures as buffer::byte_buffer&& {
+        this->error_code = other.error_code;
+        this->order_is_published = other.order_is_published;
+        other.error_code = runtime::Error.none;
+        other.order_is_published = false;
+    }
+
+    priv fn ready() const -> bool {
+        return this->error_code == runtime::Error.none && this->storage_is_valid();
+    }
+
+    priv fn published() const -> bool {
+        return this->ready() && this->order_is_published;
+    }
+
+    priv fn storage_is_empty() const -> bool {
+        let declarations_are_empty: bool = this->functions.empty() && this->parameters.empty();
+        let products_are_empty: bool = this->bindings.empty() && this->candidates.empty();
+        let generic_products_are_empty: bool = this->generic_candidates.empty() && this->signatures.empty();
+        let declaration_storage_is_empty: bool = declarations_are_empty && products_are_empty;
+        return declaration_storage_is_empty && generic_products_are_empty;
+    }
+
+    priv fn fail(error: runtime::Error) -> runtime::Error {
+        if (this->error_code == runtime::Error.none) {
+            this->error_code = error;
+        }
+        return this->error_code;
+    }
+
+    fn storage_is_valid() const -> bool {
+        let declarations_are_valid: bool = this->functions.is_valid() && this->parameters.is_valid();
+        let bindings_are_valid: bool = this->bindings.is_valid() && this->candidates.is_valid();
+        let candidates_are_valid: bool = bindings_are_valid && this->generic_candidates.is_valid();
+        let tables_are_valid: bool = declarations_are_valid && candidates_are_valid;
+        return tables_are_valid && this->signatures.is_valid();
+    }
+
+    fn error() const -> runtime::Error {
+        return this->error_code;
+    }
+
+    fn function_count() const -> usize {
+        return this->functions.size();
+    }
+
+    fn parameter_count() const -> usize {
+        return this->parameters.size();
+    }
+
+    fn binding_count() const -> usize {
+        return this->bindings.size();
+    }
+
+    fn candidate_count() const -> usize {
+        return this->candidates.size();
+    }
+
+    fn generic_candidate_count() const -> usize {
+        return this->generic_candidates.size();
+    }
+
+    fn signature_size() const -> usize {
+        return this->signatures.size();
+    }
+
+    fn function_data() const -> *const domain::Function {
+        return this->functions.empty() ? null : &this->functions.get(0) as *const domain::Function;
+    }
+
+    fn parameter_data() const -> *const domain::Parameter {
+        return this->parameters.empty() ? null : &this->parameters.get(0) as *const domain::Parameter;
+    }
+
+    fn binding_data() const -> *const domain::Binding {
+        return this->bindings.empty() ? null : &this->bindings.get(0) as *const domain::Binding;
+    }
+
+    fn candidate_data() const -> *const usize {
+        return this->candidates.empty() ? null : &this->candidates.get(0).value as *const usize;
+    }
+
+    fn generic_candidate_data() const -> *const usize {
+        return this->generic_candidates.empty() ? null : &this->generic_candidates.get(0).value as *const usize;
+    }
+
+    fn signature_data() const -> *const u8 {
+        return this->signatures.data();
+    }
+
+    fn append_function(record: domain::Function) -> IndexResult {
+        if (!this->ready() || !function_is_initial(record)) {
+            return {index = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        let function_id: usize = this->functions.size();
+        let error: runtime::Error = this->functions.push_back(record);
+        if (error != runtime::Error.none) {
+            return {index = no_id(), error = this->fail(error)};
+        }
+        return {index = function_id, error = runtime::Error.none};
+    }
+
+    fn append_parameter(function_id: usize, record: domain::Parameter) -> IndexResult {
+        let unowned: bool = function_id == no_id() && record.function_id == no_id();
+        let owned_id_is_invalid: bool = !unowned && function_id >= this->functions.size();
+        if (!this->ready() || owned_id_is_invalid) {
+            return {index = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        let parameter_id: usize = this->parameters.size();
+        if (!unowned) {
+            let function: domain::Function = this->functions.get(function_id);
+            let owner_matches: bool = record.function_id == function_id;
+            if (!owner_matches || !parameter_slice_is_appendable(function, parameter_id)) {
+                return {index = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+            }
+        }
+        let error: runtime::Error = this->parameters.push_back(record);
+        if (error != runtime::Error.none) {
+            return {index = no_id(), error = this->fail(error)};
+        }
+        if (!unowned) {
+            if (this->functions.get(function_id).parameter_count == 0) {
+                this->functions.get(function_id).first_parameter = parameter_id;
+            }
+            this->functions.get(function_id).parameter_count += 1;
+        }
+        return {index = parameter_id, error = runtime::Error.none};
+    }
+
+    fn append_signature(function_id: usize, data: *const u8, length: usize) -> runtime::Error {
+        if (!this->ready() || function_id >= this->functions.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let function: domain::Function = this->functions.get(function_id);
+        let signature_is_empty: bool = function.signature_offset == no_id() && function.signature_length == 0;
+        if (!signature_is_empty || data == null) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (length == 0) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let offset: usize = this->signatures.size();
+        let error: runtime::Error = this->signatures.append(data, length);
+        if (error != runtime::Error.none) {
+            return this->fail(error);
+        }
+        this->functions.get(function_id).signature_offset = offset;
+        this->functions.get(function_id).signature_length = length;
+        return runtime::Error.none;
+    }
+
+    fn set_required_parameter_count(function_id: usize, count: usize) -> runtime::Error {
+        if (!this->ready() || function_id >= this->functions.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (count > this->functions.get(function_id).parameter_count) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->functions.get(function_id).required_parameter_count = count;
+        return runtime::Error.none;
+    }
+
+    fn set_return_type(function_id: usize, type_id: usize) -> runtime::Error {
+        if (!this->ready() || function_id >= this->functions.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->functions.get(function_id).return_type = type_id;
+        return runtime::Error.none;
+    }
+
+    fn attach_definition(
+        function_id: usize, unit_index: usize, node_index: usize, additional_flags: usize) -> runtime::Error {
+        if (!this->ready() || function_id >= this->functions.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let function: domain::Function = this->functions.get(function_id);
+        let definition_is_empty: bool = function.implementation_unit == no_id() &&
+            function.implementation_node == no_id();
+        if (!definition_is_empty || unit_index == no_id()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (node_index == no_id()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->functions.get(function_id).implementation_unit = unit_index;
+        this->functions.get(function_id).implementation_node = node_index;
+        this->functions.get(function_id).flags |= additional_flags;
+        return runtime::Error.none;
+    }
+
+    fn add_function_flags(function_id: usize, flags: usize) -> runtime::Error {
+        if (!this->ready() || function_id >= this->functions.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->functions.get(function_id).flags |= flags;
+        return runtime::Error.none;
+    }
+
+    fn remove_function_flags(function_id: usize, flags: usize) -> runtime::Error {
+        if (!this->ready() || function_id >= this->functions.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->functions.get(function_id).flags &= ~flags;
+        return runtime::Error.none;
+    }
+
+    fn set_ir_function(function_id: usize, ir_function: usize) -> runtime::Error {
+        if (!this->ready() || function_id >= this->functions.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (ir_function == no_id() || this->functions.get(function_id).ir_function != no_id()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->functions.get(function_id).ir_function = ir_function;
+        return runtime::Error.none;
+    }
+
+    deinit() {
+    }
+}

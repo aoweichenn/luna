@@ -16,15 +16,15 @@ import luna.std.bytes as bytes;
 
 fn function_value(context: *context::Context, node: syntax::SyntaxNode, function_id: usize) -> context::Expression {
     let none: usize = context::no_id();
-    let functions: *const context::Function = context->functions.data as
-            *const context::Function;
-    let function: context::Function = functions[function_id];
+    let functions: *const domain::Function = context->callables.function_data() as
+            *const domain::Function;
+    let function: domain::Function = functions[function_id];
     var parameter_types: bytes::Buffer = bytes::empty();
     for (var index: usize = 0;
         index < function.parameter_count && context->error == runtime::Error.none;
         index += 1) {
-        let parameters: *const context::Parameter = context->parameters.data as
-                *const context::Parameter;
+        let parameters: *const domain::Parameter = context->callables.parameter_data() as
+                *const domain::Parameter;
         let parameter_type: usize = parameters[function.first_parameter + index].type_id;
         let appended: bytes::BufferResult =
             bytes::append(parameter_types, (&parameter_type) as *const usize as *const u8, sizeof(usize));
@@ -62,15 +62,15 @@ fn add_callable_diagnostic(
     let none: usize = context::no_id();
     var related_unit: usize = none;
     var related_span: lexer::SourceSpan = context::empty_span();
-    if (binding_id < context->binding_count) {
-        let bindings: *const context::Binding = context->bindings.data as
-                *const context::Binding;
+    if (binding_id < context->callables.binding_count()) {
+        let bindings: *const domain::Binding = context->callables.binding_data() as
+                *const domain::Binding;
         let candidate_count: usize = bindings[binding_id].candidate_count;
         for (var candidate_index: usize = 0; candidate_index < candidate_count; candidate_index += 1) {
             let function_id: usize = functions::binding_candidate(context, binding_id, candidate_index);
             if (functions::function_is_visible(context, function_id, context->current_unit)) {
-                let functions_data: *const context::Function = context->functions.data as
-                        *const context::Function;
+                let functions_data: *const domain::Function = context->callables.function_data() as
+                        *const domain::Function;
                 let symbols: *const context::Symbol = context->symbols.symbol_data() as
                         *const context::Symbol;
                 let symbol: context::Symbol = symbols[functions_data[function_id].symbol_id];
@@ -222,15 +222,15 @@ fn lower_name(context: *context::Context, node: syntax::SyntaxNode, expected_typ
 
 fn lower_this(context: *context::Context, node: syntax::SyntaxNode) -> context::Expression {
     let none: usize = context::no_id();
-    if (context->current_function >= context->function_count) {
+    if (context->current_function >= context->callables.function_count()) {
         context::add_diagnostic(
             context, context::DiagnosticKind.invalid_receiver, context->current_unit, node.span, none,
             context::empty_span(), none);
         return base::invalid_expression();
     }
-    let functions: *const context::Function = context->functions.data as
-            *const context::Function;
-    let function: context::Function = functions[context->current_function];
+    let functions: *const domain::Function = context->callables.function_data() as
+            *const domain::Function;
+    let function: domain::Function = functions[context->current_function];
     if (!domain::has_receiver(function.identity)) {
         context::add_diagnostic(
             context, context::DiagnosticKind.invalid_receiver, context->current_unit, node.span, none,
@@ -439,8 +439,8 @@ fn store_bitfield(
 fn bound_method_entry(
     context: *context::Context, node: syntax::SyntaxNode, target: probe::CallTarget,
     function_id: usize, receiver_address: usize) -> usize {
-    let functions_data: *const context::Function = context->functions.data as *const context::Function;
-    let function: context::Function = functions_data[function_id];
+    let functions_data: *const domain::Function = context->callables.function_data() as *const domain::Function;
+    let function: domain::Function = functions_data[function_id];
     let plan: domain::DispatchPlan = classes::dispatch_plan(
         context, target.owner_type, function_id, call_has_exact_dynamic_type(context, target));
     if (plan.kind == domain::CallDispatch.virtual_call) {
@@ -488,8 +488,8 @@ fn lower_bound_method(
             none, context::empty_span(), expected_type);
         return base::invalid_expression();
     }
-    let functions_data: *const context::Function = context->functions.data as *const context::Function;
-    let function: context::Function = functions_data[resolution.function_id];
+    let functions_data: *const domain::Function = context->callables.function_data() as *const domain::Function;
+    let function: domain::Function = functions_data[resolution.function_id];
     let receiver_type: usize = functions::function_receiver_type(context, function);
     let receiver_address: usize = instance_receiver_address(context, node, target, receiver_type, lowerer);
     let entry: usize = bound_method_entry(context, node, target, resolution.function_id, receiver_address);
@@ -815,19 +815,19 @@ fn collect_variadic_call_argument(
     append_call_argument(context, values, argument.value_id);
 }
 
-fn default_call_argument(context: *context::Context, parameter: context::Parameter) -> context::Expression {
+fn default_call_argument(context: *context::Context, parameter: domain::Parameter) -> context::Expression {
     if (parameter.default_node == context::no_id()) {
         return base::invalid_expression();
     }
     let node: syntax::SyntaxNode = context::node(context, parameter.unit_index, parameter.default_node);
     switch (parameter.default_kind) {
-    case context::ParameterDefaultKind.integer {
+    case domain::ParameterDefaultKind.integer {
         return builder::emit_integer_constant(context, node, parameter.type_id, parameter.default_value);
     }
-    case context::ParameterDefaultKind.boolean {
+    case domain::ParameterDefaultKind.boolean {
         return builder::emit_boolean_constant(context, node, parameter.default_value != 0);
     }
-    case context::ParameterDefaultKind.null_pointer {
+    case domain::ParameterDefaultKind.null_pointer {
         return builder::emit_null_constant(context, node, parameter.type_id);
     }
     default {
@@ -837,15 +837,15 @@ fn default_call_argument(context: *context::Context, parameter: context::Paramet
 }
 
 fn collect_default_call_arguments(
-    context: *context::Context, function: context::Function, explicit_count: usize, values: *bytes::Buffer) {
-    let parameters: *const context::Parameter = context->parameters.data as
-            *const context::Parameter;
+    context: *context::Context, function: domain::Function, explicit_count: usize, values: *bytes::Buffer) {
+    let parameters: *const domain::Parameter = context->callables.parameter_data() as
+            *const domain::Parameter;
     let parameter_count: usize = functions::function_argument_parameter_count(function);
     let first_parameter: usize = functions::function_first_argument_parameter(function);
     for (var index: usize = explicit_count;
         index < parameter_count && context->error == runtime::Error.none;
         index += 1) {
-        let parameter: context::Parameter = parameters[first_parameter + index];
+        let parameter: domain::Parameter = parameters[first_parameter + index];
         if (parameter.default_node == context::no_id()) {
             context->error = runtime::Error.invalid_argument;
             return;
@@ -857,7 +857,7 @@ fn collect_default_call_arguments(
 }
 
 fn call_parameter_type(
-    parameters: *const context::Parameter, fields: *const type_info::Field,
+    parameters: *const domain::Parameter, fields: *const type_info::Field,
     first_parameter: usize, index: usize, parameters_from_fields: bool) -> usize {
     return parameters_from_fields ? fields[first_parameter + index].type_id :
         parameters[first_parameter + index].type_id;
@@ -999,7 +999,7 @@ fn initialize_class_vptr(
     return builder::store_to_address(context, node, vptr_storage, table_pointer, table_value);
 }
 
-fn virtual_function_type(context: *context::Context, function: context::Function) -> usize {
+fn virtual_function_type(context: *context::Context, function: domain::Function) -> usize {
     var parameter_types: bytes::Buffer = bytes::empty();
     let receiver_type: usize = functions::function_receiver_type(context, function);
     if (receiver_type == context::no_id()) {
@@ -1009,7 +1009,7 @@ fn virtual_function_type(context: *context::Context, function: context::Function
         parameter_types, (&receiver_type) as *const usize as *const u8, sizeof(usize));
     parameter_types = receiver_appended.buffer;
     context->error = receiver_appended.error;
-    let parameters: *const context::Parameter = context->parameters.data as *const context::Parameter;
+    let parameters: *const domain::Parameter = context->callables.parameter_data() as *const domain::Parameter;
     for (var index: usize = 0;
         index < function.parameter_count && context->error == runtime::Error.none;
         index += 1) {
@@ -1032,7 +1032,7 @@ fn virtual_function_type(context: *context::Context, function: context::Function
 
 fn load_virtual_callee(
     context: *context::Context, node: syntax::SyntaxNode, plan: domain::DispatchPlan,
-    function: context::Function, receiver_address: usize) -> usize {
+    function: domain::Function, receiver_address: usize) -> usize {
     let byte_pointer: usize = byte_pointer_type(context, true);
     let table_storage_type: usize = pointer_type(context, byte_pointer, true);
     if (byte_pointer == context::no_id() || table_storage_type == context::no_id()) {
@@ -1249,11 +1249,11 @@ fn lower_target_call_with_receiver(
     var parameters_from_fields: bool = false;
     var callee_no_return: bool = false;
     var bound_receiver: usize = none;
-    var selected_record: context::Function = {};
+    var selected_record: domain::Function = {};
     let symbols: *const context::Symbol = context->symbols.symbol_data() as
             *const context::Symbol;
     if (selected_function != none) {
-        let function_data: *const context::Function = context->functions.data as *const context::Function;
+        let function_data: *const domain::Function = context->callables.function_data() as *const domain::Function;
         selected_record = function_data[selected_function];
         return_type = selected_record.return_type;
         ir_callee = selected_record.ir_function;
@@ -1334,7 +1334,7 @@ fn lower_target_call_with_receiver(
         let variadic_extra: bool = index >= parameter_count;
         var parameter_type: usize = none;
         if (!variadic_extra) {
-            let parameters: *const context::Parameter = context->parameters.data as *const context::Parameter;
+            let parameters: *const domain::Parameter = context->callables.parameter_data() as *const domain::Parameter;
             let type_fields: *const type_info::Field = context->types.field_data() as *const type_info::Field;
             parameter_type = call_parameter_type(
                 parameters, type_fields, first_parameter, index, parameters_from_fields);
@@ -1497,9 +1497,9 @@ fn lower_special_construction(
         add_callable_diagnostic(context, diagnostic, node, binding_id);
         return base::invalid_expression();
     }
-    let function_data: *const context::Function = context->functions.data as *const context::Function;
-    let parameters: *const context::Parameter = context->parameters.data as *const context::Parameter;
-    let function: context::Function = function_data[resolution.function_id];
+    let function_data: *const domain::Function = context->callables.function_data() as *const domain::Function;
+    let parameters: *const domain::Parameter = context->callables.parameter_data() as *const domain::Parameter;
+    let function: domain::Function = function_data[resolution.function_id];
     let receiver_type: usize = functions::function_receiver_type(context, function);
     let receiver: usize = convert_value(context, node, destination, receiver_type);
     if (receiver == none || !initialize_class_vptr(context, node, expected_type, destination)) {

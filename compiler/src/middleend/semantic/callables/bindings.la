@@ -1,0 +1,156 @@
+module luna.compiler.sema.callables;
+
+fn binding_slice_is_appendable(first: usize, count: usize, next: usize) -> bool {
+    if (count == 0) {
+        return first == no_id();
+    }
+    if (first > next) {
+        return false;
+    }
+    return count == next - first;
+}
+
+impl CallableTable {
+    priv fn function_is_ordered(function_id: usize) const -> bool {
+        for (var index: usize = 0; index < this->candidates.size(); index += 1) {
+            if (this->candidates.get(index).value == function_id) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    priv fn generic_candidate_is_published(declaration_id: usize) const -> bool {
+        for (var index: usize = 0; index < this->generic_candidates.size(); index += 1) {
+            if (this->generic_candidates.get(index).value == declaration_id) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn set_function_binding(function_id: usize, binding_id: usize) -> runtime::Error {
+        if (!this->published() || function_id >= this->functions.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (binding_id >= this->bindings.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let current: usize = this->functions.get(function_id).binding_id;
+        if (current != no_id() && current != binding_id) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->functions.get(function_id).binding_id = binding_id;
+        return runtime::Error.none;
+    }
+
+    fn publish_function_order(data: *const usize, count: usize) -> runtime::Error {
+        if (!this->ready() || this->order_is_published) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let source_is_invalid: bool = data == null && count != 0;
+        if (source_is_invalid || count != this->functions.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        for (var index: usize = 0; index < count; index += 1) {
+            if (data[index] >= this->functions.size()) {
+                return this->fail(runtime::Error.invalid_argument);
+            }
+            for (var previous: usize = 0; previous < index; previous += 1) {
+                if (data[previous] == data[index]) {
+                    return this->fail(runtime::Error.invalid_argument);
+                }
+            }
+        }
+        var published: vector::vector<IndexEntry> = vector::vector<IndexEntry>();
+        let reserve_error: runtime::Error = published.reserve(count);
+        if (reserve_error != runtime::Error.none) {
+            return this->fail(reserve_error);
+        }
+        for (var index: usize = 0; index < count; index += 1) {
+            let error: runtime::Error = published.push_back({value = data[index]});
+            if (error != runtime::Error.none) {
+                return this->fail(error);
+            }
+        }
+        this->candidates = published as vector::vector<IndexEntry>&&;
+        this->order_is_published = true;
+        return runtime::Error.none;
+    }
+
+    fn append_ordered_function(function_id: usize) -> IndexResult {
+        if (!this->published() || function_id >= this->functions.size()) {
+            return {index = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        if (this->function_is_ordered(function_id)) {
+            return {index = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        let index: usize = this->candidates.size();
+        let error: runtime::Error = this->candidates.push_back({value = function_id});
+        if (error != runtime::Error.none) {
+            return {index = no_id(), error = this->fail(error)};
+        }
+        return {index = index, error = runtime::Error.none};
+    }
+
+    fn append_binding(record: domain::Binding) -> IndexResult {
+        if (!this->published() || record.kind != domain::BindingKind.callable_set) {
+            return {index = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        let concrete_is_valid: bool = record.candidate_count == 0 ? record.first_candidate == no_id() :
+            range_is_valid(record.first_candidate, record.candidate_count, this->candidates.size());
+        let generic_is_valid: bool = record.generic_candidate_count == 0 ? record.first_generic_candidate == no_id() :
+            range_is_valid(
+                record.first_generic_candidate, record.generic_candidate_count, this->generic_candidates.size());
+        if (!concrete_is_valid || !generic_is_valid) {
+            return {index = no_id(), error = this->fail(runtime::Error.invalid_argument)};
+        }
+        let binding_id: usize = this->bindings.size();
+        let error: runtime::Error = this->bindings.push_back(record);
+        if (error != runtime::Error.none) {
+            return {index = no_id(), error = this->fail(error)};
+        }
+        return {index = binding_id, error = runtime::Error.none};
+    }
+
+    fn extend_binding(binding_id: usize) -> runtime::Error {
+        if (!this->published() || binding_id >= this->bindings.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let binding: domain::Binding = this->bindings.get(binding_id);
+        let slice_is_valid: bool = binding.candidate_count != 0 &&
+            range_is_valid(binding.first_candidate, binding.candidate_count, this->candidates.size());
+        if (!slice_is_valid) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let next: usize = binding.first_candidate + binding.candidate_count;
+        if (next >= this->candidates.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        this->bindings.get(binding_id).candidate_count += 1;
+        return runtime::Error.none;
+    }
+
+    fn append_generic_candidate(binding_id: usize, declaration_id: usize) -> runtime::Error {
+        if (!this->published() || binding_id >= this->bindings.size()) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        if (this->generic_candidate_is_published(declaration_id)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let next: usize = this->generic_candidates.size();
+        let binding: domain::Binding = this->bindings.get(binding_id);
+        if (!binding_slice_is_appendable(binding.first_generic_candidate, binding.generic_candidate_count, next)) {
+            return this->fail(runtime::Error.invalid_argument);
+        }
+        let error: runtime::Error = this->generic_candidates.push_back({value = declaration_id});
+        if (error != runtime::Error.none) {
+            return this->fail(error);
+        }
+        if (binding.generic_candidate_count == 0) {
+            this->bindings.get(binding_id).first_generic_candidate = next;
+        }
+        this->bindings.get(binding_id).generic_candidate_count += 1;
+        return runtime::Error.none;
+    }
+}

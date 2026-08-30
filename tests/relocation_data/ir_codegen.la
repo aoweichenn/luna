@@ -8,6 +8,7 @@ import luna.bootstrap.middleend.semantic.classes.model as class_model;
 import luna.bootstrap.middleend.semantic.context as context;
 import luna.bootstrap.middleend.semantic.generics.model as generic_model;
 import luna.runtime;
+import luna.compiler.sema.callables as callable_model;
 import luna.compiler.sema.domain as domain;
 import luna.std.bytes as bytes;
 import luna.std.string_view as string_views;
@@ -31,6 +32,11 @@ enum GenericProbe: usize {
 enum SymbolProbe: usize {
     module_count = 2, unit_count = 2, import_count = 1, symbol_count = 1,
     name_node = 3, name_token = 5,
+}
+
+enum CallableProbe: usize {
+    symbol_id = 2, interface_unit = 3, interface_node = 5, parameter_type = 7,
+    return_type = 11, ir_function = 13,
 }
 
 const SYMBOL_VALUE: u64 = 17;
@@ -57,6 +63,220 @@ fn pattern_count(data: *const u8, length: usize, pattern: *const u8, pattern_len
 
 fn first_error(current: runtime::Error, next: runtime::Error) -> runtime::Error {
     return current == runtime::Error.none ? next : current;
+}
+
+fn callable_probe_function(symbol_id: usize) -> domain::Function {
+    let none: usize = callable_model::no_id();
+    return {
+        identity = domain::free_function(), symbol_id = symbol_id, binding_id = none,
+        interface_unit = CallableProbe.interface_unit as usize,
+        interface_node = CallableProbe.interface_node as usize,
+        implementation_unit = none, implementation_node = none,
+        return_type = CallableProbe.return_type as usize,
+        first_parameter = none, parameter_count = 0, required_parameter_count = 0,
+        signature_offset = none, signature_length = 0, ir_function = none, flags = 0,
+    };
+}
+
+fn callable_table_failure_is_sticky() -> bool {
+    var rejected: callable_model::CallableTable = callable_model::CallableTable();
+    if (rejected.append_function(callable_probe_function(0)).error != runtime::Error.none ||
+        rejected.append_function(callable_probe_function(1)).error != runtime::Error.none) {
+        return false;
+    }
+    let duplicate_order: [2]usize = {0, 0};
+    let rejected_error: runtime::Error = rejected.publish_function_order(&duplicate_order[0], 2);
+    let rejection_is_atomic: bool = rejected_error == runtime::Error.invalid_argument &&
+        rejected.candidate_count() == 0;
+    if (!rejection_is_atomic || rejected.error() != runtime::Error.invalid_argument) {
+        return false;
+    }
+    let valid_order: [2]usize = {0, 1};
+    let next_error: runtime::Error = rejected.publish_function_order(&valid_order[0], 2);
+    return next_error == runtime::Error.invalid_argument && rejected.candidate_count() == 0;
+}
+
+fn callable_table_generic_candidates_are_valid() -> bool {
+    var table: callable_model::CallableTable = callable_model::CallableTable();
+    let function = table.append_function(callable_probe_function(CallableProbe.symbol_id as usize));
+    if (function.error != runtime::Error.none) {
+        return false;
+    }
+    let signature: [3]u8 = {1, 7, 11};
+    if (table.append_signature(function.index, &signature[0] as *const u8, 3) != runtime::Error.none) {
+        return false;
+    }
+    let function_order: usize = function.index;
+    if (table.publish_function_order(&function_order, 1) != runtime::Error.none) {
+        return false;
+    }
+    let binding = table.append_binding({
+            kind = domain::BindingKind.callable_set, module_id = 0, owner_type = domain::no_owner(),
+            declaration_unit = CallableProbe.interface_unit as usize,
+            declaration_node = CallableProbe.interface_node as usize, name_token = 1,
+            first_candidate = 0, candidate_count = 1,
+            first_generic_candidate = context::no_id(), generic_candidate_count = 0,
+        });
+    if (binding.error != runtime::Error.none) {
+        return false;
+    }
+    if (table.set_function_binding(function.index, binding.index) != runtime::Error.none) {
+        return false;
+    }
+    let generic_error: runtime::Error = table.append_generic_candidate(binding.index, 0);
+    let generic_is_valid: bool = generic_error == runtime::Error.none && table.generic_candidate_count() == 1;
+    if (!generic_is_valid || !table.is_valid(1)) {
+        return false;
+    }
+    let duplicate_error: runtime::Error = table.append_generic_candidate(binding.index, 0);
+    let duplicate_is_rejected: bool = duplicate_error == runtime::Error.invalid_argument &&
+        table.generic_candidate_count() == 1;
+    if (!duplicate_is_rejected) {
+        return false;
+    }
+    return table.error() == runtime::Error.invalid_argument;
+}
+
+fn callable_table_binding_extension_is_rejected() -> bool {
+    var out_of_range: callable_model::CallableTable = callable_model::CallableTable();
+    if (out_of_range.append_function(callable_probe_function(CallableProbe.symbol_id as usize)).error !=
+            runtime::Error.none) {
+        return false;
+    }
+    let function_order: usize = 0;
+    if (out_of_range.publish_function_order(&function_order, 1) != runtime::Error.none) {
+        return false;
+    }
+    let out_of_range_error: runtime::Error = out_of_range.extend_binding(1);
+    let out_of_range_is_rejected: bool = out_of_range_error == runtime::Error.invalid_argument &&
+        out_of_range.error() == runtime::Error.invalid_argument;
+    if (!out_of_range_is_rejected) {
+        return false;
+    }
+
+    var table: callable_model::CallableTable = callable_model::CallableTable();
+    if (table.append_function(callable_probe_function(CallableProbe.symbol_id as usize)).error !=
+            runtime::Error.none) {
+        return false;
+    }
+    if (table.publish_function_order(&function_order, 1) != runtime::Error.none) {
+        return false;
+    }
+    let binding = table.append_binding({
+            kind = domain::BindingKind.callable_set, module_id = 0, owner_type = domain::no_owner(),
+            declaration_unit = CallableProbe.interface_unit as usize,
+            declaration_node = CallableProbe.interface_node as usize, name_token = 1,
+            first_candidate = 0, candidate_count = 1,
+            first_generic_candidate = context::no_id(), generic_candidate_count = 0,
+        });
+    if (binding.error != runtime::Error.none) {
+        return false;
+    }
+    let extension_error: runtime::Error = table.extend_binding(binding.index);
+    let extension_is_rejected: bool = extension_error == runtime::Error.invalid_argument && table.binding_count() == 1;
+    if (!extension_is_rejected) {
+        return false;
+    }
+    return table.error() == runtime::Error.invalid_argument;
+}
+
+fn callable_table_move_is_valid() -> bool {
+    var empty: callable_model::CallableTable = callable_model::CallableTable();
+    if (empty.publish_function_order(null, 0) != runtime::Error.none || !empty.is_valid(0)) {
+        return false;
+    }
+    let repeated_publication: runtime::Error = empty.publish_function_order(null, 0);
+    if (repeated_publication != runtime::Error.invalid_argument || empty.candidate_count() != 0) {
+        return false;
+    }
+
+    var original: callable_model::CallableTable = callable_model::CallableTable();
+    let function = original.append_function(callable_probe_function(CallableProbe.symbol_id as usize));
+    if (function.error != runtime::Error.none || function.index != 0) {
+        return false;
+    }
+    let parameter: domain::Parameter = {
+        function_id = function.index, type_id = CallableProbe.parameter_type as usize,
+        unit_index = CallableProbe.interface_unit as usize,
+        declaration_node = CallableProbe.interface_node as usize, name_token = 1,
+        default_node = context::no_id(), default_value = 0, default_kind = domain::ParameterDefaultKind.none,
+    };
+    let appended_parameter = original.append_parameter(function.index, parameter);
+    if (appended_parameter.error != runtime::Error.none || appended_parameter.index != 0) {
+        return false;
+    }
+    if (original.is_valid(1)) {
+        return false;
+    }
+    if (original.set_required_parameter_count(function.index, 1) != runtime::Error.none ||
+        original.set_return_type(function.index, CallableProbe.return_type as usize) != runtime::Error.none) {
+        return false;
+    }
+    let signature: [3]u8 = {1, 7, 11};
+    if (original.append_signature(function.index, &signature[0] as *const u8, 3) != runtime::Error.none) {
+        return false;
+    }
+    let function_order: usize = function.index;
+    if (original.publish_function_order(&function_order, 1) != runtime::Error.none) {
+        return false;
+    }
+    let binding = original.append_binding({
+            kind = domain::BindingKind.callable_set, module_id = 0, owner_type = domain::no_owner(),
+            declaration_unit = CallableProbe.interface_unit as usize,
+            declaration_node = CallableProbe.interface_node as usize, name_token = 1,
+            first_candidate = 0, candidate_count = 1,
+            first_generic_candidate = context::no_id(), generic_candidate_count = 0,
+        });
+    if (binding.error != runtime::Error.none || binding.index != 0) {
+        return false;
+    }
+    if (original.set_function_binding(function.index, binding.index) != runtime::Error.none ||
+        original.set_ir_function(function.index, CallableProbe.ir_function as usize) != runtime::Error.none) {
+        return false;
+    }
+    if (!original.is_valid(1)) {
+        return false;
+    }
+    if (original.append_generic_candidate(binding.index, 0) != runtime::Error.none || !original.is_valid(1)) {
+        return false;
+    }
+
+    var moved: callable_model::CallableTable = utility::move(original);
+    let source_is_empty: bool = original.function_count() == 0 && original.parameter_count() == 0;
+    let source_is_valid: bool = original.storage_is_valid() && original.is_valid(1);
+    if (!source_is_empty || !source_is_valid) {
+        return false;
+    }
+    let counts_are_valid: bool = moved.function_count() == 1 && moved.parameter_count() == 1;
+    let products_are_valid: bool = moved.binding_count() == 1 && moved.candidate_count() == 1;
+    if (!counts_are_valid || !products_are_valid) {
+        return false;
+    }
+    let function_is_valid: bool = moved.function_data()[0].binding_id == binding.index &&
+        moved.function_data()[0].ir_function == CallableProbe.ir_function as usize;
+    let parameter_is_valid: bool = moved.parameter_data()[0].function_id == function.index &&
+        moved.parameter_data()[0].type_id == CallableProbe.parameter_type as usize;
+    if (!function_is_valid || !parameter_is_valid) {
+        return false;
+    }
+    let signature_is_valid: bool = moved.signature_size() == 3 && moved.signature_data()[1] == 7;
+    let generic_candidate_is_valid: bool = moved.generic_candidate_count() == 1 &&
+        moved.generic_candidate_data()[0] == 0;
+    let order_is_valid: bool = moved.candidate_data()[0] == function.index && moved.is_valid(1);
+    if (!signature_is_valid || !generic_candidate_is_valid) {
+        return false;
+    }
+    if (!order_is_valid) {
+        return false;
+    }
+    if (original.append_function(callable_probe_function(CallableProbe.symbol_id as usize)).error !=
+            runtime::Error.none) {
+        return false;
+    }
+    if (!callable_table_failure_is_sticky() || !callable_table_generic_candidates_are_valid()) {
+        return false;
+    }
+    return callable_table_binding_extension_is_rejected();
 }
 
 fn class_table_failure_is_sticky() -> bool {
@@ -454,6 +674,9 @@ fn semantic_diagnostic_flow_is_valid() -> bool {
 }
 
 fn main() -> i32 {
+    if (!callable_table_move_is_valid()) {
+        return 36;
+    }
     if (!class_table_move_is_valid()) {
         return 32;
     }

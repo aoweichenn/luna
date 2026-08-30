@@ -193,11 +193,12 @@ algorithm family behind `types::lookup_field`; consteval and expression passes
 do not import a lookup child module.
 See [the semantic pipeline contract](sema.md).
 
-Callable identity, expression value categories and stable passive class/generic
-metadata now live in the acyclic `luna.compiler.sema.domain` foundation. The
-former callable/value modules are removed. Move-only `ClassTable` and
-`GenericTable` remain separate construction owners imported only by Context;
-higher passes consume their records through domain.
+Callable identity, expression value categories and stable passive
+class/generic/function/parameter/binding metadata live in the acyclic
+`luna.compiler.sema.domain` foundation. The former callable/value modules are
+removed. Move-only `ClassTable`, `GenericTable` and `CallableTable` remain
+separate construction owners composed by Context; higher passes consume their
+records through domain and const table projections.
 
 Compilation is split into global and local phases:
 
@@ -239,6 +240,26 @@ lowering consume that same sequence rather than sorting independently.
 Function, parameter, slot, block and global construction therefore remains
 deterministic when source units are supplied in a different order, without
 recursive sorting or downstream order drift.
+
+`luna.compiler.sema.callables::CallableTable` is the move-only owner of the
+function, parameter and binding records, canonical signature bytes and the
+ordinary/generic candidate indexes. It publishes the initial sorted function
+order once, transactionally, then permits only bound slice extension, ordered
+method append and focused function mutation. A private move-only
+`SignatureWriter` in `functions/signature.la` constructs each canonical byte
+sequence before the completed bytes are appended to the owner's signature
+buffer. The table validates ordinary binding ranges and candidate back-links,
+as well as generic candidate bounds and uniqueness; the reverse
+`GenericDeclaration.binding_id` relation remains a cross-owner validation in
+`functions`. Const-function parameters reuse the parameter vector with
+`function_id = no_id()` and are cross-validated against `ConstFunction` slices
+in `functions/const.la`. Runtime free-generic instances may own a binding
+without being inserted into the ordinary overload sequence; concrete generic
+class methods are appended to that sequence through the same owner. Context
+loses six callable raw buffers and five mirrored record counters, and no
+longer exposes writable callable records. The direct relocation contract
+rejects duplicate generic candidates, repeated order publication and invalid
+binding extension while preserving the sticky error and atomic order state.
 
 Multi-candidate calls are resolved by a non-emitting expression probe split
 across one interface and three same-module implementation units. The probe
@@ -299,7 +320,9 @@ with an output boolean. The former `semantic.context.lookup` child interface
 and object do not represent an independent dependency and are removed;
 `context/symbols.la` and `context/lookup.la` are implementation families of the
 parent context module. Callable bindings and their candidate slices remain a
-separate invariant and are intentionally not absorbed into the name table.
+separate invariant and are owned by `CallableTable`, not absorbed into the
+name table. `call_selections` is an expression-lowering cache and remains in
+Context for the later LoweringState extraction.
 
 M3.1 adds one canonical `base_type` field to the semantic type record. TypeTable
 is now the only owner of that relation; layout, class policy, field lookup, IR

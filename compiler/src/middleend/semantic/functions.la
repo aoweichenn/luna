@@ -8,29 +8,42 @@ import luna.bootstrap.middleend.semantic.generics;
 import luna.bootstrap.middleend.semantic.types as types;
 import luna.compiler.types as type_info;
 import luna.runtime as runtime;
+import luna.std.buffer as buffer;
 import luna.std.bytes as bytes;
 import luna.std.checked as checked;
 
-fn append_function(context: *context::Context, function: context::Function) -> usize {
-    let result: usize = context->function_count;
-    if (!context::append_record(
-            context, &context->functions, (&function) as
-                *const context::Function as *const u8, sizeof(context::Function))) {
+fn append_function(context: *context::Context, function: domain::Function) -> usize {
+    if (context->error != runtime::Error.none) {
         return context::no_id();
     }
-    context->function_count += 1;
-    return result;
+    let result = context->callables.append_function(function);
+    context->error = result.error;
+    return result.index;
 }
 
-fn append_parameter(context: *context::Context, parameter: context::Parameter) -> usize {
-    let result: usize = context->parameter_count;
-    if (!context::append_record(
-            context, &context->parameters, (&parameter) as
-                *const context::Parameter as *const u8, sizeof(context::Parameter))) {
+fn append_parameter(context: *context::Context, parameter: domain::Parameter) -> usize {
+    if (context->error != runtime::Error.none) {
         return context::no_id();
     }
-    context->parameter_count += 1;
-    return result;
+    let result = context->callables.append_parameter(parameter.function_id, parameter);
+    context->error = result.error;
+    return result.index;
+}
+
+fn set_required_parameter_count(context: *context::Context, function_id: usize, count: usize) -> bool {
+    if (context->error != runtime::Error.none) {
+        return false;
+    }
+    context->error = context->callables.set_required_parameter_count(function_id, count);
+    return context->error == runtime::Error.none;
+}
+
+fn set_return_type(context: *context::Context, function_id: usize, type_id: usize) -> bool {
+    if (context->error != runtime::Error.none) {
+        return false;
+    }
+    context->error = context->callables.set_return_type(function_id, type_id);
+    return context->error == runtime::Error.none;
 }
 
 enum FunctionPartKind: usize {
@@ -72,7 +85,8 @@ fn function_parts(
     context: *context::Context, unit_index: usize, declaration: syntax::SyntaxNode, parameter_count: *usize,
     return_node: *usize, body_node: *usize) -> bool {
     let none: usize = context::no_id();
-    if (parameter_count == null || return_node == null || body_node == null) {
+    let primary_outputs_are_valid: bool = parameter_count != null && return_node != null;
+    if (!primary_outputs_are_valid || body_node == null) {
         return false;
     }
     *parameter_count = 0;
@@ -147,9 +161,9 @@ fn first_parameter_node(context: *context::Context, unit_index: usize, declarati
 
 fn parameter_name_exists(
     context: *context::Context, function_id: usize, unit_index: usize, name_token: usize) -> usize {
-    let parameters: *const context::Parameter = context->parameters.data as
-            *const context::Parameter;
-    for (var index: usize = 0; index < context->parameter_count; index += 1) {
+    let parameters: *const domain::Parameter = context->callables.parameter_data() as
+            *const domain::Parameter;
+    for (var index: usize = 0; index < context->callables.parameter_count(); index += 1) {
         if (parameters[index].function_id == function_id &&
             context::tokens_equal(
                 context, unit_index, name_token, parameters[index].unit_index, parameters[index].name_token)) {
@@ -162,8 +176,6 @@ fn parameter_name_exists(
 fn collect_function_parameters(
     context: *context::Context, function_id: usize, unit_index: usize, declaration: syntax::SyntaxNode,
     expected_parameter_count: usize, defaults_are_enabled: bool) -> bool {
-    var functions: *context::Function = context->functions.data as
-            *context::Function;
     var child: usize = first_parameter_node(context, unit_index, declaration);
     var defaults_are_valid: bool = true;
     for (var index: usize = 0; index < expected_parameter_count; index += 1) {
@@ -175,8 +187,8 @@ fn collect_function_parameters(
         }
         let duplicate: usize = parameter_name_exists(context, function_id, unit_index, parameter_node.token_index);
         if (duplicate != context::no_id()) {
-            let parameters: *const context::Parameter = context->parameters.data as
-                    *const context::Parameter;
+            let parameters: *const domain::Parameter = context->callables.parameter_data() as
+                    *const domain::Parameter;
             context::add_diagnostic(
                 context, context::DiagnosticKind.duplicate_parameter, unit_index,
                 context::token(context, unit_index, parameter_node.token_index).span, parameters[duplicate].unit_index,
@@ -200,9 +212,6 @@ fn collect_function_parameters(
                     context, context::DiagnosticKind.incomplete_type, unit_index, parameter_node.span, context::no_id(),
                     context::empty_span(), type_id);
             }
-            if (functions[function_id].parameter_count == 0) {
-                functions[function_id].first_parameter = context->parameter_count;
-            }
             let default_node: usize = parameter_default_node(context, unit_index, parameter_node);
             let default_value: DefaultValue = collect_parameter_default(
                 context, unit_index, declaration, parameter_node, type_id, defaults_are_enabled);
@@ -216,15 +225,14 @@ fn collect_function_parameters(
                     default_node = default_value.valid ? default_node : context::no_id(),
                     default_value = default_value.value, default_kind = default_value.kind,
                 });
-            functions = context->functions.data as
-                *context::Function;
-            functions[function_id].parameter_count += 1;
+            if (context->error != runtime::Error.none) {
+                return false;
+            }
         }
         child = parameter_node.next_sibling;
     }
     if (!defaults_are_valid) {
-        functions = context->functions.data as *context::Function;
-        functions[function_id].required_parameter_count = expected_parameter_count;
+        set_required_parameter_count(context, function_id, expected_parameter_count);
     }
     return context->error == runtime::Error.none;
 }
@@ -232,9 +240,15 @@ fn collect_function_parameters(
 fn external_name_is_reserved(context: *context::Context, unit_index: usize, token_index: usize) -> bool {
     let token: lexer::Token = context::token(context, unit_index, token_index);
     let unit: *const context::Unit = context::input_unit(context, unit_index);
-    return context::token_equals_bytes(context, unit_index, token_index, "_start", 6) ||
-        (unit != null && token.span.length >= 2 && unit->source.data[token.span.offset] == '_' &&
-            unit->source.data[token.span.offset + 1] == 'L');
+    let start_is_reserved: bool = context::token_equals_bytes(context, unit_index, token_index, "_start", 6);
+    if (start_is_reserved) {
+        return true;
+    }
+    if (unit == null) {
+        return false;
+    }
+    let prefix_is_long: bool = token.span.length >= 2 && unit->source.data[token.span.offset] == '_';
+    return prefix_is_long && unit->source.data[token.span.offset + 1] == 'L';
 }
 
 fn diagnose_external_type(
@@ -256,13 +270,13 @@ fn diagnose_external_type(
 }
 
 fn validate_external_signature(context: *context::Context, function_id: usize) -> bool {
-    let functions: *const context::Function = context->functions.data as
-            *const context::Function;
-    let parameters: *const context::Parameter = context->parameters.data as
-            *const context::Parameter;
+    let functions: *const domain::Function = context->callables.function_data() as
+            *const domain::Function;
+    let parameters: *const domain::Parameter = context->callables.parameter_data() as
+            *const domain::Parameter;
     let symbols: *const context::Symbol = context->symbols.symbol_data() as
             *const context::Symbol;
-    let function: context::Function = functions[function_id];
+    let function: domain::Function = functions[function_id];
     let symbol: context::Symbol = symbols[function.symbol_id];
     if (external_name_is_reserved(
             context, symbol.declaration_unit, symbol.name_token)) {
@@ -276,7 +290,7 @@ fn validate_external_signature(context: *context::Context, function_id: usize) -
         context::node(context, symbol.declaration_unit, symbol.declaration_node).span,
         context::no_id(), context::empty_span());
     for (var index: usize = 0; index < function.parameter_count; index += 1) {
-        let parameter: context::Parameter = parameters[function.first_parameter + index];
+        let parameter: domain::Parameter = parameters[function.first_parameter + index];
         diagnose_external_type(
             context, parameter.type_id, parameter.unit_index,
             context::node(context, parameter.unit_index, parameter.declaration_node).span, symbol.declaration_unit,
@@ -372,6 +386,9 @@ fn add_function_declaration(
     context: *context::Context, identity: domain::CallableIdentity, module_id: usize, unit_index: usize,
     declaration_id: usize, declaration: syntax::SyntaxNode, interface_unit: bool, defaults: DefaultProfile) -> usize {
     let none: usize = context::no_id();
+    if (context->error != runtime::Error.none) {
+        return none;
+    }
     var parameter_count: usize = 0;
     var return_node: usize = none;
     var body_node: usize = none;
@@ -415,7 +432,7 @@ fn add_function_declaration(
     let appended_symbol: context::IndexResult = context->symbols.append_symbol({
             kind = context::SymbolKind.function, module_id = module_id, declaration_unit = unit_index,
             declaration_node = declaration_id, name_token = declaration.token_index, type_id = none,
-            function_id = context->function_count, integer_value = 0, flags = flags,
+            function_id = context->callables.function_count(), integer_value = 0, flags = flags,
         });
     context->error = appended_symbol.error;
     let symbol_id: usize = appended_symbol.index;
@@ -448,9 +465,10 @@ fn add_function_declaration(
                 context, context::DiagnosticKind.incomplete_type, unit_index,
                 context::node(context, unit_index, return_node).span, none, context::empty_span(), return_type);
         }
-        let functions: *context::Function = context->functions.data as
-                *context::Function;
-        functions[function_id].return_type = return_type;
+        set_return_type(context, function_id, return_type);
+        if (context->error != runtime::Error.none) {
+            return function_id;
+        }
     }
     let defaults_are_enabled: bool = defaults.valid && defaults.default_count != 0;
     collect_function_parameters(context, function_id, unit_index, declaration, parameter_count, defaults_are_enabled);
@@ -467,6 +485,9 @@ fn collect_function_declaration(
         required_parameter_count = 0, default_count = 0, valid = false,
     };
     validate_function_declaration_form(context, unit_index, declaration, interface_unit, &defaults);
+    if (context->error != runtime::Error.none) {
+        return;
+    }
     let lookup: FunctionDeclarationLookup =
         lookup_function_declaration(context, identity, module_id, unit_index, declaration);
     let match: FunctionDeclarationMatch = classify_function_declaration(
@@ -624,14 +645,14 @@ fn collect_functions(context: *context::Context) -> bool {
     if (!collect_class_methods(context)) {
         return false;
     }
-    let functions: *const context::Function = context->functions.data as
-            *const context::Function;
+    let functions: *const domain::Function = context->callables.function_data() as
+            *const domain::Function;
     let symbols: *const context::Symbol = context->symbols.symbol_data() as
             *const context::Symbol;
     let modules: *const context::Module = context->symbols.module_data() as
             *const context::Module;
-    for (var function_id: usize = 0; function_id < context->function_count; function_id += 1) {
-        let function: context::Function = functions[function_id];
+    for (var function_id: usize = 0; function_id < context->callables.function_count(); function_id += 1) {
+        let function: domain::Function = functions[function_id];
         let symbol: context::Symbol = symbols[function.symbol_id];
         let definition_is_missing: bool = function.interface_unit != context::no_id() &&
             function.implementation_unit == context::no_id();
@@ -660,9 +681,9 @@ fn collect_functions(context: *context::Context) -> bool {
     // usual per-module name uniqueness cannot catch collisions: two functions
     // emitting the same verbatim symbol are a duplicate_function.
     for (var outer: usize = 0;
-        outer < context->function_count && context->error == runtime::Error.none;
+        outer < context->callables.function_count() && context->error == runtime::Error.none;
         outer += 1) {
-        let outer_function: context::Function = functions[outer];
+        let outer_function: domain::Function = functions[outer];
         let outer_token: usize = function_export_name_token(context, outer_function);
         if (outer_token != context::no_id()) {
             let outer_span: lexer::SourceSpan = context::token(
@@ -672,9 +693,9 @@ fn collect_functions(context: *context::Context) -> bool {
                 column = outer_span.column,
             };
             for (var inner: usize = outer + 1;
-                inner < context->function_count && context->error == runtime::Error.none;
+                inner < context->callables.function_count() && context->error == runtime::Error.none;
                 inner += 1) {
-                let inner_function: context::Function = functions[inner];
+                let inner_function: domain::Function = functions[inner];
                 let inner_token: usize = function_export_name_token(context, inner_function);
                 if (inner_token != context::no_id()) {
                     let inner_span: lexer::SourceSpan =
@@ -697,7 +718,7 @@ fn collect_functions(context: *context::Context) -> bool {
     return build_function_signatures(context) && build_function_bindings(context);
 }
 
-fn function_export_name_token(context: *context::Context, function: context::Function) -> usize {
+fn function_export_name_token(context: *context::Context, function: domain::Function) -> usize {
     let none: usize = context::no_id();
     if (function.implementation_unit == none || (function.flags & (context::SymbolFlag.external as usize)) != 0) {
         return none;
@@ -710,9 +731,11 @@ fn function_export_name_token(context: *context::Context, function: context::Fun
         return none;
     }
     let argument_node: syntax::SyntaxNode = context::node(context, function.implementation_unit, argument);
-    if (argument_node.kind != syntax::SyntaxKind.string_expression || argument_node.child_count != 0 ||
-        !attributes::attribute_string_is_identifier(
-            context, function.implementation_unit, argument_node.token_index)) {
+    let argument_shape_is_valid: bool = argument_node.kind == syntax::SyntaxKind.string_expression &&
+        argument_node.child_count == 0;
+    let argument_text_is_valid: bool = attributes::attribute_string_is_identifier(
+        context, function.implementation_unit, argument_node.token_index);
+    if (!argument_shape_is_valid || !argument_text_is_valid) {
         return none;
     }
     return argument_node.token_index;

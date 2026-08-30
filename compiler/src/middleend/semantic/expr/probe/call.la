@@ -1,18 +1,18 @@
 module luna.bootstrap.middleend.semantic.expr.probe;
 
 fn function_type(context: *context::Context, function_id: usize) -> usize {
-    if (function_id >= context->function_count) {
+    if (function_id >= context->callables.function_count()) {
         context->error = runtime::Error.invalid_argument;
         return context::no_id();
     }
-    let function_records: *const context::Function = context->functions.data as
-            *const context::Function;
-    let function: context::Function = function_records[function_id];
+    let function_records: *const domain::Function = context->callables.function_data() as
+            *const domain::Function;
+    let function: domain::Function = function_records[function_id];
     if ((function.flags & (context::SymbolFlag.variadic as usize)) != 0) {
         return context::no_id();
     }
-    let parameters: *const context::Parameter = context->parameters.data as
-            *const context::Parameter;
+    let parameters: *const domain::Parameter = context->callables.parameter_data() as
+            *const domain::Parameter;
     var parameter_types: bytes::Buffer = bytes::empty();
     for (var index: usize = 0;
         index < function.parameter_count && context->error == runtime::Error.none;
@@ -35,7 +35,7 @@ fn function_type(context: *context::Context, function_id: usize) -> usize {
 }
 
 fn function_matches_type(context: *context::Context, function_id: usize, target_type: usize) -> bool {
-    if (!type_is_valid(context, target_type) || function_id >= context->function_count) {
+    if (!type_is_valid(context, target_type) || function_id >= context->callables.function_count()) {
         return false;
     }
     let target: type_info::Record = context::type_record(context, target_type);
@@ -44,9 +44,9 @@ fn function_matches_type(context: *context::Context, function_id: usize, target_
     if (!callable_value) {
         return false;
     }
-    let functions_data: *const context::Function = context->functions.data as
-            *const context::Function;
-    let function: context::Function = functions_data[function_id];
+    let functions_data: *const domain::Function = context->callables.function_data() as
+            *const domain::Function;
+    let function: domain::Function = functions_data[function_id];
     let variadic: bool = (function.flags & (context::SymbolFlag.variadic as usize)) != 0;
     let parameter_count: usize = functions::function_argument_parameter_count(function);
     let first_parameter: usize = functions::function_first_argument_parameter(function);
@@ -54,8 +54,8 @@ fn function_matches_type(context: *context::Context, function_id: usize, target_
     if (variadic || !shape_matches) {
         return false;
     }
-    let parameters: *const context::Parameter = context->parameters.data as
-            *const context::Parameter;
+    let parameters: *const domain::Parameter = context->callables.parameter_data() as
+            *const domain::Parameter;
     let fields: *const type_info::Field = context->types.field_data() as
             *const type_info::Field;
     for (var index: usize = 0; index < parameter_count; index += 1) {
@@ -80,15 +80,15 @@ fn resolve_function_value(
         if (visible_count != 1) {
             return {status = ResolutionStatus.ambiguous, function_id = context::no_id()};
         }
-        let functions_data: *const context::Function = context->functions.data as
-                *const context::Function;
+        let functions_data: *const domain::Function = context->callables.function_data() as
+                *const domain::Function;
         let variadic: bool = (functions_data[function_id].flags & (context::SymbolFlag.variadic as usize)) != 0;
         return variadic ? {status = ResolutionStatus.no_match, function_id = context::no_id()} :
             {status = ResolutionStatus.selected, function_id = function_id};
     }
     var selected: usize = context::no_id();
-    let bindings: *const context::Binding = context->bindings.data as
-            *const context::Binding;
+    let bindings: *const domain::Binding = context->callables.binding_data() as
+            *const domain::Binding;
     let candidate_count: usize = bindings[binding_id].candidate_count;
     for (var candidate_index: usize = 0; candidate_index < candidate_count; candidate_index += 1) {
         let function_id: usize = functions::binding_candidate(context, binding_id, candidate_index);
@@ -157,12 +157,12 @@ fn invalid_call_target() -> CallTarget {
 }
 
 fn prepare_generic_class_methods(context: *context::Context, owner_type: usize) -> bool {
-    let first_function: usize = context->function_count;
+    let first_function: usize = context->callables.function_count();
     if (!functions::instantiate_generic_class(context, owner_type)) {
         return false;
     }
     for (var function_id: usize = first_function;
-        function_id < context->function_count && context->error == runtime::Error.none;
+        function_id < context->callables.function_count() && context->error == runtime::Error.none;
         function_id += 1) {
         functions::create_ir_function_instance(context, function_id);
     }
@@ -257,12 +257,12 @@ fn instance_call_target(
 }
 
 fn current_receiver_category(context: *context::Context) -> domain::ValueCategory {
-    if (context->current_function >= context->function_count) {
+    if (context->current_function >= context->callables.function_count()) {
         return domain::ValueCategory.rvalue;
     }
-    let functions_data: *const context::Function = context->functions.data as
-            *const context::Function;
-    let function: context::Function = functions_data[context->current_function];
+    let functions_data: *const domain::Function = context->callables.function_data() as
+            *const domain::Function;
+    let function: domain::Function = functions_data[context->current_function];
     switch (function.identity.receiver) {
     case domain::ReceiverKind.writable {
         return domain::ValueCategory.writable_lvalue;
@@ -290,12 +290,12 @@ fn super_call_target(context: *context::Context, base: syntax::SyntaxNode, membe
     if (base.kind != syntax::SyntaxKind.super_expression) {
         return invalid;
     }
-    if (context->current_function >= context->function_count) {
+    if (context->current_function >= context->callables.function_count()) {
         return invalid;
     }
-    let functions_data: *const context::Function = context->functions.data as
-            *const context::Function;
-    let current: context::Function = functions_data[context->current_function];
+    let functions_data: *const domain::Function = context->callables.function_data() as
+            *const domain::Function;
+    let current: domain::Function = functions_data[context->current_function];
     let owner_type: usize = classes::base_type(context, current.identity.owner_type);
     invalid.owner_type = owner_type;
     if (!domain::has_receiver(current.identity) || owner_type == context::no_id()) {
@@ -355,12 +355,12 @@ fn resolve_bound_method(context: *context::Context, node: syntax::SyntaxNode, ex
     }
     var selected: usize = context::no_id();
     var owner_type: usize = target.owner_type;
-    let functions_data: *const context::Function = context->functions.data as
-            *const context::Function;
+    let functions_data: *const domain::Function = context->callables.function_data() as
+            *const domain::Function;
     for (var depth: usize = 0; depth < context::Limit.maximum_type_depth as usize; depth += 1) {
         let binding_id: usize = target_binding(context, target, owner_type);
         if (binding_id != context::no_id()) {
-            let bindings: *const context::Binding = context->bindings.data as *const context::Binding;
+            let bindings: *const domain::Binding = context->callables.binding_data() as *const domain::Binding;
             for (var index: usize = 0; index < bindings[binding_id].candidate_count; index += 1) {
                 let function_id: usize = functions::binding_candidate(context, binding_id, index);
                 let receiver_matches: bool = candidate_target_is_compatible(
@@ -455,7 +455,7 @@ fn receiver_is_compatible(required: domain::ReceiverKind, actual: domain::ValueC
     }
 }
 
-fn candidate_owner_is_compatible(context: *context::Context, function: context::Function, target: CallTarget) -> bool {
+fn candidate_owner_is_compatible(context: *context::Context, function: domain::Function, target: CallTarget) -> bool {
     if (!target.valid || function.identity.kind != target.kind) {
         return false;
     }
@@ -465,7 +465,7 @@ fn candidate_owner_is_compatible(context: *context::Context, function: context::
     return classes::is_base_of(context, function.identity.owner_type, target.owner_type);
 }
 
-fn candidate_target_is_compatible(context: *context::Context, function: context::Function, target: CallTarget) -> bool {
+fn candidate_target_is_compatible(context: *context::Context, function: domain::Function, target: CallTarget) -> bool {
     if (!candidate_owner_is_compatible(context, function, target)) {
         return false;
     }
@@ -521,12 +521,12 @@ fn probe_parameter_argument(context: *context::Context, node_id: usize, paramete
 
 fn candidate_call_status(
     context: *context::Context, node: syntax::SyntaxNode, function_id: usize, target: CallTarget) -> CandidateMatch {
-    if (function_id >= context->function_count || node.child_count == 0) {
+    if (function_id >= context->callables.function_count() || node.child_count == 0) {
         return {status = Status.invalid, rank = BindingRank.no_match as usize};
     }
-    let functions_data: *const context::Function = context->functions.data as
-            *const context::Function;
-    let function: context::Function = functions_data[function_id];
+    let functions_data: *const domain::Function = context->callables.function_data() as
+            *const domain::Function;
+    let function: domain::Function = functions_data[function_id];
     if (!candidate_target_is_compatible(context, function, target)) {
         return {status = Status.incompatible, rank = BindingRank.no_match as usize};
     }
@@ -546,7 +546,7 @@ fn candidate_call_status(
         let variadic_extra: bool = argument_index >= parameter_count;
         var expected_type: usize = context::no_id();
         if (!variadic_extra) {
-            let parameters: *const context::Parameter = context->parameters.data as *const context::Parameter;
+            let parameters: *const domain::Parameter = context->callables.parameter_data() as *const domain::Parameter;
             expected_type = parameters[first_parameter + argument_index].type_id;
         }
         let match: CandidateMatch = variadic_extra ?
@@ -725,9 +725,9 @@ fn target_binding(context: *context::Context, target: CallTarget, owner_type: us
 }
 
 fn target_candidate_is_visible(context: *context::Context, target: CallTarget, function_id: usize) -> bool {
-    let functions_data: *const context::Function = context->functions.data as
-            *const context::Function;
-    let function: context::Function = functions_data[function_id];
+    let functions_data: *const domain::Function = context->callables.function_data() as
+            *const domain::Function;
+    let function: domain::Function = functions_data[function_id];
     if (!candidate_owner_is_compatible(context, function, target)) {
         return false;
     }
@@ -743,8 +743,8 @@ fn visit_target_candidates(
     for (var depth: usize = 0; depth < context::Limit.maximum_type_depth as usize; depth += 1) {
         let binding_id: usize = target_binding(context, target, owner_type);
         if (binding_id != context::no_id()) {
-            let bindings: *const context::Binding = context->bindings.data as
-                    *const context::Binding;
+            let bindings: *const domain::Binding = context->callables.binding_data() as
+                    *const domain::Binding;
             let candidate_count: usize = bindings[binding_id].candidate_count;
             for (var index: usize = 0; index < candidate_count; index += 1) {
                 let function_id: usize = functions::binding_candidate(context, binding_id, index);
@@ -770,8 +770,8 @@ fn call_target_visible_count(context: *context::Context, target: CallTarget) -> 
     for (var depth: usize = 0; depth < context::Limit.maximum_type_depth as usize; depth += 1) {
         let binding_id: usize = target_binding(context, target, owner_type);
         if (binding_id != context::no_id()) {
-            let bindings: *const context::Binding = context->bindings.data as
-                    *const context::Binding;
+            let bindings: *const domain::Binding = context->callables.binding_data() as
+                    *const domain::Binding;
             for (var index: usize = 0; index < bindings[binding_id].candidate_count; index += 1) {
                 let function_id: usize = functions::binding_candidate(context, binding_id, index);
                 if (functions::function_is_visible(context, function_id, context->current_unit)) {
@@ -802,9 +802,9 @@ fn resolve_call_target(
         return {status = ResolutionStatus.invalid, function_id = context::no_id()};
     }
     if (cached != context::no_id()) {
-        let functions_data: *const context::Function = context->functions.data as
-                *const context::Function;
-        if (cached >= context->function_count ||
+        let functions_data: *const domain::Function = context->callables.function_data() as
+                *const domain::Function;
+        if (cached >= context->callables.function_count() ||
             !candidate_target_is_compatible(context, functions_data[cached], target)) {
             context->error = runtime::Error.invalid_argument;
             return {status = ResolutionStatus.invalid, function_id = context::no_id()};
@@ -944,8 +944,8 @@ fn probe_call(context: *context::Context, node_id: usize, node: syntax::SyntaxNo
     if (resolution.status != ResolutionStatus.selected) {
         return resolution.status == ResolutionStatus.invalid ? invalid_result() : incompatible_result();
     }
-    let functions_data: *const context::Function = context->functions.data as
-            *const context::Function;
+    let functions_data: *const domain::Function = context->callables.function_data() as
+            *const domain::Function;
     let result_type: usize = target.receiver_source == ReceiverSource.construction ? target.owner_type :
         functions_data[resolution.function_id].return_type;
     let result_record: type_info::Record = context::type_record(context, result_type);

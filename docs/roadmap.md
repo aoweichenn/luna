@@ -329,6 +329,7 @@ the archived Luna 0 self-hosting milestone named `M4` above.
 - [x] `types.visibility` child-module contraction into same-module implementation
 - [x] `types.lookup` child-module contraction into same-module implementation
 - [x] move-only typed SymbolTable and `context.lookup` child-module contraction
+- [x] move-only typed CallableTable implementation with canonical signatures and candidate-slice ownership
 - [ ] semantic-pipeline state classes and module contraction
 - [x] backend and command-service state classes
 - [ ] remaining `luna.bootstrap.*` namespace/module contraction

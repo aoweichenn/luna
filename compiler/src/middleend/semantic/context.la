@@ -33,7 +33,7 @@ fn release_error(current: runtime::Error, next: runtime::Error) -> runtime::Erro
 }
 
 enum ContextStorageCount: usize {
-    records = 18,
+    records = 13,
 }
 
 struct ContextStorageRecord {
@@ -73,53 +73,43 @@ fn storage_records_are_valid(records: *const ContextStorageRecord, count: usize)
 
 fn context_record_storage_is_valid(context: *const Context) -> bool {
     var records: [ContextStorageCount.records]ContextStorageRecord = {};
-    records[0] = {buffer = context->bindings, count = context->binding_count, record_size = sizeof(Binding)};
+    records[0] = {buffer = context->locals, count = context->local_count, record_size = sizeof(Local)};
     records[1] = {
-        buffer = context->callable_candidates, count = context->callable_candidate_count, record_size = sizeof(usize),
-    };
-    records[2] = {buffer = context->functions, count = context->function_count, record_size = sizeof(Function)};
-    records[3] = {buffer = context->parameters, count = context->parameter_count, record_size = sizeof(Parameter)};
-    records[4] = {buffer = context->locals, count = context->local_count, record_size = sizeof(Local)};
-    records[5] = {
         buffer = context->alignment_overrides, count = context->alignment_override_count,
         record_size = sizeof(AlignmentOverride),
     };
-    records[6] = {
+    records[2] = {
         buffer = context->bitfield_segments, count = context->bitfield_segment_count,
         record_size = sizeof(BitfieldSegment),
     };
-    records[7] = {
+    records[3] = {
         buffer = context->const_functions, count = context->const_function_count, record_size = sizeof(ConstFunction),
     };
-    records[8] = {
+    records[4] = {
         buffer = context->const_locals, count = context->const_local_count, record_size = sizeof(ConstLocal),
     };
-    records[9] = {
+    records[5] = {
         buffer = context->array_lengths, count = context->array_length_count, record_size = sizeof(ArrayLength),
     };
-    records[10] = {buffer = context->labels, count = context->label_count, record_size = sizeof(Label)};
-    records[11] = {
+    records[6] = {buffer = context->labels, count = context->label_count, record_size = sizeof(Label)};
+    records[7] = {
         buffer = context->pending_gotos, count = context->pending_goto_count, record_size = sizeof(PendingGoto),
     };
-    records[12] = {
+    records[8] = {
         buffer = context->loop_labels, count = context->loop_label_count, record_size = sizeof(LoopLabel),
     };
-    records[13] = {
+    records[9] = {
         buffer = context->label_locals, count = context->label_locals.length / sizeof(LocalSnapshot),
         record_size = sizeof(LocalSnapshot),
     };
-    records[14] = {
+    records[10] = {
         buffer = context->goto_locals, count = context->goto_locals.length / sizeof(LocalSnapshot),
         record_size = sizeof(LocalSnapshot),
     };
-    records[15] = {
+    records[11] = {
         buffer = context->call_selections, count = context->call_selection_count, record_size = sizeof(usize),
     };
-    records[16] = {
-        buffer = context->generic_callable_candidates, count = context->generic_callable_candidate_count,
-        record_size = sizeof(usize),
-    };
-    records[17] = {
+    records[12] = {
         buffer = context->temporaries, count = context->temporary_count, record_size = sizeof(Temporary),
     };
     return storage_records_are_valid(
@@ -133,7 +123,7 @@ fn context_storage_is_valid(context: *const Context) -> bool {
     var validator: ContextStorageValidator = {valid = true};
     context_storage_require(&validator, context_record_storage_is_valid(context as *const Context));
     context_storage_require(&validator, context->symbols.storage_is_valid());
-    context_storage_require(&validator, bytes::is_valid(context->callable_signatures));
+    context_storage_require(&validator, context->callables.storage_is_valid());
     context_storage_require(&validator, context->classes.storage_is_valid());
     context_storage_require(&validator, context->generics.storage_is_valid());
     context_storage_require(&validator, context->scope_depth <= Limit.maximum_scope_depth as usize &&
@@ -148,12 +138,8 @@ fn context_init(input: InputView) -> Context {
     var type_table: type_info::TypeTable = type_info::TypeTable();
     let type_error: runtime::Error = type_table.error();
     return {
-        input = input, symbols = SymbolTable(), bindings = bytes::empty(), binding_count = 0,
-        callable_candidates = bytes::empty(),
-            callable_candidate_count = 0, generic_callable_candidates = bytes::empty(),
-            generic_callable_candidate_count = 0, call_selections = bytes::empty(), call_selection_count = 0,
-        functions = bytes::empty(), function_count = 0, callable_signatures = bytes::empty(),
-        parameters = bytes::empty(), parameter_count = 0, classes = class_model::ClassTable(),
+        input = input, symbols = SymbolTable(), callables = callable_model::CallableTable(),
+        call_selections = bytes::empty(), call_selection_count = 0, classes = class_model::ClassTable(),
         generics = generic_model::GenericTable(),
         locals = bytes::empty(), local_count = 0, temporaries = bytes::empty(), temporary_count = 0,
         alignment_overrides = bytes::empty(), alignment_override_count = 0,
@@ -173,13 +159,7 @@ fn context_release_work(context: *Context) -> runtime::Error {
     if (!context_storage_is_valid(context as *const Context)) {
         return runtime::Error.invalid_argument;
     }
-    var error: runtime::Error = bytes::release(context->bindings);
-    error = release_error(error, bytes::release(context->callable_candidates));
-    error = release_error(error, bytes::release(context->generic_callable_candidates));
-    error = release_error(error, bytes::release(context->call_selections));
-    error = release_error(error, bytes::release(context->functions));
-    error = release_error(error, bytes::release(context->callable_signatures));
-    error = release_error(error, bytes::release(context->parameters));
+    var error: runtime::Error = bytes::release(context->call_selections);
     error = release_error(error, bytes::release(context->locals));
     error = release_error(error, bytes::release(context->temporaries));
     error = release_error(error, bytes::release(context->alignment_overrides));
@@ -504,11 +484,11 @@ fn type_record(context: *Context, type_id: usize) -> type_info::Record {
     return result.record;
 }
 
-fn function_has_special_parameter(context: *Context, function: Function, owner_type: usize) -> bool {
+fn function_has_special_parameter(context: *Context, function: domain::Function, owner_type: usize) -> bool {
     if (function.parameter_count != 1) {
         return false;
     }
-    let parameters: *const Parameter = context->parameters.data as *const Parameter;
+    let parameters: *const domain::Parameter = context->callables.parameter_data() as *const domain::Parameter;
     let parameter: type_info::Record = type_record(context, parameters[function.first_parameter].type_id);
     if (parameter.kind != type_info::Kind.reference || parameter.element_type != owner_type) {
         return false;
@@ -520,7 +500,7 @@ fn function_has_special_parameter(context: *Context, function: Function, owner_t
     return copy_parameter || move_parameter;
 }
 
-fn function_is_special_member(context: *Context, function: Function, owner_type: usize) -> bool {
+fn function_is_special_member(context: *Context, function: domain::Function, owner_type: usize) -> bool {
     if (function.identity.owner_type != owner_type) {
         return false;
     }
@@ -535,8 +515,8 @@ fn function_is_special_member(context: *Context, function: Function, owner_type:
 }
 
 fn type_declares_special_member(context: *Context, owner_type: usize) -> bool {
-    let functions: *const Function = context->functions.data as *const Function;
-    for (var function_id: usize = 0; function_id < context->function_count; function_id += 1) {
+    let functions: *const domain::Function = context->callables.function_data() as *const domain::Function;
+    for (var function_id: usize = 0; function_id < context->callables.function_count(); function_id += 1) {
         if (function_is_special_member(context, functions[function_id], owner_type)) {
             return true;
         }

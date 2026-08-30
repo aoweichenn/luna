@@ -32,9 +32,10 @@ or when several Luna sessions are present.
 ## Repository state
 
 - Branch: `main`
-- Base commit: `e7ab8982d202d3e0f110f447a41f63b8fdea6899`
-  (`refactor: contract semantic type passes`)
-- `origin/main` matched that commit when this snapshot was refreshed.
+- Base commit: `4670cb463547a75418c6691d0d2145767f1f0644`
+  (`refactor: introduce typed semantic symbol ownership`)
+- `HEAD` and `origin/main` are both `4670cb463547a75418c6691d0d2145767f1f0644`
+  when this snapshot was refreshed.
 - The IR modernization and its anchor promotion are committed and pushed.
 - The semantic ownership batches and their anchor promotion are committed and
   pushed.
@@ -52,16 +53,16 @@ or when several Luna sessions are present.
 - The `types.visibility` and `types.lookup` contractions plus their anchor
   promotion are committed and pushed as
   `e7ab8982d202d3e0f110f447a41f63b8fdea6899`.
-- The current working tree contains the complete, independently validated and
-  promoted SymbolTable ownership and `context.lookup` contraction batch. It
-  belongs to the requested commit/push; reconcile HEAD and `origin/main` after
-  recovery to determine whether that final operation completed.
+- The SymbolTable ownership and `context.lookup` contraction batch is included
+  in the current base commit above. The current working tree additionally
+  contains the uncommitted CallableTable implementation and its documentation,
+  relocation contract, registry and three-lane workflow changes described below.
 - `advice.md` is an untracked user-owned file and has not been modified as part
   of the IR or semantic work.
 - The user-owned `.agents/` Luna repository skill and `.codex/` Sol/Luna role
-  configuration are included in the requested commit because the tracked
-  AGENTS contract references them. They were inspected for credentials, their
-  resources exist and every TOML file parses on caw.
+  configuration are part of the current uncommitted workflow change because
+  the tracked AGENTS contract references them. Preserve them and `advice.md`;
+  no commit, push or anchor promotion is claimed for this active batch.
 - Anchor before this work:
   `c8e6dbac2dac2b97c146efb761943fbd2da70634731daa59f3e1817afc0e4f5a`,
   4,994,899 bytes.
@@ -744,7 +745,8 @@ and anchor together. Preserve `advice.md`.
 
 ## Completed local task: SymbolTable ownership and lookup contraction
 
-The first Context state-class batch is complete locally on top of `e7ab898`:
+The first Context state-class batch is included in base
+`4670cb463547a75418c6691d0d2145767f1f0644`:
 
 - move-only `SymbolTable` owns typed vectors for UnitInfo, Module, Import and
   Symbol records with sticky failure and const-only projections;
@@ -763,11 +765,12 @@ The first Context state-class batch is complete locally on top of `e7ab898`:
   units of `luna.bootstrap.middleend.semantic.context`;
 - the `context.lookup` child interface, reverse import, registry node and
   linked object are removed without an alias;
-- Binding and callable-candidate slices remain separate because their
-  overload-order invariant belongs to a future CallableTable, not SymbolTable;
+- Binding and callable-candidate slices remain separate from SymbolTable
+  because their overload-order invariant belongs to the current CallableTable
+  owner;
 - the transitional context interface is 581 lines and explicitly remains debt
-  for the CallableTable/LoweringState batches rather than being hidden behind
-  another fake module; storage and lookup implementations are 225/367 lines.
+  for the LoweringState batch rather than being hidden behind another fake
+  module; storage and lookup implementations are 225/367 lines.
 
 The relocation-data contract now constructs SymbolTable directly and verifies
 the four typed stores, import slices, state publication, const projections,
@@ -792,11 +795,154 @@ Final isolated validation host and workspace:
 - verified stage-fixed `luna`: 5,257,043 bytes, SHA-256
   `e9b2f2c365b9bb7a2487f54b142483c170bad9436e817fed4be1ff9a72111daa`.
 
-The artifact is promoted. The requested commit/push must include source,
-deleted child interface, registry, AGENTS, repository skill/agent config,
-docs, test, SESSION and anchor together. Preserve `advice.md`. Afterward the
-next bounded batch is a move-only CallableTable for Binding and ordinary/
-generic candidate slices, followed by LoweringState and `context.builder`.
+The SymbolTable artifact is promoted in the current base commit. The active
+CallableTable batch below is implementation- and validation-complete locally,
+and its exact stage-fixed artifact is promoted into the local anchor. It is
+not yet committed or pushed; preserve `advice.md`. After the pending
+commit/push, the next bounded batch is LoweringState and `context.builder`.
+
+## Default three-lane gpt-5.6-luna workflow
+
+For substantive Luna work, the repository default is three named
+`gpt-5.6-luna` lanes, each with `xhigh` reasoning and disjoint authority:
+
+1. `luna_implementer` owns one settled, file-bounded implementation slice and
+   does not commit, push, promote the anchor or run a local Luna build.
+2. `luna_validator` owns independent read-only local review plus isolated caw
+   execution, including formatter/audit, focused or incremental checks, the
+   cold fixed point, complete tests and exact evidence; it does not edit or
+   repair the local tree.
+3. `luna_documenter` owns source-backed architecture, roadmap, test-contract
+   and SESSION updates after the implementation shape is accepted; it records
+   only supplied validation evidence and does not edit code or claim pending
+   gates.
+
+The main Sol agent remains responsible for repository discovery, architecture,
+acceptance criteria, complete diff review and final evidence acceptance. The
+checked-in main configuration is `gpt-5.6-sol` with `xhigh` reasoning and
+allows three concurrent child threads; its default and named subagents are
+`gpt-5.6-luna` with `xhigh` reasoning. `luna_explorer` is an optional
+read-only source/dependency mapping lane before implementation, not a fourth
+default lane. Writers use disjoint files; registry, tests, docs and anchor
+changes are serialized with their owner.
+
+## Current local task: CallableTable ownership (implementation + validation complete locally; anchor promoted)
+
+This batch is the move-only callable-storage extraction on top of the current
+base commit. The implementation and the validator's final isolated caw gates
+are complete locally and accepted by the main thread. Anchor promotion is
+complete locally; commit and push remain pending, and this handoff does not
+claim either of them.
+
+### Current workspace and evidence
+
+- Current branch/base: `main` at `4670cb463547a75418c6691d0d2145767f1f0644`;
+  `origin/main` resolves to the same commit.
+- Validator host: caw, x86_64 WSL2 Linux 6.6.87.2, Python 3.13.9.
+- Isolated caw workspace:
+  `/home/aoweichen/codex-workspaces/luna-callable-table-haI1UoW1` (retained).
+- Current evidence: `incremental build passed; pre-final complete suite 450
+  passed, 0 failed, 0 skipped`.
+- Final validator evidence is recorded below. No validation gate remains
+  pending; commit and push are deliberately still pending.
+
+### Accepted validator evidence
+
+- Formatter: one `signature.la` reflow was synchronized back to the local tree
+  by the main thread; final formatter check is `0/0` (zero files needing
+  reflow, zero token drift).
+- Audit: `63 modules / 1 driver / 33 interfaces / 53 objects`.
+- Incremental build with `jobs=4`: cache `46/54` compile, `46/54` assemble,
+  `0/1` link; wall `7.79s` (outer `8.34s`).
+- Stage-next test: `450 passed, 0 failed, 0 skipped` in `5.67s`.
+- `verify --fresh`: transition `16.32s`, next `16.51s`, fixed `16.42s`;
+  cache `0/54`, `0/54`, `0/1` respectively; every stage artifact was
+  byte-identical; outer wall `50.78s`.
+- Absolute stage-fixed final test: `450 passed, 0 failed, 0 skipped` in
+  `5.30s`. The transition, stage-next and stage-fixed `luna` binaries each
+  measure `5,355,347` bytes and have SHA-256
+  `817788b20d49267287b77dd34816ebb936f66eca0df545df4214eec3258c6dd8`.
+- One relative `--stage out/stage-fixed/bin` invocation from the harness cwd
+  produced `449 passed, 1 failed`; this was a harness-path invocation error,
+  not a product regression. Re-running the same verified stage through its
+  absolute path produced `450/450` and the final result above.
+- Local anchor promotion is complete: the exact stage-fixed artifact was copied
+  to `anchor/luna` with mode `755`, size `5,355,347` bytes and the SHA-256
+  above. Remote next/fixed comparison succeeded; `anchor/SHA256SUMS` was
+  refreshed and `anchor/PROVENANCE.md` received the note
+  `2026-08-30: promotion to typed semantic callable ownership`.
+- The caw workspace is retained for review and reproducibility. No commit or push has
+  been performed.
+
+### Implementation decisions
+
+- `Function`, `Parameter` and `Binding` are stable passive records in
+  `luna.compiler.sema.domain`; `CallableTable` owns their storage and does
+  not duplicate their definitions.
+- `CallableTable` is move-only and owns five typed vectors (functions,
+  parameters, bindings, ordinary candidates and generic candidates), one
+  `byte_buffer` for canonical signature bytes, and one sticky runtime error.
+  It publishes the initial sorted function order once from a validated
+  replacement vector, then allows focused mutation and ordered appends needed
+  by concrete generic-class methods.
+- Ordinary parameter slices and ordinary binding/candidate slices are checked
+  by the table. Generic candidates are range-checked and globally unique in
+  the table, while each generic declaration's reverse `binding_id` relation
+  remains a cross-owner invariant validated in `functions`.
+- Const-function parameters intentionally reuse the shared parameter vector
+  with `function_id = no_id()`; `functions/const.la` explicitly cross-validates
+  every `ConstFunction` slice and its unowned parameter records.
+- Canonical bytes are built by the private move-only `SignatureWriter`
+  resource class in `functions/signature.la`, then appended to the table's
+  signature buffer. Runtime free-generic instances may own a binding without
+  entering the ordinary candidate sequence; concrete generic-class methods
+  append through the ordered candidate path.
+- `call_selections` remains Context-owned lowering state for the next
+  LoweringState extraction, not callable metadata. The owner is split into
+  `storage.la`, `bindings.la` and `validation.la` under one real
+  `luna.compiler.sema.callables` module.
+
+### Changed files
+
+- Workflow contract/configuration: `AGENTS.md`,
+  `.agents/skills/luna-compiler-engineering/SKILL.md`,
+  `.agents/skills/luna-compiler-engineering/references/orchestration.md`,
+  `.codex/config.toml`, `.codex/agents/luna-explorer.toml`,
+  `.codex/agents/luna-implementer.toml`,
+  `.codex/agents/luna-validator.toml`, and
+  `.codex/agents/luna-documenter.toml`.
+- Callable/domain interfaces and registry:
+  `compiler/include/luna/compiler/sema/domain.lh`,
+  `compiler/include/luna/compiler/sema/callables.lh`,
+  `compiler/include/luna/bootstrap/middleend/semantic/context.lh`,
+  `compiler/include/luna/bootstrap/middleend/semantic/functions.lh`, and
+  `compiler/include/luna/bootstrap/middleend/semantic/consteval/engine.lh`,
+  `compiler/include/luna/bootstrap/middleend/semantic/lifetime.lh`, and
+  `tools/selfhost.py`.
+- Callable implementation and consumers: `compiler/src/middleend/sema.la`,
+  `compiler/src/middleend/semantic/callables/{storage,bindings,validation}.la`,
+  `compiler/src/middleend/semantic/context.la`,
+  `compiler/src/middleend/semantic/context/builder.la`,
+  `compiler/src/middleend/semantic/classes.la`,
+  `compiler/src/middleend/semantic/consteval/engine/execute.la`,
+  `compiler/src/middleend/semantic/expr/access.la`,
+  `compiler/src/middleend/semantic/expr/probe.la`,
+  `compiler/src/middleend/semantic/expr/probe/{call,operators}.la`,
+  `compiler/src/middleend/semantic/types/visibility.la`,
+  `compiler/src/middleend/semantic/functions.la`,
+  `compiler/src/middleend/semantic/functions/{bindings,const,defaults,generics,ir,methods,overloads,signature,special}.la`,
+  `compiler/src/middleend/semantic/lifetime.la`, and
+  `compiler/src/middleend/semantic/stmt.la`.
+- Direct relocation contract: `tests/relocation_data/ir_codegen.la` covers
+  move/moved-from state, sticky failure, duplicate generic candidates,
+  repeated order publication, invalid binding extension and no partial order
+  publication.
+- Documentation: `docs/architecture.md`, `docs/modernization.md`,
+  `docs/roadmap.md`, `docs/sema.md` and `docs/test-architecture.md`.
+
+The roadmap marks this batch complete as implementation + validation complete
+locally. Anchor promotion is also complete locally; commit and push remain
+pending and must not be described as complete until they occur.
 
 ## Recovery checklist
 
@@ -805,5 +951,7 @@ generic candidate slices, followed by LoweringState and `context.builder`.
 3. Run `git status --short`, `git diff --stat` and inspect the table/domain stack.
 4. Preserve `advice.md` and all existing comments/changes.
 5. Do not redo the completed IR, semantic ownership or domain work.
-6. SymbolTable implementation, remote validation and promotion are complete.
-   Only confirm the requested commit/push and preserve `advice.md`.
+6. SymbolTable implementation, remote validation and promotion are complete;
+   CallableTable implementation, validation and local anchor promotion are
+   complete, while commit and push remain pending. Preserve `advice.md` and do
+   not claim a pushed commit until the main thread completes it.

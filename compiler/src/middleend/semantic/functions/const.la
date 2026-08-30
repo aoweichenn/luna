@@ -293,8 +293,8 @@ fn collect_const_function(
         }
         let records: *const context::ConstFunction = context->const_functions.data as
                 *const context::ConstFunction;
-        let parameters: *const context::Parameter = context->parameters.data as
-                *const context::Parameter;
+        let parameters: *const domain::Parameter = context->callables.parameter_data() as
+                *const domain::Parameter;
         let base: usize = records[const_id].first_parameter;
         let collected: usize = records[const_id].parameter_count;
         for (var previous: usize = 0; previous < collected; previous += 1) {
@@ -308,20 +308,21 @@ fn collect_const_function(
                 context, {
                     function_id = none, type_id = type_id, unit_index = unit_index, declaration_node = child,
                     name_token = parameter_node.token_index, default_node = none, default_value = 0,
-                    default_kind = context::ParameterDefaultKind.none,
+                    default_kind = domain::ParameterDefaultKind.none,
                 }) == none) {
             return false;
         }
         let writable: *context::ConstFunction = context->const_functions.data as
                 *context::ConstFunction;
         if (writable[const_id].parameter_count == 0) {
-            writable[const_id].first_parameter = context->parameter_count - 1;
+            writable[const_id].first_parameter = context->callables.parameter_count() - 1;
         }
         writable[const_id].parameter_count += 1;
         child = parameter_node.next_sibling;
     }
     return context->error == runtime::Error.none;
 }
+
 fn collect_const_functions_in_unit(
     context: *context::Context, module_id: usize, unit_index: usize, interface_unit: bool) -> bool {
     let none: usize = context::no_id();
@@ -348,6 +349,36 @@ fn collect_const_functions_in_unit(
     return context->error == runtime::Error.none;
 }
 
+fn const_parameter_slices_are_valid(context: *context::Context) -> bool {
+    let records: *const context::ConstFunction = context->const_functions.data as
+            *const context::ConstFunction;
+    let parameters: *const domain::Parameter = context->callables.parameter_data() as
+            *const domain::Parameter;
+    let parameter_count: usize = context->callables.parameter_count();
+    var expected_first: usize = 0;
+    for (var const_id: usize = 0; const_id < context->const_function_count; const_id += 1) {
+        let record: context::ConstFunction = records[const_id];
+        let empty_slice_is_valid: bool = record.parameter_count == 0 && record.first_parameter == context::no_id();
+        let range_is_valid: bool = record.first_parameter <= parameter_count &&
+            record.parameter_count <= parameter_count - record.first_parameter;
+        let position_is_valid: bool = record.first_parameter == expected_first && range_is_valid;
+        let positioned_slice_is_valid: bool = record.parameter_count != 0 && position_is_valid;
+        let slice_is_valid: bool = empty_slice_is_valid || positioned_slice_is_valid;
+        if (!slice_is_valid) {
+            return false;
+        }
+        for (var index: usize = 0; index < record.parameter_count; index += 1) {
+            if (parameters[record.first_parameter + index].function_id != context::no_id()) {
+                return false;
+            }
+        }
+        if (record.parameter_count != 0) {
+            expected_first = record.first_parameter + record.parameter_count;
+        }
+    }
+    return expected_first == parameter_count;
+}
+
 fn collect_const_functions(context: *context::Context) -> bool {
     for (var module_id: usize = 0;
         module_id < context->symbols.module_count() && context->error == runtime::Error.none;
@@ -372,6 +403,13 @@ fn collect_const_functions(context: *context::Context) -> bool {
         index < context->const_function_count && context->error == runtime::Error.none;
         index += 1) {
         validate_const_function(context, index);
+    }
+    if (context->error != runtime::Error.none) {
+        return false;
+    }
+    if (!const_parameter_slices_are_valid(context)) {
+        context->error = runtime::Error.invalid_argument;
+        return false;
     }
     return context->error == runtime::Error.none;
 }

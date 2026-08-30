@@ -1181,3 +1181,35 @@ The complete post-fixed-point suite passed 450/450 with no failures or skips.
 
 The promoted 5,257,043-byte executable has SHA-256
 `e9b2f2c365b9bb7a2487f54b142483c170bad9436e817fed4be1ff9a72111daa`.
+
+## 2026-08-30: promotion to typed semantic callable ownership
+
+The anchor now contains the stage-fixed `luna` executable from the
+CallableTable ownership batch accompanying this note. Stable Function,
+Parameter and Binding records live in `luna.compiler.sema.domain`; the new
+move-only `luna.compiler.sema.callables::CallableTable` owns five typed vectors
+and canonical signature bytes with sticky failure, const projections and
+one-time candidate-order publication. Context no longer exposes six callable
+byte buffers, five mirrored record counters or writable callable records.
+
+Bound mutation preserves parameter and ordinary binding slices, candidate
+uniqueness, function definition/flag/IR publication and free-generic versus
+generic-class candidate policy. Cross-owner validation retains the generic
+declaration reverse binding and const-function parameter-slice contracts. A
+private resource-owning SignatureWriter class builds canonical bytes, and
+callable/symbol publication preserves the first runtime failure. The direct
+relocation contract covers move/moved-from state, sticky errors, duplicate
+generic candidates, repeated order publication, invalid binding extension and
+atomic initial order publication.
+
+Remote x86-64 verification used the retained isolated caw workspace
+`/home/aoweichen/codex-workspaces/luna-callable-table-haI1UoW1` on WSL2 Linux
+6.6.87.2 with Python 3.13.9. Audit reported 63 modules, one driver, 33 driver
+interfaces and 53 library objects; final formatting reported zero files
+needing reflow and zero token drift. The fresh transition/next/fixed stages
+completed in 16.32/16.51/16.42 seconds, and every stage artifact was
+byte-identical. Both the stage-next and final absolute stage-fixed test runs
+passed 450/450 with no failures or skips.
+
+The promoted 5,355,347-byte executable has SHA-256
+`817788b20d49267287b77dd34816ebb936f66eca0df545df4214eec3258c6dd8`.

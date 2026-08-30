@@ -1,0 +1,169 @@
+module luna.compiler.sema.callables;
+
+fn range_is_valid(offset: usize, length: usize, size: usize) -> bool {
+    return offset <= size && length <= size - offset;
+}
+
+fn default_kind_is_valid(kind: domain::ParameterDefaultKind) -> bool {
+    switch (kind) {
+    case domain::ParameterDefaultKind.none, domain::ParameterDefaultKind.integer,
+        domain::ParameterDefaultKind.boolean, domain::ParameterDefaultKind.null_pointer {
+        return true;
+    }
+    default {
+        return false;
+    }
+    }
+}
+
+impl CallableTable {
+    priv fn parameter_is_valid(parameter_id: usize) const -> bool {
+        let parameter: domain::Parameter = this->parameters.get(parameter_id);
+        if (!default_kind_is_valid(parameter.default_kind)) {
+            return false;
+        }
+        if (parameter.function_id == no_id()) {
+            return true;
+        }
+        if (parameter.function_id >= this->functions.size()) {
+            return false;
+        }
+        let function: domain::Function = this->functions.get(parameter.function_id);
+        if (function.first_parameter > parameter_id) {
+            return false;
+        }
+        return parameter_id - function.first_parameter < function.parameter_count;
+    }
+
+    priv fn candidate_is_valid(candidate_index: usize) const -> bool {
+        let function_id: usize = this->candidates.get(candidate_index).value;
+        if (function_id >= this->functions.size()) {
+            return false;
+        }
+        for (var previous: usize = 0; previous < candidate_index; previous += 1) {
+            if (this->candidates.get(previous).value == function_id) {
+                return false;
+            }
+        }
+        let binding_id: usize = this->functions.get(function_id).binding_id;
+        if (binding_id >= this->bindings.size()) {
+            return false;
+        }
+        let binding: domain::Binding = this->bindings.get(binding_id);
+        if (binding.first_candidate > candidate_index) {
+            return false;
+        }
+        return candidate_index - binding.first_candidate < binding.candidate_count;
+    }
+
+    priv fn generic_candidates_are_valid(generic_declaration_count: usize) const -> bool {
+        for (var index: usize = 0; index < this->generic_candidates.size(); index += 1) {
+            let declaration_id: usize = this->generic_candidates.get(index).value;
+            if (declaration_id >= generic_declaration_count) {
+                return false;
+            }
+            for (var previous: usize = 0; previous < index; previous += 1) {
+                if (this->generic_candidates.get(previous).value == declaration_id) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    priv fn function_is_valid(function_id: usize, expected_signature_offset: usize) const -> bool {
+        let function: domain::Function = this->functions.get(function_id);
+        let parameter_slice_is_valid: bool = function.parameter_count == 0 ? function.first_parameter == no_id() :
+            range_is_valid(function.first_parameter, function.parameter_count, this->parameters.size());
+        let arity_is_valid: bool = function.required_parameter_count <= function.parameter_count;
+        let signature_is_valid: bool = function.signature_offset == expected_signature_offset &&
+            range_is_valid(function.signature_offset, function.signature_length, this->signatures.size());
+        if (!parameter_slice_is_valid || !arity_is_valid) {
+            return false;
+        }
+        if (!signature_is_valid || function.signature_length == 0) {
+            return false;
+        }
+        if (function.binding_id >= this->bindings.size()) {
+            return false;
+        }
+        for (var index: usize = 0; index < function.parameter_count; index += 1) {
+            if (this->parameters.get(function.first_parameter + index).function_id != function_id) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    priv fn binding_is_valid(binding_id: usize, generic_declaration_count: usize) const -> bool {
+        let binding: domain::Binding = this->bindings.get(binding_id);
+        if (binding.kind != domain::BindingKind.callable_set) {
+            return false;
+        }
+        let concrete_is_valid: bool = binding.candidate_count == 0 ? binding.first_candidate == no_id() :
+            range_is_valid(binding.first_candidate, binding.candidate_count, this->candidates.size());
+        let generic_is_valid: bool = binding.generic_candidate_count == 0 ? binding.first_generic_candidate == no_id() :
+            range_is_valid(
+                binding.first_generic_candidate, binding.generic_candidate_count, this->generic_candidates.size());
+        if (!concrete_is_valid || !generic_is_valid) {
+            return false;
+        }
+        if (binding.candidate_count == 0 && binding.generic_candidate_count == 0) {
+            return false;
+        }
+        for (var index: usize = 0; index < binding.candidate_count; index += 1) {
+            let function_id: usize = this->candidates.get(binding.first_candidate + index).value;
+            if (function_id >= this->functions.size()) {
+                return false;
+            }
+            if (this->functions.get(function_id).binding_id != binding_id) {
+                return false;
+            }
+        }
+        for (var index: usize = 0; index < binding.generic_candidate_count; index += 1) {
+            let declaration_id: usize = this->generic_candidates.get(binding.first_generic_candidate + index).value;
+            if (declaration_id >= generic_declaration_count) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn is_valid(generic_declaration_count: usize) const -> bool {
+        if (this->error_code != runtime::Error.none || !this->storage_is_valid()) {
+            return false;
+        }
+        if (this->storage_is_empty() && !this->order_is_published) {
+            return true;
+        }
+        if (!this->order_is_published || !this->generic_candidates_are_valid(generic_declaration_count)) {
+            return false;
+        }
+        var signature_offset: usize = 0;
+        for (var function_id: usize = 0; function_id < this->functions.size(); function_id += 1) {
+            if (!this->function_is_valid(function_id, signature_offset)) {
+                return false;
+            }
+            signature_offset += this->functions.get(function_id).signature_length;
+        }
+        if (signature_offset != this->signatures.size()) {
+            return false;
+        }
+        for (var binding_id: usize = 0; binding_id < this->bindings.size(); binding_id += 1) {
+            if (!this->binding_is_valid(binding_id, generic_declaration_count)) {
+                return false;
+            }
+        }
+        for (var candidate_index: usize = 0; candidate_index < this->candidates.size(); candidate_index += 1) {
+            if (!this->candidate_is_valid(candidate_index)) {
+                return false;
+            }
+        }
+        for (var parameter_id: usize = 0; parameter_id < this->parameters.size(); parameter_id += 1) {
+            if (!this->parameter_is_valid(parameter_id)) {
+                return false;
+            }
+        }
+        return true;
+    }
+}

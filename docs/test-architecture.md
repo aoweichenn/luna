@@ -84,10 +84,17 @@ projection 边界。该契约复用既有编译/链接协议，不为每个 clas
 moved-from 空状态和首错粘滞。现有模块顺序、重复/循环 import、selective import、qualified name 和歧义 qualifier
 用例继续覆盖`LookupResult`的行为分支；`audit`要求旧`context.lookup`接口与 registry object 消失。
 
+该大用例也直接构造`CallableTable`：覆盖函数/参数/绑定 typed vector、canonical signature byte buffer、初始候选顺序
+的事务式一次发布、参数与普通 binding 连续切片、const projection、深层 owner 校验、move/moved-from 和首错粘滞。
+重复候选顺序、重复发布、重复 generic candidate 以及非法 binding extension 都必须被拒绝且不留下部分结果。const
+函数参数复用 shared parameter vector，并由`functions/const.la`显式交叉验证；generic declaration 的反向 binding
+则由`functions`跨 owner 校验。现有 overload/default/generic/method/bound-method/callable-identity corpus 继续覆盖
+真实语义行为；自由泛型实例可复用 generic binding 而不污染普通候选序列。
+
 semantic domain 收缩不新增逐概念编译用例；现有 overload、class policy、generic instance、method receiver、
 reference binding、value category、lifetime 和负诊断 corpus 原样覆盖`luna.compiler.sema.domain`。`audit`验证旧
-callable/value 模块已经消失；本批图审查另外确认 class/generic owner 只由 Context 直接导入。relocation-data
-大契约继续校验迁移后记录布局和 table ABI。
+callable/value 模块已经消失；本批图审查另外确认 compiler production 中 class/generic owner 只由 Context 直接
+导入，relocation-data 则有意直接导入 owner 以固定其 ABI 和生命周期。该大契约继续校验迁移后记录布局。
 
 `functions.ir` 收缩同样不增加行为用例：Sema 的批次入口和 expression probe 的泛型实例路径继续覆盖两个 IR
 construction 入口，`audit`则要求旧 child interface/registry node 消失，并确认 parent `functions`对象包含该实现。

@@ -4,7 +4,8 @@
 
 The semantic pipeline validates the parsed source-module graph, constructs the
 canonical type model and lowers checked functions into `luna.compiler.ir`.
-This document records the first eleven ownership/domain batches of its modernization.
+This document records the first thirteen ownership/domain batches of its
+modernization.
 
 The root module is still named `luna.bootstrap.middleend.sema` while the
 downstream semantic dependency graph is contracted incrementally. The current
@@ -15,8 +16,8 @@ has already become private.
 
 `luna.compiler.sema.domain` is the first modern semantic dependency boundary.
 It replaces the historical callable and value-category modules and now owns
-the stable passive class/generic metadata in one 158-line interface with two
-same-module behavior implementation units.
+the stable passive class/generic/callable metadata in one 208-line interface
+with two same-module behavior implementation units.
 
 The module contains only closed, passive compiler-domain values:
 
@@ -28,6 +29,8 @@ The module contains only closed, passive compiler-domain values:
   describe class policy and contiguous metadata slices;
 - `GenericDeclarationKind`, `GenericInstanceState` and the `Generic*` records
   describe generic declarations, substitutions and concrete instances;
+- `Function`, `Parameter`, `Binding` and their closed enums describe stable
+  callable declarations and published overload slices without owning storage;
 - stateless predicates validate identities, compare ownership, project value
   categories and compute reference compatibility.
 
@@ -37,12 +40,11 @@ Closed-kind behavior uses `switch`; the module owns no allocation or mutable
 session state and therefore needs no class hierarchy, virtual dispatch or
 runtime RTTI.
 
-The domain module depends only on `luna.compiler.types`. ClassTable and
-GenericTable now depend downward on domain records, Context alone owns both
-tables, and every higher pass consumes records through its existing `domain::`
-dependency. Direct compiler imports of class/generic owner modules contract
-from 5/8 to 1/1 without adding a module or object. The resulting order is
-strictly acyclic: types, domain, table owners, Context, then semantic passes.
+The domain module depends only on `luna.compiler.types`. ClassTable,
+GenericTable and CallableTable depend downward on domain records; Context
+composes all three, and every higher pass consumes records through `domain::`
+plus const owner projections. The resulting order is strictly acyclic: types,
+domain, table owners, Context, then semantic passes.
 
 ## Class metadata ownership
 
@@ -230,7 +232,7 @@ the three resource destructors.
 9. functions, methods and method validation;
 10. module assertions, imported-name checks and public-type visibility;
 11. IR function creation, vtable creation and statement lowering;
-12. entry selection, reachability and generic-model validation;
+12. entry selection, reachability and generic/callable-owner validation;
 13. common work cleanup and result transfer.
 
 These calls remain focused lower-level pass functions for now. Wrapping the
@@ -283,16 +285,65 @@ The old `luna.bootstrap.middleend.semantic.context.lookup` child module had no
 independent consumer or acyclic boundary: every operation required Context.
 Its interface and registry object are deleted. `context/symbols.la` implements
 storage/publication and `context/lookup.la` implements bound lookup in the
-parent module. The parent interface is temporarily 581 lines because the
+parent module. The parent interface is now 522 lines because the
 transitional Context still exports unrelated passive records and builder
-state; this batch does not hide that debt by creating another facade. The next
-owner extractions must reduce the interface rather than adding more operations
-to it.
+state; owner extraction continues to reduce that interface rather than hiding
+the debt behind another facade.
 
-`Binding`, ordinary candidates and generic candidates deliberately remain out
-of SymbolTable. They encode overload ordering and contiguous callable slices,
-not source-name ownership, and therefore belong to the next `CallableTable`
-batch.
+`Binding`, ordinary candidates and generic candidates remain outside
+SymbolTable because they encode overload ordering and contiguous callable
+slices, not source-name ownership. They now belong to the separate
+`CallableTable` owner below Context.
+
+## Callable ownership
+
+`luna.compiler.sema.callables::CallableTable` replaces Context's raw function,
+parameter, binding, ordinary-candidate, generic-candidate and signature
+buffers plus their synchronized counts. Stable `Function`, `Parameter` and
+`Binding` values live in the domain module; the owner privately composes five
+typed vectors, one `byte_buffer` and the first runtime failure. Context owns
+the table and exposes neither writable records nor raw allocation state.
+
+The table owns these related invariants:
+
+- each ordinary function has one contiguous parameter slice; const-function
+  parameters are explicitly unowned, reuse the same parameter store with
+  `function_id = no_id()`, and are cross-validated against `ConstFunction`
+  records by `functions/const.la`;
+- every function signature is non-empty and signatures occupy one canonical,
+  gap-free byte sequence in function-ID order;
+- initial ordinary candidate order is validated for bounds and uniqueness in
+  a replacement vector, then moved into place in one publication step; a
+  second publication is rejected;
+- ordinary binding slices are in range and map candidates back to the same
+  binding; generic declaration candidates are globally unique, while each
+  declaration's reverse `binding_id` relation is checked by the cross-owner
+  `functions` validation;
+- runtime free-generic instances may bind directly without entering the
+  ordinary candidate sequence, while concrete generic-class methods append
+  through the ordered-candidate method;
+- allocation or invariant failure is sticky and blocks later mutation.
+
+CallableTable function, parameter and binding records are mutated only through
+its bound methods; GenericTable remains the owner of generic declarations and
+instances. Consumers receive const typed projections. `CallableTable::is_valid`
+checks ordinary parameter ownership, signature contiguity, unique candidate
+identities and ordinary candidate-to-binding back-links. Generic declaration
+reverse bindings remain a cross-owner `functions` invariant, and const-function
+parameter slices are checked separately by `functions/const.la` after
+collection.
+
+Canonical signature construction uses the private move-only `SignatureWriter`
+resource class in `functions/signature.la`; only its completed bytes enter the
+CallableTable signature buffer. The direct relocation-data contract explicitly
+covers duplicate generic candidates, repeated order publication and invalid
+binding extension, including sticky failure and no partial order publication.
+
+The owner is a real dependency boundary with a 64-line interface and three
+same-module implementation families: `storage.la` for lifetime/declarations,
+`bindings.la` for ordered publication and slice mutation, and `validation.la`
+for deep final-state verification. `call_selections` is not callable metadata;
+it remains transitional expression-lowering state for the LoweringState batch.
 
 ## Entry selection
 
@@ -318,6 +369,9 @@ sets the IR entry through `ir::Builder` before graph reachability validation.
 | `semantic/generics/storage.la` | GenericTable lifetime, declarations, bindings and read-only projections |
 | `semantic/generics/instances.la` | canonical instance insertion, hash rebuilding and reverse maps |
 | `semantic/generics/validation.la` | declarations, slices, indexes, maps and final-state validation |
+| `semantic/callables/storage.la` | CallableTable lifetime, declarations, signatures and focused function publication |
+| `semantic/callables/bindings.la` | transactional candidate order, binding slices and generic candidate publication |
+| `semantic/callables/validation.la` | parameter/signature/candidate/binding deep validation |
 | `semantic/types/visibility.la` | same-module exported-type, generic argument and anonymous-field visibility |
 | `semantic/types/lookup.la` | same-module direct, anonymous-promotion and inherited field lookup |
 | `semantic/functions/ir.la` | same-module IR function, receiver and parameter construction |
@@ -339,17 +393,17 @@ consumer imports them independently.
 
 | feature | disposition |
 | --- | --- |
-| Classes | SemanticSession owns phases; Input, DiagnosticBuffer, SymbolTable, ClassTable and GenericTable own state/lifetimes |
+| Classes | SemanticSession owns phases; Input, DiagnosticBuffer, SymbolTable, ClassTable, GenericTable and CallableTable own state/lifetimes |
 | Generics | SymbolTable and the other owners use typed vectors instead of exposed byte arithmetic |
-| Composition | Input composes vector/byte_buffer; Context composes SymbolTable and the other semantic owners |
+| Composition | Input composes vector/byte_buffer; Context composes SymbolTable, ClassTable, GenericTable and CallableTable |
 | Access control | session phase, symbol/metadata vectors, diagnostic storage and sticky errors are private |
 | Constructors/destructors | constructors establish ready/empty states; destructors close each resource path once |
-| Copy/move | Input, DiagnosticBuffer, SymbolTable, ClassTable and GenericTable are move-only; views are copied borrows |
-| Overloads/defaults | SymbolTable operations have distinct contracts and no meaningful overload or default |
+| Copy/move | Input, DiagnosticBuffer and all four table owners are move-only; views are copied borrows |
+| Overloads/defaults | CallableTable owns overload-set storage; its mutation operations have distinct contracts and need no API defaults |
 | Operators | no natural value operator exists for a semantic session or diagnostic stream |
-| Bound methods | SymbolTable owns publication/lookup behavior; SemanticPass stays a pointer because passes capture no receiver |
+| Bound methods | SymbolTable owns name publication/lookup and CallableTable owns callable publication; SemanticPass stays a pointer because passes capture no receiver |
 | Friends | unnecessary because const projections and focused mutations preserve the owner boundary |
-| Virtual dispatch/RTTI | rejected: SymbolTable is one closed implementation with no runtime substitution |
+| Virtual dispatch/RTTI | rejected for table owners: each has one closed implementation with no runtime substitution |
 
 The domain module adopts enums, structs and switch-based free predicates
 because its values are passive and stateless. Adding a class merely to group
@@ -359,13 +413,11 @@ those functions would introduce pattern-shaped indirection without an owner.
 
 The next semantic batches should remain independently green:
 
-1. extract callable bindings and candidate slices into a move-only
-   `CallableTable`, then remove the remaining general record append uses;
-2. extract lowering state and contract `context.builder` without merging its
-   unrelated responsibilities into SymbolTable;
-3. migrate pass families to bound methods or focused strategy objects where
+1. extract lowering state and contract `context.builder` without merging its
+   unrelated responsibilities into SymbolTable or CallableTable;
+2. migrate pass families to bound methods or focused strategy objects where
    they own real state;
-4. rename the remaining `luna.bootstrap.middleend.semantic.*` graph only when
+3. rename the remaining `luna.bootstrap.middleend.semantic.*` graph only when
    the new dependency boundary is acyclic and independently useful.
 
 ## Validation gates
@@ -379,10 +431,11 @@ python3 tools/selfhost.py verify --fresh
 python3 tools/selfhost.py test
 ```
 
-The relocation-data contract exercises Input, ClassTable and GenericTable
-move/moved-from storage; class-member and generic-parameter slices; hierarchy
-flags, virtual-slot assignment and descriptor/vtable publication; generic
-rehash, deduplication, reverse maps and rollback; sticky owner failures;
-borrowed InputView use; and IR ownership transfer. The ordinary negative corpus
-exercises DiagnosticBuffer capacity, DiagnosticView lookup and stable leading
+The relocation-data contract exercises Input, ClassTable, GenericTable,
+SymbolTable and CallableTable move/moved-from storage; class, generic,
+name/import and callable slices; hierarchy/runtime publication; generic
+indexes and rollback; transactional candidate publication; signature
+contiguity; sticky owner failures; borrowed InputView use; and IR ownership
+transfer. The ordinary overload/default/generic/class corpus exercises the
+same owner through real lowering. The negative corpus preserves stable leading
 diagnostic kinds through the command driver.

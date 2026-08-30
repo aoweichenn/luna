@@ -65,12 +65,22 @@ root.
 ## Sol and Luna roles
 
 For material work, the main Sol agent owns repository discovery, architecture,
-the approved plan, acceptance criteria, diff review and final validation.
+the approved plan, acceptance criteria, diff review and final evidence acceptance.
 Delegate bounded execution only after the design and file ownership are clear.
+For substantive Luna work, a three-role `gpt-5.6-luna` pipeline is the project
+default: `luna_implementer` owns settled file-bounded code, `luna_validator`
+owns independent caw execution and evidence, and `luna_documenter` owns
+source-backed architecture and handoff updates. Use `luna_explorer` before
+implementation when an independent source map or review sharpens the contract.
+Keep only tiny, tightly coupled edits in the main thread.
 
 - Use `luna_explorer` for independent read-only source or dependency mapping.
 - Use `luna_implementer` for one narrowly scoped implementation with explicit
   files, invariants and acceptance criteria.
+- Use `luna_validator` after main-agent diff acceptance; it executes the
+  delegated caw gates without editing local source.
+- Use `luna_documenter` after the implementation shape is accepted; give it
+  validation evidence before it records a gate as complete.
 - Do not let concurrent writers touch overlapping files. In an already dirty
   subsystem, prefer one writer at a time.
 - The main agent must inspect the resulting diff and correct architectural

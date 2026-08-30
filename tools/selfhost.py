@@ -204,6 +204,12 @@ LIBRARIES = {
         "middleend/semantic/generics/instances",
         "middleend/semantic/generics/validation",
     ),
+    "sem_callables": compiler_module(
+        "luna.compiler.sema.callables",
+        "middleend/semantic/callables/storage",
+        "middleend/semantic/callables/bindings",
+        "middleend/semantic/callables/validation",
+    ),
     "sem_ctx": compiler_module(
         "luna.bootstrap.middleend.semantic.context",
         "middleend/semantic/context",

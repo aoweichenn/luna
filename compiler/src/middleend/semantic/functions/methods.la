@@ -435,13 +435,18 @@ fn method_form_is_valid(
 }
 
 fn mark_member_exported(context: *context::Context, function_id: usize) {
-    if (function_id == context::no_id()) {
+    if (context->error != runtime::Error.none || function_id == context::no_id()) {
         return;
     }
-    var functions: *context::Function = context->functions.data as
-            *context::Function;
-    let symbol_id: usize = functions[function_id].symbol_id;
-    functions[function_id].flags |= context::SymbolFlag.member_exported as usize;
+    if (function_id >= context->callables.function_count()) {
+        context->error = runtime::Error.invalid_argument;
+        return;
+    }
+    let symbol_id: usize = context->callables.function_data()[function_id].symbol_id;
+    context->error = context->callables.add_function_flags(function_id, context::SymbolFlag.member_exported as usize);
+    if (context->error != runtime::Error.none) {
+        return;
+    }
     context->error = context->symbols.add_symbol_flags(symbol_id, context::SymbolFlag.member_exported as usize);
 }
 
@@ -544,8 +549,8 @@ fn collect_defined_method(
         return;
     }
     if (lookup.overload != context::no_id()) {
-        let functions: *const context::Function = context->functions.data as
-                *const context::Function;
+        let functions: *const domain::Function = context->callables.function_data() as
+                *const domain::Function;
         let abstract_method: bool = (functions[lookup.overload].flags &
                 (context::SymbolFlag.abstract_method as usize)) != 0;
         if (abstract_method) {
@@ -654,8 +659,8 @@ fn instantiate_generic_class(context: *context::Context, type_id: usize) -> bool
     if (instance_id == context::no_id()) {
         return true;
     }
-    let existing_functions: *const context::Function = context->functions.data as *const context::Function;
-    for (var function_id: usize = 0; function_id < context->function_count; function_id += 1) {
+    let existing_functions: *const domain::Function = context->callables.function_data() as *const domain::Function;
+    for (var function_id: usize = 0; function_id < context->callables.function_count(); function_id += 1) {
         if (existing_functions[function_id].identity.owner_type == type_id) {
             return true;
         }
@@ -675,7 +680,7 @@ fn instantiate_generic_class(context: *context::Context, type_id: usize) -> bool
     let generic_id: usize = instances[instance_id].declaration_id;
     let module_id: usize = declaration.module_id;
     let type_record: type_info::Record = context::type_record(context, type_id);
-    let first_function: usize = context->function_count;
+    let first_function: usize = context->callables.function_count();
     collect_class_declaration_methods(context, module_id, type_id, type_record);
     let modules: *const context::Module = context->symbols.module_data() as *const context::Module;
     collect_generic_impls_in_unit(context, generic_id, module_id, type_id, modules[module_id].interface_unit);
@@ -685,9 +690,9 @@ fn instantiate_generic_class(context: *context::Context, type_id: usize) -> bool
                 index));
     }
     for (var function_id: usize = first_function;
-        function_id < context->function_count && context->error == runtime::Error.none;
+        function_id < context->callables.function_count() && context->error == runtime::Error.none;
         function_id += 1) {
-        let functions_data: *const context::Function = context->functions.data as *const context::Function;
+        let functions_data: *const domain::Function = context->callables.function_data() as *const domain::Function;
         if (functions_data[function_id].identity.owner_type != type_id) {
             continue;
         }
@@ -707,8 +712,8 @@ fn instantiate_generic_class(context: *context::Context, type_id: usize) -> bool
 }
 
 fn destructor(context: *context::Context, owner_type: usize) -> usize {
-    let functions_data: *const context::Function = context->functions.data as *const context::Function;
-    for (var function_id: usize = 0; function_id < context->function_count; function_id += 1) {
+    let functions_data: *const domain::Function = context->callables.function_data() as *const domain::Function;
+    for (var function_id: usize = 0; function_id < context->callables.function_count(); function_id += 1) {
         let identity: domain::CallableIdentity = functions_data[function_id].identity;
         if (identity.kind == domain::CallableKind.destructor && identity.owner_type == owner_type) {
             return function_id;

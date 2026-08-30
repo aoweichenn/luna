@@ -145,6 +145,7 @@ contain files or child module/family directories at one level, never both.
 | `bootstrap.middleend.type` | `luna.compiler.types` | storage, traits, construction, mutation, validation, layout |
 | `bootstrap.middleend.ir` + `ir.verify` | `luna.compiler.ir` | storage, globals, functions, control, instructions, validation, verify |
 | semantic foundational records | `luna.compiler.sema.domain` | callable, value, classes, generics |
+| semantic callable ownership | `luna.compiler.sema.callables` | storage, bindings, validation |
 | semantic `context.*` | `luna.compiler.sema.session` | session, names, builder |
 | semantic `types.*` | `luna.compiler.sema.types` | resolution, lookup, visibility, layout |
 | semantic `consteval.*` | `luna.compiler.sema.consteval` | model, engine, execution |
@@ -271,8 +272,9 @@ replaces the generic Store with a move-only `GenericTable`; declarations,
 instances, open-addressed lookup, reverse maps and rollback now share one typed
 owner and strong publication boundaries. The sixth batch moves stable passive
 class/generic metadata into `luna.compiler.sema.domain` after proving the
-acyclic types-to-domain-to-owner-to-Context order; only Context retains direct
-owner imports, preparing both tables for later session absorption.
+acyclic types-to-domain-to-owner-to-Context order; only Context in compiler
+production code retains direct owner imports, while the relocation contract
+imports owners explicitly to test their ABI and lifecycle.
 The seventh batch makes TypeTable the sole base/vptr authority, removes those
 mirrors from ClassRecord and replaces ClassTable's writable projections with
 focused hierarchy, virtual-slot and runtime-metadata publication methods.
@@ -302,6 +304,26 @@ linked object disappear, while `context/symbols.la` and `context/lookup.la`
 remain cohesive same-module implementation units. Binding/candidate storage is
 not folded into this class because overload ordering and contiguous candidate
 slices form a different ownership boundary.
+The thirteenth batch moves stable Function, Parameter and Binding records into
+the domain foundation and introduces the move-only `CallableTable` owner.
+Typed vectors now own functions, parameters, bindings and both candidate
+families; `byte_buffer` owns canonical signatures. The private move-only
+`SignatureWriter` resource in `functions/signature.la` builds those bytes
+before publication. Initial candidate order is published exactly once from a
+validated replacement vector; later ordered appends are reserved for concrete
+generic-class methods. Bound methods own parameter/signature slices, ordinary
+binding extension, generic-candidate publication, flags, definitions and IR
+identities. Deep owner validation checks ordinary candidate back-links,
+signature contiguity, candidate uniqueness and moved-from/sticky-error state.
+The reverse binding from a generic declaration remains a cross-owner
+`functions` validation, and const-function parameter slices are explicitly
+cross-validated in `functions/const.la` because they reuse the shared parameter
+vector with `function_id = no_id()`. Runtime free-generic instances may bind
+without entering the ordinary candidate sequence. Context loses six callable
+raw buffers and five mirrored record counters; `call_selections` remains
+lowering state for the next batch rather than being mixed into callable
+ownership. The direct relocation contract covers duplicate generic candidates,
+repeated publication and invalid binding extension.
 
 `ir::Module` owns the completed typed CFG, `ir::Builder` owns its append-only
 construction phase, and the private `Verifier` owns whole-module validation
